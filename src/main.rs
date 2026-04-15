@@ -96,6 +96,13 @@ enum Commands {
         #[arg(short, long)]
         agent: Option<String>,
     },
+
+    /// Output agent context as markdown (called by SessionStart and PreCompact hooks)
+    Prime {
+        /// Agent name (defaults to YGG_AGENT_NAME env var or current directory name)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -262,6 +269,17 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::status_cmd::execute(&pool, agent.as_deref()).await?;
+        }
+        Commands::Prime { agent } => {
+            let agent_name = agent
+                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                });
+            ygg::cli::prime::execute(&agent_name).await?;
         }
     }
 

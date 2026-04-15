@@ -802,12 +802,26 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             ("session-start.sh", include_str!("../../scripts/hooks/session-start.sh")),
             ("pre-tool-use.sh", include_str!("../../scripts/hooks/pre-tool-use.sh")),
             ("prompt-submit.sh", include_str!("../../scripts/hooks/prompt-submit.sh")),
+            ("pre-compact.sh", include_str!("../../scripts/hooks/pre-compact.sh")),
         ] {
             let dest = hooks_dir.join(name);
             tokio::fs::write(&dest, content).await?;
             Command::new("chmod").args(["+x", dest.to_str().unwrap()]).status().await.ok();
         }
         ok("hook scripts", "installed");
+
+        // Install slash commands into ~/.claude/commands/
+        let commands_dir = claude_dir.join("commands");
+        tokio::fs::create_dir_all(&commands_dir).await.ok();
+        for (name, content) in [
+            ("ygg-status.md", include_str!("../../scripts/commands/ygg-status.md")),
+            ("ygg-spawn.md", include_str!("../../scripts/commands/ygg-spawn.md")),
+            ("ygg-lock.md", include_str!("../../scripts/commands/ygg-lock.md")),
+        ] {
+            let dest = commands_dir.join(name);
+            tokio::fs::write(&dest, content).await?;
+        }
+        ok("slash commands", "installed");
 
         // Install hooks into Claude Code settings
         let settings_path = claude_dir.join("settings.json");
@@ -826,6 +840,10 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 "UserPromptSubmit": [{
                     "type": "command",
                     "command": format!("{hooks_path}/prompt-submit.sh")
+                }],
+                "PreCompact": [{
+                    "type": "command",
+                    "command": format!("{hooks_path}/pre-compact.sh")
                 }]
             },
             "statusLine": {

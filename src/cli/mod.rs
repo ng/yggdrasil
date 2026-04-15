@@ -4,6 +4,7 @@ pub mod interrupt_cmd;
 pub mod lock_cmd;
 pub mod inject;
 pub mod observe;
+pub mod prime;
 pub mod recover;
 pub mod run;
 pub mod spawn;
