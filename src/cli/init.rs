@@ -552,15 +552,14 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
     } else if has("ollama").await {
         ok("ollama", "installed");
-        if prompt_yes("start ollama? (ollama serve)") {
-            Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
-            if wait_port(11434, 10).await {
-                ok("ollama", "started");
-            } else {
-                bad("ollama", "didn't start");
-                if !prompt_skip("ollama") { std::process::exit(1); }
-            }
-        } else if !prompt_skip("ollama") { std::process::exit(1); }
+        hint("starting ollama...");
+        Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+        if wait_port(11434, 10).await {
+            ok("ollama", "started");
+        } else {
+            bad("ollama", "didn't start");
+            if !prompt_skip("ollama") { std::process::exit(1); }
+        }
     } else {
         bad("ollama", "not found");
         if has_brew {
