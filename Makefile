@@ -1,4 +1,4 @@
-PREFIX ?= /usr/local/bin
+PREFIX ?= $(HOME)/.local/bin
 
 .PHONY: build install uninstall clean
 
@@ -6,13 +6,15 @@ build:
 	cargo build --release
 
 install: build
-	sudo cp target/release/ygg $(PREFIX)/ygg
-	sudo chmod +x $(PREFIX)/ygg
+	mkdir -p $(PREFIX)
+	cp target/release/ygg $(PREFIX)/ygg
+	chmod +x $(PREFIX)/ygg
 	@echo "ygg installed to $(PREFIX)/ygg"
-	ygg init
+	@echo "ensure $(PREFIX) is on your PATH"
+	$(PREFIX)/ygg init
 
 uninstall:
-	sudo rm -f $(PREFIX)/ygg
+	rm -f $(PREFIX)/ygg
 
 clean:
 	cargo clean
