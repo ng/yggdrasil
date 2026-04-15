@@ -171,12 +171,62 @@ async fn port_open(port: u16) -> bool {
     tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok()
 }
 
+async fn host_port_open(host: &str, port: u16) -> bool {
+    tokio::net::TcpStream::connect(format!("{host}:{port}")).await.is_ok()
+}
+
 async fn wait_port(port: u16, secs: u64) -> bool {
     for _ in 0..secs {
         if port_open(port).await { return true; }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     false
+}
+
+/// Parse (user, host, port, password) from a postgres URL.
+/// Falls back to `fallback_user` when no userinfo is present.
+fn parse_pg_url_parts(url: &str, fallback_user: &str) -> (String, String, u16, Option<String>) {
+    let rest = url.strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))
+        .unwrap_or(url);
+    let (userinfo, hostdb) = rest.split_once('@').unwrap_or(("", rest));
+    let (user, pass) = if userinfo.is_empty() {
+        (fallback_user.to_string(), None)
+    } else if let Some((u, p)) = userinfo.split_once(':') {
+        (u.to_string(), Some(p.to_string()))
+    } else {
+        (userinfo.to_string(), None)
+    };
+    let (hostport, _) = hostdb.split_once('/').unwrap_or((hostdb, "ygg"));
+    let (host, port) = if let Some((h, p)) = hostport.rsplit_once(':') {
+        (h.to_string(), p.parse().unwrap_or(5432))
+    } else {
+        (hostport.to_string(), 5432u16)
+    };
+    (user, host, port, pass)
+}
+
+/// Run `createdb` against the configured postgres instance.
+async fn pg_createdb(user: &str, host: &str, port: u16, pass: Option<&str>) -> bool {
+    let port_s = port.to_string();
+    let bin = find_bin("createdb").unwrap_or_else(|| "createdb".to_string());
+    let mut cmd = Command::new(&bin);
+    cmd.args(["-U", user, "-h", host, "-p", &port_s, "ygg"])
+       .stdout(Stdio::null()).stderr(Stdio::null());
+    if let Some(p) = pass { cmd.env("PGPASSWORD", p); }
+    cmd.status().await.is_ok_and(|s| s.success())
+}
+
+/// Run `psql -c "CREATE EXTENSION IF NOT EXISTS <ext>"` against the configured instance.
+async fn pg_enable_extension(user: &str, host: &str, port: u16, pass: Option<&str>, ext: &str) -> bool {
+    let port_s = port.to_string();
+    let sql = format!("CREATE EXTENSION IF NOT EXISTS {ext}");
+    let bin = find_bin("psql").unwrap_or_else(|| "psql".to_string());
+    let mut cmd = Command::new(&bin);
+    cmd.args(["-U", user, "-h", host, "-p", &port_s, "-d", "ygg", "-c", &sql, "-q"])
+       .stdout(Stdio::null()).stderr(Stdio::null());
+    if let Some(p) = pass { cmd.env("PGPASSWORD", p); }
+    cmd.status().await.is_ok_and(|s| s.success())
 }
 
 /// Detect which postgresql@XX version is running via brew services or pg_config.
@@ -414,6 +464,11 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // Always force the correct DATABASE_URL in env
     unsafe { std::env::set_var("DATABASE_URL", &db_url); }
 
+    // Parse pg connection details — used for all createdb/psql calls so we
+    // connect to the right host/port/user regardless of where postgres lives.
+    let (pg_user, pg_host, pg_port, pg_pass) = parse_pg_url_parts(&db_url, &sys_user);
+    let pg_is_local = pg_host == "localhost" || pg_host == "127.0.0.1";
+
     let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "384".into());
 
     let db_show = db_url.find('@').and_then(|at| db_url[..at].rfind(':').map(|c| format!("{}:***@{}", &db_url[..c], &db_url[at+1..]))).unwrap_or_else(|| db_url.clone());
@@ -483,64 +538,69 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     if skipping(&all_skips, "pg") {
         ok("postgresql", "skipped");
-    } else if port_open(5432).await {
+    } else if host_port_open(&pg_host, pg_port).await {
         ok("postgresql", "running");
-    } else if has("psql").await {
-        // Installed but not running — try to start
-        ok("postgresql", "installed");
-        if has_brew {
-            run_show("brew", &["services", "start", "postgresql@16"]).await;
-        }
-        if wait_port(5432, 10).await {
-            ok("postgresql", "started");
-        } else {
-            bad("postgresql", "not responding on :5432");
+    } else if pg_is_local {
+        // Local postgres not responding — try to start or install it
+        if has("psql").await {
+            ok("postgresql", "installed");
             if has_brew {
-                hint("try: brew services restart postgresql@16");
+                run_show("brew", &["services", "start", "postgresql@16"]).await;
             }
-            if !prompt_skip("postgresql") { std::process::exit(1); }
-        }
-    } else if has_brew {
-        // Not installed — brew install (no sudo)
-        let pb = spin("brew install postgresql@16...");
-        let installed = run_show("brew", &["install", "postgresql@16"]).await;
-        pb.finish_and_clear();
-        if installed {
-            run_show("brew", &["services", "start", "postgresql@16"]).await;
             if wait_port(5432, 10).await {
-                ok("postgresql", "installed");
+                ok("postgresql", "started");
             } else {
-                bad("postgresql", "installed but won't start");
-                hint("try: brew services restart postgresql@16");
+                bad("postgresql", "not responding on :5432");
+                if has_brew {
+                    hint("try: brew services restart postgresql@16");
+                }
+                if !prompt_skip("postgresql") { std::process::exit(1); }
+            }
+        } else if has_brew {
+            let pb = spin("brew install postgresql@16...");
+            let installed = run_show("brew", &["install", "postgresql@16"]).await;
+            pb.finish_and_clear();
+            if installed {
+                run_show("brew", &["services", "start", "postgresql@16"]).await;
+                if wait_port(5432, 10).await {
+                    ok("postgresql", "installed");
+                } else {
+                    bad("postgresql", "installed but won't start");
+                    hint("try: brew services restart postgresql@16");
+                    if !prompt_skip("postgresql") { std::process::exit(1); }
+                }
+            } else {
+                bad("postgresql", "brew install failed");
                 if !prompt_skip("postgresql") { std::process::exit(1); }
             }
         } else {
-            bad("postgresql", "brew install failed");
+            bad("postgresql", "not installed");
+            if has_apt {
+                hint("run: sudo apt-get install -y postgresql postgresql-client");
+                hint("then: sudo systemctl start postgresql");
+            } else {
+                hint("install: https://www.postgresql.org/download/");
+            }
             if !prompt_skip("postgresql") { std::process::exit(1); }
         }
     } else {
-        // No brew — tell user what to run
-        bad("postgresql", "not installed");
-        if has_apt {
-            hint("run: sudo apt-get install -y postgresql postgresql-client");
-            hint("then: sudo systemctl start postgresql");
-        } else {
-            hint("install: https://www.postgresql.org/download/");
-        }
+        // Remote postgres not reachable
+        bad("postgresql", &format!("cannot reach {pg_host}:{pg_port}"));
+        hint("check that your port-forward or remote host is accessible");
         if !prompt_skip("postgresql") { std::process::exit(1); }
     }
 
     // database + pgvector (only if pg is up)
-    if !skipping(&all_skips, "pg") && port_open(5432).await {
+    if !skipping(&all_skips, "pg") && host_port_open(&pg_host, pg_port).await {
         // Create database first
-        if run("createdb", &["ygg"]).await {
+        if pg_createdb(&pg_user, &pg_host, pg_port, pg_pass.as_deref()).await {
             ok("database 'ygg'", "created");
         } else {
             ok("database 'ygg'", "exists");
         }
 
         // Now check pgvector in the ygg database
-        let pgvector_ok = run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await;
+        let pgvector_ok = pg_enable_extension(&pg_user, &pg_host, pg_port, pg_pass.as_deref(), "vector").await;
 
         if pgvector_ok {
             ok("pgvector", "enabled");
@@ -569,7 +629,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         run_show("brew", &["services", "restart", &pg_version]).await;
                         wait_port(5432, 10).await;
 
-                        if run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await {
+                        if pg_enable_extension(&pg_user, &pg_host, pg_port, pg_pass.as_deref(), "vector").await {
                             ok("pgvector", "built + enabled");
                         } else {
                             bad("pgvector", "built but can't enable");
@@ -657,19 +717,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         ok(&format!("{}", env_path.display()), "exists");
     }
 
-    if !skipping(&all_skips, "pg") && port_open(5432).await {
-        // Ensure database exists using the configured user
-        // Parse user from db_url for createdb
-        let url_user = db_url.strip_prefix("postgres://")
-            .and_then(|s| s.split('@').next())
-            .and_then(|s| s.split(':').next())
-            .unwrap_or(&sys_user);
-
-        if !url_user.is_empty() {
-            run("createdb", &["-U", url_user, "ygg"]).await;
-        } else {
-            run("createdb", &["ygg"]).await;
-        }
+    if !skipping(&all_skips, "pg") && host_port_open(&pg_host, pg_port).await {
+        // Ensure database exists
+        pg_createdb(&pg_user, &pg_host, pg_port, pg_pass.as_deref()).await;
 
         let pb = spin("running migrations...");
         match async {
@@ -684,13 +734,39 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 bad("migrations", "failed");
 
                 if err_str.contains("role") && err_str.contains("does not exist") {
-                    // Extract the bad role name from the error
-                    hint("database role doesn't exist for this URL");
+                    hint("the configured role doesn't exist on this postgres server");
                     hint(&format!("current URL: {db_url}"));
-                    hint(&format!("your system user: {sys_user}"));
-                    hint("fix: delete config and re-run init with correct URL:");
-                    hint(&format!("  rm {}", env_path.display()));
-                    hint("  ygg init");
+                    hint("");
+                    // Offer to reconfigure the URL in-place
+                    if prompt_yes("reconfigure the database URL now?") {
+                        use std::io::{self, BufRead, Write};
+                        hint(&format!("your system user is: {sys_user}"));
+                        println!("  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:port/ygg){X}");
+                        print!("  {BR}│{X}  > ");
+                        io::stdout().flush().ok();
+                        let mut new_url = String::new();
+                        io::stdin().lock().read_line(&mut new_url).ok();
+                        let new_url = new_url.trim().to_string();
+                        if !new_url.is_empty() {
+                            let new_content = format!(
+                                "DATABASE_URL={new_url}\n\
+                                 EMBEDDING_DIMENSIONS=384\n\
+                                 CONTEXT_LIMIT_TOKENS=250000\n\
+                                 CONTEXT_HARD_CAP_TOKENS=300000\n\
+                                 LOCK_TTL_SECS=300\n\
+                                 HEARTBEAT_INTERVAL_SECS=60\n\
+                                 WATCHER_INTERVAL_SECS=30\n\
+                                 RTK_BINARY_PATH=rtk\n\
+                                 RUST_LOG=ygg=info\n"
+                            );
+                            if tokio::fs::write(&env_path, &new_content).await.is_ok() {
+                                ok("config", "updated — re-run: ygg init");
+                            }
+                        }
+                    } else {
+                        hint(&format!("  rm {}", env_path.display()));
+                        hint("  ygg init");
+                    }
                 } else if err_str.contains("does not exist") && err_str.contains("database") {
                     hint("database 'ygg' doesn't exist");
                     hint(&format!("  createdb -U {sys_user} ygg"));
