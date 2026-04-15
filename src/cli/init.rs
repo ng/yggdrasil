@@ -307,24 +307,18 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let has_apt = has("apt-get").await;
     let pkg = if has_brew { "brew" } else if has_apt { "apt" } else { "—" };
 
-    // Load existing config if present
-    let existing_env = config_dir.join(".env");
-    if existing_env.exists() {
-        dotenvy::from_path(&existing_env).ok();
-    }
-    dotenvy::dotenv().ok();
-
     // Detect system username for default pg connection
     let sys_user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "postgres".into());
 
-    let default_db_url = format!("postgres://localhost:5432/ygg");
-
-    // Config file at ~/.config/ygg/.env
+    let default_db_url = "postgres://localhost:5432/ygg".to_string();
     let env_path = config_dir.join(".env");
-    let db_url = if let Ok(url) = std::env::var("DATABASE_URL") {
-        url
+
+    // If config exists, load it. If not, prompt for database URL.
+    let db_url = if env_path.exists() {
+        dotenvy::from_path(&env_path).ok();
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| default_db_url.clone())
     } else {
         println!("  {BR}│{X}  {B}PostgreSQL connection{X}");
         println!("  {BR}│{X}  {D}default uses system user '{sys_user}', no password{X}");
