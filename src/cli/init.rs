@@ -24,6 +24,42 @@ enum PackageManager {
     Brew,
 }
 
+/// Common paths that might not be in PATH when invoked from a limited env.
+const EXTRA_PATHS: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+];
+
+/// Ensure common bin directories are on PATH so we can find brew, psql, etc.
+fn ensure_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<&str> = current.split(':').collect();
+    for extra in EXTRA_PATHS {
+        if !parts.contains(extra) && Path::new(extra).exists() {
+            parts.push(extra);
+        }
+    }
+    // Also add ~/.local/bin and ~/.cargo/bin
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local_bin = format!("{home}/.local/bin");
+    let cargo_bin = format!("{home}/.cargo/bin");
+    // Leak these strings so they live long enough as &str
+    // (only called once at startup, so this is fine)
+    let local_ref: &'static str = Box::leak(local_bin.into_boxed_str());
+    let cargo_ref: &'static str = Box::leak(cargo_bin.into_boxed_str());
+    if !parts.contains(&local_ref) { parts.push(local_ref); }
+    if !parts.contains(&cargo_ref) { parts.push(cargo_ref); }
+
+    let new_path = parts.join(":");
+    // SAFETY: called once at startup before spawning threads
+    unsafe { std::env::set_var("PATH", &new_path); }
+}
+
 fn detect_pkg_manager() -> Option<PackageManager> {
     if std::process::Command::new("brew").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
         Some(PackageManager::Brew)
@@ -123,6 +159,7 @@ fn should_skip(skip: &[String], name: &str) -> bool {
 }
 
 async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
+    ensure_path();
     banner();
 
     let pkg = detect_pkg_manager();
