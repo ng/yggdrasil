@@ -1,9 +1,9 @@
 #!/bin/bash
 # Install ygg — Yggdrasil agent orchestrator
-# Usage: curl -fsSL https://raw.githubusercontent.com/youruser/ygg/main/install | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/ng/yggdrasil/main/install | sh
 set -e
 
-REPO="youruser/ygg"  # TODO: update when repo is created
+REPO="ng/yggdrasil"
 PREFIX="${PREFIX:-/usr/local/bin}"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
