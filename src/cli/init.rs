@@ -311,29 +311,29 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         // Installed but not running — try to start
         ok("postgresql", "installed");
         if has_brew {
-            run_show("brew", &["services", "start", "postgresql@15"]).await;
+            run_show("brew", &["services", "start", "postgresql@16"]).await;
         }
         if wait_port(5432, 10).await {
             ok("postgresql", "started");
         } else {
             bad("postgresql", "not responding on :5432");
             if has_brew {
-                hint("try: brew services restart postgresql@15");
+                hint("try: brew services restart postgresql@16");
             }
             if !prompt_skip("postgresql") { std::process::exit(1); }
         }
     } else if has_brew {
         // Not installed — brew install (no sudo)
-        let pb = spin("brew install postgresql@15...");
-        let installed = run_show("brew", &["install", "postgresql@15"]).await;
+        let pb = spin("brew install postgresql@16...");
+        let installed = run_show("brew", &["install", "postgresql@16"]).await;
         pb.finish_and_clear();
         if installed {
-            run_show("brew", &["services", "start", "postgresql@15"]).await;
+            run_show("brew", &["services", "start", "postgresql@16"]).await;
             if wait_port(5432, 10).await {
                 ok("postgresql", "installed");
             } else {
                 bad("postgresql", "installed but won't start");
-                hint("try: brew services restart postgresql@15");
+                hint("try: brew services restart postgresql@16");
                 if !prompt_skip("postgresql") { std::process::exit(1); }
             }
         } else {
@@ -379,8 +379,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                             ok("pgvector", "installed + enabled");
                         } else {
                             bad("pgvector", "installed but can't enable");
-                            if prompt_yes("restart postgres? (brew services restart postgresql@15)") {
-                                run_show("brew", &["services", "restart", "postgresql@15"]).await;
+                            if prompt_yes("restart postgres? (brew services restart postgresql@16)") {
+                                run_show("brew", &["services", "restart", "postgresql@16"]).await;
                                 wait_port(5432, 10).await;
                                 if run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await {
                                     ok("pgvector", "enabled after restart");
@@ -399,7 +399,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                     }
                 } else if !prompt_skip("pgvector") { std::process::exit(1); }
             } else if has_apt {
-                hint("run: sudo apt-get install -y postgresql-15-pgvector");
+                hint("run: sudo apt-get install -y postgresql-16-pgvector");
                 hint("then: psql -d ygg -c 'CREATE EXTENSION vector'");
                 if !prompt_skip("pgvector") { std::process::exit(1); }
             } else {
