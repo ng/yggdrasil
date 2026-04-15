@@ -176,9 +176,15 @@ fn skipping(list: &[String], name: &str) -> bool {
 }
 
 async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
-    // Ensure we're in a valid directory — brew/apt fail if cwd is gone
+    // Config lives in ~/.config/ygg/
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let _ = std::env::set_current_dir(&home);
+    let config_dir = Path::new(&home).join(".config").join("ygg");
+    tokio::fs::create_dir_all(&config_dir).await.ok();
+
+    // Ensure we're in a valid directory — brew/apt fail if cwd is gone
+    if std::env::current_dir().is_err() {
+        let _ = std::env::set_current_dir(&home);
+    }
 
     banner();
 
@@ -186,6 +192,11 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let has_apt = has("apt-get").await;
     let pkg = if has_brew { "brew" } else if has_apt { "apt" } else { "—" };
 
+    // Load existing config if present
+    let existing_env = config_dir.join(".env");
+    if existing_env.exists() {
+        dotenvy::from_path(&existing_env).ok();
+    }
     dotenvy::dotenv().ok();
 
     // Detect system username for default pg connection
@@ -195,8 +206,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     let default_db_url = format!("postgres://localhost:5432/ygg");
 
-    // If no .env exists yet, prompt for database config
-    let env_path = std::path::Path::new(".env");
+    // Config file at ~/.config/ygg/.env
+    let env_path = config_dir.join(".env");
     let db_url = if let Ok(url) = std::env::var("DATABASE_URL") {
         url
     } else {
@@ -406,20 +417,19 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // ── config ──
     head("config");
 
-    // Write .env with the user's chosen database URL
-    // (env_path was declared earlier for the existence check)
+    // Write config with the user's chosen database URL
     if !env_path.exists() {
         let template = include_str!("../../.env.example");
         let env_content = template.replace(
             "postgres://localhost:5432/ygg",
             &db_url,
         );
-        tokio::fs::write(env_path, env_content).await?;
+        tokio::fs::write(&env_path, env_content).await?;
         // Re-load so config picks up the new values
-        dotenvy::dotenv().ok();
-        ok(".env", "created");
+        dotenvy::from_path(&env_path).ok();
+        ok(&format!("{}", env_path.display()), "created");
     } else {
-        ok(".env", "exists");
+        ok(&format!("{}", env_path.display()), "exists");
     }
 
     if !skipping(skips, "pg") && port_open(5432).await {

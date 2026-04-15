@@ -18,6 +18,13 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, crate::YggError> {
+        // Load from ~/.config/ygg/.env first, then local .env as fallback
+        if let Ok(home) = env::var("HOME") {
+            let config_env = std::path::Path::new(&home).join(".config/ygg/.env");
+            if config_env.exists() {
+                dotenvy::from_path(&config_env).ok();
+            }
+        }
         dotenvy::dotenv().ok();
 
         Ok(Self {
