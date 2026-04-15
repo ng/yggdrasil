@@ -589,20 +589,29 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // ── config ──
     head("config");
 
-    // Write config with the user's chosen database URL
+    // Write config — always set DATABASE_URL explicitly, no template replacement
     if !env_path.exists() {
-        let template = include_str!("../../.env.example");
-        let env_content = template.replace(
-            "postgres://localhost:5432/ygg",
-            &db_url,
+        let env_content = format!(
+            "DATABASE_URL={db_url}\n\
+             EMBEDDING_DIMENSIONS=384\n\
+             CONTEXT_LIMIT_TOKENS=250000\n\
+             CONTEXT_HARD_CAP_TOKENS=300000\n\
+             LOCK_TTL_SECS=300\n\
+             HEARTBEAT_INTERVAL_SECS=60\n\
+             WATCHER_INTERVAL_SECS=30\n\
+             RTK_BINARY_PATH=rtk\n\
+             RUST_LOG=ygg=info\n"
         );
         tokio::fs::write(&env_path, env_content).await?;
-        // Re-load so config picks up the new values
         dotenvy::from_path(&env_path).ok();
         ok(&format!("{}", env_path.display()), "created");
     } else {
+        dotenvy::from_path(&env_path).ok();
         ok(&format!("{}", env_path.display()), "exists");
     }
+
+    // Always set DATABASE_URL in the environment so migrations use the right one
+    unsafe { std::env::set_var("DATABASE_URL", &db_url); }
 
     if !skipping(skips, "pg") && port_open(5432).await {
         // Ensure database exists using the configured user
