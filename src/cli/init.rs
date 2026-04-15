@@ -410,34 +410,59 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
     }
 
-    // ── embedding model ──
-    head("embedding");
+    // ── ollama (for embeddings) ──
+    head("ollama");
 
-    {
-        let pb = spin("loading all-MiniLM-L6-v2 (downloads ~30MB on first run)...");
-        match crate::embed::Embedder::new() {
-            Ok(embedder) => {
+    if skipping(skips, "ollama") {
+        ok("ollama", "skipped");
+    } else if port_open(11434).await {
+        ok("ollama", "running");
+
+        // Pull embed model
+        let embedder = crate::embed::Embedder::default_ollama();
+        let pb = spin("pulling all-minilm embedding model...");
+        match embedder.pull_model().await {
+            Ok(()) => { pb.finish_and_clear(); ok("all-minilm", "pulled"); }
+            Err(e) => { pb.finish_and_clear(); bad("all-minilm", &format!("{e}")); }
+        }
+
+        // Smoke test
+        let pb = spin("testing embedding...");
+        match embedder.embed("hello world").await {
+            Ok(_) => { pb.finish_and_clear(); ok("embedding", "ok (384d)"); }
+            Err(e) => { pb.finish_and_clear(); bad("embedding", &format!("{e}")); }
+        }
+    } else if has("ollama").await {
+        ok("ollama", "installed");
+        if prompt_yes("start ollama? (ollama serve)") {
+            Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+            if wait_port(11434, 10).await {
+                ok("ollama", "started");
+            } else {
+                bad("ollama", "didn't start");
+                if !prompt_skip("ollama") { std::process::exit(1); }
+            }
+        } else if !prompt_skip("ollama") { std::process::exit(1); }
+    } else {
+        bad("ollama", "not found");
+        if has_brew {
+            if prompt_yes("install ollama via brew?") {
+                let pb = spin("brew install ollama...");
+                let installed = run_show("brew", &["install", "ollama"]).await;
                 pb.finish_and_clear();
-                ok("all-MiniLM-L6-v2", "loaded");
-                // Quick smoke test
-                let pb2 = spin("testing embedding...");
-                match embedder.embed("hello world").await {
-                    Ok(vec) => {
-                        pb2.finish_and_clear();
-                        ok("embedding test", "ok (384d)");
-                    }
-                    Err(e) => {
-                        pb2.finish_and_clear();
-                        bad("embedding test", &format!("{e}"));
-                    }
+                if installed {
+                    ok("ollama", "installed");
+                    Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+                    wait_port(11434, 10).await;
+                } else {
+                    bad("ollama", "brew install failed");
                 }
             }
-            Err(e) => {
-                pb.finish_and_clear();
-                bad("all-MiniLM-L6-v2", &format!("{e}"));
-                hint("model downloads from huggingface.co on first run");
-                if !prompt_skip("embedding") { std::process::exit(1); }
-            }
+        } else {
+            offer_curl_install("ollama", "https://ollama.com/install.sh").await;
+        }
+        if !port_open(11434).await && !prompt_skip("ollama") {
+            std::process::exit(1);
         }
     }
 
