@@ -45,6 +45,13 @@ enum Commands {
         name: Option<String>,
     },
 
+    /// Observe a Claude Code session and ingest into the DAG
+    Observe {
+        /// Agent name to observe
+        #[arg(short, long)]
+        agent: String,
+    },
+
     /// Launch the TUI dashboard
     Dashboard,
 
@@ -151,6 +158,11 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::spawn::execute(&pool, &config, &task, name.as_deref()).await?;
+        }
+        Commands::Observe { agent } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::observe::execute(&pool, &config, &agent).await?;
         }
         Commands::Dashboard => {
             let config = ygg::config::AppConfig::from_env()?;

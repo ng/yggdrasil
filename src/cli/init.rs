@@ -77,6 +77,33 @@ fn head(title: &str) {
     println!("  {O}│{X}");
 }
 
+fn prompt_yes(msg: &str) -> bool {
+    use std::io::{self, BufRead, Write};
+    println!("  {O}│{X}");
+    println!("  {O}│{X}  {Y}{msg} [Y/n]{X}");
+    print!("  {O}│{X}  > ");
+    io::stdout().flush().ok();
+    let mut s = String::new();
+    io::stdin().lock().read_line(&mut s).ok();
+    let a = s.trim().to_lowercase();
+    a.is_empty() || a == "y" || a == "yes"
+}
+
+async fn offer_curl_install(name: &str, script_url: &str) {
+    hint(&format!("install script: {script_url}"));
+    if prompt_yes(&format!("run install script for {name}?")) {
+        let installed = run_show("sh", &["-c", &format!("curl -fsSL {script_url} | sh")]).await;
+        if installed && has(name).await {
+            ok(name, "installed");
+        } else {
+            bad(name, "install script failed");
+            hint(&format!("try manually: curl -fsSL {script_url} | sh"));
+        }
+    } else if !prompt_skip(name) {
+        std::process::exit(1);
+    }
+}
+
 fn prompt_skip(name: &str) -> bool {
     use std::io::{self, BufRead, Write};
     println!("  {O}│{X}");
@@ -207,15 +234,27 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
     }
 
-    // Tools we never auto-install — just show where to get them
-    for (name, install_url) in [("rtk", "https://github.com/rtk-ai/rtk")] {
-        if has(name).await {
-            ok(name, "found");
+    // Tools with install scripts — prompt before running
+    if !has("rtk").await {
+        bad("rtk", "not found");
+        if has_brew {
+            hint("install: brew install rtk");
+            if prompt_yes("install rtk via brew?") {
+                let pb = spin("brew install rtk...");
+                let installed = run_show("brew", &["install", "rtk"]).await;
+                pb.finish_and_clear();
+                if installed && has("rtk").await {
+                    ok("rtk", "installed");
+                } else {
+                    bad("rtk", "brew install failed, trying install script...");
+                    offer_curl_install("rtk", "https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh").await;
+                }
+            } else if !prompt_skip("rtk") { std::process::exit(1); }
         } else {
-            bad(name, "not found");
-            hint(&format!("install: {install_url}"));
-            if !prompt_skip(name) { std::process::exit(1); }
+            offer_curl_install("rtk", "https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh").await;
         }
+    } else {
+        ok("rtk", "found");
     }
 
     // ── pg ──
@@ -229,29 +268,29 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         // Installed but not running — try to start
         ok("postgresql", "installed");
         if has_brew {
-            run_show("brew", &["services", "start", "postgresql@16"]).await;
+            run_show("brew", &["services", "start", "postgresql@15"]).await;
         }
         if wait_port(5432, 10).await {
             ok("postgresql", "started");
         } else {
             bad("postgresql", "not responding on :5432");
             if has_brew {
-                hint("try: brew services restart postgresql@16");
+                hint("try: brew services restart postgresql@15");
             }
             if !prompt_skip("postgresql") { std::process::exit(1); }
         }
     } else if has_brew {
         // Not installed — brew install (no sudo)
-        let pb = spin("brew install postgresql@16...");
-        let installed = run_show("brew", &["install", "postgresql@16"]).await;
+        let pb = spin("brew install postgresql@15...");
+        let installed = run_show("brew", &["install", "postgresql@15"]).await;
         pb.finish_and_clear();
         if installed {
-            run_show("brew", &["services", "start", "postgresql@16"]).await;
+            run_show("brew", &["services", "start", "postgresql@15"]).await;
             if wait_port(5432, 10).await {
                 ok("postgresql", "installed");
             } else {
                 bad("postgresql", "installed but won't start");
-                hint("try: brew services restart postgresql@16");
+                hint("try: brew services restart postgresql@15");
                 if !prompt_skip("postgresql") { std::process::exit(1); }
             }
         } else {
@@ -319,8 +358,11 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
     } else {
         bad("ollama", "not installed");
-        hint("install: https://ollama.ai");
-        if !prompt_skip("ollama") { std::process::exit(1); }
+        offer_curl_install("ollama", "https://ollama.com/install.sh").await;
+        if has("ollama").await {
+            Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     // ── config ──
