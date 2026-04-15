@@ -160,6 +160,44 @@ async fn wait_port(port: u16, secs: u64) -> bool {
     false
 }
 
+/// Detect which postgresql@XX version is running via brew services or pg_config.
+async fn detect_pg_version() -> String {
+    // Try pg_config first
+    if let Ok(output) = Command::new("pg_config").arg("--version").stdout(Stdio::piped()).stderr(Stdio::null()).output().await {
+        if output.status.success() {
+            let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // "PostgreSQL 16.4" → "postgresql@16"
+            if let Some(major) = ver.split_whitespace().nth(1).and_then(|v| v.split('.').next()) {
+                return format!("postgresql@{major}");
+            }
+        }
+    }
+
+    // Fallback: check which brew services are running
+    if let Ok(output) = Command::new("brew").args(["services", "list"]).stdout(Stdio::piped()).stderr(Stdio::null()).output().await {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                if line.contains("postgresql@") && line.contains("started") {
+                    if let Some(name) = line.split_whitespace().next() {
+                        return name.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: check what's installed
+    for ver in ["16", "15", "14"] {
+        let path = format!("/opt/homebrew/opt/postgresql@{ver}");
+        if Path::new(&path).exists() {
+            return format!("postgresql@{ver}");
+        }
+    }
+
+    "postgresql@16".to_string()
+}
+
 // ─── init ────────────────────────────────────────────────
 
 pub async fn execute_with_options(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
@@ -367,34 +405,43 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         if pgvector_ok {
             ok("pgvector", "enabled");
         } else {
-            bad("pgvector", "not installed");
+            bad("pgvector", "not available");
             if has_brew {
-                if prompt_yes("install pgvector via brew?") {
-                    let pb = spin("brew install pgvector...");
-                    let installed = run_show("brew", &["install", "pgvector"]).await;
+                // Detect which postgres version is running
+                let pg_version = detect_pg_version().await;
+                hint(&format!("detected postgres: {pg_version}"));
+
+                if prompt_yes(&format!("install/rebuild pgvector for {pg_version}?")) {
+                    // Ensure pg_config points to the running version
+                    let pg_config_dir = format!("/opt/homebrew/opt/{pg_version}/bin");
+                    if Path::new(&pg_config_dir).exists() {
+                        // Prepend to PATH so brew builds pgvector against the right version
+                        let current_path = std::env::var("PATH").unwrap_or_default();
+                        unsafe { std::env::set_var("PATH", format!("{pg_config_dir}:{current_path}")); }
+                    }
+
+                    let pb = spin("brew reinstall pgvector...");
+                    let installed = run_show("brew", &["reinstall", "pgvector"]).await;
                     pb.finish_and_clear();
+
                     if installed {
-                        // Try enabling again after install
+                        // Restart postgres to pick up the new extension
+                        run_show("brew", &["services", "restart", &pg_version]).await;
+                        wait_port(5432, 10).await;
+
                         if run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await {
                             ok("pgvector", "installed + enabled");
                         } else {
-                            bad("pgvector", "installed but can't enable");
-                            if prompt_yes("restart postgres? (brew services restart postgresql@16)") {
-                                run_show("brew", &["services", "restart", "postgresql@16"]).await;
-                                wait_port(5432, 10).await;
-                                if run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await {
-                                    ok("pgvector", "enabled after restart");
-                                } else {
-                                    bad("pgvector", "still can't enable");
-                                    hint("check: ls /opt/homebrew/opt/postgresql*/lib/postgresql/vector*");
-                                    hint("pgvector may be built for a different postgres version");
-                                    if !prompt_skip("pgvector") { std::process::exit(1); }
-                                }
-                            } else if !prompt_skip("pgvector") { std::process::exit(1); }
+                            bad("pgvector", "still can't enable after reinstall");
+                            hint("try manually:");
+                            hint(&format!("  export PATH=/opt/homebrew/opt/{pg_version}/bin:$PATH"));
+                            hint("  brew reinstall pgvector");
+                            hint(&format!("  brew services restart {pg_version}"));
+                            hint("  psql -d ygg -c 'CREATE EXTENSION vector'");
+                            if !prompt_skip("pgvector") { std::process::exit(1); }
                         }
                     } else {
-                        bad("pgvector", "brew install failed");
-                        hint("try manually: brew install pgvector");
+                        bad("pgvector", "reinstall failed");
                         if !prompt_skip("pgvector") { std::process::exit(1); }
                     }
                 } else if !prompt_skip("pgvector") { std::process::exit(1); }
