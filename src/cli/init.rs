@@ -187,17 +187,12 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
             }
             create_database_if_needed().await;
         } else {
-            let pb = spinner("installing postgresql...");
-            let install_result = tokio::time::timeout(
-                Duration::from_secs(180),
-                install_postgres(&pkg, sudo),
-            ).await;
-
-            match install_result {
-                Ok(Ok(())) => {
+            match install_postgres(&pkg, sudo).await {
+                Ok(()) => {
                     // Wait for it to come up
+                    let pb = spinner("waiting for postgresql...");
                     let mut started = false;
-                    for _ in 0..10 {
+                    for _ in 0..15 {
                         if check_port(5432).await { started = true; break; }
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -212,38 +207,14 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
                         }
                         create_database_if_needed().await;
                     } else {
-                        warn("postgresql", "installed but not responding");
-                        println!("  {C_MID}│{C_RST}");
-                        println!("  {C_MID}│{C_RST}  {C_WARN}skip and continue? [Y/n]{C_RST}");
-                        if prompt_yes_no().await {
-                            warn("postgresql", "skipped");
-                        } else {
-                            anyhow::bail!("PostgreSQL not available. Try: ygg init --skip-pg");
-                        }
+                        warn("postgresql", "installed but not responding on :5432");
+                        prompt_skip_or_bail("postgresql").await?;
                     }
                 }
-                Ok(Err(e)) => {
-                    pb.finish_and_clear();
+                Err(e) => {
                     warn("postgresql", "install failed");
                     println!("  {C_MID}│{C_RST}  {C_DIM}{e}{C_RST}");
-                    println!("  {C_MID}│{C_RST}");
-                    println!("  {C_MID}│{C_RST}  {C_WARN}skip and continue? [Y/n]{C_RST}");
-                    if prompt_yes_no().await {
-                        warn("postgresql", "skipped");
-                    } else {
-                        anyhow::bail!("PostgreSQL setup failed");
-                    }
-                }
-                Err(_) => {
-                    pb.finish_and_clear();
-                    warn("postgresql", "timed out (30s)");
-                    println!("  {C_MID}│{C_RST}");
-                    println!("  {C_MID}│{C_RST}  {C_WARN}skip and continue? [Y/n]{C_RST}");
-                    if prompt_yes_no().await {
-                        warn("postgresql", "skipped");
-                    } else {
-                        anyhow::bail!("PostgreSQL timed out. Try: ygg init --verbose");
-                    }
+                    prompt_skip_or_bail("postgresql").await?;
                 }
             }
         }
@@ -257,16 +228,11 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
         if ollama_running {
             ok("ollama", "running");
         } else {
-            let pb = spinner("installing ollama...");
-            let install_result = tokio::time::timeout(
-                Duration::from_secs(60),
-                install_ollama(&pkg, sudo),
-            ).await;
-
-            match install_result {
-                Ok(Ok(())) => {
+            match install_ollama(&pkg, sudo).await {
+                Ok(()) => {
+                    let pb = spinner("waiting for ollama...");
                     let mut started = false;
-                    for _ in 0..10 {
+                    for _ in 0..15 {
                         if check_port(11434).await { started = true; break; }
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -274,14 +240,14 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
                     if started {
                         ok("ollama", "installed");
                     } else {
-                        warn("ollama", "not responding");
+                        warn("ollama", "installed but not responding on :11434");
                         println!("  {C_MID}│{C_RST}  {C_DIM}try: ollama serve{C_RST}");
                         prompt_skip_or_bail("ollama").await?;
                     }
                 }
-                Ok(Err(_)) | Err(_) => {
-                    pb.finish_and_clear();
-                    warn("ollama", "failed/timed out");
+                Err(e) => {
+                    warn("ollama", "install failed");
+                    println!("  {C_MID}│{C_RST}  {C_DIM}{e}{C_RST}");
                     prompt_skip_or_bail("ollama").await?;
                 }
             }
@@ -301,27 +267,17 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
     let config = AppConfig::from_env()?;
     if !should_skip(skip, "pg") {
         let pb = spinner("running migrations...");
-        match tokio::time::timeout(
-            Duration::from_secs(15),
-            async {
-                let pool = db::create_pool(&config.database_url).await?;
-                db::run_migrations(&pool).await?;
-                Ok::<(), anyhow::Error>(())
-            },
-        ).await {
-            Ok(Ok(())) => {
-                pb.finish_and_clear();
-                ok("migrations", "applied");
-            }
-            Ok(Err(e)) => {
-                pb.finish_and_clear();
+        let mig_result = async {
+            let pool = db::create_pool(&config.database_url).await?;
+            db::run_migrations(&pool).await?;
+            Ok::<(), anyhow::Error>(())
+        }.await;
+        pb.finish_and_clear();
+        match mig_result {
+            Ok(()) => ok("migrations", "applied"),
+            Err(e) => {
                 warn("migrations", "failed");
                 println!("  {C_MID}│{C_RST}  {C_DIM}{e}{C_RST}");
-                prompt_skip_or_bail("migrations").await?;
-            }
-            Err(_) => {
-                pb.finish_and_clear();
-                warn("migrations", "timed out");
                 prompt_skip_or_bail("migrations").await?;
             }
         }
