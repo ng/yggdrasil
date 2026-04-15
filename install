@@ -4,7 +4,7 @@
 set -e
 
 REPO="ng/yggdrasil"
-PREFIX="${PREFIX:-/usr/local/bin}"
+PREFIX="${PREFIX:-$HOME/.local/bin}"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
@@ -22,6 +22,7 @@ case "$OS" in
 esac
 
 echo "Installing ygg for ${OS}/${ARCH}..."
+mkdir -p "$PREFIX"
 
 # Check for prebuilt binary from GitHub releases
 LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4 || true)
@@ -31,29 +32,42 @@ if [ -n "$LATEST" ]; then
     echo "Downloading ${LATEST}..."
     curl -fsSL -o /tmp/ygg "$URL"
     chmod +x /tmp/ygg
-    sudo mv /tmp/ygg "$PREFIX/ygg"
+    mv /tmp/ygg "$PREFIX/ygg"
     echo "ygg ${LATEST} installed to ${PREFIX}/ygg"
 else
     # No release found — build from source
     echo "No prebuilt binary found. Building from source..."
     if ! command -v cargo &>/dev/null; then
+        if [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+        fi
+    fi
+
+    if ! command -v cargo &>/dev/null; then
         echo "Installing Rust toolchain..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source "$HOME/.cargo/env"
+        . "$HOME/.cargo/env"
     fi
 
     TMPDIR=$(mktemp -d)
     git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR/ygg"
     cd "$TMPDIR/ygg"
     cargo build --release
-    sudo cp target/release/ygg "$PREFIX/ygg"
+    cp target/release/ygg "$PREFIX/ygg"
     rm -rf "$TMPDIR"
     echo "ygg installed to ${PREFIX}/ygg (built from source)"
 fi
 
+# Ensure PREFIX is on PATH
+if ! echo "$PATH" | grep -q "$PREFIX"; then
+    echo ""
+    echo "Add to your shell profile:"
+    echo "  export PATH=\"$PREFIX:\$PATH\""
+    export PATH="$PREFIX:$PATH"
+fi
+
 echo ""
-echo "Binary installed. Bootstrapping dependencies..."
+echo "Bootstrapping dependencies..."
 echo ""
 
-# Run ygg init to install Postgres, Ollama, run migrations, pull models
 ygg init

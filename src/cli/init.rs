@@ -122,7 +122,7 @@ fn should_skip(skip: &[String], name: &str) -> bool {
     skip.iter().any(|s| s.eq_ignore_ascii_case(name))
 }
 
-async fn execute_inner(verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
+async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
     banner();
 
     let pkg = detect_pkg_manager();
