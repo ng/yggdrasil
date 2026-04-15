@@ -401,17 +401,23 @@ async fn check_tool_styled(name: &str) {
 
 /// Install PostgreSQL.
 async fn install_postgres(pkg: &Option<PackageManager>, sudo: bool) -> Result<(), anyhow::Error> {
+    let pg_installed = tool_exists("psql").await || tool_exists("pg_isready").await;
+
     match pkg {
         Some(PackageManager::Brew) => {
-            // brew install can take a while — run with visible output
-            let install_ok = Command::new("brew")
-                .args(["install", "postgresql@16"])
-                .status()
-                .await
-                .is_ok_and(|s| s.success());
-            if !install_ok {
-                anyhow::bail!("brew install postgresql@16 failed");
+            if pg_installed {
+                ok("postgresql", "already installed");
+            } else {
+                let install_ok = Command::new("brew")
+                    .args(["install", "postgresql@16"])
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.success());
+                if !install_ok {
+                    anyhow::bail!("brew install postgresql@16 failed");
+                }
             }
+            // Always ensure it's running
             Command::new("brew")
                 .args(["services", "start", "postgresql@16"])
                 .status()
@@ -419,14 +425,17 @@ async fn install_postgres(pkg: &Option<PackageManager>, sudo: bool) -> Result<()
                 .ok();
         }
         Some(PackageManager::Apt) => {
-            if sudo {
-                run_cmd("sudo", &["apt-get", "update", "-qq"]).await;
-                run_cmd("sudo", &["apt-get", "install", "-y", "-qq", "postgresql", "postgresql-client"]).await;
-            } else {
-                run_cmd("apt-get", &["update", "-qq"]).await;
-                run_cmd("apt-get", &["install", "-y", "-qq", "postgresql", "postgresql-client"]).await;
+            if !pg_installed {
+                if sudo {
+                    run_cmd("sudo", &["apt-get", "update", "-qq"]).await;
+                    run_cmd("sudo", &["apt-get", "install", "-y", "-qq", "postgresql", "postgresql-client"]).await;
+                } else {
+                    run_cmd("apt-get", &["update", "-qq"]).await;
+                    run_cmd("apt-get", &["install", "-y", "-qq", "postgresql", "postgresql-client"]).await;
+                }
             }
 
+            // Ensure running
             if sudo {
                 if !run_cmd("sudo", &["systemctl", "start", "postgresql"]).await {
                     run_cmd("sudo", &["pg_ctlcluster", "16", "main", "start"]).await;
@@ -442,6 +451,7 @@ async fn install_postgres(pkg: &Option<PackageManager>, sudo: bool) -> Result<()
                 run_cmd("pg_ctl", &["-D", &pgdata, "-l", "/tmp/pg.log", "start"]).await;
             }
 
+            // Ensure user/db exist (idempotent — createuser/createdb fail silently if exists)
             if sudo {
                 run_cmd("sudo", &["-u", "postgres", "createuser", "--superuser", "ygg"]).await;
                 run_cmd("sudo", &["-u", "postgres", "psql", "-c", "ALTER USER ygg PASSWORD 'ygg';"]).await;
@@ -459,6 +469,10 @@ async fn install_postgres(pkg: &Option<PackageManager>, sudo: bool) -> Result<()
 
 /// Install pgvector extension.
 async fn install_pgvector(pkg: &Option<PackageManager>, sudo: bool) {
+    // Check if pgvector is already available by trying to load it
+    let already = run_cmd("psql", &["-c", "SELECT 1 FROM pg_available_extensions WHERE name='vector';", "postgres"]).await;
+    if already { return; }
+
     match pkg {
         Some(PackageManager::Brew) => {
             run_cmd("brew", &["install", "pgvector"]).await;
@@ -523,25 +537,37 @@ async fn install_pgvector_from_source(sudo: bool) {
 
 /// Install Ollama.
 async fn install_ollama(pkg: &Option<PackageManager>, _sudo: bool) -> Result<(), anyhow::Error> {
-    match pkg {
-        Some(PackageManager::Brew) => {
-            run_cmd("brew", &["install", "ollama"]).await;
-        }
-        _ => {
-            let success = run_cmd("sh", &["-c", "curl -fsSL https://ollama.ai/install.sh | sh"]).await;
-            if !success {
-                anyhow::bail!("Ollama install failed. Install manually: https://ollama.ai");
+    if !tool_exists("ollama").await {
+        match pkg {
+            Some(PackageManager::Brew) => {
+                let install_ok = Command::new("brew")
+                    .args(["install", "ollama"])
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.success());
+                if !install_ok {
+                    anyhow::bail!("brew install ollama failed");
+                }
+            }
+            _ => {
+                let success = run_cmd("sh", &["-c", "curl -fsSL https://ollama.ai/install.sh | sh"]).await;
+                if !success {
+                    anyhow::bail!("Ollama install failed. Install manually: https://ollama.ai");
+                }
             }
         }
     }
 
-    Command::new("ollama")
-        .arg("serve")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Ensure it's serving
+    if !check_port(11434).await {
+        Command::new("ollama")
+            .arg("serve")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 
     Ok(())
 }
