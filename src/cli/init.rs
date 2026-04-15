@@ -456,8 +456,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         unsafe { std::env::set_var("PATH", format!("{pg_bin}:{current_path}")); }
                     }
 
-                    let pb = spin("brew reinstall pgvector...");
-                    let installed = run_show("brew", &["reinstall", "pgvector"]).await;
+                    let pb = spin("brew reinstall pgvector --build-from-source (may take a minute)...");
+                    let installed = run_show("brew", &["reinstall", "pgvector", "--build-from-source"]).await;
                     pb.finish_and_clear();
 
                     if installed {
@@ -473,7 +473,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                             if let Some(ref pg_bin) = get_pg_bin_dir(&pg_version).await {
                                 hint(&format!("  export PATH={pg_bin}:$PATH"));
                             }
-                            hint("  brew reinstall pgvector");
+                            hint("  brew reinstall pgvector --build-from-source");
                             hint(&format!("  brew services restart {pg_version}"));
                             hint("  psql -d ygg -c 'CREATE EXTENSION vector'");
                             if !prompt_skip("pgvector") { std::process::exit(1); }
