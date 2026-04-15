@@ -207,7 +207,7 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
     section("dependencies");
     ensure_tool("tmux", &pkg, sudo).await;
     ensure_tool("jq", &pkg, sudo).await;
-    check_tool_with_hint("rtk", "cargo install rtk  (https://github.com/ryanpig/rtk)").await;
+    check_tool_with_hint("rtk", "https://github.com/rtk-ai/rtk").await;
 
     section("postgresql");
     if should_skip(skip, "pg") {
