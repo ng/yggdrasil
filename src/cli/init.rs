@@ -6,7 +6,7 @@ use tokio::process::Command;
 
 use crate::config::AppConfig;
 use crate::db;
-use crate::ollama::OllamaClient;
+
 
 // Colors
 const D: &str = "\x1b[90m";
@@ -237,18 +237,13 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
     };
 
-    let ollama_url = std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-    let embed_model = std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "all-minilm".into());
-    let chat_model = std::env::var("OLLAMA_CHAT_MODEL").unwrap_or_else(|_| "mistral:7b".into());
     let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "384".into());
 
     let db_show = db_url.find('@').and_then(|at| db_url[..at].rfind(':').map(|c| format!("{}:***@{}", &db_url[..c], &db_url[at+1..]))).unwrap_or_else(|| db_url.clone());
 
     println!("  {D}pkg{X}     {pkg}");
     println!("  {D}pg{X}      {db_show}");
-    println!("  {D}llm{X}     {ollama_url}");
-    println!("  {D}chat{X}    {chat_model}");
-    println!("  {D}embed{X}   {embed_model} {D}({embed_dim}d){X}");
+    println!("  {D}embed{X}   all-MiniLM-L6-v2 {D}({embed_dim}d, in-process){X}");
     println!();
     println!("  {O}╭─────────────────────────────────────────────╮{X}");
 
@@ -385,8 +380,18 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                             ok("pgvector", "installed + enabled");
                         } else {
                             bad("pgvector", "installed but can't enable");
-                            hint("you may need to restart postgres: brew services restart postgresql@15");
-                            if !prompt_skip("pgvector") { std::process::exit(1); }
+                            if prompt_yes("restart postgres? (brew services restart postgresql@15)") {
+                                run_show("brew", &["services", "restart", "postgresql@15"]).await;
+                                wait_port(5432, 10).await;
+                                if run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await {
+                                    ok("pgvector", "enabled after restart");
+                                } else {
+                                    bad("pgvector", "still can't enable");
+                                    hint("check: ls /opt/homebrew/opt/postgresql*/lib/postgresql/vector*");
+                                    hint("pgvector may be built for a different postgres version");
+                                    if !prompt_skip("pgvector") { std::process::exit(1); }
+                                }
+                            } else if !prompt_skip("pgvector") { std::process::exit(1); }
                         }
                     } else {
                         bad("pgvector", "brew install failed");
@@ -405,45 +410,34 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
     }
 
-    // ── ollama ──
-    head("ollama");
+    // ── embedding model ──
+    head("embedding");
 
-    if skipping(skips, "ollama") {
-        ok("ollama", "skipped");
-    } else if port_open(11434).await {
-        ok("ollama", "running");
-    } else if has("ollama").await {
-        ok("ollama", "installed");
-        Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
-        if wait_port(11434, 10).await {
-            ok("ollama", "started");
-        } else {
-            bad("ollama", "not responding on :11434");
-            hint("try: ollama serve");
-            if !prompt_skip("ollama") { std::process::exit(1); }
-        }
-    } else if has_brew {
-        let pb = spin("brew install ollama...");
-        let installed = run_show("brew", &["install", "ollama"]).await;
-        pb.finish_and_clear();
-        if installed {
-            Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
-            if wait_port(11434, 10).await {
-                ok("ollama", "installed");
-            } else {
-                ok("ollama", "installed");
-                hint("start with: ollama serve");
+    {
+        let pb = spin("loading all-MiniLM-L6-v2 (downloads ~30MB on first run)...");
+        match crate::embed::Embedder::new() {
+            Ok(embedder) => {
+                pb.finish_and_clear();
+                ok("all-MiniLM-L6-v2", "loaded");
+                // Quick smoke test
+                let pb2 = spin("testing embedding...");
+                match embedder.embed("hello world").await {
+                    Ok(vec) => {
+                        pb2.finish_and_clear();
+                        ok("embedding test", "ok (384d)");
+                    }
+                    Err(e) => {
+                        pb2.finish_and_clear();
+                        bad("embedding test", &format!("{e}"));
+                    }
+                }
             }
-        } else {
-            bad("ollama", "brew install failed");
-            if !prompt_skip("ollama") { std::process::exit(1); }
-        }
-    } else {
-        bad("ollama", "not installed");
-        offer_curl_install("ollama", "https://ollama.com/install.sh").await;
-        if has("ollama").await {
-            Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            Err(e) => {
+                pb.finish_and_clear();
+                bad("all-MiniLM-L6-v2", &format!("{e}"));
+                hint("model downloads from huggingface.co on first run");
+                if !prompt_skip("embedding") { std::process::exit(1); }
+            }
         }
     }
 
@@ -482,20 +476,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
     }
 
-    // ── models ──
-    if !skipping(skips, "models") && port_open(11434).await {
-        head("models");
-        if let Ok(cfg) = AppConfig::from_env() {
-            let ollama = OllamaClient::new(&cfg.ollama_base_url, &cfg.ollama_embed_model, &cfg.ollama_chat_model);
-            for model in [&cfg.ollama_embed_model, &cfg.ollama_chat_model] {
-                let pb = spin(&format!("pulling {model}..."));
-                match ollama.pull_model(model).await {
-                    Result::Ok(()) => { pb.finish_and_clear(); ok(model, "pulled"); }
-                    Err(e) => { pb.finish_and_clear(); bad(model, &format!("{e}")); }
-                }
-            }
-        }
-    }
+    // No Ollama model pulls needed — embedding is in-process via fastembed
 
     // ── status bar ──
     if !skipping(skips, "statusbar") {

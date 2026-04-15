@@ -35,7 +35,7 @@ impl AppConfig {
             ollama_embed_model: env::var("OLLAMA_EMBED_MODEL")
                 .unwrap_or_else(|_| "all-minilm".into()),
             ollama_chat_model: env::var("OLLAMA_CHAT_MODEL")
-                .unwrap_or_else(|_| "mistral:7b".into()),
+                .unwrap_or_default(), // optional — digest is deterministic
             embedding_dimensions: env::var("EMBEDDING_DIMENSIONS")
                 .unwrap_or_else(|_| "384".into())
                 .parse()
