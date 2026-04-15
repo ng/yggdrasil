@@ -187,7 +187,45 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let pkg = if has_brew { "brew" } else if has_apt { "apt" } else { "—" };
 
     dotenvy::dotenv().ok();
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost:5432/ygg".into());
+
+    // Detect system username for default pg connection
+    let sys_user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "postgres".into());
+
+    let default_db_url = format!("postgres://localhost:5432/ygg");
+
+    // If no .env exists yet, prompt for database config
+    let env_path = std::path::Path::new(".env");
+    let db_url = if let Ok(url) = std::env::var("DATABASE_URL") {
+        url
+    } else {
+        println!("  {O}│{X}  {B}PostgreSQL connection{X}");
+        println!("  {O}│{X}  {D}default uses system user '{sys_user}', no password{X}");
+        println!("  {O}│{X}  {D}default: {default_db_url}{X}");
+        println!("  {O}│{X}");
+
+        use std::io::{self, BufRead, Write};
+        println!("  {O}│{X}  {Y}use default? [Y/n]{X}");
+        print!("  {O}│{X}  > ");
+        io::stdout().flush().ok();
+        let mut answer = String::new();
+        io::stdin().lock().read_line(&mut answer).ok();
+        let a = answer.trim().to_lowercase();
+
+        if a.is_empty() || a == "y" || a == "yes" {
+            default_db_url.clone()
+        } else {
+            println!("  {O}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:5432/ygg){X}");
+            print!("  {O}│{X}  > ");
+            io::stdout().flush().ok();
+            let mut url = String::new();
+            io::stdin().lock().read_line(&mut url).ok();
+            let url = url.trim().to_string();
+            if url.is_empty() { default_db_url.clone() } else { url }
+        }
+    };
+
     let ollama_url = std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
     let embed_model = std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "all-minilm".into());
     let chat_model = std::env::var("OLLAMA_CHAT_MODEL").unwrap_or_else(|_| "mistral:7b".into());
@@ -368,9 +406,17 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // ── config ──
     head("config");
 
-    let env_path = Path::new(".env");
+    // Write .env with the user's chosen database URL
+    // (env_path was declared earlier for the existence check)
     if !env_path.exists() {
-        tokio::fs::write(env_path, include_str!("../../.env.example")).await?;
+        let template = include_str!("../../.env.example");
+        let env_content = template.replace(
+            "postgres://localhost:5432/ygg",
+            &db_url,
+        );
+        tokio::fs::write(env_path, env_content).await?;
+        // Re-load so config picks up the new values
+        dotenvy::dotenv().ok();
         ok(".env", "created");
     } else {
         ok(".env", "exists");
