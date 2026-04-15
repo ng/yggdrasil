@@ -4,11 +4,14 @@ use clap::{Parser, Subcommand};
 #[command(name = "ygg", version, about = "Yggdrasil — High-density agent orchestrator")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start ygg — open tmux session with dashboard (default when no command given)
+    Up,
+
     /// Bootstrap dependencies (Postgres, Ollama, migrations, status bar)
     Init {
         /// Show command output for debugging
@@ -134,7 +137,29 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
+    let command = cli.command.unwrap_or(Commands::Up);
+
+    match command {
+        Commands::Up => {
+            // Start the ygg tmux session with dashboard
+            if !ygg::tmux::TmuxManager::is_available().await {
+                eprintln!("tmux is not installed. Run: ygg init");
+                std::process::exit(1);
+            }
+            ygg::tmux::TmuxManager::ensure_session().await?;
+            println!("ygg session ready. Attach with: tmux attach -t ygg");
+
+            // If already in tmux, just attach
+            if std::env::var("TMUX").is_ok() {
+                println!("Already in tmux. Switch to ygg: Ctrl-b s → ygg");
+            } else {
+                // Attach to the session
+                let _ = tokio::process::Command::new("tmux")
+                    .args(["attach", "-t", "ygg"])
+                    .status()
+                    .await;
+            }
+        }
         Commands::Init { verbose, skip, database_url } => {
             if let Some(ref url) = database_url {
                 // SAFETY: single-threaded at this point, before tokio runtime spawns work

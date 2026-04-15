@@ -45,7 +45,7 @@ fn banner() {
 fn spin(msg: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
-        ProgressStyle::with_template(&format!("  {O}│{X} {{spinner}} {{msg}}"))
+        ProgressStyle::with_template(&format!("  {BR}│{X} {{spinner}} {{msg}}"))
             .unwrap()
             .tick_strings(&["◜", "◠", "◝", "◞", "◡", "◟"]),
     );
@@ -54,33 +54,36 @@ fn spin(msg: &str) -> ProgressBar {
     pb
 }
 
+// Border color — forest green to match the tree theme
+const BR: &str = "\x1b[38;5;34m";
+
 fn ok(label: &str, state: &str) {
     let dots = 40usize.saturating_sub(label.len() + state.len());
     let d: String = std::iter::repeat_n('·', dots).collect();
-    println!("  {O}│{X}  {label} {D}{d}{X} {G}{state}{X}");
+    println!("  {BR}│{X}  {label} {D}{d}{X} {G}{state}{X}");
 }
 
 fn bad(label: &str, state: &str) {
     let dots = 40usize.saturating_sub(label.len() + state.len());
     let d: String = std::iter::repeat_n('·', dots).collect();
-    println!("  {O}│{X}  {label} {D}{d}{X} {R}{state}{X}");
+    println!("  {BR}│{X}  {label} {D}{d}{X} {R}{state}{X}");
 }
 
 fn hint(msg: &str) {
-    println!("  {O}│{X}  {D}{msg}{X}");
+    println!("  {BR}│{X}  {D}{msg}{X}");
 }
 
 fn head(title: &str) {
-    println!("  {O}│{X}");
-    println!("  {O}├─ {B}{title}{X}");
-    println!("  {O}│{X}");
+    println!("  {BR}│{X}");
+    println!("  {BR}├─ {G4}{B}{title}{X}");
+    println!("  {BR}│{X}");
 }
 
 fn prompt_yes(msg: &str) -> bool {
     use std::io::{self, BufRead, Write};
-    println!("  {O}│{X}");
-    println!("  {O}│{X}  {Y}{msg} [Y/n]{X}");
-    print!("  {O}│{X}  > ");
+    println!("  {BR}│{X}");
+    println!("  {BR}│{X}  {Y}{msg} [Y/n]{X}");
+    print!("  {BR}│{X}  > ");
     io::stdout().flush().ok();
     let mut s = String::new();
     io::stdin().lock().read_line(&mut s).ok();
@@ -105,9 +108,9 @@ async fn offer_curl_install(name: &str, script_url: &str) {
 
 fn prompt_skip(name: &str) -> bool {
     use std::io::{self, BufRead, Write};
-    println!("  {O}│{X}");
-    println!("  {O}│{X}  {Y}skip {name} and continue? [Y/n]{X}");
-    print!("  {O}│{X}  > ");
+    println!("  {BR}│{X}");
+    println!("  {BR}│{X}  {Y}skip {name} and continue? [Y/n]{X}");
+    print!("  {BR}│{X}  > ");
     io::stdout().flush().ok();
     let mut s = String::new();
     io::stdin().lock().read_line(&mut s).ok();
@@ -323,14 +326,14 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let db_url = if let Ok(url) = std::env::var("DATABASE_URL") {
         url
     } else {
-        println!("  {O}│{X}  {B}PostgreSQL connection{X}");
-        println!("  {O}│{X}  {D}default uses system user '{sys_user}', no password{X}");
-        println!("  {O}│{X}  {D}default: {default_db_url}{X}");
-        println!("  {O}│{X}");
+        println!("  {BR}│{X}  {B}PostgreSQL connection{X}");
+        println!("  {BR}│{X}  {D}default uses system user '{sys_user}', no password{X}");
+        println!("  {BR}│{X}  {D}default: {default_db_url}{X}");
+        println!("  {BR}│{X}");
 
         use std::io::{self, BufRead, Write};
-        println!("  {O}│{X}  {Y}use default? [Y/n]{X}");
-        print!("  {O}│{X}  > ");
+        println!("  {BR}│{X}  {Y}use default? [Y/n]{X}");
+        print!("  {BR}│{X}  > ");
         io::stdout().flush().ok();
         let mut answer = String::new();
         io::stdin().lock().read_line(&mut answer).ok();
@@ -339,8 +342,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         if a.is_empty() || a == "y" || a == "yes" {
             default_db_url.clone()
         } else {
-            println!("  {O}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:5432/ygg){X}");
-            print!("  {O}│{X}  > ");
+            println!("  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:5432/ygg){X}");
+            print!("  {BR}│{X}  > ");
             io::stdout().flush().ok();
             let mut url = String::new();
             io::stdin().lock().read_line(&mut url).ok();
@@ -357,7 +360,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     println!("  {D}pg{X}      {db_show}");
     println!("  {D}embed{X}   all-MiniLM-L6-v2 {D}({embed_dim}d, in-process){X}");
     println!();
-    println!("  {O}╭─────────────────────────────────────────────╮{X}");
+    println!("  {BR}╭─────────────────────────────────────────────╮{X}");
 
     // Collect missing deps that need manual install
     let mut missing: Vec<(&str, &str)> = Vec::new();
@@ -632,8 +635,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     }
 
     // ── done ──
-    println!("  {O}│{X}");
-    println!("  {O}╰─────────────────────────────────────────────╯{X}");
+    println!("  {BR}│{X}");
+    println!("  {BR}╰─────────────────────────────────────────────╯{X}");
     print!("\x1b[?25h");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
