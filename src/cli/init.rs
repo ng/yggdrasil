@@ -189,7 +189,7 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
         } else {
             let pb = spinner("installing postgresql...");
             let install_result = tokio::time::timeout(
-                Duration::from_secs(30),
+                Duration::from_secs(180),
                 install_postgres(&pkg, sudo),
             ).await;
 
@@ -447,8 +447,20 @@ async fn check_tool_styled(name: &str) {
 async fn install_postgres(pkg: &Option<PackageManager>, sudo: bool) -> Result<(), anyhow::Error> {
     match pkg {
         Some(PackageManager::Brew) => {
-            run_cmd("brew", &["install", "postgresql@16"]).await;
-            run_cmd("brew", &["services", "start", "postgresql@16"]).await;
+            // brew install can take a while — run with visible output
+            let install_ok = Command::new("brew")
+                .args(["install", "postgresql@16"])
+                .status()
+                .await
+                .is_ok_and(|s| s.success());
+            if !install_ok {
+                anyhow::bail!("brew install postgresql@16 failed");
+            }
+            Command::new("brew")
+                .args(["services", "start", "postgresql@16"])
+                .status()
+                .await
+                .ok();
         }
         Some(PackageManager::Apt) => {
             if sudo {
