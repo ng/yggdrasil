@@ -605,6 +605,19 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     }
 
     if !skipping(skips, "pg") && port_open(5432).await {
+        // Ensure database exists using the configured user
+        // Parse user from db_url for createdb
+        let url_user = db_url.strip_prefix("postgres://")
+            .and_then(|s| s.split('@').next())
+            .and_then(|s| s.split(':').next())
+            .unwrap_or(&sys_user);
+
+        if !url_user.is_empty() {
+            run("createdb", &["-U", url_user, "ygg"]).await;
+        } else {
+            run("createdb", &["ygg"]).await;
+        }
+
         let pb = spin("running migrations...");
         match async {
             let pool = db::create_pool(&db_url).await?;
@@ -614,8 +627,24 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             Result::Ok(()) => { pb.finish_and_clear(); ok("migrations", "applied"); }
             Err(e) => {
                 pb.finish_and_clear();
+                let err_str = format!("{e}");
                 bad("migrations", "failed");
-                hint(&format!("{e}"));
+
+                if err_str.contains("role") && err_str.contains("does not exist") {
+                    // Extract the bad role name from the error
+                    hint("database role doesn't exist for this URL");
+                    hint(&format!("current URL: {db_url}"));
+                    hint(&format!("your system user: {sys_user}"));
+                    hint("fix: delete config and re-run init with correct URL:");
+                    hint(&format!("  rm {}", env_path.display()));
+                    hint("  ygg init");
+                } else if err_str.contains("does not exist") && err_str.contains("database") {
+                    hint("database 'ygg' doesn't exist");
+                    hint(&format!("  createdb -U {sys_user} ygg"));
+                } else {
+                    hint(&format!("{e}"));
+                }
+
                 if !prompt_skip("migrations") { std::process::exit(1); }
             }
         }
