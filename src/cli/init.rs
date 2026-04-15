@@ -364,17 +364,17 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let default_db_url = format!("postgres://{sys_user}@localhost:5432/ygg");
     let env_path = config_dir.join(".env");
 
-    // If config exists, load it. If not, prompt for database URL.
-    let db_url = if env_path.exists() {
+    // Load existing config or prompt for database URL.
+    let (db_url, config_changed) = if env_path.exists() {
         dotenvy::from_path(&env_path).ok();
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| default_db_url.clone())
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| default_db_url.clone());
+        (url, false)
     } else {
+        use std::io::{self, BufRead, Write};
         println!("  {BR}│{X}  {B}PostgreSQL connection{X}");
         println!("  {BR}│{X}  {D}default uses system user '{sys_user}', no password{X}");
         println!("  {BR}│{X}  {D}default: {default_db_url}{X}");
         println!("  {BR}│{X}");
-
-        use std::io::{self, BufRead, Write};
         println!("  {BR}│{X}  {Y}use default? [Y/n]{X}");
         print!("  {BR}│{X}  > ");
         io::stdout().flush().ok();
@@ -382,18 +382,37 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         io::stdin().lock().read_line(&mut answer).ok();
         let a = answer.trim().to_lowercase();
 
-        if a.is_empty() || a == "y" || a == "yes" {
+        let url = if a.is_empty() || a == "y" || a == "yes" {
             default_db_url.clone()
         } else {
             println!("  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:5432/ygg){X}");
             print!("  {BR}│{X}  > ");
             io::stdout().flush().ok();
-            let mut url = String::new();
-            io::stdin().lock().read_line(&mut url).ok();
-            let url = url.trim().to_string();
-            if url.is_empty() { default_db_url.clone() } else { url }
-        }
+            let mut custom = String::new();
+            io::stdin().lock().read_line(&mut custom).ok();
+            let custom = custom.trim().to_string();
+            if custom.is_empty() { default_db_url.clone() } else { custom }
+        };
+
+        // Write config immediately so it's saved
+        let env_content = format!(
+            "DATABASE_URL={url}\n\
+             EMBEDDING_DIMENSIONS=384\n\
+             CONTEXT_LIMIT_TOKENS=250000\n\
+             CONTEXT_HARD_CAP_TOKENS=300000\n\
+             LOCK_TTL_SECS=300\n\
+             HEARTBEAT_INTERVAL_SECS=60\n\
+             WATCHER_INTERVAL_SECS=30\n\
+             RTK_BINARY_PATH=rtk\n\
+             RUST_LOG=ygg=info\n"
+        );
+        let _ = tokio::fs::write(&env_path, &env_content).await;
+
+        (url, true)
     };
+
+    // Always force the correct DATABASE_URL in env
+    unsafe { std::env::set_var("DATABASE_URL", &db_url); }
 
     let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "384".into());
 
@@ -632,29 +651,11 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // ── config ──
     head("config");
 
-    // Write config — always set DATABASE_URL explicitly, no template replacement
-    if !env_path.exists() {
-        let env_content = format!(
-            "DATABASE_URL={db_url}\n\
-             EMBEDDING_DIMENSIONS=384\n\
-             CONTEXT_LIMIT_TOKENS=250000\n\
-             CONTEXT_HARD_CAP_TOKENS=300000\n\
-             LOCK_TTL_SECS=300\n\
-             HEARTBEAT_INTERVAL_SECS=60\n\
-             WATCHER_INTERVAL_SECS=30\n\
-             RTK_BINARY_PATH=rtk\n\
-             RUST_LOG=ygg=info\n"
-        );
-        tokio::fs::write(&env_path, env_content).await?;
-        dotenvy::from_path(&env_path).ok();
+    if config_changed {
         ok(&format!("{}", env_path.display()), "created");
     } else {
-        dotenvy::from_path(&env_path).ok();
         ok(&format!("{}", env_path.display()), "exists");
     }
-
-    // Always set DATABASE_URL in the environment so migrations use the right one
-    unsafe { std::env::set_var("DATABASE_URL", &db_url); }
 
     if !skipping(&all_skips, "pg") && port_open(5432).await {
         // Ensure database exists using the configured user
