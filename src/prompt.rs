@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::models::agent::AgentRepo;
-use crate::models::node::{Node, NodeRepo};
+use crate::models::node::{Node, NodeKind, NodeRepo};
 use crate::ollama::OllamaClient;
 use crate::pressure::PressureMonitor;
 
@@ -96,9 +96,15 @@ impl<'a> PromptBuilder<'a> {
         limit: i32,
     ) -> Result<Vec<Node>, crate::YggError> {
         let query_vec = self.ollama.embed(query_text).await?;
+        // Only retrieve Directive and Digest nodes — not raw tool results or messages
         let results = self
             .node_repo
-            .similarity_search(&query_vec, agent_id, limit)
+            .similarity_search(
+                &query_vec,
+                agent_id,
+                limit,
+                &[NodeKind::Directive, NodeKind::Digest],
+            )
             .await?;
         Ok(results)
     }

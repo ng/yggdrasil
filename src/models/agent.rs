@@ -187,4 +187,34 @@ impl<'a> AgentRepo<'a> {
         .fetch_all(self.pool)
         .await
     }
+
+    /// Find orphaned agents stuck in active states (crash recovery).
+    /// Returns agents in Executing/WaitingTool/Planning that haven't been
+    /// updated within the staleness threshold.
+    pub async fn find_orphaned(&self, stale_secs: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
+        sqlx::query_as::<_, AgentWorkflow>(
+            r#"
+            SELECT agent_id, agent_name, current_state, head_node_id,
+                   digest_id, context_tokens, metadata, created_at, updated_at
+            FROM agents
+            WHERE current_state IN ('executing', 'waiting_tool', 'planning', 'context_flush')
+              AND updated_at < now() - make_interval(secs => $1)
+            ORDER BY updated_at
+            "#,
+        )
+        .bind(stale_secs as f64)
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// Reset an orphaned agent to Idle for resume.
+    pub async fn reset_to_idle(&self, agent_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE agents SET current_state = 'idle', updated_at = now() WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
 }

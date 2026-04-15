@@ -8,6 +8,7 @@ pub mod models;
 pub mod ollama;
 pub mod pressure;
 pub mod prompt;
+pub mod salience;
 pub mod stats;
 pub mod status;
 pub mod tmux;

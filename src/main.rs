@@ -55,6 +55,13 @@ enum Commands {
     /// Launch the TUI dashboard
     Dashboard,
 
+    /// Recover orphaned agents stuck in active states
+    Recover {
+        /// Staleness threshold in seconds (default 300)
+        #[arg(long, default_value = "300")]
+        stale_secs: u64,
+    },
+
     /// Start the background watcher daemon
     Watcher,
 
@@ -168,6 +175,11 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::dashboard_cmd::execute(&pool, &config).await?;
+        }
+        Commands::Recover { stale_secs } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::recover::execute(&pool, Some(stale_secs)).await?;
         }
         Commands::Watcher => {
             let config = ygg::config::AppConfig::from_env()?;
