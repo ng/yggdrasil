@@ -360,11 +360,37 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     // pgvector + createdb (only if pg is up)
     if !skipping(skips, "pg") && port_open(5432).await {
-        if has_brew {
-            run("brew", &["install", "pgvector"]).await;
-        }
-        ok("pgvector", "ready");
+        // Check if pgvector is available
+        let pgvector_ok = run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await
+            || run("psql", &["-d", "postgres", "-c", "SELECT 1 FROM pg_available_extensions WHERE name='vector'", "-q"]).await;
 
+        if pgvector_ok {
+            ok("pgvector", "available");
+        } else {
+            bad("pgvector", "not installed");
+            if has_brew {
+                if prompt_yes("install pgvector via brew?") {
+                    let pb = spin("brew install pgvector...");
+                    let installed = run_show("brew", &["install", "pgvector"]).await;
+                    pb.finish_and_clear();
+                    if installed {
+                        ok("pgvector", "installed");
+                    } else {
+                        bad("pgvector", "brew install failed");
+                        hint("try manually: brew install pgvector");
+                        if !prompt_skip("pgvector") { std::process::exit(1); }
+                    }
+                } else if !prompt_skip("pgvector") { std::process::exit(1); }
+            } else if has_apt {
+                hint("run: sudo apt-get install -y postgresql-15-pgvector");
+                if !prompt_skip("pgvector") { std::process::exit(1); }
+            } else {
+                hint("install: https://github.com/pgvector/pgvector");
+                if !prompt_skip("pgvector") { std::process::exit(1); }
+            }
+        }
+
+        // Ensure database exists
         if run("createdb", &["ygg"]).await {
             ok("database 'ygg'", "created");
         } else {
