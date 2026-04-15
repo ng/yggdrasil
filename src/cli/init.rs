@@ -32,11 +32,11 @@ const TG: &str = "\x1b[38;5;204m";
 fn banner() {
     println!();
     println!("       {G5}▄{X}");
-    println!("      {G4}▄█▄{X}        {FR} ▄▄▄{X}");
-    println!("     {G3}▄███▄{X}     {FR}▐{EY}o{FR} {EY}o{FR}▌{X}");
-    println!("    {G2}▄█████▄{X}    {FR}▐▄{TG}~{FR}▄▌{X}");
-    println!("   {G1}▄███████▄{X}   {FR}▐██▌{X}");
-    println!("      {TK}▐█▌{X}     {FR}▗▘▝▖{X}");
+    println!("      {G4}▄█▄{X}      {FR}  ▄▄▄▄▄{X}");
+    println!("     {G3}▄███▄{X}     {FR}▐{EY}o{FR}▌▄▌{EY}o{FR}▌{X}");
+    println!("    {G2}▄█████▄{X}    {FR}▐ {TG}\\/{FR} ▌{X}");
+    println!("   {G1}▄███████▄{X}   {FR}▐▄▄▄▄▌{X}");
+    println!("      {TK}▐█▌{X}     {FR}▐▌  ▐▌{X}");
     println!("   {RT}▀▀▀▀█▀▀▀▀{X}");
     println!();
     println!("  {O}{B}Y G G D R A S I L{X} {D}v{}{X}", env!("CARGO_PKG_VERSION"));
@@ -187,7 +187,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let pkg = if has_brew { "brew" } else if has_apt { "apt" } else { "—" };
 
     dotenvy::dotenv().ok();
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://ygg:ygg@localhost:5432/ygg".into());
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost:5432/ygg".into());
     let ollama_url = std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
     let embed_model = std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "all-minilm".into());
     let chat_model = std::env::var("OLLAMA_CHAT_MODEL").unwrap_or_else(|_| "mistral:7b".into());
