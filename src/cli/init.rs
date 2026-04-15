@@ -235,6 +235,44 @@ async fn get_pg_bin_dir(pg_version: &str) -> Option<String> {
     None
 }
 
+/// Build pgvector from git source using the system's pg_config.
+/// This bypasses brew's formula which only targets the latest 2 pg versions.
+async fn build_pgvector_from_source() -> bool {
+    let tmp = format!("{}/ygg-pgvector-build", std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into()));
+
+    // Clean up any previous attempt
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // Clone
+    if !run_show("git", &["clone", "--depth", "1", "https://github.com/pgvector/pgvector.git", &tmp]).await {
+        return false;
+    }
+
+    // Build — uses pg_config from PATH (which we set earlier)
+    let make_ok = Command::new("make")
+        .current_dir(&tmp)
+        .status()
+        .await
+        .is_ok_and(|s| s.success());
+
+    if !make_ok {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return false;
+    }
+
+    // Install — may need sudo on Linux, but on macOS with brew postgres
+    // the lib dir is user-writable
+    let install_ok = Command::new("make")
+        .args(["install"])
+        .current_dir(&tmp)
+        .status()
+        .await
+        .is_ok_and(|s| s.success());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    install_ok
+}
+
 // ─── init ────────────────────────────────────────────────
 
 pub async fn execute_with_options(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
@@ -448,7 +486,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 let pg_version = detect_pg_version().await;
                 hint(&format!("detected postgres: {pg_version}"));
 
-                if prompt_yes(&format!("install/rebuild pgvector for {pg_version}?")) {
+                if prompt_yes(&format!("install pgvector for {pg_version}?")) {
                     // Ensure pg_config points to the running version
                     if let Some(pg_bin) = get_pg_bin_dir(&pg_version).await {
                         hint(&format!("using pg_config from: {pg_bin}"));
@@ -456,30 +494,26 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         unsafe { std::env::set_var("PATH", format!("{pg_bin}:{current_path}")); }
                     }
 
-                    let pb = spin("brew reinstall pgvector --build-from-source (may take a minute)...");
-                    let installed = run_show("brew", &["reinstall", "pgvector", "--build-from-source"]).await;
+                    // Build pgvector from source directly — brew formula
+                    // only targets the latest 2 pg versions
+                    let pb = spin("building pgvector from source...");
+                    let ok_built = build_pgvector_from_source().await;
                     pb.finish_and_clear();
 
-                    if installed {
-                        // Restart postgres to pick up the new extension
+                    if ok_built {
                         run_show("brew", &["services", "restart", &pg_version]).await;
                         wait_port(5432, 10).await;
 
                         if run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await {
-                            ok("pgvector", "installed + enabled");
+                            ok("pgvector", "built + enabled");
                         } else {
-                            bad("pgvector", "still can't enable after reinstall");
-                            hint("try manually:");
-                            if let Some(ref pg_bin) = get_pg_bin_dir(&pg_version).await {
-                                hint(&format!("  export PATH={pg_bin}:$PATH"));
-                            }
-                            hint("  brew reinstall pgvector --build-from-source");
-                            hint(&format!("  brew services restart {pg_version}"));
-                            hint("  psql -d ygg -c 'CREATE EXTENSION vector'");
+                            bad("pgvector", "built but can't enable");
+                            hint("check: psql -d ygg -c \"CREATE EXTENSION vector\" 2>&1");
                             if !prompt_skip("pgvector") { std::process::exit(1); }
                         }
                     } else {
-                        bad("pgvector", "reinstall failed");
+                        bad("pgvector", "build failed");
+                        hint("requires: make, gcc/clang, postgresql server dev headers");
                         if !prompt_skip("pgvector") { std::process::exit(1); }
                     }
                 } else if !prompt_skip("pgvector") { std::process::exit(1); }
