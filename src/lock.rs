@@ -45,15 +45,12 @@ impl<'a> LockManager<'a> {
         resource_key: &str,
         agent_id: Uuid,
     ) -> Result<ResourceLock, LockError> {
-        // Reap any expired lock on this resource
-        sqlx::query("DELETE FROM locks WHERE resource_key = $1 AND expires_at < now()")
-            .bind(resource_key)
-            .execute(self.pool)
-            .await?;
-
-        // Try to insert
+        // Atomic: delete expired + insert in one statement (no TOCTOU race)
         let row: Option<ResourceLock> = sqlx::query_as::<_, ResourceLock>(
             r#"
+            WITH reap AS (
+                DELETE FROM locks WHERE resource_key = $1 AND expires_at < now()
+            )
             INSERT INTO locks (resource_key, agent_id, expires_at)
             VALUES ($1, $2, now() + make_interval(secs => $3))
             ON CONFLICT (resource_key) DO NOTHING

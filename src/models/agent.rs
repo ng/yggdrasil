@@ -112,6 +112,27 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
+    /// Atomically update head, digest, and token count in a single statement.
+    /// Use this instead of separate update_head + set_digest calls.
+    pub async fn flush_context(
+        &self,
+        agent_id: Uuid,
+        head_node_id: Uuid,
+        digest_id: Uuid,
+        context_tokens: i32,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE agents SET head_node_id = $2, digest_id = $3, context_tokens = $4, updated_at = now() WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .bind(head_node_id)
+        .bind(digest_id)
+        .bind(context_tokens)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Update the digest reference after a context flush.
     pub async fn set_digest(
         &self,

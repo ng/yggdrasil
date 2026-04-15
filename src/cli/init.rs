@@ -149,6 +149,10 @@ fn skipping(list: &[String], name: &str) -> bool {
 }
 
 async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
+    // Ensure we're in a valid directory — brew/apt fail if cwd is gone
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let _ = std::env::set_current_dir(&home);
+
     banner();
 
     let has_brew = has("brew").await;

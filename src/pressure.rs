@@ -58,13 +58,9 @@ impl<'a> PressureMonitor<'a> {
         tracing::info!(agent_id = %agent_id, weight, "pressure threshold exceeded, generating digest");
 
         let context = self.build_active_context(agent_id).await?;
-        let context_text = context
-            .iter()
-            .map(|n| format!("[{:?}] {}", n.kind, n.content))
-            .collect::<Vec<_>>()
-            .join("\n");
 
-        let digest_text = self.ollama.generate_digest(&context_text).await?;
+        // Extract key info deterministically first, then summarize via LLM in chunks
+        let digest_text = self.generate_chunked_digest(&context).await?;
 
         let agent = self.agent_repo.get(agent_id).await?.unwrap();
         let digest_node = self.node_repo.insert(
@@ -75,12 +71,122 @@ impl<'a> PressureMonitor<'a> {
             estimate_tokens(&digest_text) as i32,
         ).await?;
 
-        self.agent_repo.set_digest(agent_id, digest_node.id).await?;
-        self.agent_repo.update_head(agent_id, digest_node.id, estimate_tokens(&digest_text) as i32).await?;
+        // Atomic state update — no crash window between set_digest and update_head
+        self.agent_repo.flush_context(
+            agent_id,
+            digest_node.id,
+            digest_node.id,
+            estimate_tokens(&digest_text) as i32,
+        ).await?;
 
         tracing::info!(agent_id = %agent_id, digest_id = %digest_node.id, "digest generated");
 
         Ok(Some(digest_node))
+    }
+
+    /// Generate a digest by chunking context to fit within the local model's window.
+    /// Step 1: Extract key info deterministically (files changed, tool calls, decisions).
+    /// Step 2: If remaining context is small enough, summarize in one call.
+    /// Step 3: Otherwise, chunk and summarize each chunk, then merge summaries.
+    async fn generate_chunked_digest(&self, context: &[Node]) -> Result<String, crate::YggError> {
+        // Step 1: Deterministic extraction (no LLM needed)
+        let mut files_changed: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<String> = Vec::new();
+        let mut decisions: Vec<String> = Vec::new();
+
+        for node in context {
+            match node.kind {
+                NodeKind::ToolCall => {
+                    if let Some(cmd) = node.content.get("command").and_then(|v| v.as_str()) {
+                        tool_calls.push(cmd.to_string());
+                    }
+                }
+                NodeKind::ToolResult => {
+                    // Extract file paths from tool results
+                    let content_str = node.content.to_string();
+                    for word in content_str.split_whitespace() {
+                        if word.contains('/') && (word.ends_with(".rs") || word.ends_with(".ts") || word.ends_with(".py") || word.contains("src/")) {
+                            files_changed.push(word.trim_matches('"').to_string());
+                        }
+                    }
+                }
+                NodeKind::UserMessage | NodeKind::AssistantMessage => {
+                    let text = node.content.get("task").or(node.content.get("message"))
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    if text.contains("decided") || text.contains("chose") || text.contains("will use") || text.contains("switched to") {
+                        decisions.push(text.chars().take(200).collect());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        files_changed.sort();
+        files_changed.dedup();
+        tool_calls.dedup();
+
+        let deterministic_section = format!(
+            "## Files touched\n{}\n\n## Tool calls ({})\n{}\n\n## Key decisions\n{}",
+            files_changed.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n"),
+            tool_calls.len(),
+            tool_calls.iter().take(20).map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n"),
+            decisions.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n"),
+        );
+
+        // Step 2: Serialize context for LLM summarization
+        let context_text: String = context
+            .iter()
+            .map(|n| format!("[{:?}] {}", n.kind, n.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Max chunk size: ~6k tokens (conservative for 7B models with 8k window)
+        let max_chunk_chars = 24_000; // ~6k tokens at 4 chars/token
+
+        if context_text.len() <= max_chunk_chars {
+            // Small enough for one call
+            let summary = self.ollama.generate_digest(&context_text).await
+                .unwrap_or_else(|_| "LLM summarization unavailable".to_string());
+            return Ok(format!("{deterministic_section}\n\n## Summary\n{summary}"));
+        }
+
+        // Step 3: Chunk by newlines into groups that fit the model's window
+        let lines: Vec<&str> = context_text.lines().collect();
+        let mut chunk_summaries = Vec::new();
+        let mut current_chunk = String::new();
+
+        for line in &lines {
+            if current_chunk.len() + line.len() > max_chunk_chars {
+                if !current_chunk.is_empty() {
+                    let summary = self.ollama.generate_digest(&current_chunk).await
+                        .unwrap_or_else(|_| "chunk summary unavailable".to_string());
+                    chunk_summaries.push(summary);
+                    current_chunk.clear();
+                }
+            }
+            current_chunk.push_str(line);
+            current_chunk.push('\n');
+        }
+        if !current_chunk.is_empty() {
+            let summary = self.ollama.generate_digest(&current_chunk).await
+                .unwrap_or_else(|_| "chunk summary unavailable".to_string());
+            chunk_summaries.push(summary);
+        }
+
+        // Merge chunk summaries
+        let merged = if chunk_summaries.len() > 1 {
+            let combined = chunk_summaries.join("\n---\n");
+            if combined.len() <= max_chunk_chars {
+                self.ollama.generate_digest(&format!("Merge these summaries into one coherent summary:\n{combined}")).await
+                    .unwrap_or(combined)
+            } else {
+                combined
+            }
+        } else {
+            chunk_summaries.into_iter().next().unwrap_or_default()
+        };
+
+        Ok(format!("{deterministic_section}\n\n## Summary\n{merged}"))
     }
 
     /// Build the active context: all nodes from the last digest (or root) to head.
