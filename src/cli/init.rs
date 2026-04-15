@@ -31,12 +31,12 @@ const TG: &str = "\x1b[38;5;204m";
 
 fn banner() {
     println!();
-    println!("       {G5}▄{X}");
-    println!("      {G4}▄█▄{X}      {FR}  ▄▄▄▄▄{X}");
-    println!("     {G3}▄███▄{X}     {FR}▐{EY}o{FR}▌▄▌{EY}o{FR}▌{X}");
-    println!("    {G2}▄█████▄{X}    {FR}▐ {TG}\\/{FR} ▌{X}");
-    println!("   {G1}▄███████▄{X}   {FR}▐▄▄▄▄▌{X}");
-    println!("      {TK}▐█▌{X}     {FR}▐▌  ▐▌{X}");
+    println!("       {G5}▄{X}         {FR} ▄▄▄{X}");
+    println!("      {G4}▄█▄{X}       {FR}▐{EY}o{FR} {EY}o{FR}▌{X}");
+    println!("     {G3}▄███▄{X}      {FR} \\{TG}w{FR}/ {X}");
+    println!("    {G2}▄█████▄{X}    {FR}▐▌   ▐▌{X}");
+    println!("   {G1}▄███████▄{X}   {FR}▐▌   ▐▌{X}");
+    println!("      {TK}▐█▌{X}      {FR}^     ^{X}");
     println!("   {RT}▀▀▀▀█▀▀▀▀{X}");
     println!();
     println!("  {O}{B}Y G G D R A S I L{X} {D}v{}{X}", env!("CARGO_PKG_VERSION"));
@@ -358,14 +358,20 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         if !prompt_skip("postgresql") { std::process::exit(1); }
     }
 
-    // pgvector + createdb (only if pg is up)
+    // database + pgvector (only if pg is up)
     if !skipping(skips, "pg") && port_open(5432).await {
-        // Check if pgvector is available
-        let pgvector_ok = run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await
-            || run("psql", &["-d", "postgres", "-c", "SELECT 1 FROM pg_available_extensions WHERE name='vector'", "-q"]).await;
+        // Create database first
+        if run("createdb", &["ygg"]).await {
+            ok("database 'ygg'", "created");
+        } else {
+            ok("database 'ygg'", "exists");
+        }
+
+        // Now check pgvector in the ygg database
+        let pgvector_ok = run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await;
 
         if pgvector_ok {
-            ok("pgvector", "available");
+            ok("pgvector", "enabled");
         } else {
             bad("pgvector", "not installed");
             if has_brew {
@@ -374,7 +380,14 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                     let installed = run_show("brew", &["install", "pgvector"]).await;
                     pb.finish_and_clear();
                     if installed {
-                        ok("pgvector", "installed");
+                        // Try enabling again after install
+                        if run("psql", &["-d", "ygg", "-c", "CREATE EXTENSION IF NOT EXISTS vector", "-q"]).await {
+                            ok("pgvector", "installed + enabled");
+                        } else {
+                            bad("pgvector", "installed but can't enable");
+                            hint("you may need to restart postgres: brew services restart postgresql@15");
+                            if !prompt_skip("pgvector") { std::process::exit(1); }
+                        }
                     } else {
                         bad("pgvector", "brew install failed");
                         hint("try manually: brew install pgvector");
@@ -383,18 +396,12 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 } else if !prompt_skip("pgvector") { std::process::exit(1); }
             } else if has_apt {
                 hint("run: sudo apt-get install -y postgresql-15-pgvector");
+                hint("then: psql -d ygg -c 'CREATE EXTENSION vector'");
                 if !prompt_skip("pgvector") { std::process::exit(1); }
             } else {
                 hint("install: https://github.com/pgvector/pgvector");
                 if !prompt_skip("pgvector") { std::process::exit(1); }
             }
-        }
-
-        // Ensure database exists
-        if run("createdb", &["ygg"]).await {
-            ok("database 'ygg'", "created");
-        } else {
-            ok("database 'ygg'", "exists");
         }
     }
 
