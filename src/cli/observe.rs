@@ -17,7 +17,7 @@ pub async fn execute(
     agent_name: &str,
 ) -> Result<(), anyhow::Error> {
     let agent_repo = AgentRepo::new(pool);
-    let node_repo = NodeRepo::new(pool);
+    let _node_repo = NodeRepo::new(pool);
 
     // Get or create the agent
     let agent = agent_repo.register(agent_name).await?;

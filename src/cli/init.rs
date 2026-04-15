@@ -4,7 +4,6 @@ use std::time::Duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::process::Command;
 
-use crate::config::AppConfig;
 use crate::db;
 
 

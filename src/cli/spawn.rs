@@ -5,7 +5,7 @@ use crate::tmux::TmuxManager;
 /// Spawn a new Claude Code agent in a tmux window.
 pub async fn execute(
     pool: &sqlx::PgPool,
-    config: &AppConfig,
+    _config: &AppConfig,
     task: &str,
     name: Option<&str>,
 ) -> Result<(), anyhow::Error> {
