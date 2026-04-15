@@ -8,83 +8,45 @@ use crate::config::AppConfig;
 use crate::db;
 use crate::ollama::OllamaClient;
 
-// Warm gradient: dim → orange → gold
-const C_DIM: &str = "\x1b[90m";    // dim gray
-const C_MID: &str = "\x1b[38;5;208m"; // orange
-const C_HI: &str = "\x1b[38;5;220m";  // gold
-const C_OK: &str = "\x1b[38;5;114m";  // soft green
-const C_ERR: &str = "\x1b[38;5;203m"; // soft red
-const C_WARN: &str = "\x1b[38;5;221m"; // yellow
-const C_BOLD: &str = "\x1b[1m";
-const C_RST: &str = "\x1b[0m";
+// Colors
+const D: &str = "\x1b[90m";
+const O: &str = "\x1b[38;5;208m";
+const G: &str = "\x1b[38;5;114m";
+const R: &str = "\x1b[38;5;203m";
+const Y: &str = "\x1b[38;5;221m";
+const B: &str = "\x1b[1m";
+const X: &str = "\x1b[0m";
 
-/// Detect the system package manager.
-enum PackageManager {
-    Apt,
-    Brew,
+// Tree colors
+const G1: &str = "\x1b[38;5;22m";
+const G2: &str = "\x1b[38;5;28m";
+const G3: &str = "\x1b[38;5;34m";
+const G4: &str = "\x1b[38;5;40m";
+const G5: &str = "\x1b[38;5;46m";
+const TK: &str = "\x1b[38;5;94m";
+const RT: &str = "\x1b[38;5;58m";
+const FR: &str = "\x1b[38;5;48m";
+const EY: &str = "\x1b[38;5;226m";
+const TG: &str = "\x1b[38;5;204m";
+
+fn banner() {
+    println!();
+    println!("       {G5}▄{X}");
+    println!("      {G4}▄█▄{X}        {FR} ▄▄▄{X}");
+    println!("     {G3}▄███▄{X}     {FR}▐{EY}o{FR} {EY}o{FR}▌{X}");
+    println!("    {G2}▄█████▄{X}    {FR}▐▄{TG}~{FR}▄▌{X}");
+    println!("   {G1}▄███████▄{X}   {FR}▐██▌{X}");
+    println!("      {TK}▐█▌{X}     {FR}▗▘▝▖{X}");
+    println!("   {RT}▀▀▀▀█▀▀▀▀{X}");
+    println!();
+    println!("  {O}{B}Y G G D R A S I L{X} {D}v{}{X}", env!("CARGO_PKG_VERSION"));
+    println!();
 }
 
-/// Common paths that might not be in PATH when invoked from a limited env.
-const EXTRA_PATHS: &[&str] = &[
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-    "/usr/sbin",
-    "/sbin",
-];
-
-/// Ensure common bin directories are on PATH so we can find brew, psql, etc.
-fn ensure_path() {
-    let current = std::env::var("PATH").unwrap_or_default();
-    let mut parts: Vec<&str> = current.split(':').collect();
-    for extra in EXTRA_PATHS {
-        if !parts.contains(extra) && Path::new(extra).exists() {
-            parts.push(extra);
-        }
-    }
-    // Also add ~/.local/bin and ~/.cargo/bin
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local_bin = format!("{home}/.local/bin");
-    let cargo_bin = format!("{home}/.cargo/bin");
-    // Leak these strings so they live long enough as &str
-    // (only called once at startup, so this is fine)
-    let local_ref: &'static str = Box::leak(local_bin.into_boxed_str());
-    let cargo_ref: &'static str = Box::leak(cargo_bin.into_boxed_str());
-    if !parts.contains(&local_ref) { parts.push(local_ref); }
-    if !parts.contains(&cargo_ref) { parts.push(cargo_ref); }
-
-    let new_path = parts.join(":");
-    // SAFETY: called once at startup before spawning threads
-    unsafe { std::env::set_var("PATH", &new_path); }
-}
-
-fn detect_pkg_manager() -> Option<PackageManager> {
-    if std::process::Command::new("brew").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
-        Some(PackageManager::Brew)
-    } else if std::process::Command::new("apt-get").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
-        Some(PackageManager::Apt)
-    } else {
-        None
-    }
-}
-
-/// Check if we have sudo access.
-async fn has_sudo() -> bool {
-    Command::new("sudo")
-        .args(["-n", "true"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|s| s.success())
-}
-
-fn spinner(msg: &str) -> ProgressBar {
+fn spin(msg: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
-        ProgressStyle::with_template(&format!("  {C_MID}{{spinner}}{C_RST} {{msg}}"))
+        ProgressStyle::with_template(&format!("  {O}│{X} {{spinner}} {{msg}}"))
             .unwrap()
             .tick_strings(&["◜", "◠", "◝", "◞", "◡", "◟"]),
     );
@@ -93,595 +55,322 @@ fn spinner(msg: &str) -> ProgressBar {
     pb
 }
 
-fn status(label: &str, state: &str, color: &str) {
-    let dots = 42usize.saturating_sub(label.len() + state.len());
-    let dotstr: String = std::iter::repeat_n('·', dots).collect();
-    println!("  {C_MID}│{C_RST}  {label} {C_DIM}{dotstr}{C_RST} {color}{state}{C_RST}");
+fn line(label: &str, state: &str, color: &str) {
+    let dots = 40usize.saturating_sub(label.len() + state.len());
+    let d: String = std::iter::repeat_n('·', dots).collect();
+    println!("  {O}│{X}  {label} {D}{d}{X} {color}{state}{X}");
 }
 
-fn ok(label: &str, state: &str) {
-    status(label, state, C_OK);
+fn head(title: &str) {
+    println!("  {O}│{X}");
+    println!("  {O}├─ {B}{title}{X}");
+    println!("  {O}│{X}");
 }
 
-fn fail(label: &str, state: &str) {
-    status(label, state, C_ERR);
+fn prompt(msg: &str) -> bool {
+    use std::io::{self, BufRead, Write};
+    println!("  {O}│{X}");
+    println!("  {O}│{X}  {Y}{msg} [Y/n]{X}");
+    print!("  {O}│{X}  > ");
+    io::stdout().flush().ok();
+    let mut s = String::new();
+    io::stdin().lock().read_line(&mut s).ok();
+    let a = s.trim().to_lowercase();
+    a.is_empty() || a == "y" || a == "yes"
 }
 
-fn warn(label: &str, state: &str) {
-    status(label, state, C_WARN);
+/// Find a binary by checking known paths, then falling back to which.
+fn find_bin(name: &str) -> Option<String> {
+    let known = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin"];
+    for dir in known {
+        let p = format!("{dir}/{name}");
+        if Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    // Fallback: check PATH
+    if std::process::Command::new("which").arg(name).stdout(Stdio::piped()).stderr(Stdio::null()).output()
+        .is_ok_and(|o| o.status.success()) {
+        return Some(name.to_string());
+    }
+    None
 }
 
-fn section(title: &str) {
-    println!("  {C_MID}│{C_RST}");
-    println!("  {C_MID}├─ {C_HI}{C_BOLD}{title}{C_RST}");
-    println!("  {C_MID}│{C_RST}");
+async fn has(name: &str) -> bool {
+    find_bin(name).is_some()
 }
 
-// Extra greens for the tree canopy gradient
-const C_G1: &str = "\x1b[38;5;22m";   // dark forest
-const C_G2: &str = "\x1b[38;5;28m";   // mid forest
-const C_G3: &str = "\x1b[38;5;34m";   // green
-const C_G4: &str = "\x1b[38;5;40m";   // bright green
-const C_G5: &str = "\x1b[38;5;46m";   // vivid green
-const C_TRUNK: &str = "\x1b[38;5;94m"; // brown
-const C_ROOT: &str = "\x1b[38;5;58m";  // dark brown
-
-const C_FROG: &str = "\x1b[38;5;48m";    // bright teal-green
-const C_EYES: &str = "\x1b[38;5;226m";  // yellow eyes
-
-const C_TONGUE: &str = "\x1b[38;5;204m"; // pink tongue
-
-fn banner() {
-    println!();
-    println!("       {C_G5}▄{C_RST}");
-    println!("      {C_G4}▄█▄{C_RST}        {C_FROG} ▄▄▄{C_RST}");
-    println!("     {C_G3}▄███▄{C_RST}     {C_FROG}▐{C_EYES}o{C_FROG} {C_EYES}o{C_FROG}▌{C_RST}");
-    println!("    {C_G2}▄█████▄{C_RST}    {C_FROG}▐▄{C_TONGUE}~{C_FROG}▄▌{C_RST}");
-    println!("   {C_G1}▄███████▄{C_RST}   {C_FROG}▐██▌{C_RST}");
-    println!("      {C_TRUNK}▐█▌{C_RST}     {C_FROG}▗▘▝▖{C_RST}");
-    println!("   {C_ROOT}▀▀▀▀█▀▀▀▀{C_RST}");
-    println!();
-    println!("  {C_HI}{C_BOLD}Y G G D R A S I L{C_RST} {C_DIM}v{}{C_RST}", env!("CARGO_PKG_VERSION"));
-    println!();
+async fn run(cmd: &str, args: &[&str]) -> bool {
+    let bin = find_bin(cmd).unwrap_or_else(|| cmd.to_string());
+    Command::new(&bin).args(args).stdout(Stdio::null()).stderr(Stdio::null())
+        .status().await.is_ok_and(|s| s.success())
 }
 
-/// Run `ygg init` with options.
-pub async fn execute_with_options(verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
-    execute_inner(verbose, skip).await
+async fn run_visible(cmd: &str, args: &[&str]) -> bool {
+    let bin = find_bin(cmd).unwrap_or_else(|| cmd.to_string());
+    Command::new(&bin).args(args)
+        .status().await.is_ok_and(|s| s.success())
+}
+
+async fn port_open(port: u16) -> bool {
+    tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok()
+}
+
+async fn wait_port(port: u16, secs: u64) -> bool {
+    for _ in 0..secs {
+        if port_open(port).await { return true; }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    false
+}
+
+fn is_mac() -> bool {
+    cfg!(target_os = "macos")
+}
+
+// ─── init ────────────────────────────────────────────────
+
+pub async fn execute_with_options(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
+    execute_inner(skip).await
 }
 
 pub async fn execute() -> Result<(), anyhow::Error> {
-    execute_inner(false, &[]).await
+    execute_inner(&[]).await
 }
 
-fn should_skip(skip: &[String], name: &str) -> bool {
-    skip.iter().any(|s| s.eq_ignore_ascii_case(name))
+fn skip(list: &[String], name: &str) -> bool {
+    list.iter().any(|s| s.eq_ignore_ascii_case(name))
 }
 
-async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
-    ensure_path();
+async fn execute_inner(skips: &[String]) -> Result<(), anyhow::Error> {
     banner();
 
-    let pkg = detect_pkg_manager();
-    let sudo = has_sudo().await;
-    let pkg_name = match &pkg {
-        Some(PackageManager::Brew) => "brew",
-        Some(PackageManager::Apt) => "apt",
-        None => "—",
-    };
+    let has_brew = has("brew").await;
+    let has_apt = has("apt-get").await;
+    let pkg = if has_brew { "brew" } else if has_apt { "apt" } else { "—" };
 
-    // Show expected connection paths
     dotenvy::dotenv().ok();
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://ygg:ygg@localhost:5432/ygg".into());
-    let ollama_url = std::env::var("OLLAMA_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".into());
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://ygg:ygg@localhost:5432/ygg".into());
+    let ollama_url = std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
+    let embed_model = std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "all-minilm".into());
+    let chat_model = std::env::var("OLLAMA_CHAT_MODEL").unwrap_or_else(|_| "mistral:7b".into());
+    let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "384".into());
 
-    // Mask password in display
-    let db_display = if let Some(at) = db_url.find('@') {
-        if let Some(colon) = db_url[..at].rfind(':') {
-            format!("{}:***@{}", &db_url[..colon], &db_url[at+1..])
-        } else {
-            db_url.clone()
-        }
-    } else {
-        db_url.clone()
-    };
+    // Mask password
+    let db_show = db_url.find('@').and_then(|at| db_url[..at].rfind(':').map(|c| format!("{}:***@{}", &db_url[..c], &db_url[at+1..]))).unwrap_or_else(|| db_url.clone());
 
-    let embed_model = std::env::var("OLLAMA_EMBED_MODEL")
-        .unwrap_or_else(|_| "all-minilm".into());
-    let chat_model = std::env::var("OLLAMA_CHAT_MODEL")
-        .unwrap_or_else(|_| "mistral:7b".into());
-    let embed_dim = std::env::var("EMBEDDING_DIMENSIONS")
-        .unwrap_or_else(|_| "384".into());
-
-    println!("  {C_DIM}pkg{C_RST}     {pkg_name}");
-    println!("  {C_DIM}sudo{C_RST}    {}", if sudo { "yes" } else { "no" });
-    println!("  {C_DIM}pg{C_RST}      {db_display}");
-    println!("  {C_DIM}llm{C_RST}     {ollama_url}");
-    println!("  {C_DIM}chat{C_RST}    {chat_model}");
-    println!("  {C_DIM}embed{C_RST}   {embed_model} {C_DIM}({embed_dim}d){C_RST}");
+    println!("  {D}pkg{X}     {pkg}");
+    println!("  {D}pg{X}      {db_show}");
+    println!("  {D}llm{X}     {ollama_url}");
+    println!("  {D}chat{X}    {chat_model}");
+    println!("  {D}embed{X}   {embed_model} {D}({embed_dim}d){X}");
     println!();
-    println!("  {C_MID}╭─────────────────────────────────────────────╮{C_RST}");
+    println!("  {O}╭─────────────────────────────────────────────╮{X}");
 
-    section("dependencies");
-    ensure_tool("tmux", &pkg, sudo).await;
-    ensure_tool("jq", &pkg, sudo).await;
-    check_tool_with_hint("rtk", "https://github.com/rtk-ai/rtk").await;
+    // ── deps ──
+    head("dependencies");
 
-    section("postgresql");
-    if should_skip(skip, "pg") {
-        ok("postgresql", "skipped");
-    } else {
-        let pg_running = check_port(5432).await;
-        if pg_running {
-            ok("postgresql", "running");
-            {
-                let pb = spinner("checking pgvector...");
-                install_pgvector(&pkg, sudo).await;
-                pb.finish_and_clear();
-                ok("pgvector", "ready");
-            }
-            create_database_if_needed().await;
+    for (name, hint) in [("tmux", "brew install tmux"), ("jq", "brew install jq"), ("rtk", "https://github.com/rtk-ai/rtk")] {
+        if has(name).await {
+            line(name, "found", G);
         } else {
-            match install_postgres(&pkg, sudo).await {
-                Ok(()) => {
-                    // Wait for it to come up
-                    let pb = spinner("waiting for postgresql...");
-                    let mut started = false;
-                    for _ in 0..15 {
-                        if check_port(5432).await { started = true; break; }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    pb.finish_and_clear();
-                    if started {
-                        ok("postgresql", "installed");
-                        {
-                            let pb = spinner("checking pgvector...");
-                            install_pgvector(&pkg, sudo).await;
-                            pb.finish_and_clear();
-                            ok("pgvector", "ready");
-                        }
-                        create_database_if_needed().await;
-                    } else {
-                        warn("postgresql", "installed but not responding on :5432");
-                        prompt_skip_or_bail("postgresql").await?;
-                    }
-                }
-                Err(e) => {
-                    warn("postgresql", "install failed");
-                    println!("  {C_MID}│{C_RST}  {C_DIM}{e}{C_RST}");
-                    prompt_skip_or_bail("postgresql").await?;
-                }
+            line(name, "not found", R);
+            println!("  {O}│{X}  {D}install: {hint}{X}");
+            if !prompt(&format!("skip {name} and continue?")) {
+                std::process::exit(1);
             }
         }
     }
 
-    section("ollama");
-    if should_skip(skip, "ollama") {
-        ok("ollama", "skipped");
-    } else {
-        let ollama_running = check_port(11434).await;
-        if ollama_running {
-            ok("ollama", "running");
+    // ── pg ──
+    head("postgresql");
+
+    if skip(skips, "pg") {
+        line("postgresql", "skipped", D);
+    } else if port_open(5432).await {
+        line("postgresql", "running", G);
+    } else if has("psql").await {
+        line("postgresql", "installed, starting...", Y);
+        if has_brew {
+            run_visible("brew", &["services", "start", "postgresql@16"]).await;
+        }
+        if !wait_port(5432, 10).await {
+            line("postgresql", "not responding on :5432", R);
+            if !prompt("skip postgresql and continue?") { std::process::exit(1); }
         } else {
-            match install_ollama(&pkg, sudo).await {
-                Ok(()) => {
-                    let pb = spinner("waiting for ollama...");
-                    let mut started = false;
-                    for _ in 0..15 {
-                        if check_port(11434).await { started = true; break; }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    pb.finish_and_clear();
-                    if started {
-                        ok("ollama", "installed");
-                    } else {
-                        warn("ollama", "installed but not responding on :11434");
-                        println!("  {C_MID}│{C_RST}  {C_DIM}try: ollama serve{C_RST}");
-                        prompt_skip_or_bail("ollama").await?;
-                    }
+            line("postgresql", "running", G);
+        }
+    } else {
+        // Need to install
+        if has_brew {
+            let pb = spin("brew install postgresql@16...");
+            let ok = run_visible("brew", &["install", "postgresql@16"]).await;
+            pb.finish_and_clear();
+            if ok {
+                run_visible("brew", &["services", "start", "postgresql@16"]).await;
+                if wait_port(5432, 10).await {
+                    line("postgresql", "installed", G);
+                } else {
+                    line("postgresql", "installed but not responding", Y);
+                    if !prompt("skip and continue?") { std::process::exit(1); }
                 }
-                Err(e) => {
-                    warn("ollama", "install failed");
-                    println!("  {C_MID}│{C_RST}  {C_DIM}{e}{C_RST}");
-                    prompt_skip_or_bail("ollama").await?;
+            } else {
+                line("postgresql", "brew install failed", R);
+                if !prompt("skip and continue?") { std::process::exit(1); }
+            }
+        } else if has_apt {
+            run("apt-get", &["update", "-qq"]).await;
+            run("apt-get", &["install", "-y", "-qq", "postgresql", "postgresql-client"]).await;
+            if wait_port(5432, 10).await {
+                line("postgresql", "installed", G);
+            } else {
+                line("postgresql", "install may have failed", R);
+                if !prompt("skip and continue?") { std::process::exit(1); }
+            }
+        } else {
+            line("postgresql", "no package manager", R);
+            if !prompt("skip and continue?") { std::process::exit(1); }
+        }
+    }
+
+    // pgvector + createdb (only if pg is available)
+    if !skip(skips, "pg") && port_open(5432).await {
+        if has_brew && !run("psql", &["-c", "SELECT 1 FROM pg_available_extensions WHERE name='vector'", "postgres"]).await {
+            run("brew", &["install", "pgvector"]).await;
+        }
+        line("pgvector", "ready", G);
+
+        // Ensure database exists
+        if run("createdb", &["ygg"]).await {
+            line("database 'ygg'", "created", G);
+        } else {
+            line("database 'ygg'", "exists", G);
+        }
+    }
+
+    // ── ollama ──
+    head("ollama");
+
+    if skip(skips, "ollama") {
+        line("ollama", "skipped", D);
+    } else if port_open(11434).await {
+        line("ollama", "running", G);
+    } else if has("ollama").await {
+        line("ollama", "installed, starting...", Y);
+        Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+        if wait_port(11434, 10).await {
+            line("ollama", "running", G);
+        } else {
+            line("ollama", "not responding", R);
+            println!("  {O}│{X}  {D}try: ollama serve{X}");
+            if !prompt("skip and continue?") { std::process::exit(1); }
+        }
+    } else {
+        if has_brew {
+            let pb = spin("brew install ollama...");
+            let ok = run_visible("brew", &["install", "ollama"]).await;
+            pb.finish_and_clear();
+            if ok {
+                Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+                if wait_port(11434, 10).await {
+                    line("ollama", "installed", G);
+                } else {
+                    line("ollama", "installed, run: ollama serve", Y);
                 }
+            } else {
+                line("ollama", "brew install failed", R);
+                if !prompt("skip and continue?") { std::process::exit(1); }
+            }
+        } else {
+            let pb = spin("installing ollama...");
+            let ok = run("sh", &["-c", "curl -fsSL https://ollama.ai/install.sh | sh"]).await;
+            pb.finish_and_clear();
+            if ok {
+                Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+                if wait_port(11434, 10).await {
+                    line("ollama", "installed", G);
+                } else {
+                    line("ollama", "installed, run: ollama serve", Y);
+                }
+            } else {
+                line("ollama", "install failed", R);
+                println!("  {O}│{X}  {D}https://ollama.ai{X}");
+                if !prompt("skip and continue?") { std::process::exit(1); }
             }
         }
     }
 
-    section("config");
+    // ── config ──
+    head("config");
+
     let env_path = Path::new(".env");
     if !env_path.exists() {
-        let example = include_str!("../../.env.example");
-        tokio::fs::write(env_path, example).await?;
-        ok(".env", "created");
+        tokio::fs::write(env_path, include_str!("../../.env.example")).await?;
+        line(".env", "created", G);
     } else {
-        ok(".env", "exists");
+        line(".env", "exists", G);
     }
 
-    let config = AppConfig::from_env()?;
-    if !should_skip(skip, "pg") {
-        let pb = spinner("running migrations...");
-        let mig_result = async {
-            let pool = db::create_pool(&config.database_url).await?;
+    // migrations
+    if !skip(skips, "pg") && port_open(5432).await {
+        let pb = spin("running migrations...");
+        match async {
+            let pool = db::create_pool(&db_url).await?;
             db::run_migrations(&pool).await?;
             Ok::<(), anyhow::Error>(())
-        }.await;
-        pb.finish_and_clear();
-        match mig_result {
-            Ok(()) => ok("migrations", "applied"),
+        }.await {
+            Ok(()) => { pb.finish_and_clear(); line("migrations", "applied", G); }
             Err(e) => {
-                warn("migrations", "failed");
-                println!("  {C_MID}│{C_RST}  {C_DIM}{e}{C_RST}");
-                prompt_skip_or_bail("migrations").await?;
+                pb.finish_and_clear();
+                line("migrations", "failed", R);
+                println!("  {O}│{X}  {D}{e}{X}");
+                if !prompt("skip and continue?") { std::process::exit(1); }
             }
         }
     }
 
-    if !should_skip(skip, "models") && check_port(11434).await {
-        section("models");
-
-        let ollama = OllamaClient::new(
-            &config.ollama_base_url,
-            &config.ollama_embed_model,
-            &config.ollama_chat_model,
-        );
-
-        for model in [&config.ollama_embed_model, &config.ollama_chat_model] {
-            let pb = spinner(&format!("pulling {model}..."));
-            match ollama.pull_model(model).await {
-                Result::Ok(()) => {
-                    pb.finish_and_clear();
-                    ok(model, "pulled");
-                }
-                Err(e) => {
-                    pb.finish_and_clear();
-                    fail(model, &format!("{e}"));
+    // ── models ──
+    if !skip(skips, "models") && port_open(11434).await {
+        head("models");
+        let config = AppConfig::from_env().ok();
+        if let Some(cfg) = config {
+            let ollama = OllamaClient::new(&cfg.ollama_base_url, &cfg.ollama_embed_model, &cfg.ollama_chat_model);
+            for model in [&cfg.ollama_embed_model, &cfg.ollama_chat_model] {
+                let pb = spin(&format!("pulling {model}..."));
+                match ollama.pull_model(model).await {
+                    Ok(()) => { pb.finish_and_clear(); line(model, "pulled", G); }
+                    Err(e) => { pb.finish_and_clear(); line(model, &format!("{e}"), R); }
                 }
             }
         }
-    } else if should_skip(skip, "models") {
-        section("models");
-        ok("models", "skipped");
     }
 
-    if !should_skip(skip, "statusbar") {
-        section("status bar");
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/vscode".into());
-        let claude_dir = Path::new(&home).join(".claude");
-        tokio::fs::create_dir_all(&claude_dir).await.ok();
-        let script_src = include_str!("../../scripts/ygg-status.sh");
-        let script_dest = claude_dir.join("ygg-status.sh");
-        tokio::fs::write(&script_dest, script_src).await?;
-        Command::new("chmod")
-            .args(["+x", script_dest.to_str().unwrap()])
-            .status()
-            .await
-            .ok();
-        ok("ygg-status.sh", "installed");
-    } else {
-        section("status bar");
-        ok("status bar", "skipped");
+    // ── status bar ──
+    if !skip(skips, "statusbar") {
+        head("status bar");
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let dest = Path::new(&home).join(".claude").join("ygg-status.sh");
+        tokio::fs::create_dir_all(dest.parent().unwrap()).await.ok();
+        tokio::fs::write(&dest, include_str!("../../scripts/ygg-status.sh")).await?;
+        Command::new("chmod").args(["+x", dest.to_str().unwrap()]).status().await.ok();
+        line("ygg-status.sh", "installed", G);
     }
 
-    println!("  {C_MID}│{C_RST}");
-    println!("  {C_MID}╰─────────────────────────────────────────────╯{C_RST}");
-    println!();
+    // ── done ──
+    println!("  {O}│{X}");
+    println!("  {O}╰─────────────────────────────────────────────╯{X}");
 
-    // Reset terminal state in case spinners messed it up
-    print!("\x1b[?25h"); // show cursor
+    // Restore cursor
+    print!("\x1b[?25h");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
-    println!("  {C_OK}{C_BOLD}ready{C_RST}");
     println!();
-    println!("  {C_DIM}skip flags: --skip pg,ollama,models,statusbar{C_RST}");
+    println!("  {G}{B}ready{X}");
     println!();
-    println!("  {C_DIM}next:{C_RST}");
-    println!("    {C_HI}ygg spawn{C_RST} --task {C_DIM}\"your task\"{C_RST}");
-    println!("    {C_HI}ygg dashboard{C_RST}");
+    println!("  {D}next:{X}");
+    println!("    {O}ygg spawn{X} --task {D}\"your task\"{X}");
+    println!("    {O}ygg dashboard{X}");
     println!();
 
     Ok(())
-}
-
-/// Prompt user to skip or bail.
-async fn prompt_skip_or_bail(name: &str) -> Result<(), anyhow::Error> {
-    println!("  {C_MID}│{C_RST}");
-    println!("  {C_MID}│{C_RST}  {C_WARN}skip {name} and continue? [Y/n]{C_RST}");
-    if prompt_yes_no().await {
-        warn(name, "skipped");
-        Ok(())
-    } else {
-        anyhow::bail!("{name} not available. Try: ygg init --skip {name}")
-    }
-}
-
-/// Check if a tool exists, install it if not.
-async fn ensure_tool(name: &str, pkg: &Option<PackageManager>, sudo: bool) {
-    if tool_exists(name).await {
-        ok(name, "found");
-        return;
-    }
-
-    let pb = spinner(&format!("installing {name}..."));
-    let success = match pkg {
-        Some(PackageManager::Brew) => run_cmd("brew", &["install", name]).await,
-        Some(PackageManager::Apt) if sudo => {
-            run_cmd("sudo", &["apt-get", "update", "-qq"]).await;
-            run_cmd("sudo", &["apt-get", "install", "-y", "-qq", name]).await
-        }
-        Some(PackageManager::Apt) => {
-            run_cmd("apt-get", &["update", "-qq"]).await;
-            run_cmd("apt-get", &["install", "-y", "-qq", name]).await
-        }
-        None => false,
-    };
-    pb.finish_and_clear();
-
-    if success && tool_exists(name).await {
-        ok(name, "installed");
-    } else {
-        warn(name, "install failed");
-        println!("  {C_MID}│{C_RST}");
-        println!("  {C_MID}│{C_RST}  {C_WARN}skip {name} and continue? [Y/n]{C_RST}");
-        if !prompt_yes_no().await {
-            std::process::exit(1);
-        }
-    }
-}
-
-/// Check for a tool we can't auto-install. Show install hint and prompt to skip.
-async fn check_tool_with_hint(name: &str, hint: &str) {
-    if tool_exists(name).await {
-        ok(name, "found");
-    } else {
-        warn(name, "not found");
-        println!("  {C_MID}│{C_RST}  {C_DIM}install: {hint}{C_RST}");
-        println!("  {C_MID}│{C_RST}");
-        println!("  {C_MID}│{C_RST}  {C_WARN}skip {name} and continue? [Y/n]{C_RST}");
-        if !prompt_yes_no().await {
-            std::process::exit(1);
-        }
-    }
-}
-
-/// Install PostgreSQL.
-async fn install_postgres(pkg: &Option<PackageManager>, sudo: bool) -> Result<(), anyhow::Error> {
-    let pg_installed = tool_exists("psql").await || tool_exists("pg_isready").await;
-
-    match pkg {
-        Some(PackageManager::Brew) => {
-            if pg_installed {
-                ok("postgresql", "already installed");
-            } else {
-                let install_ok = Command::new("brew")
-                    .args(["install", "postgresql@16"])
-                    .status()
-                    .await
-                    .is_ok_and(|s| s.success());
-                if !install_ok {
-                    anyhow::bail!("brew install postgresql@16 failed");
-                }
-            }
-            // Always ensure it's running
-            Command::new("brew")
-                .args(["services", "start", "postgresql@16"])
-                .status()
-                .await
-                .ok();
-        }
-        Some(PackageManager::Apt) => {
-            if !pg_installed {
-                if sudo {
-                    run_cmd("sudo", &["apt-get", "update", "-qq"]).await;
-                    run_cmd("sudo", &["apt-get", "install", "-y", "-qq", "postgresql", "postgresql-client"]).await;
-                } else {
-                    run_cmd("apt-get", &["update", "-qq"]).await;
-                    run_cmd("apt-get", &["install", "-y", "-qq", "postgresql", "postgresql-client"]).await;
-                }
-            }
-
-            // Ensure running
-            if sudo {
-                if !run_cmd("sudo", &["systemctl", "start", "postgresql"]).await {
-                    run_cmd("sudo", &["pg_ctlcluster", "16", "main", "start"]).await;
-                }
-            } else {
-                let pgdata = format!(
-                    "{}/pgdata",
-                    std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
-                );
-                if !Path::new(&pgdata).exists() {
-                    run_cmd("initdb", &["-D", &pgdata]).await;
-                }
-                run_cmd("pg_ctl", &["-D", &pgdata, "-l", "/tmp/pg.log", "start"]).await;
-            }
-
-            // Ensure user/db exist (idempotent — createuser/createdb fail silently if exists)
-            if sudo {
-                run_cmd("sudo", &["-u", "postgres", "createuser", "--superuser", "ygg"]).await;
-                run_cmd("sudo", &["-u", "postgres", "psql", "-c", "ALTER USER ygg PASSWORD 'ygg';"]).await;
-            } else {
-                run_cmd("createuser", &["--superuser", "ygg"]).await;
-                run_cmd("psql", &["-c", "ALTER USER ygg PASSWORD 'ygg';", "postgres"]).await;
-            }
-        }
-        None => {
-            anyhow::bail!("No package manager found. Install PostgreSQL manually.");
-        }
-    }
-    Ok(())
-}
-
-/// Install pgvector extension.
-async fn install_pgvector(pkg: &Option<PackageManager>, sudo: bool) {
-    // Check if pgvector is already available by trying to load it
-    let already = run_cmd("psql", &["-c", "SELECT 1 FROM pg_available_extensions WHERE name='vector';", "postgres"]).await;
-    if already { return; }
-
-    match pkg {
-        Some(PackageManager::Brew) => {
-            run_cmd("brew", &["install", "pgvector"]).await;
-        }
-        Some(PackageManager::Apt) => {
-            let success = if sudo {
-                run_cmd("sudo", &["apt-get", "install", "-y", "-qq", "postgresql-16-pgvector"]).await
-                    || run_cmd("sudo", &["apt-get", "install", "-y", "-qq", "postgresql-15-pgvector"]).await
-                    || run_cmd("sudo", &["apt-get", "install", "-y", "-qq", "postgresql-14-pgvector"]).await
-            } else {
-                run_cmd("apt-get", &["install", "-y", "-qq", "postgresql-16-pgvector"]).await
-                    || run_cmd("apt-get", &["install", "-y", "-qq", "postgresql-15-pgvector"]).await
-            };
-            if !success {
-                install_pgvector_from_source(sudo).await;
-            }
-        }
-        None => {
-            warn("pgvector", "install manually");
-        }
-    }
-}
-
-/// Build pgvector from source.
-async fn install_pgvector_from_source(sudo: bool) {
-    let tmpdir = format!("{}/pgvector-build", std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into()));
-    if !run_cmd("git", &["clone", "--depth", "1", "https://github.com/pgvector/pgvector.git", &tmpdir]).await {
-        fail("pgvector", "clone failed");
-        return;
-    }
-
-    let make_ok = Command::new("make")
-        .current_dir(&tmpdir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|s| s.success());
-
-    if make_ok {
-        let install_ok = if sudo {
-            run_cmd("sudo", &["make", "-C", &tmpdir, "install"]).await
-        } else {
-            Command::new("make")
-                .arg("install")
-                .current_dir(&tmpdir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await
-                .is_ok_and(|s| s.success())
-        };
-        if !install_ok {
-            fail("pgvector", "make install failed");
-        }
-    } else {
-        fail("pgvector", "build failed");
-    }
-
-    let _ = std::fs::remove_dir_all(&tmpdir);
-}
-
-/// Install Ollama.
-async fn install_ollama(pkg: &Option<PackageManager>, _sudo: bool) -> Result<(), anyhow::Error> {
-    if !tool_exists("ollama").await {
-        match pkg {
-            Some(PackageManager::Brew) => {
-                let install_ok = Command::new("brew")
-                    .args(["install", "ollama"])
-                    .status()
-                    .await
-                    .is_ok_and(|s| s.success());
-                if !install_ok {
-                    anyhow::bail!("brew install ollama failed");
-                }
-            }
-            _ => {
-                let success = run_cmd("sh", &["-c", "curl -fsSL https://ollama.ai/install.sh | sh"]).await;
-                if !success {
-                    anyhow::bail!("Ollama install failed. Install manually: https://ollama.ai");
-                }
-            }
-        }
-    }
-
-    // Ensure it's serving
-    if !check_port(11434).await {
-        Command::new("ollama")
-            .arg("serve")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok();
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-
-    Ok(())
-}
-
-/// Create the ygg database if it doesn't exist.
-async fn create_database_if_needed() {
-    if run_cmd("createdb", &["ygg"]).await {
-        ok("database 'ygg'", "created");
-    } else {
-        ok("database 'ygg'", "exists");
-    }
-}
-
-async fn tool_exists(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|s| s.success())
-}
-
-async fn check_port(port: u16) -> bool {
-    tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
-        .await
-        .is_ok()
-}
-
-/// Prompt user yes/no, default yes.
-async fn prompt_yes_no() -> bool {
-    use std::io::{self, BufRead, Write};
-    print!("  {C_MID}│{C_RST}  > ");
-    io::stdout().flush().ok();
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line).ok();
-    let answer = line.trim().to_lowercase();
-    answer.is_empty() || answer == "y" || answer == "yes"
-}
-
-async fn run_cmd(cmd: &str, args: &[&str]) -> bool {
-    run_cmd_verbose(cmd, args, false).await
-}
-
-async fn run_cmd_verbose(cmd: &str, args: &[&str], verbose: bool) -> bool {
-    let (stdout, stderr) = if verbose {
-        (Stdio::inherit(), Stdio::inherit())
-    } else {
-        (Stdio::null(), Stdio::null())
-    };
-
-    match tokio::time::timeout(
-        Duration::from_secs(120),
-        Command::new(cmd)
-            .args(args)
-            .stdout(stdout)
-            .stderr(stderr)
-            .status(),
-    )
-    .await
-    {
-        Ok(Ok(status)) => status.success(),
-        Ok(Err(_)) => false,
-        Err(_) => {
-            eprintln!("  {C_WARN}timeout{C_RST}: {cmd} {}", args.join(" "));
-            false
-        }
-    }
 }
