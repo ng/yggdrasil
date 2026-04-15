@@ -17,9 +17,12 @@ enum Commands {
         /// Show command output for debugging
         #[arg(short, long)]
         verbose: bool,
-        /// Skip specific deps (pg, ollama, models, statusbar)
+        /// Skip specific deps (pg, ollama, models, statusbar, pgvector, hooks)
         #[arg(long, value_delimiter = ',')]
         skip: Vec<String>,
+        /// Clear saved skip decisions and re-prompt everything
+        #[arg(long)]
+        reset: bool,
         /// PostgreSQL connection URL (overrides DATABASE_URL)
         #[arg(long)]
         database_url: Option<String>,
@@ -167,9 +170,14 @@ async fn main() -> anyhow::Result<()> {
                     .await;
             }
         }
-        Commands::Init { verbose, skip, database_url } => {
+        Commands::Init { verbose, skip, reset, database_url } => {
+            if reset {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                let skips_path = std::path::Path::new(&home).join(".config/ygg/skips.json");
+                let _ = std::fs::remove_file(&skips_path);
+                println!("Saved skip decisions cleared.");
+            }
             if let Some(ref url) = database_url {
-                // SAFETY: single-threaded at this point, before tokio runtime spawns work
                 unsafe { std::env::set_var("DATABASE_URL", url); }
             }
             ygg::cli::init::execute_with_options(verbose, &skip).await?;

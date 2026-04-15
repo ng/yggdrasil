@@ -110,12 +110,28 @@ fn prompt_skip(name: &str) -> bool {
     use std::io::{self, BufRead, Write};
     println!("  {BR}│{X}");
     println!("  {BR}│{X}  {Y}skip {name} and continue? [Y/n]{X}");
+    println!("  {BR}│{X}  {D}(choice will be remembered for future runs){X}");
     print!("  {BR}│{X}  > ");
     io::stdout().flush().ok();
     let mut s = String::new();
     io::stdin().lock().read_line(&mut s).ok();
     let a = s.trim().to_lowercase();
-    a.is_empty() || a == "y" || a == "yes"
+    let skip = a.is_empty() || a == "y" || a == "yes";
+    if skip {
+        // Save the decision — use sync write since we're in a sync fn
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let config_dir = std::path::Path::new(&home).join(".config/ygg");
+        let path = config_dir.join("skips.json");
+        let mut skips: Vec<String> = std::fs::read_to_string(&path).ok()
+            .and_then(|d| serde_json::from_str(&d).ok())
+            .unwrap_or_default();
+        let key = name.to_lowercase();
+        if !skips.contains(&key) {
+            skips.push(key);
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&skips).unwrap_or_default());
+        }
+    }
+    skip
 }
 
 /// Find a binary by checking known paths, then PATH.
@@ -290,11 +306,38 @@ fn skipping(list: &[String], name: &str) -> bool {
     list.iter().any(|s| s.eq_ignore_ascii_case(name))
 }
 
+/// Load saved skip decisions from ~/.config/ygg/skips.json
+async fn load_saved_skips(config_dir: &Path) -> Vec<String> {
+    let path = config_dir.join("skips.json");
+    if let Ok(data) = tokio::fs::read_to_string(&path).await {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        vec![]
+    }
+}
+
+/// Save a skip decision
+async fn save_skip(config_dir: &Path, name: &str) {
+    let path = config_dir.join("skips.json");
+    let mut skips = load_saved_skips(config_dir).await;
+    let name = name.to_lowercase();
+    if !skips.contains(&name) {
+        skips.push(name);
+    }
+    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&skips).unwrap_or_default()).await;
+}
+
 async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // Config lives in ~/.config/ygg/
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let config_dir = Path::new(&home).join(".config").join("ygg");
     tokio::fs::create_dir_all(&config_dir).await.ok();
+
+    // Merge CLI skips with saved skips
+    let saved_skips = load_saved_skips(&config_dir).await;
+    let all_skips: Vec<String> = skips.iter().cloned()
+        .chain(saved_skips.into_iter())
+        .collect();
 
     // Ensure we're in a valid directory — brew/apt fail if cwd is gone
     if std::env::current_dir().is_err() {
@@ -419,7 +462,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // ── pg ──
     head("postgresql");
 
-    if skipping(skips, "pg") {
+    if skipping(&all_skips, "pg") {
         ok("postgresql", "skipped");
     } else if port_open(5432).await {
         ok("postgresql", "running");
@@ -469,7 +512,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     }
 
     // database + pgvector (only if pg is up)
-    if !skipping(skips, "pg") && port_open(5432).await {
+    if !skipping(&all_skips, "pg") && port_open(5432).await {
         // Create database first
         if run("createdb", &["ygg"]).await {
             ok("database 'ygg'", "created");
@@ -534,7 +577,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // ── ollama (for embeddings) ──
     head("ollama");
 
-    if skipping(skips, "ollama") {
+    if skipping(&all_skips, "ollama") {
         ok("ollama", "skipped");
     } else if port_open(11434).await {
         ok("ollama", "running");
@@ -613,7 +656,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // Always set DATABASE_URL in the environment so migrations use the right one
     unsafe { std::env::set_var("DATABASE_URL", &db_url); }
 
-    if !skipping(skips, "pg") && port_open(5432).await {
+    if !skipping(&all_skips, "pg") && port_open(5432).await {
         // Ensure database exists using the configured user
         // Parse user from db_url for createdb
         let url_user = db_url.strip_prefix("postgres://")
@@ -662,7 +705,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     // No Ollama model pulls needed — embedding is in-process via fastembed
 
     // ── hooks + status bar ──
-    if !skipping(skips, "hooks") {
+    if !skipping(&all_skips, "hooks") {
         head("hooks");
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         let claude_dir = Path::new(&home).join(".claude");
