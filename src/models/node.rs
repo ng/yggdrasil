@@ -56,7 +56,7 @@ impl<'a> NodeRepo<'a> {
             )
             INSERT INTO nodes (parent_id, agent_id, kind, content, token_count, ancestors)
             SELECT $1, $2, $3::node_kind, $4, $5,
-                   COALESCE(p.ancestors || p.id, '{}')
+                   CASE WHEN p.id IS NOT NULL THEN COALESCE(p.ancestors, '{}') || p.id ELSE '{}' END
             FROM (SELECT 1) AS dummy
             LEFT JOIN parent p ON TRUE
             RETURNING id, parent_id, agent_id, kind, content, token_count, embedding, created_at, ancestors
@@ -89,11 +89,14 @@ impl<'a> NodeRepo<'a> {
     pub async fn get_ancestor_path(&self, node_id: Uuid) -> Result<Vec<Node>, sqlx::Error> {
         sqlx::query_as::<_, Node>(
             r#"
+            WITH target AS (
+                SELECT ancestors FROM nodes WHERE id = $1
+            )
             SELECT n.id, n.parent_id, n.agent_id, n.kind, n.content,
                    n.token_count, n.embedding, n.created_at, n.ancestors
-            FROM nodes n
+            FROM nodes n, target t
             WHERE n.id = $1
-               OR n.id = ANY((SELECT ancestors FROM nodes WHERE id = $1))
+               OR n.id = ANY(t.ancestors)
             ORDER BY array_length(n.ancestors, 1) NULLS FIRST, n.created_at
             "#,
         )
@@ -106,10 +109,13 @@ impl<'a> NodeRepo<'a> {
     pub async fn calculate_path_tokens(&self, node_id: Uuid) -> Result<i64, sqlx::Error> {
         let row = sqlx::query(
             r#"
-            SELECT COALESCE(SUM(n.token_count::bigint), 0) AS total
-            FROM nodes n
+            WITH target AS (
+                SELECT ancestors FROM nodes WHERE id = $1
+            )
+            SELECT COALESCE(SUM(n.token_count::bigint), 0)::bigint AS total
+            FROM nodes n, target t
             WHERE n.id = $1
-               OR n.id = ANY((SELECT ancestors FROM nodes WHERE id = $1))
+               OR n.id = ANY(t.ancestors)
             "#,
         )
         .bind(node_id)
