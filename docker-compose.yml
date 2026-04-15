@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ygg
+      POSTGRES_USER: ygg
+      POSTGRES_PASSWORD: ygg
+    ports:
+      - "5432:5432"
+    volumes:
+      - ygg_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ygg"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ygg_ollama:/root/.ollama
+
+volumes:
+  ygg_pgdata:
+  ygg_ollama:

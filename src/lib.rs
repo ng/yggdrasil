@@ -1,0 +1,53 @@
+pub mod cli;
+pub mod config;
+pub mod db;
+pub mod executor;
+pub mod interrupt;
+pub mod lock;
+pub mod models;
+pub mod ollama;
+pub mod pressure;
+pub mod prompt;
+pub mod stats;
+pub mod status;
+pub mod tmux;
+pub mod tui;
+pub mod watcher;
+
+use sqlx::PgPool;
+use uuid::Uuid;
+
+/// Shared application state threaded through all subsystems.
+pub struct AppState {
+    pub pool: PgPool,
+    pub agent_id: Uuid,
+    pub config: config::AppConfig,
+}
+
+/// Unified error type for Ygg.
+#[derive(Debug, thiserror::Error)]
+pub enum YggError {
+    #[error("database: {0}")]
+    Db(#[from] sqlx::Error),
+
+    #[error("ollama: {0}")]
+    Ollama(String),
+
+    #[error("executor failed (exit {exit_code}): {stderr}")]
+    Executor { exit_code: i32, stderr: String },
+
+    #[error("invalid state transition: {from} -> {to}")]
+    InvalidTransition { from: String, to: String },
+
+    #[error("lock conflict: {0}")]
+    Lock(#[from] lock::LockError),
+
+    #[error("config: {0}")]
+    Config(String),
+
+    #[error("tmux: {0}")]
+    Tmux(String),
+
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}

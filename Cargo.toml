@@ -1,0 +1,68 @@
+[package]
+name = "ygg"
+version = "0.1.0"
+edition = "2024"
+description = "Yggdrasil — High-density agent orchestrator"
+
+[[bin]]
+name = "ygg"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Database
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "migrate",
+    "bigdecimal",
+] }
+
+# pgvector
+pgvector = { version = "0.4", features = ["sqlx"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client (Ollama)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Config
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Progress / spinners
+indicatif = "0.17"
+
+# Signal handling
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
