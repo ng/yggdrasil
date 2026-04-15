@@ -207,7 +207,7 @@ async fn execute_inner(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Er
     section("dependencies");
     ensure_tool("tmux", &pkg, sudo).await;
     ensure_tool("jq", &pkg, sudo).await;
-    check_tool_styled("rtk").await;
+    check_tool_with_hint("rtk", "cargo install rtk  (https://github.com/ryanpig/rtk)").await;
 
     section("postgresql");
     if should_skip(skip, "pg") {
@@ -423,16 +423,27 @@ async fn ensure_tool(name: &str, pkg: &Option<PackageManager>, sudo: bool) {
     if success && tool_exists(name).await {
         ok(name, "installed");
     } else {
-        fail(name, "install manually");
+        warn(name, "install failed");
+        println!("  {C_MID}│{C_RST}");
+        println!("  {C_MID}│{C_RST}  {C_WARN}skip {name} and continue? [Y/n]{C_RST}");
+        if !prompt_yes_no().await {
+            std::process::exit(1);
+        }
     }
 }
 
-/// Just check, don't install.
-async fn check_tool_styled(name: &str) {
+/// Check for a tool we can't auto-install. Show install hint and prompt to skip.
+async fn check_tool_with_hint(name: &str, hint: &str) {
     if tool_exists(name).await {
         ok(name, "found");
     } else {
-        fail(name, "not found");
+        warn(name, "not found");
+        println!("  {C_MID}│{C_RST}  {C_DIM}install: {hint}{C_RST}");
+        println!("  {C_MID}│{C_RST}");
+        println!("  {C_MID}│{C_RST}  {C_WARN}skip {name} and continue? [Y/n]{C_RST}");
+        if !prompt_yes_no().await {
+            std::process::exit(1);
+        }
     }
 }
 
