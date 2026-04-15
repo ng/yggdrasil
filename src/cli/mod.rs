@@ -2,6 +2,7 @@ pub mod dashboard_cmd;
 pub mod init;
 pub mod interrupt_cmd;
 pub mod lock_cmd;
+pub mod inject;
 pub mod observe;
 pub mod recover;
 pub mod run;

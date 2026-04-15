@@ -623,15 +623,82 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     // No Ollama model pulls needed — embedding is in-process via fastembed
 
-    // ── status bar ──
-    if !skipping(skips, "statusbar") {
-        head("status bar");
+    // ── hooks + status bar ──
+    if !skipping(skips, "hooks") {
+        head("hooks");
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        let dest = Path::new(&home).join(".claude").join("ygg-status.sh");
-        tokio::fs::create_dir_all(dest.parent().unwrap()).await.ok();
-        tokio::fs::write(&dest, include_str!("../../scripts/ygg-status.sh")).await?;
-        Command::new("chmod").args(["+x", dest.to_str().unwrap()]).status().await.ok();
+        let claude_dir = Path::new(&home).join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.ok();
+
+        // Install status bar script
+        let status_dest = claude_dir.join("ygg-status.sh");
+        tokio::fs::write(&status_dest, include_str!("../../scripts/ygg-status.sh")).await?;
+        Command::new("chmod").args(["+x", status_dest.to_str().unwrap()]).status().await.ok();
         ok("ygg-status.sh", "installed");
+
+        // Install hook scripts
+        let hooks_dir = claude_dir.join("ygg-hooks");
+        tokio::fs::create_dir_all(&hooks_dir).await.ok();
+
+        for (name, content) in [
+            ("session-start.sh", include_str!("../../scripts/hooks/session-start.sh")),
+            ("pre-tool-use.sh", include_str!("../../scripts/hooks/pre-tool-use.sh")),
+            ("prompt-submit.sh", include_str!("../../scripts/hooks/prompt-submit.sh")),
+        ] {
+            let dest = hooks_dir.join(name);
+            tokio::fs::write(&dest, content).await?;
+            Command::new("chmod").args(["+x", dest.to_str().unwrap()]).status().await.ok();
+        }
+        ok("hook scripts", "installed");
+
+        // Install hooks into Claude Code settings
+        let settings_path = claude_dir.join("settings.json");
+        let hooks_path = hooks_dir.to_string_lossy();
+
+        let settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "type": "command",
+                    "command": format!("{hooks_path}/session-start.sh")
+                }],
+                "PreToolUse": [{
+                    "type": "command",
+                    "command": format!("{hooks_path}/pre-tool-use.sh")
+                }],
+                "UserPromptSubmit": [{
+                    "type": "command",
+                    "command": format!("{hooks_path}/prompt-submit.sh")
+                }]
+            },
+            "statusLine": {
+                "type": "command",
+                "command": format!("{}", status_dest.to_string_lossy()),
+                "refreshInterval": 3
+            }
+        });
+
+        // Merge with existing settings if present
+        let final_settings = if settings_path.exists() {
+            let existing = tokio::fs::read_to_string(&settings_path).await.unwrap_or_default();
+            if let Ok(mut existing_json) = serde_json::from_str::<serde_json::Value>(&existing) {
+                // Merge hooks and statusLine into existing
+                if let Some(obj) = existing_json.as_object_mut() {
+                    obj.insert("hooks".to_string(), settings["hooks"].clone());
+                    obj.insert("statusLine".to_string(), settings["statusLine"].clone());
+                }
+                existing_json
+            } else {
+                settings
+            }
+        } else {
+            settings
+        };
+
+        tokio::fs::write(&settings_path, serde_json::to_string_pretty(&final_settings)?).await?;
+        ok("claude settings.json", "hooks registered");
+
+        hint("hooks will fire automatically in Claude Code sessions");
+        hint("no manual ygg commands needed — just use Claude normally");
     }
 
     // ── done ──
