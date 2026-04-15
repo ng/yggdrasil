@@ -187,15 +187,52 @@ async fn detect_pg_version() -> String {
         }
     }
 
-    // Fallback: check what's installed
-    for ver in ["16", "15", "14"] {
-        let path = format!("/opt/homebrew/opt/postgresql@{ver}");
-        if Path::new(&path).exists() {
-            return format!("postgresql@{ver}");
+    // Fallback: check common install locations
+    let prefixes = ["/opt/homebrew/opt", "/usr/local/opt", "/usr/lib/postgresql"];
+    for prefix in prefixes {
+        for ver in ["16", "15", "14"] {
+            let path = format!("{prefix}/postgresql@{ver}");
+            let path2 = format!("{prefix}/{ver}");
+            if Path::new(&path).exists() {
+                return format!("postgresql@{ver}");
+            }
+            if Path::new(&path2).exists() {
+                return format!("postgresql@{ver}");
+            }
         }
     }
 
     "postgresql@16".to_string()
+}
+
+/// Get the pg_config bin directory for a given postgres version.
+/// Uses pg_config --bindir if available, falls back to known paths.
+async fn get_pg_bin_dir(pg_version: &str) -> Option<String> {
+    // Try pg_config directly
+    if let Ok(output) = Command::new("pg_config").arg("--bindir")
+        .stdout(Stdio::piped()).stderr(Stdio::null()).output().await
+    {
+        if output.status.success() {
+            let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if Path::new(&dir).exists() {
+                return Some(dir);
+            }
+        }
+    }
+
+    // Check known locations
+    let candidates = [
+        format!("/opt/homebrew/opt/{pg_version}/bin"),
+        format!("/usr/local/opt/{pg_version}/bin"),
+        format!("/usr/lib/postgresql/{}/bin", pg_version.trim_start_matches("postgresql@")),
+    ];
+    for dir in candidates {
+        if Path::new(&dir).exists() {
+            return Some(dir);
+        }
+    }
+
+    None
 }
 
 // ─── init ────────────────────────────────────────────────
@@ -413,11 +450,10 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
                 if prompt_yes(&format!("install/rebuild pgvector for {pg_version}?")) {
                     // Ensure pg_config points to the running version
-                    let pg_config_dir = format!("/opt/homebrew/opt/{pg_version}/bin");
-                    if Path::new(&pg_config_dir).exists() {
-                        // Prepend to PATH so brew builds pgvector against the right version
+                    if let Some(pg_bin) = get_pg_bin_dir(&pg_version).await {
+                        hint(&format!("using pg_config from: {pg_bin}"));
                         let current_path = std::env::var("PATH").unwrap_or_default();
-                        unsafe { std::env::set_var("PATH", format!("{pg_config_dir}:{current_path}")); }
+                        unsafe { std::env::set_var("PATH", format!("{pg_bin}:{current_path}")); }
                     }
 
                     let pb = spin("brew reinstall pgvector...");
@@ -434,7 +470,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         } else {
                             bad("pgvector", "still can't enable after reinstall");
                             hint("try manually:");
-                            hint(&format!("  export PATH=/opt/homebrew/opt/{pg_version}/bin:$PATH"));
+                            if let Some(ref pg_bin) = get_pg_bin_dir(&pg_version).await {
+                                hint(&format!("  export PATH={pg_bin}:$PATH"));
+                            }
                             hint("  brew reinstall pgvector");
                             hint(&format!("  brew services restart {pg_version}"));
                             hint("  psql -d ygg -c 'CREATE EXTENSION vector'");
