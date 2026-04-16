@@ -86,7 +86,7 @@ impl<'a> EventRepo<'a> {
             sqlx::query_as::<_, Event>(
                 r#"SELECT id, event_kind, agent_id, agent_name, payload, created_at
                    FROM events WHERE created_at > $1
-                   ORDER BY created_at ASC LIMIT $3"#,
+                   ORDER BY created_at ASC LIMIT $2"#,
             )
             .bind(since).bind(limit)
             .fetch_all(self.pool).await
