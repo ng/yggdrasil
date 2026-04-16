@@ -829,22 +829,10 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
         let settings = serde_json::json!({
             "hooks": {
-                "SessionStart": [{
-                    "type": "command",
-                    "command": format!("{hooks_path}/session-start.sh")
-                }],
-                "PreToolUse": [{
-                    "type": "command",
-                    "command": format!("{hooks_path}/pre-tool-use.sh")
-                }],
-                "UserPromptSubmit": [{
-                    "type": "command",
-                    "command": format!("{hooks_path}/prompt-submit.sh")
-                }],
-                "PreCompact": [{
-                    "type": "command",
-                    "command": format!("{hooks_path}/pre-compact.sh")
-                }]
+                "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/session-start.sh")}]}],
+                "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/pre-tool-use.sh")}]}],
+                "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/prompt-submit.sh")}]}],
+                "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/pre-compact.sh")}]}]
             },
             "statusLine": {
                 "type": "command",
