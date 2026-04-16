@@ -128,6 +128,9 @@ enum Commands {
         /// Agent name (defaults to YGG_AGENT_NAME env var or current directory name)
         #[arg(short, long)]
         agent: Option<String>,
+        /// Transcript file path (for estimating context pressure)
+        #[arg(long)]
+        transcript: Option<String>,
     },
 }
 
@@ -315,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::digest::execute(&pool, &config, &agent_name, &transcript).await?;
         }
-        Commands::Prime { agent } => {
+        Commands::Prime { agent, transcript } => {
             let agent_name = agent
                 .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
                 .unwrap_or_else(|| {
@@ -324,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
                         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                         .unwrap_or_else(|| "ygg".to_string())
                 });
-            ygg::cli::prime::execute(&agent_name).await?;
+            ygg::cli::prime::execute(&agent_name, transcript.as_deref()).await?;
         }
     }
 

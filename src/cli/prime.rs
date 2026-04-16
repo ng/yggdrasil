@@ -1,9 +1,10 @@
 use crate::{config::AppConfig, db, lock::LockManager, models::agent::AgentRepo};
 
 /// Output agent context as markdown — injected by SessionStart and PreCompact hooks.
+/// Accepts an optional transcript path to estimate context pressure from file size.
 /// Gracefully degrades when the DB is unavailable.
-pub async fn execute(agent_name: &str) -> Result<(), anyhow::Error> {
-    let outcome = try_with_db(agent_name).await;
+pub async fn execute(agent_name: &str, transcript_path: Option<&str>) -> Result<(), anyhow::Error> {
+    let outcome = try_with_db(agent_name, transcript_path).await;
 
     match outcome {
         Ok(ctx) => print_rich(agent_name, &ctx),
@@ -21,13 +22,23 @@ struct PrimeContext {
     context_limit: usize,
     locks: Vec<String>,
     other_agents: Vec<(String, String, i32)>, // (name, state, tokens)
+    last_digest: Option<DigestInfo>,
+    node_count: i64,
+    transcript_tokens: Option<i64>,
 }
 
-async fn try_with_db(agent_name: &str) -> Result<PrimeContext, anyhow::Error> {
+struct DigestInfo {
+    summary: String,
+    turns: i64,
+    corrections: i64,
+    reinforcements: i64,
+    age_secs: i64,
+}
+
+async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<PrimeContext, anyhow::Error> {
     let config = AppConfig::from_env()?;
     let pool = db::create_pool(&config.database_url).await?;
     let agent_repo = AgentRepo::new(&pool);
-
     // Register (or touch) this agent so it exists in the DB.
     let agent = agent_repo.register(agent_name).await?;
 
@@ -47,18 +58,60 @@ async fn try_with_db(agent_name: &str) -> Result<PrimeContext, anyhow::Error> {
         .map(|a| (a.agent_name, a.current_state.to_string(), a.context_tokens))
         .collect();
 
+    // Count total nodes for this agent
+    let node_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nodes WHERE agent_id = $1"
+    )
+    .bind(agent.agent_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0);
+
+    // Get most recent digest for this agent
+    let last_digest = sqlx::query_as::<_, (serde_json::Value, chrono::DateTime<chrono::Utc>)>(
+        r#"SELECT content, created_at FROM nodes
+           WHERE agent_id = $1 AND kind = 'digest'
+           ORDER BY created_at DESC LIMIT 1"#
+    )
+    .bind(agent.agent_id)
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|(content, created_at)| {
+        let age = (chrono::Utc::now() - created_at).num_seconds();
+        DigestInfo {
+            summary: content.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            turns: content.get("turn_count").and_then(|t| t.as_i64()).unwrap_or(0),
+            corrections: content.get("corrections").and_then(|c| c.as_array()).map(|a| a.len() as i64).unwrap_or(0),
+            reinforcements: content.get("reinforcements").and_then(|r| r.as_array()).map(|a| a.len() as i64).unwrap_or(0),
+            age_secs: age,
+        }
+    });
+
+    // Estimate context from transcript file size.
+    // JSONL has heavy JSON overhead (~10 chars per semantic token).
+    let transcript_tokens = transcript_path.and_then(|p| {
+        std::fs::metadata(p).ok().map(|m| (m.len() / 10) as i64)
+    });
+
     Ok(PrimeContext {
         state: agent.current_state.to_string(),
         context_tokens: agent.context_tokens,
         context_limit: config.context_limit_tokens,
         locks,
         other_agents,
+        last_digest,
+        node_count,
+        transcript_tokens,
     })
 }
 
 fn print_rich(agent_name: &str, ctx: &PrimeContext) {
+    // Use transcript-based estimate if available, otherwise DB node tokens
+    let effective_tokens = ctx.transcript_tokens.unwrap_or(ctx.context_tokens as i64);
     let pct = if ctx.context_limit > 0 {
-        ctx.context_tokens as u64 * 100 / ctx.context_limit as u64
+        effective_tokens as u64 * 100 / ctx.context_limit as u64
     } else {
         0
     };
@@ -73,11 +126,41 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
     println!();
     println!("## Yggdrasil · `{agent_name}`");
     println!();
+
+    // Context line — show transcript estimate if available
+    let tok_display = if let Some(t) = ctx.transcript_tokens {
+        format!("~{}k tok transcript", t / 1000)
+    } else {
+        format!("{} tok", ctx.context_tokens)
+    };
     println!(
-        "**state** {state}  ·  **context** {bar}{pct}% ({tokens} tok)  ·  **locks** {lock_str}",
+        "**state** {state}  ·  **context** {bar}{pct}% ({tok_display})  ·  **locks** {lock_str}",
         state = ctx.state,
-        tokens = ctx.context_tokens,
     );
+
+    // Session recovery indicator
+    if let Some(ref digest) = ctx.last_digest {
+        let age = format_age(digest.age_secs);
+        println!();
+        println!(
+            "**recovered** — prior session ({age}): {} turns, {} corrections, {} reinforcements",
+            digest.turns, digest.corrections, digest.reinforcements
+        );
+        if !digest.summary.is_empty() {
+            let summary = if digest.summary.len() > 120 {
+                format!("{}…", &digest.summary[..117])
+            } else {
+                digest.summary.clone()
+            };
+            println!("> {summary}");
+        }
+    }
+
+    // Memory stats
+    if ctx.node_count > 0 {
+        println!();
+        println!("**memory** {} nodes stored across sessions", ctx.node_count);
+    }
 
     if !ctx.other_agents.is_empty() {
         println!();
@@ -89,7 +172,7 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
 
     if pct > 75 {
         println!();
-        println!("> ⚠ context at {pct}% — digest will trigger at 100%");
+        println!("> context at {pct}% — digest will trigger at 100%");
     }
 
     println!();
@@ -121,4 +204,13 @@ fn pressure_bar(pct: u64) -> &'static str {
         51..=75 => "▓",
         _ => "█",
     }
+}
+
+fn format_age(secs: i64) -> String {
+    if secs < 60 { return format!("{secs}s ago"); }
+    let mins = secs / 60;
+    if mins < 60 { return format!("{mins}m ago"); }
+    let hours = mins / 60;
+    if hours < 24 { return format!("{hours}h ago"); }
+    format!("{}d ago", hours / 24)
 }
