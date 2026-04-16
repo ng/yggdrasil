@@ -63,6 +63,9 @@ enum Commands {
         /// Agent name
         #[arg(short, long)]
         agent: String,
+        /// Current prompt text to embed and use as the similarity query
+        #[arg(long)]
+        prompt: Option<String>,
     },
 
     /// Launch the TUI dashboard
@@ -150,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "ygg=info".parse().unwrap()),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -218,10 +222,10 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::observe::execute(&pool, &config, &agent).await?;
         }
-        Commands::Inject { agent } => {
+        Commands::Inject { agent, prompt } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::inject::execute(&pool, &config, &agent).await?;
+            ygg::cli::inject::execute(&pool, &config, &agent, prompt.as_deref()).await?;
         }
         Commands::Dashboard => {
             let config = ygg::config::AppConfig::from_env()?;

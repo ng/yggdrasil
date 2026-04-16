@@ -1,12 +1,19 @@
 #!/bin/bash
-# Claude Code UserPromptSubmit hook — inject directives near the cursor
-# This is the agent-ways "progressive disclosure" pattern
+# Claude Code UserPromptSubmit hook — write prompt node + inject similar past context
+# Installed by: ygg init
 
-AGENT="${YGG_AGENT_NAME:-$(basename $(pwd))}"
+INPUT=$(cat)
+AGENT="${YGG_AGENT_NAME:-$(basename "$(pwd)")}"
 
-# Get relevant directives from ygg (similarity search + salience governor)
-# ygg inject returns text to prepend to the conversation
-DIRECTIVES=$(ygg inject --agent "$AGENT" 2>/dev/null) || true
+# Extract prompt text from the hook's JSON payload (truncate to 2000 chars)
+PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null | head -c 2000)
+
+# Run inject: writes prompt as a node, searches global similarity, returns matches + locks
+if [ -n "$PROMPT" ]; then
+    DIRECTIVES=$(ygg inject --agent "$AGENT" --prompt "$PROMPT" 2>/dev/null) || true
+else
+    DIRECTIVES=$(ygg inject --agent "$AGENT" 2>/dev/null) || true
+fi
 
 if [ -n "$DIRECTIVES" ]; then
     echo "$DIRECTIVES"

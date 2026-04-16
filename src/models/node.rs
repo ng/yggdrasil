@@ -31,6 +31,26 @@ pub struct Node {
     pub ancestors: Vec<Uuid>,
 }
 
+/// A node returned from a similarity search, with the actual cosine distance
+/// from pgvector and the agent name joined in.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub agent_name: String,
+    pub kind: NodeKind,
+    pub content: serde_json::Value,
+    pub token_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub distance: f64, // cosine distance: 0 = identical, 1 = orthogonal
+}
+
+impl SearchHit {
+    pub fn similarity(&self) -> f64 {
+        (1.0 - self.distance).clamp(0.0, 1.0)
+    }
+}
+
 pub struct NodeRepo<'a> {
     pool: &'a PgPool,
 }
@@ -253,5 +273,74 @@ impl<'a> NodeRepo<'a> {
         if by_agent.len() < 2 { return Ok(vec![]); }
 
         Ok(by_agent.into_values().collect())
+    }
+
+    /// Global similarity search across ALL agents — the cross-session memory query.
+    /// Returns hits with actual cosine distances from pgvector (not hardcoded).
+    /// `max_distance`: filter threshold (0.4 ≈ cosine similarity > 0.6).
+    pub async fn similarity_search_global(
+        &self,
+        query_vec: &Vector,
+        kinds: &[NodeKind],
+        limit: i32,
+        max_distance: f64,
+    ) -> Result<Vec<SearchHit>, sqlx::Error> {
+        let kind_strings: Vec<String> = kinds.iter().map(|k| {
+            format!("{k:?}").to_lowercase()
+                .replace("usermessage", "user_message")
+                .replace("assistantmessage", "assistant_message")
+                .replace("toolcall", "tool_call")
+                .replace("toolresult", "tool_result")
+                .replace("humanoverride", "human_override")
+        }).collect();
+
+        let rows = sqlx::query(
+            r#"
+            SELECT n.id, n.agent_id, a.agent_name, n.kind::text AS kind_text,
+                   n.content, n.token_count, n.created_at,
+                   (n.embedding <=> $1)::float8 AS distance
+            FROM nodes n
+            JOIN agents a ON a.agent_id = n.agent_id
+            WHERE n.embedding IS NOT NULL
+              AND n.kind::text = ANY($2)
+              AND (n.embedding <=> $1) < $3
+            ORDER BY n.embedding <=> $1
+            LIMIT $4
+            "#,
+        )
+        .bind(query_vec)
+        .bind(&kind_strings)
+        .bind(max_distance)
+        .bind(limit as i64)
+        .fetch_all(self.pool)
+        .await?;
+
+        let hits = rows.into_iter().map(|row| {
+            use sqlx::Row;
+            SearchHit {
+                id: row.get("id"),
+                agent_id: row.get("agent_id"),
+                agent_name: row.get("agent_name"),
+                kind: {
+                    let k: String = row.get("kind_text");
+                    match k.as_str() {
+                        "user_message" => NodeKind::UserMessage,
+                        "assistant_message" => NodeKind::AssistantMessage,
+                        "tool_call" => NodeKind::ToolCall,
+                        "tool_result" => NodeKind::ToolResult,
+                        "digest" => NodeKind::Digest,
+                        "directive" => NodeKind::Directive,
+                        "human_override" => NodeKind::HumanOverride,
+                        _ => NodeKind::System,
+                    }
+                },
+                content: row.get("content"),
+                token_count: row.get("token_count"),
+                created_at: row.get("created_at"),
+                distance: row.get("distance"),
+            }
+        }).collect();
+
+        Ok(hits)
     }
 }
