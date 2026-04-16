@@ -1,4 +1,5 @@
 pub mod dashboard_cmd;
+pub mod digest;
 pub mod init;
 pub mod interrupt_cmd;
 pub mod lock_cmd;

@@ -803,6 +803,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             ("pre-tool-use.sh", include_str!("../../scripts/hooks/pre-tool-use.sh")),
             ("prompt-submit.sh", include_str!("../../scripts/hooks/prompt-submit.sh")),
             ("pre-compact.sh", include_str!("../../scripts/hooks/pre-compact.sh")),
+            ("stop.sh", include_str!("../../scripts/hooks/stop.sh")),
         ] {
             let dest = hooks_dir.join(name);
             tokio::fs::write(&dest, content).await?;
@@ -832,7 +833,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/session-start.sh")}]}],
                 "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/pre-tool-use.sh")}]}],
                 "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/prompt-submit.sh")}]}],
-                "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/pre-compact.sh")}]}]
+                "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/pre-compact.sh")}]}],
+                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/stop.sh")}]}]
             },
             "statusLine": {
                 "type": "command",

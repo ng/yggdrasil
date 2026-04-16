@@ -100,6 +100,16 @@ enum Commands {
         agent: Option<String>,
     },
 
+    /// Digest a session transcript — extract corrections, write Digest node (called by Stop hook)
+    Digest {
+        /// Agent name
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Path to the Claude Code transcript JSONL file
+        #[arg(long)]
+        transcript: String,
+    },
+
     /// Output agent context as markdown (called by SessionStart and PreCompact hooks)
     Prime {
         /// Agent name (defaults to YGG_AGENT_NAME env var or current directory name)
@@ -273,6 +283,19 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::status_cmd::execute(&pool, agent.as_deref()).await?;
+        }
+        Commands::Digest { agent, transcript } => {
+            let agent_name = agent
+                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                });
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::digest::execute(&pool, &config, &agent_name, &transcript).await?;
         }
         Commands::Prime { agent } => {
             let agent_name = agent
