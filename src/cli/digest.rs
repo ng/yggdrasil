@@ -3,6 +3,7 @@ use std::io::BufRead;
 use crate::config::AppConfig;
 use crate::embed::Embedder;
 use crate::models::agent::AgentRepo;
+use crate::models::event::{EventKind, EventRepo};
 use crate::models::node::{NodeKind, NodeRepo};
 
 use tracing::{debug, info, warn};
@@ -17,6 +18,7 @@ pub async fn execute(
 ) -> Result<(), anyhow::Error> {
     let agent_repo = AgentRepo::new(pool);
     let node_repo = NodeRepo::new(pool);
+    let event_repo = EventRepo::new(pool);
 
     let agent = match agent_repo.get_by_name(agent_name).await? {
         Some(a) => a,
@@ -95,6 +97,33 @@ pub async fn execute(
     }
 
     agent_repo.update_head(agent.agent_id, node.id, agent.context_tokens).await?;
+
+    // Emit events
+    let _ = event_repo.emit(
+        EventKind::DigestWritten,
+        agent_name,
+        Some(agent.agent_id),
+        serde_json::json!({
+            "node_id": node.id,
+            "turns": entries.len(),
+            "corrections": corrections.len(),
+            "reinforcements": reinforcements.len(),
+            "summary": &summary[..summary.len().min(120)],
+        }),
+    ).await;
+
+    for c in &corrections {
+        let _ = event_repo.emit(
+            EventKind::CorrectionDetected,
+            agent_name,
+            Some(agent.agent_id),
+            serde_json::json!({
+                "feedback": c.feedback,
+                "sentiment": c.sentiment.to_str(),
+                "context": &c.context[..c.context.len().min(120)],
+            }),
+        ).await;
+    }
 
     // Print a summary to stdout (appears in terminal, not injected)
     if !corrections.is_empty() || !reinforcements.is_empty() {

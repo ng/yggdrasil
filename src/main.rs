@@ -100,6 +100,19 @@ enum Commands {
         agent: Option<String>,
     },
 
+    /// Live event stream — all hook activity, node writes, locks, digests, similarity hits
+    Logs {
+        /// Stream live (poll every 300ms)
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of recent events to show on start
+        #[arg(long, default_value = "20")]
+        tail: i64,
+        /// Filter to a specific agent
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+
     /// Digest a session transcript — extract corrections, write Digest node (called by Stop hook)
     Digest {
         /// Agent name
@@ -283,6 +296,11 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::status_cmd::execute(&pool, agent.as_deref()).await?;
+        }
+        Commands::Logs { follow, tail, agent } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::logs_cmd::execute(&pool, follow, tail, agent.as_deref()).await?;
         }
         Commands::Digest { agent, transcript } => {
             let agent_name = agent

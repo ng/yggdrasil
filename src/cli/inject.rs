@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::embed::Embedder;
 use crate::models::agent::AgentRepo;
+use crate::models::event::{EventKind, EventRepo};
 use crate::models::node::{NodeKind, NodeRepo};
 use crate::lock::LockManager;
 
@@ -23,6 +24,7 @@ pub async fn execute(
 ) -> Result<(), anyhow::Error> {
     let agent_repo = AgentRepo::new(pool);
     let node_repo = NodeRepo::new(pool);
+    let event_repo = EventRepo::new(pool);
 
     let agent = match agent_repo.get_by_name(agent_name).await? {
         Some(a) => a,
@@ -85,6 +87,14 @@ pub async fn execute(
                         node.id, node.token_count
                     );
 
+                    let snippet = if prompt.len() > 80 { &prompt[..80] } else { prompt };
+                    let _ = event_repo.emit(
+                        EventKind::NodeWritten,
+                        agent_name,
+                        Some(agent.agent_id),
+                        serde_json::json!({ "node_id": node.id, "tokens": node.token_count, "snippet": snippet }),
+                    ).await;
+
                     // Search ALL agents for similar past context
                     let hits = node_repo
                         .similarity_search_global(
@@ -113,12 +123,20 @@ pub async fn execute(
                         for hit in memories {
                             let age = format_age(hit.created_at);
                             let snippet = extract_snippet(&hit.content);
+                            let _ = event_repo.emit(
+                                EventKind::SimilarityHit,
+                                agent_name,
+                                Some(agent.agent_id),
+                                serde_json::json!({
+                                    "source_agent": hit.agent_name,
+                                    "distance": hit.distance,
+                                    "similarity": hit.similarity(),
+                                    "snippet": &snippet,
+                                }),
+                            ).await;
                             output.push(format!(
                                 "[ygg memory | {} | {} | sim={:.0}%] {}",
-                                hit.agent_name,
-                                age,
-                                hit.similarity() * 100.0,
-                                snippet,
+                                hit.agent_name, age, hit.similarity() * 100.0, snippet,
                             ));
                         }
                     }
