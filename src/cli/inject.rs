@@ -65,8 +65,25 @@ pub async fn execute(
             let query_text = if prompt.len() > 1500 { &prompt[..1500] } else { prompt };
             debug!("inject: embedding {} chars", query_text.len());
 
-            match embedder.embed(query_text).await {
-                Err(e) => warn!("inject: embed failed: {e}"),
+            let embed_start = std::time::Instant::now();
+            let embed_result = embedder.embed(query_text).await;
+            let embed_ms = embed_start.elapsed().as_millis() as u64;
+
+            let _ = event_repo.emit(
+                EventKind::EmbeddingCall,
+                agent_name,
+                Some(agent.agent_id),
+                serde_json::json!({
+                    "model": "all-minilm",
+                    "input_chars": query_text.len(),
+                    "latency_ms": embed_ms,
+                    "success": embed_result.is_ok(),
+                    "purpose": "prompt_embed",
+                }),
+            ).await;
+
+            match embed_result {
+                Err(e) => warn!("inject: embed failed ({embed_ms}ms): {e}"),
                 Ok(query_vec) => {
                     // Write this prompt as a UserMessage node and advance head_node_id
                     let node = node_repo.insert(

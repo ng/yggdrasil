@@ -85,12 +85,29 @@ pub async fn execute(
     // Embed and store
     let embedder = Embedder::new(&config.ollama_base_url, &config.ollama_embed_model);
     if embedder.health_check().await {
-        match embedder.embed(&embed_text).await {
+        let embed_start = std::time::Instant::now();
+        let embed_result = embedder.embed(&embed_text).await;
+        let embed_ms = embed_start.elapsed().as_millis() as u64;
+
+        let _ = event_repo.emit(
+            EventKind::EmbeddingCall,
+            agent_name,
+            Some(agent.agent_id),
+            serde_json::json!({
+                "model": &config.ollama_embed_model,
+                "input_chars": embed_text.len(),
+                "latency_ms": embed_ms,
+                "success": embed_result.is_ok(),
+                "purpose": "digest_embed",
+            }),
+        ).await;
+
+        match embed_result {
             Ok(vec) => {
                 node_repo.set_embedding(node.id, vec).await?;
-                info!("digest: node {} embedded and stored", node.id);
+                info!("digest: node {} embedded in {embed_ms}ms", node.id);
             }
-            Err(e) => warn!("digest: embed failed: {e}"),
+            Err(e) => warn!("digest: embed failed ({embed_ms}ms): {e}"),
         }
     } else {
         warn!("digest: ollama unavailable — digest stored without embedding");

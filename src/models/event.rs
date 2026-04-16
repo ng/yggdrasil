@@ -13,6 +13,7 @@ pub enum EventKind {
     SimilarityHit,
     CorrectionDetected,
     HookFired,
+    EmbeddingCall,
 }
 
 impl EventKind {
@@ -25,6 +26,7 @@ impl EventKind {
             Self::SimilarityHit    => "similarity_hit",
             Self::CorrectionDetected => "correction",
             Self::HookFired        => "hook_fired",
+            Self::EmbeddingCall    => "embedding_call",
         }
     }
 }

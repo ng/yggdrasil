@@ -84,6 +84,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::SimilarityHit     => (BLUE,   "≈"),
         EventKind::CorrectionDetected => (RED,   "✗"),
         EventKind::HookFired         => (ORANGE, "▸"),
+        EventKind::EmbeddingCall     => (CYAN,   "⚡"),
     }
 }
 
@@ -120,6 +121,14 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
         }
         EventKind::HookFired => {
             p["hook"].as_str().unwrap_or("").to_string()
+        }
+        EventKind::EmbeddingCall => {
+            let model = p["model"].as_str().unwrap_or("?");
+            let ms    = p["latency_ms"].as_u64().unwrap_or(0);
+            let chars = p["input_chars"].as_u64().unwrap_or(0);
+            let ok    = p["success"].as_bool().unwrap_or(false);
+            let status = if ok { format!("{GREEN}ok{RESET}") } else { format!("{RED}fail{RESET}") };
+            format!("{CYAN}{model}{RESET}  {chars} chars  {ms}ms  {status}")
         }
     }
 }
