@@ -139,6 +139,16 @@ enum Commands {
         action: TaskAction,
     },
 
+    /// Install / update / remove Yggdrasil's managed block in CLAUDE.md + AGENTS.md
+    InitProject {
+        /// Remove the managed block (and delete the file if that's all that remains)
+        #[arg(long)]
+        remove: bool,
+        /// Target directory (defaults to current working directory)
+        #[arg(long)]
+        path: Option<String>,
+    },
+
     /// Persist a durable directive the similarity retriever can surface later
     Remember {
         /// The memory text
@@ -489,6 +499,20 @@ async fn main() -> anyhow::Result<()> {
                 TaskAction::Stats { all } => {
                     ygg::cli::task_cmd::stats(&pool, all).await?;
                 }
+            }
+        }
+        Commands::InitProject { remove, path } => {
+            let cwd = path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            if remove {
+                let report = ygg::cli::init_project::remove(&cwd)?;
+                println!("Removing Yggdrasil integration block in {}:", cwd.display());
+                ygg::cli::init_project::print_report(&report);
+            } else {
+                let report = ygg::cli::init_project::install(&cwd)?;
+                println!("Yggdrasil integration in {}:", cwd.display());
+                ygg::cli::init_project::print_report(&report);
             }
         }
         Commands::Remember { text, agent, list, limit } => {
