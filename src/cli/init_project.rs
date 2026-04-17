@@ -17,72 +17,117 @@ const END: &str = "<!-- END YGG INTEGRATION -->";
 const CLAUDE_BLOCK: &str = r#"## Yggdrasil Agent Coordination
 
 This project uses **Yggdrasil** (`ygg`) for cross-session memory, resource
-coordination, and issue tracking. Hooks run automatically at Claude Code
-lifecycle events; you do not need to invoke them.
+coordination, and issue tracking. The SessionStart, UserPromptSubmit, Stop,
+PreCompact, and PreToolUse hooks are active — they auto-prime context, inject
+similar past nodes, digest transcripts, and track state in Postgres. You will
+see their output at the top of each session (`<!-- ygg:prime -->`) and above
+each user prompt (`[ygg memory | <agent> | <age> | sim=<n>%]`).
+
+### Quick Reference
+
+```bash
+ygg task ready                              # Unblocked tasks in the current repo
+ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywhere)
+ygg task create "title" [--kind … --priority …]   # Create a task
+ygg task claim <ref>                        # Take a task (assign + in_progress)
+ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
+ygg task close <ref> [--reason "..."]       # Complete a task
+ygg task dep <task> <blocker>               # Record dependency
+ygg remember "..."                          # Durable note; similarity retriever can surface later
+
+ygg status                                  # See all agents' state, locks, recent activity
+ygg lock acquire <resource-key>             # Lease a shared resource before editing
+ygg lock release <resource-key>             # Release when done
+ygg lock list                               # See outstanding locks
+ygg spawn --task "..."                      # Spawn a parallel agent in a new tmux window
+ygg interrupt take-over --agent <name>      # Take over / steer another agent
+ygg logs --follow                           # Live event stream
+```
 
 ### Rules
 
-- **Task tracking** — use `ygg task` for any work that outlives the current turn.
-  Intra-turn checklists can stay in a native TodoList; cross-session work lives
-  in `ygg task`. Do **not** use `bd` / beads.
-- **Durable notes** — `ygg remember "..."` writes a repo-scoped directive the
-  similarity retriever will surface in future sessions. Prefer this over
-  scratch markdown files.
-- **Before editing shared resources** — `ygg lock acquire <path-or-key>`. Release
-  when done. Locks are advisory; bypassing them defeats the coordination layer.
-- **Read `[ygg memory | ...]` injections** at the top of each user turn. They
-  are real prior context surfaced by similarity — treat as relevant unless the
-  content clearly refutes that.
-- **For parallel work** that warrants its own context window, prefer
-  `ygg spawn --task "..."` over the native Task/Agent tool.
+- **Before editing a resource another agent might touch** (shared file, branch, migration, config), acquire a lock: `ygg lock acquire <path-or-key>`. Release when done. This is Yggdrasil's core contract — bypassing it defeats the coordination layer.
+- **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock/memory coordination.
+- **Read `[ygg memory | ...]` injections** at the top of each user turn. They are real context from prior conversations (same or other agents) surfaced by similarity. Treat as relevant unless the content clearly refutes that.
+- **Before assuming you're alone**, check `ygg status`. Other agents may hold locks or be mid-task on related work.
+- **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in a native TodoList; cross-session work lives in `ygg task`.
+- **Durable notes** — `ygg remember "..."` writes a directive node the similarity retriever will surface in future sessions (scoped to the current repo when detectable). Prefer this over scratch `.md` files.
+- **Do NOT** use `bd` / beads. This project uses `ygg task` / `ygg remember` instead.
 
-### Quick reference
+## Session Completion
+
+Work is NOT complete until `git push` succeeds.
+
+1. Run quality gates if code changed (tests, linters, build/type-check).
+2. Release any locks you still hold (`ygg lock list` → `ygg lock release <key>`).
+3. Push:
+   ```bash
+   git pull --rebase
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+4. If push fails, resolve and retry until it succeeds.
+
+**Never** stop before pushing; **never** say "ready to push when you are" — you push.
+
+## Non-Interactive Shell Commands
+
+Some systems alias `cp`/`mv`/`rm` to interactive mode which hangs agents. Use:
 
 ```bash
-ygg task ready                  # unblocked tasks in this repo
-ygg task create "title" [--kind bug|feature|... --priority 0..4]
-ygg task claim <ref>            # take a task (assignee + in_progress)
-ygg task close <ref> [--reason "..."]
-ygg task show <ref>             # full detail for <prefix>-N or UUID
-ygg task dep <task> <blocker>   # record dependency
-
-ygg remember "..."              # durable repo-scoped note
-ygg lock acquire <key>          # lease a shared resource
-ygg lock release <key>          # release when done
-ygg status                      # other agents + outstanding locks
-ygg logs --follow               # live event stream
+cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
+# scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
-
-### Session completion
-
-Work is not complete until `git push` succeeds. Release held locks, run quality
-gates, rebase, push, verify `git status` shows up-to-date.
 "#;
 
-/// The block for AGENTS.md — slightly terser, same semantics.
+/// The block for AGENTS.md — same semantics, slightly terser narrative,
+/// intended for non-Claude CLI agents that read AGENTS.md instead of CLAUDE.md.
 const AGENTS_BLOCK: &str = r#"## Yggdrasil Coordination
 
 This project uses **Yggdrasil** (`ygg`) for cross-session memory and
-coordination. Hooks fire at lifecycle events; you do not invoke them manually.
+coordination. Hooks fire at Claude Code lifecycle events; you do not invoke
+them manually. Above each user prompt you will see `[ygg memory | ... ]` lines —
+those are real prior context surfaced by similarity.
+
+### Quick Reference
+
+```bash
+ygg task ready                              # Unblocked tasks in this repo
+ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywhere)
+ygg task create "title"                     # New task
+ygg task claim <ref>                        # Take a task
+ygg task close <ref>                        # Complete a task
+ygg task dep <task> <blocker>               # Record dependency
+ygg remember "..."                          # Durable note; retriever can surface later
+
+ygg status                                  # Agents + outstanding locks
+ygg lock acquire <key> / release <key> / list
+ygg spawn --task "..."                      # Parallel agent in a new tmux window
+ygg interrupt take-over --agent <name>      # Take over another agent
+ygg logs --follow                           # Live event stream
+```
 
 ### Rules
 
-- Use `ygg task` for cross-session work (not `bd` / beads).
-- Use `ygg remember "..."` for durable repo-scoped notes.
-- Acquire `ygg lock` before editing a shared resource; release when done.
-- Read `[ygg memory | ...]` injections — they are real prior context.
-- Prefer `ygg spawn` over a native Task tool for parallel work.
+- Acquire a lock before editing a resource another agent might touch. Release when done.
+- Prefer `ygg spawn` over a native Task/Agent tool for parallel work.
+- Read `[ygg memory | ...]` hints — real prior context.
+- Check `ygg status` before assuming you're working alone.
+- Use `ygg task` for cross-session work tracking; `ygg remember` for durable notes.
+- Do NOT use `bd` / beads.
 
-### Quick reference
+## Session Completion
+
+Work is not complete until `git push` succeeds. Release held locks, run quality gates, rebase, push, verify `git status` shows up-to-date.
+
+## Non-Interactive Shell Commands
+
+Some systems alias `cp`/`mv`/`rm` to interactive mode which hangs agents. Use:
 
 ```bash
-ygg task ready | list | create | claim | close | show | dep
-ygg remember "..."
-ygg lock acquire <key> | release <key> | list
-ygg status | logs --follow
+cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
+# scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
-
-Work is not complete until `git push` succeeds.
 "#;
 
 /// Compute a stable content hash of the template at this version.
