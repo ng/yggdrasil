@@ -178,6 +178,18 @@ enum Commands {
         hours: i64,
     },
 
+    /// Show the full pipeline trace for recent user turns — embed →
+    /// retrieve → score → emit → (reference, after digest). Lets you
+    /// see what Yggdrasil actually did vs. what you think it did.
+    Trace {
+        /// Number of recent turns to render (default 5)
+        #[arg(long, default_value = "5")]
+        last: i64,
+        /// Filter to a specific agent
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+
     /// Emit the single-line status for Claude Code's statusLine — reads the
     /// harness JSON payload from stdin, shows context %, tokens, cost (2dp),
     /// cache hit rate, recalls/24h.
@@ -581,6 +593,11 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::eval_cmd::execute(&pool, hours).await?;
+        }
+        Commands::Trace { last, agent } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::trace_cmd::execute(&pool, last, agent.as_deref()).await?;
         }
         Commands::Bar => {
             let config = ygg::config::AppConfig::from_env()?;
