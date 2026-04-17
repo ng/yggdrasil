@@ -378,6 +378,37 @@ pub async fn execute(
         debug!("inject: no prompt text — vector search skipped");
     }
 
+    // ── scoped memories ───────────────────────────────────────────────────────
+    // Surface matching memories from the first-class memories table. Runs
+    // independent of node hits — pinned memories and narrow-scope notes
+    // should appear even when the node retriever wouldn't rank them in the
+    // top-k.
+    if let Some(prompt) = prompt_text {
+        let embedder = Embedder::default_ollama();
+        if embedder.health_check().await {
+            if let Ok(q) = embedder.embed(prompt).await {
+                let repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool).await.ok()
+                    .map(|r| r.repo_id);
+                let cc_sid = crate::models::event::cc_session_id();
+                let mems = crate::models::memory::MemoryRepo::new(pool)
+                    .search(&q, repo_id, cc_sid.as_deref(), 3, 0.5)
+                    .await
+                    .unwrap_or_default();
+                for m in mems {
+                    let sim = (m.similarity * 100.0) as u32;
+                    let pin = if m.memory.pinned { "★" } else { "·" };
+                    let snip = if m.memory.text.chars().count() > 140 {
+                        m.memory.text.chars().take(140).collect::<String>() + "…"
+                    } else { m.memory.text.clone() };
+                    output.push(format!(
+                        "[ygg memory | {} {} | sim={}%] {}",
+                        pin, m.memory.scope.as_str(), sim, snip
+                    ));
+                }
+            }
+        }
+    }
+
     // ── lock status ───────────────────────────────────────────────────────────
     let lock_mgr = LockManager::new(pool, config.lock_ttl_secs);
     let locks = lock_mgr.list_agent_locks(agent.agent_id).await?;

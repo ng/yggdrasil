@@ -191,6 +191,30 @@ impl App {
     }
 }
 
+/// Glyph + color for an event kind — mirrors src/cli/logs_cmd.rs::kind_style.
+fn event_glyph(kind: &str) -> (&'static str, Color) {
+    match kind {
+        "node_written"         => ("●", Color::Green),
+        "lock_acquired"        => ("⚿", Color::Yellow),
+        "lock_released"        => ("○", Color::DarkGray),
+        "digest_written"       => ("◈", Color::Cyan),
+        "similarity_hit"       => ("≈", Color::Blue),
+        "correction_detected"  => ("✗", Color::Red),
+        "hook_fired"           => ("▸", Color::Yellow),
+        "embedding_call"       => ("⚡", Color::Cyan),
+        "task_created"         => ("✚", Color::Green),
+        "task_status_changed"  => ("◆", Color::Yellow),
+        "remembered"           => ("♦", Color::Blue),
+        "embedding_cache_hit"  => ("⚡", Color::Green),
+        "classifier_decision"  => ("⚖", Color::Cyan),
+        "scoring_decision"     => ("·", Color::Gray),
+        "redaction_applied"    => ("✂", Color::Red),
+        "hit_referenced"       => ("✓", Color::Green),
+        "agent_state_changed"  => ("↪", Color::Blue),
+        _                      => ("·", Color::Gray),
+    }
+}
+
 fn short_status_detail(p: &serde_json::Value) -> String {
     // One-line detail for the bottom status strip. Best-effort per kind.
     if let Some(score) = p.get("total_score").or_else(|| p.get("similarity"))
@@ -293,11 +317,15 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
             }
 
             // Global status strip — 3 most recent events, always visible.
+            // Mirrors the glyph/color scheme the Logs pane uses so the footer
+            // reads like a compressed Logs tail at a glance.
             let lines: Vec<Line> = app.status_tail.iter().map(|(ts, kind, detail)| {
+                let (glyph, color) = event_glyph(kind);
                 Line::from(vec![
                     Span::styled(ts.clone(), Style::default().fg(Color::DarkGray)),
                     Span::raw(" "),
-                    Span::styled(format!("{kind:<20}"), Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("{glyph} "), Style::default().fg(color)),
+                    Span::styled(format!("{kind:<18}"), Style::default().fg(color)),
                     Span::raw(" "),
                     Span::styled(detail.clone(), Style::default().fg(Color::Gray)),
                 ])
