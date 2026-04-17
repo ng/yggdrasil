@@ -41,27 +41,26 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     let out_tok = j.pointer("/token_usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
     let tok_total = in_tok + out_tok;
 
-    // Look up today's cache savings and inference counts for a "did Yggdrasil
-    // help me today?" at-a-glance signal.
-    let since = Utc::now() - Duration::hours(24);
-    let (cache_hits, embed_calls): (i64, i64) = sqlx::query_as(
+    // Look up today's cache savings and inference counts, plus the
+    // preceding 24h window for trend deltas. One roundtrip.
+    let now_minus_24 = Utc::now() - Duration::hours(24);
+    let now_minus_48 = Utc::now() - Duration::hours(48);
+    let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"SELECT
-             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
-             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call')
-           FROM events WHERE created_at >= $1"#,
+             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $1),
+             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $1),
+             COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at >= $1),
+             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at < $1 AND created_at >= $2),
+             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at < $1 AND created_at >= $2),
+             COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at < $1 AND created_at >= $2)
+           FROM events"#,
     )
-    .bind(since)
+    .bind(now_minus_24)
+    .bind(now_minus_48)
     .fetch_one(pool)
     .await
-    .unwrap_or((0, 0));
-
-    let hits_today: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM events WHERE event_kind::text = 'similarity_hit' AND created_at >= $1",
-    )
-    .bind(since)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    .unwrap_or((0, 0, 0, 0, 0, 0));
+    let (cache_hits, embed_calls, hits_today, cache_prev, calls_prev, hits_prev) = row;
 
     let mut segments: Vec<String> = Vec::new();
 
@@ -81,24 +80,51 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         segments.push(format!("${:.2}", cost_usd));
     }
 
-    // Cache — "hit rate is 1%" is misleading when you've got 3 hits out of
-    // ~217 embed calls because the pool is fresh. Show absolute "X of Y
-    // cached" instead; the ratio is implicit and the units are meaningful.
+    // Cache — absolute "X of Y cached" with a trend arrow comparing the
+    // current 24h hit rate to the preceding 24h's rate. Rising = pool
+    // warming or workload getting more repetitive. Flat-band is ±5 pct pts.
     let cache_total = cache_hits + embed_calls;
     if cache_total > 0 {
+        let rate_now = cache_hits as f64 / cache_total as f64;
+        let prev_total = cache_prev + calls_prev;
+        let trend = if prev_total >= 10 {
+            let rate_prev = cache_prev as f64 / prev_total as f64;
+            trend_arrow(rate_now - rate_prev, 0.05)
+        } else {
+            "" // Not enough history to make a trend claim.
+        };
         segments.push(format!(
-            "{GREEN}cache {cache_hits}/{cache_total}{RESET}"
+            "{GREEN}cache {cache_hits}/{cache_total}{RESET}{trend}"
         ));
     }
 
-    // Similarity hits in the last 24h — tagged so a quick glance says
-    // "Yggdrasil recalled 276 things for me today."
+    // Recalls (last 24h) with a trend arrow comparing to the preceding 24h.
+    // Flat-band is ±15% of the prior window count.
     if hits_today > 0 {
-        segments.push(format!("{DIM}{hits_today} recalls/24h{RESET}"));
+        let trend = if hits_prev >= 10 {
+            let pct_change = (hits_today - hits_prev) as f64 / hits_prev as f64;
+            trend_arrow(pct_change, 0.15)
+        } else {
+            ""
+        };
+        segments.push(format!("{DIM}{hits_today} recalls/24h{RESET}{trend}"));
     }
 
     println!("{}", segments.join(" · "));
     Ok(())
+}
+
+/// Render a delta as a trend glyph. `delta` is the signed change (new - old
+/// for absolute metrics, or (new - old)/old for rates). `flat_band` defines
+/// the threshold below which we consider the movement noise.
+fn trend_arrow(delta: f64, flat_band: f64) -> &'static str {
+    if delta > flat_band {
+        "\x1b[38;5;114m ↑\x1b[0m"  // green up
+    } else if delta < -flat_band {
+        "\x1b[38;5;203m ↓\x1b[0m"  // red down
+    } else {
+        "\x1b[2m ─\x1b[0m"  // dim flat
+    }
 }
 
 fn format_tokens(n: i64) -> String {
