@@ -90,6 +90,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::Remembered        => (BLUE,   "♦"),
         EventKind::EmbeddingCacheHit => (GREEN,  "⚡"),
         EventKind::ClassifierDecision => (CYAN,  "⚖"),
+        EventKind::ScoringDecision  => (GRAY,  "·"),
     }
 }
 
@@ -171,6 +172,16 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
                           else if kept { format!("{GREEN}keep{RESET}") }
                           else { format!("{RED}drop{RESET}") };
             format!("{verdict} {CYAN}score={score:.2}{RESET} {DIM}from {src}{RESET}  {}", truncate(snip, 40))
+        }
+        EventKind::ScoringDecision => {
+            let kept = p["kept"].as_bool().unwrap_or(false);
+            let reason = p["drop_reason"].as_str().unwrap_or("");
+            let total = p["components"]["total"].as_f64().unwrap_or(0.0);
+            let snip = p["snippet"].as_str().unwrap_or("");
+            let src = p["source_agent"].as_str().unwrap_or("?");
+            let verdict = if kept { format!("{GREEN}keep{RESET}") } else { format!("{RED}drop{RESET}") };
+            let extra = if !reason.is_empty() && !kept { format!(" {DIM}({reason}){RESET}") } else { String::new() };
+            format!("{verdict}{extra} {DIM}{total:.2} from {src}{RESET}  {}", truncate(snip, 35))
         }
     }
 }

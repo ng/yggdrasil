@@ -19,6 +19,7 @@ pub enum EventKind {
     Remembered,
     EmbeddingCacheHit,
     ClassifierDecision,
+    ScoringDecision,
 }
 
 impl EventKind {
@@ -37,6 +38,7 @@ impl EventKind {
             Self::Remembered       => "remembered",
             Self::EmbeddingCacheHit => "cache_hit",
             Self::ClassifierDecision => "classifier",
+            Self::ScoringDecision => "scoring",
         }
     }
 }

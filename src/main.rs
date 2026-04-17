@@ -150,6 +150,13 @@ enum Commands {
         path: Option<String>,
     },
 
+    /// Aggregate events into an effectiveness report over a time window
+    Eval {
+        /// Time window in hours (default 24)
+        #[arg(long, default_value = "24")]
+        hours: i64,
+    },
+
     /// Persist a durable directive the similarity retriever can surface later
     Remember {
         /// The memory text
@@ -515,6 +522,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("Yggdrasil integration in {}:", cwd.display());
                 ygg::cli::init_project::print_report(&report);
             }
+        }
+        Commands::Eval { hours } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::eval_cmd::execute(&pool, hours).await?;
         }
         Commands::Remember { text, agent, list, limit } => {
             let config = ygg::config::AppConfig::from_env()?;

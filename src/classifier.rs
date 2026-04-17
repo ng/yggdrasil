@@ -61,9 +61,12 @@ pub struct Decision {
 
 impl Classifier {
     pub fn from_env() -> Self {
+        // Default OFF as of ADR 0012 — mechanical scoring is the primary
+        // precision mechanism now. Set YGG_CLASSIFIER=on to enable the
+        // LLM overlay.
         let enabled = std::env::var("YGG_CLASSIFIER")
-            .map(|v| v != "off" && v != "0" && v != "false")
-            .unwrap_or(true);
+            .map(|v| v == "on" || v == "1" || v == "true")
+            .unwrap_or(false);
         let base_url = std::env::var("OLLAMA_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:11434".into());
         let model = std::env::var("YGG_CLASSIFIER_MODEL")

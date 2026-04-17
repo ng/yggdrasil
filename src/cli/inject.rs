@@ -134,64 +134,153 @@ pub async fn execute(
                     }
 
                     // Exclude the node we just wrote (distance ≈ 0), surface the rest
-                    let candidates: Vec<_> = hits.iter()
+                    let mut candidates: Vec<crate::models::node::SearchHit> = hits.into_iter()
                         .filter(|h| h.id != node.id && h.distance > 0.01)
                         .collect();
 
-                    // Classifier pass — zero-shot pairwise relevance scoring.
-                    // Fails open: on any error every candidate survives, so
-                    // we never regress below cosine-only behavior.
-                    let classifier = crate::classifier::Classifier::from_env();
-                    let snippets: Vec<String> = candidates.iter()
-                        .map(|h| extract_snippet(&h.content))
-                        .collect();
-                    let snippet_refs: Vec<&str> = snippets.iter().map(String::as_str).collect();
-                    let decisions = classifier.classify_batch(prompt, &snippet_refs).await;
+                    // Disclosure gate — drop candidates we already surfaced
+                    // to THIS agent within the cooldown window. Avoids
+                    // re-injecting the same memory on every prompt.
+                    let cooldown_secs: i64 = std::env::var("YGG_DISCLOSURE_COOLDOWN_SECS")
+                        .ok().and_then(|v| v.parse().ok()).unwrap_or(1800);
+                    if cooldown_secs > 0 && !candidates.is_empty() {
+                        let cand_ids: Vec<uuid::Uuid> = candidates.iter().map(|c| c.id).collect();
+                        let recent_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+                            r#"SELECT DISTINCT (payload->>'source_node_id')::uuid
+                               FROM events
+                               WHERE event_kind::text = 'similarity_hit'
+                                 AND agent_id = $1
+                                 AND created_at > now() - make_interval(secs => $2)
+                                 AND payload->>'source_node_id' IS NOT NULL
+                                 AND (payload->>'source_node_id')::uuid = ANY($3)"#
+                        )
+                        .bind(agent.agent_id)
+                        .bind(cooldown_secs as f64)
+                        .bind(&cand_ids)
+                        .fetch_all(pool)
+                        .await
+                        .unwrap_or_default();
 
-                    for (hit, (decision, snippet)) in candidates.iter().zip(decisions.iter().zip(snippets.iter())) {
+                        if !recent_ids.is_empty() {
+                            let before = candidates.len();
+                            candidates.retain(|c| !recent_ids.contains(&c.id));
+                            debug!("inject: disclosure gate suppressed {} candidate(s)", before - candidates.len());
+                        }
+                    }
+
+                    // Mechanical scoring — the primary precision mechanism.
+                    // Rank by cosine × kind × age × repo × agent, soft-cap
+                    // at max_hits, drop below floor. Bias is permissive:
+                    // most things pass through, stronger signals rise.
+                    let scorer = crate::scoring::Scorer::from_env();
+                    // Best-effort repo_id lookup per candidate — nodes
+                    // predating ADR 0009 have NULL repo_id, which maps to
+                    // "neutral" in the scorer (no penalty).
+                    let candidate_ids: Vec<uuid::Uuid> = candidates.iter().map(|h| h.id).collect();
+                    let hit_repo_ids: Vec<Option<uuid::Uuid>> = if candidate_ids.is_empty() {
+                        vec![]
+                    } else {
+                        let rows: Vec<(uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
+                            "SELECT id, repo_id FROM nodes WHERE id = ANY($1)"
+                        )
+                        .bind(&candidate_ids)
+                        .fetch_all(pool)
+                        .await
+                        .unwrap_or_default();
+                        candidate_ids.iter().map(|id| {
+                            rows.iter().find(|(rid, _)| rid == id).and_then(|(_, repo)| *repo)
+                        }).collect()
+                    };
+                    let current_repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool).await
+                        .ok()
+                        .map(|r| r.repo_id);
+
+                    let scored = scorer.score(
+                        &candidates,
+                        agent.agent_id,
+                        current_repo_id,
+                        &hit_repo_ids,
+                        chrono::Utc::now(),
+                    );
+
+                    // Emit a scoring_decision event ONLY for dropped candidates —
+                    // kept candidates get a similarity_hit further down, which
+                    // carries the total score. Keeps ygg logs --follow readable
+                    // while preserving the drop-reason breakdown that ygg eval
+                    // needs.
+                    for (hit, sd) in candidates.iter().zip(scored.iter()) {
+                        if !sd.dropped { continue; }
+                        let snippet = extract_snippet(&hit.content);
                         let _ = event_repo.emit(
-                            EventKind::ClassifierDecision,
+                            EventKind::ScoringDecision,
                             agent_name,
                             Some(agent.agent_id),
                             serde_json::json!({
                                 "source_agent": hit.agent_name,
+                                "kind": format!("{:?}", hit.kind).to_lowercase(),
                                 "similarity": hit.similarity(),
-                                "score": decision.score,
-                                "kept": decision.kept,
-                                "bypassed": decision.bypassed,
-                                "reason": decision.reason,
-                                "model": classifier.model(),
-                                "threshold": classifier.threshold(),
+                                "components": sd.scores,
+                                "kept": false,
+                                "drop_reason": sd.drop_reason,
                                 "snippet": snippet,
                             }),
                         ).await;
                     }
 
-                    let memories: Vec<_> = candidates.iter()
-                        .zip(decisions.iter().zip(snippets.iter()))
-                        .filter(|(_, (decision, _))| decision.kept)
+                    // Optional LLM classifier overlay — only runs on the
+                    // survivors. Default off; set YGG_CLASSIFIER=on.
+                    let classifier = crate::classifier::Classifier::from_env();
+                    let survivor_indices: Vec<usize> = scored.iter().enumerate()
+                        .filter(|(_, s)| !s.dropped)
+                        .map(|(i, _)| i)
                         .collect();
+                    let survivor_snippets: Vec<String> = survivor_indices.iter()
+                        .map(|&i| extract_snippet(&candidates[i].content))
+                        .collect();
+                    let classifier_decisions = if classifier.is_enabled() && !survivor_snippets.is_empty() {
+                        let refs: Vec<&str> = survivor_snippets.iter().map(String::as_str).collect();
+                        Some(classifier.classify_batch(prompt, &refs).await)
+                    } else {
+                        None
+                    };
 
-                    if !memories.is_empty() {
-                        for (hit, (decision, snippet)) in memories {
-                            let age = format_age(hit.created_at);
-                            let _ = event_repo.emit(
-                                EventKind::SimilarityHit,
-                                agent_name,
-                                Some(agent.agent_id),
-                                serde_json::json!({
-                                    "source_agent": hit.agent_name,
-                                    "distance": hit.distance,
-                                    "similarity": hit.similarity(),
-                                    "score": decision.score,
-                                    "snippet": snippet,
-                                }),
-                            ).await;
-                            output.push(format!(
-                                "[ygg memory | {} | {} | sim={:.0}%] {}",
-                                hit.agent_name, age, hit.similarity() * 100.0, snippet,
-                            ));
-                        }
+                    // Build sorted emission order: kept candidates by score descending.
+                    let mut emit_order: Vec<usize> = survivor_indices.clone();
+                    emit_order.sort_by(|&a, &b| {
+                        scored[b].scores.total.partial_cmp(&scored[a].scores.total).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    for (pos_in_survivors, &i) in emit_order.iter().enumerate() {
+                        let hit = &candidates[i];
+                        // If classifier is enabled and dropped this one, skip.
+                        let classifier_kept = classifier_decisions.as_ref()
+                            .and_then(|d| {
+                                let j = survivor_indices.iter().position(|&k| k == i)?;
+                                d.get(j).map(|dec| dec.kept || dec.bypassed)
+                            })
+                            .unwrap_or(true);
+                        if !classifier_kept { continue; }
+
+                        let age = format_age(hit.created_at);
+                        let snippet = extract_snippet(&hit.content);
+                        let _ = pos_in_survivors; // reserved for future rank-aware logging
+                        let _ = event_repo.emit(
+                            EventKind::SimilarityHit,
+                            agent_name,
+                            Some(agent.agent_id),
+                            serde_json::json!({
+                                "source_agent": hit.agent_name,
+                                "source_node_id": hit.id,
+                                "distance": hit.distance,
+                                "similarity": hit.similarity(),
+                                "total_score": scored[i].scores.total,
+                                "snippet": snippet,
+                            }),
+                        ).await;
+                        output.push(format!(
+                            "[ygg memory | {} | {} | sim={:.0}%] {}",
+                            hit.agent_name, age, hit.similarity() * 100.0, snippet,
+                        ));
                     }
                 }
             }

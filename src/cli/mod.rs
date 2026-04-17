@@ -1,5 +1,6 @@
 pub mod dashboard_cmd;
 pub mod digest;
+pub mod eval_cmd;
 pub mod init;
 pub mod init_project;
 pub mod logs_cmd;
