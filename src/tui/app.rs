@@ -12,7 +12,6 @@ use crate::config::AppConfig;
 use super::dashboard::DashboardView;
 use super::dag_view::DagView;
 use super::log_view::LogView;
-use super::meter_view::MeterView;
 use super::query_view::QueryView;
 use super::tasks_view::TasksView;
 use super::trace_view::TraceView;
@@ -23,7 +22,6 @@ pub enum ActiveView {
     Dag,
     Tasks,
     Trace,
-    Meter,
     Query,
     Logs,
 }
@@ -35,7 +33,6 @@ pub struct App {
     pub dag: DagView,
     pub tasks: TasksView,
     pub trace: TraceView,
-    pub meter: MeterView,
     pub query: QueryView,
     pub logs: LogView,
     pub agent_name: String,
@@ -53,7 +50,6 @@ impl App {
             dag: DagView::new(),
             tasks: TasksView::new(),
             trace: TraceView::new(),
-            meter: MeterView::new(),
             query: QueryView::new(),
             logs: LogView::new(),
             agent_name,
@@ -107,12 +103,11 @@ impl App {
             KeyCode::Char('2') => self.active_view = ActiveView::Dag,
             KeyCode::Char('3') => self.active_view = ActiveView::Tasks,
             KeyCode::Char('4') => self.active_view = ActiveView::Trace,
-            KeyCode::Char('5') => self.active_view = ActiveView::Meter,
-            KeyCode::Char('6') => {
+            KeyCode::Char('5') => {
                 self.active_view = ActiveView::Query;
                 self.query_focus = true;
             }
-            KeyCode::Char('7') => self.active_view = ActiveView::Logs,
+            KeyCode::Char('6') => self.active_view = ActiveView::Logs,
             KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
             KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
             KeyCode::Char('i') if self.active_view == ActiveView::Query => {
@@ -144,7 +139,12 @@ impl App {
                         self.active_view = ActiveView::Dag;
                     }
                 }
+                ActiveView::Dag => self.dag.toggle_detail(),
                 ActiveView::Logs => self.logs.toggle_detail(),
+                _ => {}
+            },
+            KeyCode::Esc => match self.active_view {
+                ActiveView::Dag if self.dag.detail_open => self.dag.detail_open = false,
                 _ => {}
             },
             _ => {}
@@ -156,8 +156,7 @@ impl App {
             ActiveView::Dashboard => ActiveView::Dag,
             ActiveView::Dag => ActiveView::Tasks,
             ActiveView::Tasks => ActiveView::Trace,
-            ActiveView::Trace => ActiveView::Meter,
-            ActiveView::Meter => ActiveView::Query,
+            ActiveView::Trace => ActiveView::Query,
             ActiveView::Query => ActiveView::Logs,
             ActiveView::Logs => ActiveView::Dashboard,
         };
@@ -168,8 +167,7 @@ impl App {
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
-            ActiveView::Meter => ActiveView::Trace,
-            ActiveView::Query => ActiveView::Meter,
+            ActiveView::Query => ActiveView::Trace,
             ActiveView::Logs => ActiveView::Query,
         };
     }
@@ -229,7 +227,6 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
             ActiveView::Dag     => { app.dag.refresh(pool).await?; }
             ActiveView::Tasks   => { app.tasks.refresh(pool).await?; }
             ActiveView::Trace   => { app.trace.refresh(pool).await?; }
-            ActiveView::Meter   => { app.meter.refresh(pool, &app.agent_name).await?; }
             ActiveView::Logs    => { app.logs.refresh(pool).await?; }
             _ => {}
         }
@@ -259,9 +256,8 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[2] DAG",       app.active_view == ActiveView::Dag),
                 tab("[3] Tasks",     app.active_view == ActiveView::Tasks),
                 tab("[4] Trace",     app.active_view == ActiveView::Trace),
-                tab("[5] Meter",     app.active_view == ActiveView::Meter),
-                tab("[6] Query",     app.active_view == ActiveView::Query),
-                tab("[7] Logs",      app.active_view == ActiveView::Logs),
+                tab("[5] Query",     app.active_view == ActiveView::Query),
+                tab("[6] Logs",      app.active_view == ActiveView::Logs),
                 Span::raw("  q=quit  ←→/tab=nav  f=filter(logs)  i=input(query)"),
             ];
             frame.render_widget(Line::from(titles), chunks[0]);
@@ -271,7 +267,6 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 ActiveView::Dag       => app.dag.render(frame, chunks[1]),
                 ActiveView::Tasks     => app.tasks.render(frame, chunks[1]),
                 ActiveView::Trace     => app.trace.render(frame, chunks[1]),
-                ActiveView::Meter     => app.meter.render(frame, chunks[1]),
                 ActiveView::Query     => app.query.render(frame, chunks[1]),
                 ActiveView::Logs      => app.logs.render(frame, chunks[1]),
             }

@@ -21,6 +21,7 @@ pub struct DagView {
     /// is obvious whether we have an error, a registered repo with no
     /// tasks, or a fallback with no conversation either.
     pub last_status: String,
+    pub detail_open: bool,
 }
 
 pub enum RenderRow {
@@ -39,7 +40,7 @@ impl DagView {
         let mut st = ListState::default();
         st.select(Some(0));
         Self { rows: vec![], state: st, repo_name: String::new(),
-            last_status: String::new() }
+            last_status: String::new(), detail_open: false }
     }
 
     // Kept for compatibility with existing app.rs entry — a no-op here
@@ -56,6 +57,24 @@ impl DagView {
         if self.rows.is_empty() { return; }
         let i = self.state.selected().unwrap_or(0);
         self.state.select(Some((i + 1) % self.rows.len()));
+    }
+
+    /// Toggle the detail overlay for the selected task row. Does nothing for
+    /// repo-header rows since there's no task to show.
+    pub fn toggle_detail(&mut self) {
+        if let Some(i) = self.state.selected() {
+            if matches!(self.rows.get(i), Some(RenderRow::Task { .. })) {
+                self.detail_open = !self.detail_open;
+            }
+        }
+    }
+
+    fn selected_task(&self) -> Option<(&Task, &str)> {
+        let i = self.state.selected()?;
+        match self.rows.get(i)? {
+            RenderRow::Task { task, prefix, .. } => Some((task, prefix.as_str())),
+            _ => None,
+        }
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
@@ -255,7 +274,76 @@ impl DagView {
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
         frame.render_stateful_widget(list, area, &mut self.state);
+
+        // Detail overlay floats over the list when toggled on.
+        if self.detail_open {
+            if let Some((task, prefix)) = self.selected_task() {
+                render_detail_overlay(frame, area, task, prefix);
+            }
+        }
     }
+}
+
+fn render_detail_overlay(frame: &mut Frame, area: Rect, task: &Task, prefix: &str) {
+    // Center a popup inside the pane area.
+    let popup_w = area.width.saturating_sub(8).min(90);
+    let popup_h = area.height.saturating_sub(4).min(24);
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect { x, y, width: popup_w, height: popup_h };
+
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let id = format!("{}-{}", prefix, task.seq);
+    let kind = format!("{:?}", task.kind).to_lowercase();
+    let status = format!("{:?}", task.status).to_lowercase();
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(format!(" {id} "),
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(&task.title, Style::default().add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("  {kind} · P{} · {status}", task.priority),
+                Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+    ];
+
+    if !task.description.is_empty() {
+        lines.push(Line::from(Span::styled("description",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        for l in task.description.lines() { lines.push(Line::from(format!("  {l}"))); }
+        lines.push(Line::from(""));
+    }
+    if let Some(a) = task.acceptance.as_ref().filter(|s| !s.is_empty()) {
+        lines.push(Line::from(Span::styled("acceptance",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        for l in a.lines() { lines.push(Line::from(format!("  {l}"))); }
+        lines.push(Line::from(""));
+    }
+    if let Some(d) = task.design.as_ref().filter(|s| !s.is_empty()) {
+        lines.push(Line::from(Span::styled("design",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        for l in d.lines() { lines.push(Line::from(format!("  {l}"))); }
+        lines.push(Line::from(""));
+    }
+    if let Some(n) = task.notes.as_ref().filter(|s| !s.is_empty()) {
+        lines.push(Line::from(Span::styled("notes",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        for l in n.lines() { lines.push(Line::from(format!("  {l}"))); }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" task detail — Enter/Esc to close ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let para = ratatui::widgets::Paragraph::new(lines)
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(para, popup);
 }
 
 fn walk(
