@@ -13,6 +13,18 @@ use uuid::Uuid;
 use crate::models::repo::{Repo, RepoRepo};
 use crate::models::task::{Task, TaskKind, TaskRepo, TaskStatus};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DagSort { Priority, Kind, Recent }
+
+impl DagSort {
+    fn label(&self) -> &'static str {
+        match self { Self::Priority => "priority", Self::Kind => "kind", Self::Recent => "recent" }
+    }
+    fn next(&self) -> Self {
+        match self { Self::Priority => Self::Kind, Self::Kind => Self::Recent, Self::Recent => Self::Priority }
+    }
+}
+
 pub struct DagView {
     pub rows: Vec<RenderRow>,
     pub state: ListState,
@@ -22,6 +34,7 @@ pub struct DagView {
     /// tasks, or a fallback with no conversation either.
     pub last_status: String,
     pub detail_open: bool,
+    pub sort: DagSort,
 }
 
 pub enum RenderRow {
@@ -40,7 +53,7 @@ impl DagView {
         let mut st = ListState::default();
         st.select(Some(0));
         Self { rows: vec![], state: st, repo_name: String::new(),
-            last_status: String::new(), detail_open: false }
+            last_status: String::new(), detail_open: false, sort: DagSort::Priority }
     }
 
     // Kept for compatibility with existing app.rs entry — a no-op here
@@ -57,6 +70,10 @@ impl DagView {
         if self.rows.is_empty() { return; }
         let i = self.state.selected().unwrap_or(0);
         self.state.select(Some((i + 1) % self.rows.len()));
+    }
+
+    pub fn cycle_sort(&mut self) {
+        self.sort = self.sort.next();
     }
 
     /// Toggle the detail overlay for the selected task row. Does nothing for
@@ -149,13 +166,13 @@ impl DagView {
                     matches!(t.kind, TaskKind::Epic) || no_blockers
                 })
                 .collect();
-            roots.sort_by_key(|t| (t.priority, t.seq));
+            sort_tasks(&mut roots, self.sort);
 
             let mut visited: HashSet<Uuid> = HashSet::new();
             for r in &roots {
                 walk(
                     r.task_id, 0, &repo.task_prefix, &children_of, &by_id,
-                    &mut visited, &mut rows,
+                    &mut visited, &mut rows, self.sort,
                 );
             }
             // Cycle orphans and anything we missed.
@@ -185,8 +202,9 @@ impl DagView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(" Task graph — {} open across all repos ", self.rows.iter()
-            .filter(|r| matches!(r, RenderRow::Task { .. })).count());
+        let title = format!(" Task graph — {} open across all repos  ·  sort: {}  (s to cycle) ",
+            self.rows.iter().filter(|r| matches!(r, RenderRow::Task { .. })).count(),
+            self.sort.label());
 
         if self.rows.is_empty() {
             let lines: Vec<Line> = vec![
@@ -354,6 +372,7 @@ fn walk(
     by_id: &BTreeMap<Uuid, &Task>,
     visited: &mut HashSet<Uuid>,
     rows: &mut Vec<RenderRow>,
+    sort: DagSort,
 ) {
     if !visited.insert(id) { return; }
     let Some(task) = by_id.get(&id).copied() else { return; };
@@ -368,11 +387,30 @@ fn walk(
         n_children,
     });
 
-    let mut sorted: Vec<&Uuid> = children.iter().filter(|c| by_id.contains_key(c)).collect();
-    sorted.sort_by_key(|c| by_id.get(c).map(|t| (t.priority, t.seq)));
+    let mut sorted: Vec<&Task> = children.iter()
+        .filter_map(|c| by_id.get(c).copied()).collect();
+    sort_tasks(&mut sorted, sort);
 
     for child in sorted {
-        walk(*child, depth + 1, prefix, children_of, by_id, visited, rows);
+        walk(child.task_id, depth + 1, prefix, children_of, by_id, visited, rows, sort);
+    }
+}
+
+fn sort_tasks(tasks: &mut Vec<&Task>, sort: DagSort) {
+    match sort {
+        DagSort::Priority => tasks.sort_by_key(|t| (t.priority, t.seq)),
+        DagSort::Kind => tasks.sort_by_key(|t| (kind_order(&t.kind), t.priority, t.seq)),
+        DagSort::Recent => tasks.sort_by_key(|t| std::cmp::Reverse(t.updated_at)),
+    }
+}
+
+fn kind_order(k: &TaskKind) -> u8 {
+    match k {
+        TaskKind::Epic => 0,
+        TaskKind::Feature => 1,
+        TaskKind::Bug => 2,
+        TaskKind::Task => 3,
+        TaskKind::Chore => 4,
     }
 }
 

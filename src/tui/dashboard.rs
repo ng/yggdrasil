@@ -3,10 +3,13 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::lock::LockManager;
 use crate::models::agent::{AgentRepo, AgentWorkflow};
+
+const PRESSURE_TTL: Duration = Duration::from_secs(5);
 
 /// Rough token-window estimate from the latest Claude Code transcript for
 /// the given agent. Matches the bar/meter logic: find `~/.claude/projects/<slug>/*.jsonl`
@@ -60,7 +63,12 @@ pub struct DashboardView {
     cache_hits_24h: i64,
     cache_total_24h: i64,
     redactions_24h: i64,
-    prompts_hourly: Vec<u64>, // last 24h, oldest→newest
+    prompts_hourly: Vec<u64>,                 // global, last 24h, oldest→newest
+    per_agent_hourly: HashMap<Uuid, [u64; 24]>, // per agent, last 24h
+
+    /// Transcript-file-size pressure cache. Reading ~/.claude/projects on
+    /// every 500ms render is expensive; cache per-agent for PRESSURE_TTL.
+    pressure_cache: HashMap<String, (Instant, Option<i64>)>,
 }
 
 impl DashboardView {
@@ -71,7 +79,19 @@ impl DashboardView {
             prompts_1h: 0, digests_1h: 0, hits_1h: 0,
             cache_hits_24h: 0, cache_total_24h: 0, redactions_24h: 0,
             prompts_hourly: vec![0; 24],
+            per_agent_hourly: HashMap::new(),
+            pressure_cache: HashMap::new(),
         }
+    }
+
+    fn cached_pressure(&mut self, agent_name: &str) -> Option<i64> {
+        let now = Instant::now();
+        if let Some((t, v)) = self.pressure_cache.get(agent_name) {
+            if now.duration_since(*t) < PRESSURE_TTL { return *v; }
+        }
+        let v = agent_pressure_tokens(agent_name);
+        self.pressure_cache.insert(agent_name.to_string(), (now, v));
+        v
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
@@ -109,7 +129,7 @@ impl DashboardView {
         self.cache_total_24h = ch24 + cc24;
         self.redactions_24h = r24;
 
-        // Prompts per hour sparkline, 24h.
+        // Prompts per hour sparkline, 24h — global across agents.
         let sparkline: Vec<(i32, i64)> = sqlx::query_as(
             "SELECT (24 - FLOOR(EXTRACT(EPOCH FROM (now() - created_at)) / 3600))::int,
                     COUNT(*)
@@ -125,6 +145,25 @@ impl DashboardView {
             series[idx] = n as u64;
         }
         self.prompts_hourly = series;
+
+        // Per-agent prompts-per-hour sparkline, 24h — one row per (agent, bucket).
+        let per_agent: Vec<(Uuid, i32, i64)> = sqlx::query_as(
+            "SELECT agent_id,
+                    (24 - FLOOR(EXTRACT(EPOCH FROM (now() - created_at)) / 3600))::int,
+                    COUNT(*)
+             FROM events
+             WHERE created_at >= now() - interval '24 hours'
+               AND event_kind::text = 'node_written'
+               AND payload->>'kind' = 'user_message'
+               AND agent_id IS NOT NULL
+             GROUP BY 1, 2"
+        ).fetch_all(pool).await.unwrap_or_default();
+        self.per_agent_hourly.clear();
+        for (aid, b, n) in per_agent {
+            let idx = (b - 1).clamp(0, 23) as usize;
+            let entry = self.per_agent_hourly.entry(aid).or_insert([0u64; 24]);
+            entry[idx] = n as u64;
+        }
 
         Ok(())
     }
@@ -143,20 +182,98 @@ impl DashboardView {
         self.agents.get(self.selected).map(|a| a.agent_name.clone())
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        // Layout: pulse (top) · agents (middle, stretch) · locks (bottom)
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        // Layout: alerts (top) · pulse · agents (stretch) · locks (bottom)
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(3),  // alerts
                 Constraint::Length(6),  // system pulse
                 Constraint::Min(8),     // agents
                 Constraint::Length(10), // locks
             ])
             .split(area);
 
-        self.render_pulse(frame, chunks[0]);
-        self.render_agents_table(frame, chunks[1]);
-        self.render_locks_table(frame, chunks[2]);
+        self.render_alerts(frame, chunks[0]);
+        self.render_pulse(frame, chunks[1]);
+        self.render_agents_table(frame, chunks[2]);
+        self.render_locks_table(frame, chunks[3]);
+    }
+
+    fn render_alerts(&mut self, frame: &mut Frame, area: Rect) {
+        let mut alerts: Vec<Span> = Vec::new();
+        let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+
+        // High pressure agents (>=90%)
+        let agent_names: Vec<String> = self.agents.iter().map(|a| a.agent_name.clone()).collect();
+        for name in &agent_names {
+            if let Some(tokens) = self.cached_pressure(name) {
+                if limit > 0 {
+                    let pct = ((tokens as f64 / limit as f64) * 100.0) as u32;
+                    if pct >= 90 {
+                        alerts.push(Span::styled(
+                            format!(" ⛔ {name} {pct}% "),
+                            Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD),
+                        ));
+                        alerts.push(Span::raw("  "));
+                    } else if pct >= 75 {
+                        alerts.push(Span::styled(
+                            format!(" ⚠ {name} {pct}% "),
+                            Style::default().fg(Color::Black).bg(Color::Yellow),
+                        ));
+                        alerts.push(Span::raw("  "));
+                    }
+                }
+            }
+        }
+
+        // Locks held "too long" — 30m+ is our threshold for "someone's probably
+        // stuck". Expired locks are just stale state and not interesting.
+        let now = Utc::now();
+        let long_held = self.locks.iter()
+            .filter(|l| (l.expires_at - now).num_seconds() > 0)  // still live
+            .filter(|l| (now - l.acquired_at).num_minutes() >= 30)
+            .count();
+        if long_held > 0 {
+            alerts.push(Span::styled(
+                format!(" ⏳ {long_held} lock{} held 30m+ ", if long_held == 1 { "" } else { "s" }),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ));
+            alerts.push(Span::raw("  "));
+        }
+
+        // Error-state agents
+        let errored = self.agents.iter()
+            .filter(|a| a.current_state == crate::models::agent::AgentState::Error).count();
+        if errored > 0 {
+            alerts.push(Span::styled(
+                format!(" ✗ {errored} agent(s) in error "),
+                Style::default().fg(Color::White).bg(Color::Red),
+            ));
+            alerts.push(Span::raw("  "));
+        }
+
+        // Redactions in last 24h — informational, not a blocker.
+        if self.redactions_24h > 0 {
+            alerts.push(Span::styled(
+                format!(" 🔒 {} redaction(s) 24h ", self.redactions_24h),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ));
+        }
+
+        let line = if alerts.is_empty() {
+            Line::from(vec![Span::styled(
+                "  ✓ all clear — no pressure alerts, no expired locks, no errored agents",
+                Style::default().fg(Color::Green),
+            )])
+        } else {
+            Line::from(alerts)
+        };
+
+        let para = Paragraph::new(vec![line])
+            .block(Block::default().borders(Borders::ALL).title(" Alerts "));
+        frame.render_widget(para, area);
     }
 
     fn render_pulse(&self, frame: &mut Frame, area: Rect) {
@@ -212,17 +329,33 @@ impl DashboardView {
         frame.render_widget(pulse, cols[1]);
     }
 
-    fn render_agents_table(&self, frame: &mut Frame, area: Rect) {
+    fn render_agents_table(&mut self, frame: &mut Frame, area: Rect) {
         let header = Row::new(vec![
             Cell::from("NAME").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Cell::from("STATE"),
             Cell::from("PRESSURE"),
-            Cell::from("HEAD"),
+            Cell::from("24H"),
             Cell::from("UPDATED"),
         ]).height(1);
 
+        // Shared y-axis for comparable sparklines across agents.
+        let global_max = self.per_agent_hourly.values()
+            .flat_map(|s| s.iter().copied())
+            .max().unwrap_or(1)
+            .max(1);
+
+        // Pre-compute cached pressure per agent — we can't call &mut self
+        // inside the iter closure below.
+        let mut pressure_by_name: HashMap<String, Option<i64>> = HashMap::new();
+        let agent_names: Vec<String> = self.agents.iter().map(|a| a.agent_name.clone()).collect();
+        for n in &agent_names {
+            pressure_by_name.insert(n.clone(), self.cached_pressure(n));
+        }
+
+        let selected = self.selected;
+        let per_agent = &self.per_agent_hourly;
         let rows: Vec<Row> = self.agents.iter().enumerate().map(|(i, agent)| {
-            let style = if i == self.selected {
+            let style = if i == selected {
                 Style::default().bg(Color::DarkGray)
             } else { Style::default() };
 
@@ -255,7 +388,7 @@ impl DashboardView {
             // is findable for this agent.
             let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
-            let (pressure_bar, pressure_color) = match agent_pressure_tokens(&agent.agent_name) {
+            let (pressure_bar, pressure_color) = match pressure_by_name.get(&agent.agent_name).copied().flatten() {
                 Some(tokens) if limit > 0 => {
                     let pct = ((tokens as f64 / limit as f64) * 100.0).min(999.0) as u32;
                     let blocks = (pct / 10).min(10) as usize;
@@ -270,13 +403,15 @@ impl DashboardView {
                 _ => ("—".to_string(), Color::DarkGray),
             };
 
+            let sparkline = per_agent.get(&agent.agent_id)
+                .map(|s| text_sparkline(s, global_max))
+                .unwrap_or_else(|| "        ".to_string());
+
             Row::new(vec![
                 Cell::from(agent.agent_name.clone()),
                 Cell::from(state_label).style(Style::default().fg(state_color)),
                 Cell::from(pressure_bar).style(Style::default().fg(pressure_color)),
-                Cell::from(
-                    agent.head_node_id.map(|id| id.to_string()[..8].to_string()).unwrap_or_else(|| "—".into()),
-                ),
+                Cell::from(sparkline).style(Style::default().fg(Color::Cyan)),
                 Cell::from(humanize_since(agent.updated_at)),
             ]).style(style)
         }).collect();
@@ -299,43 +434,43 @@ impl DashboardView {
             Cell::from("RESOURCE").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Cell::from("HELD BY"),
             Cell::from("HELD FOR"),
-            Cell::from("EXPIRES"),
+            Cell::from("TTL"),
         ]).height(1);
 
         let now = Utc::now();
-        let rows: Vec<Row> = self.locks.iter().map(|l| {
+        // Drop expired — that's stale state, not a signal to act on. Sort the
+        // rest by held-for DESC so the "who's stuck?" entries rise to the top.
+        let mut live: Vec<&crate::lock::ResourceLock> = self.locks.iter()
+            .filter(|l| (l.expires_at - now).num_seconds() > 0)
+            .collect();
+        live.sort_by_key(|l| std::cmp::Reverse((now - l.acquired_at).num_seconds()));
+
+        let rows: Vec<Row> = live.iter().map(|l| {
             let resource = short_resource(&l.resource_key);
             let agent = self.agent_name_by_id.get(&l.agent_id)
                 .cloned()
                 .unwrap_or_else(|| format!("{}…", &l.agent_id.to_string()[..8]));
-            let held = humanize_since(l.acquired_at);
+            let held_secs = (now - l.acquired_at).num_seconds().max(0);
+            let held = humanize_duration(held_secs);
+            // Color-code held-for: >30m = yellow (possibly stuck), >2h = red
+            let held_color = if held_secs > 7200 { Color::Red }
+                             else if held_secs > 1800 { Color::Yellow }
+                             else { Color::DarkGray };
+
             let ttl_secs = (l.expires_at - now).num_seconds();
-            let (ttl_label, ttl_color) = if ttl_secs <= 0 {
-                ("expired", Color::Red)
-            } else if ttl_secs < 60 {
-                ("<1m",    Color::Yellow)
-            } else if ttl_secs < 300 {
-                ("<5m",    Color::Yellow)
-            } else {
-                ("ok",     Color::Green)
-            };
-            // "0s (expired)" reads worse than just "expired".
-            let ttl_str = if ttl_secs <= 0 {
-                "expired".to_string()
-            } else {
-                format!("{}  ({})", humanize_duration(ttl_secs), ttl_label)
-            };
-            let ttl = (ttl_label, ttl_color);
+            let ttl_color = if ttl_secs < 60 { Color::Yellow }
+                            else if ttl_secs < 300 { Color::Yellow }
+                            else { Color::Green };
 
             Row::new(vec![
                 Cell::from(resource),
                 Cell::from(agent).style(Style::default().fg(Color::Cyan)),
-                Cell::from(held).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(ttl_str).style(Style::default().fg(ttl.1)),
+                Cell::from(held).style(Style::default().fg(held_color)),
+                Cell::from(humanize_duration(ttl_secs)).style(Style::default().fg(ttl_color)),
             ])
         }).collect();
 
-        let title = format!(" Locks — {} held (advisory) ", self.locks.len());
+        let title = format!(" Locks — {} live (sorted by longest held) ", live.len());
         let table = Table::new(rows, [
             Constraint::Percentage(45),
             Constraint::Percentage(20),
@@ -361,6 +496,21 @@ fn short_resource(s: &str) -> String {
 fn humanize_since(ts: chrono::DateTime<chrono::Utc>) -> String {
     let secs = (Utc::now() - ts).num_seconds().max(0);
     humanize_duration(secs) + " ago"
+}
+
+/// Render a 24-hour series as block-char sparkline. `max` is the shared y-axis
+/// so values across rows are visually comparable.
+fn text_sparkline(series: &[u64], max: u64) -> String {
+    // 8-step bar chars, empty cell for zero so sparse agents look sparse.
+    const BARS: [char; 8] = ['▁','▂','▃','▄','▅','▆','▇','█'];
+    let max = max.max(1);
+    series.iter().map(|&v| {
+        if v == 0 { ' ' }
+        else {
+            let step = ((v * 7 + max - 1) / max).min(7) as usize;
+            BARS[step]
+        }
+    }).collect()
 }
 
 fn humanize_duration(secs: i64) -> String {

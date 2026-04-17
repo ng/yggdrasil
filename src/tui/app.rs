@@ -116,6 +116,10 @@ impl App {
             KeyCode::Char('f') if self.active_view == ActiveView::Logs => {
                 self.logs.cycle_filter();
             }
+            KeyCode::Char('s') if self.active_view == ActiveView::Dag => {
+                self.dag.cycle_sort();
+                let _ = self.dag.refresh(pool).await;
+            }
             KeyCode::Up => match self.active_view {
                 ActiveView::Dag => self.dag.scroll_up(),
                 ActiveView::Dashboard => self.dashboard.select_prev(),
@@ -258,7 +262,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[4] Trace",     app.active_view == ActiveView::Trace),
                 tab("[5] Query",     app.active_view == ActiveView::Query),
                 tab("[6] Logs",      app.active_view == ActiveView::Logs),
-                Span::raw("  q=quit  ←→/tab=nav  f=filter(logs)  i=input(query)"),
+                Span::raw("  q=quit  ←→/tab=nav  Enter=detail  s=sort(dag)  f=filter(logs)  i=input(query)"),
             ];
             frame.render_widget(Line::from(titles), chunks[0]);
 
