@@ -1,5 +1,20 @@
 use clap::{Parser, Subcommand};
 
+/// Accept priority as either an integer (0..=4) or a beads-style `P0`..`P4`.
+/// Agents used to bd often guess the `P2` form; this keeps them honest
+/// without forcing a migration.
+fn parse_priority(s: &str) -> Result<i16, String> {
+    let trimmed = s.trim();
+    let numeric = if let Some(rest) = trimmed.strip_prefix(['P', 'p']) { rest } else { trimmed };
+    let n: i16 = numeric.parse().map_err(|_| format!(
+        "priority must be 0..=4 or P0..P4 (got '{s}')"
+    ))?;
+    if !(0..=4).contains(&n) {
+        return Err(format!("priority must be between 0 (critical) and 4 (backlog); got {n}"));
+    }
+    Ok(n)
+}
+
 #[derive(Parser)]
 #[command(name = "ygg", version, about = "Yggdrasil — High-density agent orchestrator")]
 struct Cli {
@@ -163,6 +178,11 @@ enum Commands {
         hours: i64,
     },
 
+    /// Emit the single-line status for Claude Code's statusLine — reads the
+    /// harness JSON payload from stdin, shows context %, tokens, cost (2dp),
+    /// cache hit rate, recalls/24h.
+    Bar,
+
     /// Persist a durable directive the similarity retriever can surface later
     Remember {
         /// The memory text
@@ -208,7 +228,7 @@ enum TaskAction {
         title: String,
         #[arg(short, long)] description: Option<String>,
         #[arg(short, long)] kind: Option<String>,
-        #[arg(short, long)] priority: Option<i16>,
+        #[arg(short, long, value_parser = parse_priority)] priority: Option<i16>,
         #[arg(long)] acceptance: Option<String>,
         #[arg(long)] design: Option<String>,
         #[arg(long)] notes: Option<String>,
@@ -231,7 +251,7 @@ enum TaskAction {
         reference: String,
         #[arg(long)] title: Option<String>,
         #[arg(long)] description: Option<String>,
-        #[arg(long)] priority: Option<i16>,
+        #[arg(long, value_parser = parse_priority)] priority: Option<i16>,
         #[arg(long)] kind: Option<String>,
         #[arg(long)] acceptance: Option<String>,
         #[arg(long)] design: Option<String>,
@@ -544,6 +564,11 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::eval_cmd::execute(&pool, hours).await?;
+        }
+        Commands::Bar => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::bar_cmd::execute(&pool).await?;
         }
         Commands::Remember { text, agent, list, limit } => {
             let config = ygg::config::AppConfig::from_env()?;

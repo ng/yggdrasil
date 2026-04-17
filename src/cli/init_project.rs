@@ -28,12 +28,26 @@ each user prompt (`[ygg memory | <agent> | <age> | sim=<n>%]`).
 ```bash
 ygg task ready                              # Unblocked tasks in the current repo
 ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywhere)
-ygg task create "title" [--kind … --priority …]   # Create a task
+ygg task create "title" --kind <k> --priority <0-4>   # See priority/kind values below
 ygg task claim <ref>                        # Take a task (assign + in_progress)
 ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
 ygg task close <ref> [--reason "..."]       # Complete a task
 ygg task dep <task> <blocker>               # Record dependency
 ygg remember "..."                          # Durable note; similarity retriever can surface later
+```
+
+### Task field values (important — no guessing)
+
+- `--priority <0..4>` — **0 = critical, 1 = high, 2 = medium, 3 = low, 4 = backlog**.
+  Also accepts `P0`..`P4`. Do NOT pass strings like "high" / "medium" / "low".
+- `--kind <task|bug|feature|chore|epic>` — one of these five. Default is `task`.
+- `--status <open|in_progress|blocked|closed>` — for filtering / transitions.
+- `--label <a,b,c>` — comma-separated labels. Repeatable.
+- `<ref>` is either `<prefix>-<N>` (e.g. `yggdrasil-42`) or a UUID.
+
+Example:
+```bash
+ygg task create "fix migration ordering" --kind bug --priority 1 --label migrations,sqlx
 
 ygg status                                  # See all agents' state, locks, recent activity
 ygg lock acquire <resource-key>             # Lease a shared resource before editing

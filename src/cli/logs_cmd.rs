@@ -63,30 +63,25 @@ pub async fn execute(
     }
 }
 
+/// Render one event as a single line. We deliberately avoid column
+/// alignment: variable-width data (agent names, snippets, numeric counts)
+/// makes columnar layouts sheer in ways that are annoying to fix and
+/// never look good across every event kind. Instead we emit a scannable
+/// delimited form — `time · symbol label · agent · detail` — each field
+/// stands on its own, colors segment the fields visually.
 fn print_event(event: &Event) {
     let ts = event.created_at.with_timezone(&chrono::Local).format("%H:%M:%S");
     let (color, symbol) = kind_style(&event.event_kind);
-    // Visible-width padding (count chars, not bytes) so multi-byte glyphs
-    // don't shear later columns.
-    let label = pad_visible(event.event_kind.label(), 15);
-    let agent = pad_visible(&truncate(&event.agent_name, 14), 14);
+    let label = event.event_kind.label();
+    let agent = truncate(&event.agent_name, 24);
     let detail = format_payload(&event.event_kind, &event.payload);
 
     println!(
-        "{DIM}{ts}{RESET}  {color}{symbol}{RESET}  {color}{label}{RESET}  {GRAY}{agent}{RESET}  {detail}"
+        "{DIM}{ts}{RESET} {color}{symbol} {label}{RESET} {SEP} {GRAY}{agent}{RESET} {SEP} {detail}"
     );
 }
 
-/// Pad a string to a fixed visible-char width (char count, not byte count).
-/// Assumes all chars render as 1 column; fine for our labels which are ASCII.
-fn pad_visible(s: &str, width: usize) -> String {
-    let w = s.chars().count();
-    if w >= width {
-        s.to_string()
-    } else {
-        format!("{s}{}", " ".repeat(width - w))
-    }
-}
+const SEP: &str = "\x1b[38;5;240m·\x1b[0m";
 
 fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
     match kind {
@@ -126,7 +121,7 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
                 "system" => "system",
                 _ => kind,
             };
-            format!("{CYAN}{kind_label:<11}{RESET} {DIM}~{tok}t{RESET}  {}", truncate(snip, 50))
+            format!("{CYAN}{kind_label:<11}{RESET} {DIM}~{tok:>3}t{RESET}  {}", truncate(snip, 50))
         }
         EventKind::LockAcquired | EventKind::LockReleased => {
             p["resource"].as_str()
@@ -138,7 +133,7 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let corr  = p["corrections"].as_i64().unwrap_or(0);
             let reinf = p["reinforcements"].as_i64().unwrap_or(0);
             format!(
-                "{DIM}{turns} turns{RESET}  {RED}{corr} corrections{RESET}  {GREEN}{reinf} reinforcements{RESET}"
+                "{DIM}{turns:>4} turns{RESET}  {RED}{corr:>2} corrections{RESET}  {GREEN}{reinf:>2} reinforcements{RESET}"
             )
         }
         EventKind::SimilarityHit => {
@@ -164,7 +159,7 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let chars = p["input_chars"].as_u64().unwrap_or(0);
             let ok    = p["success"].as_bool().unwrap_or(false);
             let status = if ok { format!("{GREEN}ok{RESET}") } else { format!("{RED}fail{RESET}") };
-            format!("{CYAN}{model}{RESET}  {chars} chars  {ms}ms  {status}")
+            format!("{CYAN}{model:<11}{RESET} {chars:>4} chars  {ms:>4}ms  {status}")
         }
         EventKind::TaskCreated => {
             let rref = p["ref"].as_str().unwrap_or("?");
@@ -190,7 +185,7 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let ms    = p["latency_ms"].as_u64().unwrap_or(0);
             let chars = p["input_chars"].as_u64().unwrap_or(0);
             let purpose = p["purpose"].as_str().unwrap_or("");
-            format!("{GREEN}{model}{RESET}  {chars} chars  {ms}ms  {DIM}{purpose} (cached){RESET}")
+            format!("{GREEN}{model:<11}{RESET} {chars:>4} chars  {ms:>4}ms  {DIM}{purpose} (cached){RESET}")
         }
         EventKind::ClassifierDecision => {
             let score = p["score"].as_f64().unwrap_or(0.0);

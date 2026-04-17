@@ -11,7 +11,9 @@ The SessionStart, UserPromptSubmit, Stop, PreCompact, and PreToolUse hooks are a
 ```bash
 ygg task ready                              # Unblocked tasks in the current repo
 ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywhere)
-ygg task create "title" [--kind … --priority …]   # Create a task
+ygg task create "title" --kind <task|bug|feature|chore|epic> --priority <0-4>
+                                            # Priority: 0=critical 1=high 2=med 3=low 4=backlog.
+                                            # Accepts "P0".."P4" too. NOT "high"/"medium"/"low".
 ygg task claim <ref>                        # Take a task (assign + in_progress)
 ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
 ygg task close <ref> [--reason "..."]       # Complete a task
@@ -94,7 +96,9 @@ each user prompt (`[ygg memory | <agent> | <age> | sim=<n>%]`).
 ```bash
 ygg task ready                              # Unblocked tasks in the current repo
 ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywhere)
-ygg task create "title" [--kind … --priority …]   # Create a task
+ygg task create "title" --kind <task|bug|feature|chore|epic> --priority <0-4>
+                                            # Priority: 0=critical 1=high 2=med 3=low 4=backlog.
+                                            # Accepts "P0".."P4" too. NOT "high"/"medium"/"low".
 ygg task claim <ref>                        # Take a task (assign + in_progress)
 ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
 ygg task close <ref> [--reason "..."]       # Complete a task

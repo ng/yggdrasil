@@ -251,7 +251,7 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
     println!("### When to use `ygg`");
     println!();
     println!("- **Finding work** → `ygg task ready` for unblocked tasks in this repo; `ygg task list` for everything.");
-    println!("- **Tracking work** → `ygg task create \"...\"` before starting non-trivial work; `ygg task claim <id>` to take one; `ygg task close <id>` when done.");
+    println!("- **Tracking work** → `ygg task create \"...\" --kind <task|bug|feature|chore|epic> --priority <0-4>` (0=critical, 4=backlog; NOT \"high\"/\"medium\"/\"low\"). `ygg task claim <ref>` to take one; `ygg task close <ref>` when done.");
     println!("- **Persistent memory** → `ygg remember \"...\"` for durable notes the similarity retriever should surface in future sessions.");
     println!("- **Before editing a shared resource** another agent might touch → `ygg lock acquire <key>`. Release when done.");
     println!("- **For parallel work** that warrants its own context window → `ygg spawn --task \"...\"` instead of the native Task/Agent tool.");
