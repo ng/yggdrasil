@@ -65,30 +65,34 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
 
     let mut segments: Vec<String> = Vec::new();
 
-    // Context % + bar glyph based on pressure tier
+    // Context usage — always labelled so it's not confusable with cache %.
     let bar_color = if pct >= 90 { YELL } else if pct >= 75 { CYAN } else { GREEN };
-    segments.push(format!("{bar_color}▊{RESET} {BOLD}{pct:>3}%{RESET}"));
+    segments.push(format!(
+        "{bar_color}▊{RESET} {DIM}ctx{RESET} {BOLD}{pct}%{RESET}"
+    ));
 
-    // Token usage
+    // Tokens: e.g. "9.3K tok"
     if tok_total > 0 {
-        segments.push(format!("{}", format_tokens(tok_total)));
+        segments.push(format_tokens(tok_total));
     }
 
-    // Session cost — always 2 dp
+    // Session cost — 2dp.
     if cost_usd > 0.0 {
         segments.push(format!("${:.2}", cost_usd));
     }
 
-    // Cache hit rate (24h rolling) — shows the system is working
+    // Cache — "hit rate is 1%" is misleading when you've got 3 hits out of
+    // ~217 embed calls because the pool is fresh. Show absolute "X of Y
+    // cached" instead; the ratio is implicit and the units are meaningful.
     let cache_total = cache_hits + embed_calls;
     if cache_total > 0 {
-        let rate = cache_hits as f64 / cache_total as f64 * 100.0;
         segments.push(format!(
-            "{GREEN}cache {rate:>2.0}%{RESET} {DIM}({cache_hits} saved){RESET}"
+            "{GREEN}cache {cache_hits}/{cache_total}{RESET}"
         ));
     }
 
-    // Similarity hits today — "Yggdrasil actually surfaced N memories for you"
+    // Similarity hits in the last 24h — tagged so a quick glance says
+    // "Yggdrasil recalled 276 things for me today."
     if hits_today > 0 {
         segments.push(format!("{DIM}{hits_today} recalls/24h{RESET}"));
     }
