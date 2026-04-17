@@ -100,6 +100,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::ClassifierDecision => (CYAN,  "⚖"),
         EventKind::ScoringDecision  => (GRAY,  "·"),
         EventKind::RedactionApplied => (RED,   "✂"),
+        EventKind::HitReferenced    => (GREEN, "✓"),
     }
 }
 
@@ -216,6 +217,11 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
                 .map(|o| o.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" "))
                 .unwrap_or_default();
             format!("{RED}{total} redacted{RESET} {DIM}in {node_kind} · {kinds}{RESET}")
+        }
+        EventKind::HitReferenced => {
+            let overlap = p["overlap"].as_f64().unwrap_or(0.0);
+            let method = p["method"].as_str().unwrap_or("");
+            format!("{GREEN}referenced{RESET} {DIM}overlap={overlap:.2} method={method}{RESET}")
         }
     }
 }

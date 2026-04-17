@@ -21,6 +21,7 @@ pub enum EventKind {
     ClassifierDecision,
     ScoringDecision,
     RedactionApplied,
+    HitReferenced,
 }
 
 impl EventKind {
@@ -41,6 +42,7 @@ impl EventKind {
             Self::ClassifierDecision => "classifier",
             Self::ScoringDecision => "scoring",
             Self::RedactionApplied => "redacted",
+            Self::HitReferenced => "referenced",
         }
     }
 }

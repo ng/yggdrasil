@@ -31,6 +31,15 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
         println!("    avg score of kept hits .......... {:.2}", score_sum / score_n as f64);
     }
 
+    // Reference rate — the real "did it help?" number
+    let referenced = count_events(pool, since, "hit_referenced").await?;
+    if hits > 0 && referenced > 0 {
+        let rate = referenced as f64 / hits as f64 * 100.0;
+        println!("    referenced by next turn ......... {GREEN}{referenced}/{hits} ({rate:.0}%){RESET}");
+    } else if hits > 0 {
+        println!("    referenced by next turn ......... {DIM}0/{hits} (0%) — digest hasn't scored yet{RESET}");
+    }
+
     let (kept, dropped) = scoring_stats(pool, since).await?;
     println!("    scoring: kept / dropped ......... {kept} / {dropped}");
     if let Some(breakdown) = drop_reason_breakdown(pool, since).await? {

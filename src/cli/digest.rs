@@ -116,6 +116,21 @@ pub async fn execute(
 
     agent_repo.update_head(agent.agent_id, node.id, agent.context_tokens).await?;
 
+    // Score retrieval references — pair similarity_hit events with the
+    // assistant turns that followed them, emit hit_referenced events for
+    // overlaps ≥ threshold. Batch, idempotent. yggdrasil-20.
+    match crate::references::score_references(pool, agent.agent_id, agent_name, transcript_path).await {
+        Ok(r) if r.scored > 0 => {
+            info!(
+                "digest: references scored {} pairs, {} referenced ({:.0}%)",
+                r.scored, r.referenced,
+                r.referenced as f64 / r.scored as f64 * 100.0
+            );
+        }
+        Ok(_) => {}
+        Err(e) => warn!("digest: reference scoring failed: {e}"),
+    }
+
     // Emit events
     let _ = event_repo.emit(
         EventKind::DigestWritten,
