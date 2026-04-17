@@ -10,23 +10,11 @@ use sqlx::PgPool;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::cli::task_cmd::resolve_cwd_repo;
+use crate::models::repo::{Repo, RepoRepo};
 use crate::models::task::{Task, TaskKind, TaskRepo, TaskStatus};
-
-/// If no tasks in this repo, we fall back to recent conversation nodes
-/// for the agent that matches the current cwd — otherwise the DAG pane
-/// would be useless in every repo that hasn't created a task yet.
-pub enum FallbackRow {
-    Convo {
-        kind: String,
-        snippet: String,
-        age_secs: i64,
-    },
-}
 
 pub struct DagView {
     pub rows: Vec<RenderRow>,
-    pub fallback: Vec<FallbackRow>,
     pub state: ListState,
     pub repo_name: String,
     /// What happened on the last refresh. Shown in the empty-state so it
@@ -35,18 +23,22 @@ pub struct DagView {
     pub last_status: String,
 }
 
-pub struct RenderRow {
-    pub task: Task,
-    pub depth: usize,
-    pub is_root: bool,
-    pub n_children: usize,
+pub enum RenderRow {
+    RepoHeader { prefix: String, name: String, open_count: usize },
+    Task {
+        task: Task,
+        prefix: String,
+        depth: usize,
+        is_root: bool,
+        n_children: usize,
+    },
 }
 
 impl DagView {
     pub fn new() -> Self {
         let mut st = ListState::default();
         st.select(Some(0));
-        Self { rows: vec![], fallback: vec![], state: st, repo_name: String::new(),
+        Self { rows: vec![], state: st, repo_name: String::new(),
             last_status: String::new() }
     }
 
@@ -67,229 +59,196 @@ impl DagView {
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
-        let repo = match resolve_cwd_repo(pool).await {
-            Ok(r) => r,
-            Err(e) => {
-                self.rows.clear();
-                self.fallback.clear();
-                self.repo_name = "?".into();
-                self.last_status = format!("could not resolve repo: {e}");
-                return Ok(());
-            }
-        };
-        self.repo_name = format!("{} ({})", repo.name, repo.task_prefix);
-        self.last_status = String::new();
+        // Whole-system view: show all open tasks across every repo, grouped
+        // by repo header. Deliberately NOT cwd-scoped — the TUI is a
+        // cross-project dashboard; the CLI `ygg task ready` is the
+        // in-repo quick view.
+        self.repo_name.clear();
+        self.last_status.clear();
 
-        // All non-closed tasks in this repo.
-        let all = TaskRepo::new(pool).list(Some(repo.repo_id), None).await.unwrap_or_default();
-        let open: Vec<Task> = all.into_iter()
+        let repos = RepoRepo::new(pool).list().await.unwrap_or_default();
+
+        // All open tasks across every repo, keyed by repo_id.
+        let all_open: Vec<Task> = TaskRepo::new(pool).list(None, None).await
+            .unwrap_or_default()
+            .into_iter()
             .filter(|t| t.status != TaskStatus::Closed)
             .collect();
 
-        // Pull dependency edges in one query: for each task, which tasks does
-        // IT depend on (blockers). Build parent→children as "this task is a
-        // child OF its blockers" so roots are tasks with no blockers.
-        let task_ids: Vec<Uuid> = open.iter().map(|t| t.task_id).collect();
-        let edges: Vec<(Uuid, Uuid)> = if task_ids.is_empty() {
-            vec![]
-        } else {
-            sqlx::query_as::<_, (Uuid, Uuid)>(
-                "SELECT task_id, blocker_id FROM task_deps
-                 WHERE task_id = ANY($1) OR blocker_id = ANY($1)"
-            )
-            .bind(&task_ids)
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default()
-        };
-
-        // blocker_id → [task_id, ...]  (the blocker's "children" in tree terms)
-        let mut children_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        // task_id → [blocker_id, ...]
-        let mut blockers_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        for (task, blocker) in &edges {
-            children_of.entry(*blocker).or_default().push(*task);
-            blockers_of.entry(*task).or_default().push(*blocker);
-        }
-
-        // Tasks keyed by id for O(1) lookup during walk.
-        let by_id: BTreeMap<Uuid, &Task> = open.iter().map(|t| (t.task_id, t)).collect();
-
-        // Roots: anything that is an epic OR has no unclosed blocker.
-        // Epics live as roots even if they have no deps (they bundle work).
-        let mut roots: Vec<&Task> = open.iter()
-            .filter(|t| {
-                let no_blockers = blockers_of.get(&t.task_id)
-                    .map(|bs| bs.iter().all(|b| !by_id.contains_key(b)))
-                    .unwrap_or(true);
-                matches!(t.kind, TaskKind::Epic) || no_blockers
-            })
-            .collect();
-        roots.sort_by_key(|t| (t.priority, t.seq));
-
-        // DFS from each root, emitting RenderRows. Cycle-safe via visited set.
-        let mut rows: Vec<RenderRow> = Vec::new();
-        let mut visited: HashSet<Uuid> = HashSet::new();
-        for r in &roots {
-            walk(
-                r.task_id, 0, true, &children_of, &by_id, &mut visited, &mut rows,
+        if all_open.is_empty() {
+            self.rows.clear();
+            self.last_status = format!(
+                "no open tasks in any of {} registered repo(s)", repos.len()
             );
+            self.state.select(None);
+            return Ok(());
         }
 
-        // Any task we never visited (cycle orphans etc.) — still show them so
-        // nothing goes missing.
-        for t in &open {
-            if !visited.contains(&t.task_id) {
-                let n_children = children_of.get(&t.task_id).map(|v| v.len()).unwrap_or(0);
-                rows.push(RenderRow { task: t.clone(), depth: 0, is_root: true, n_children });
-                visited.insert(t.task_id);
+        // Bucket by repo.
+        let mut by_repo: HashMap<Uuid, Vec<Task>> = HashMap::new();
+        for t in all_open {
+            by_repo.entry(t.repo_id).or_default().push(t);
+        }
+
+        // Preload all dep edges for all open tasks in one query.
+        let every_id: Vec<Uuid> = by_repo.values().flat_map(|v| v.iter().map(|t| t.task_id)).collect();
+        let edges: Vec<(Uuid, Uuid)> = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT task_id, blocker_id FROM task_deps
+             WHERE task_id = ANY($1) OR blocker_id = ANY($1)"
+        )
+        .bind(&every_id)
+        .fetch_all(pool).await.unwrap_or_default();
+        let mut children_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        let mut blockers_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for (t, b) in &edges {
+            children_of.entry(*b).or_default().push(*t);
+            blockers_of.entry(*t).or_default().push(*b);
+        }
+
+        // Stable repo order: by name asc.
+        let mut repo_order: Vec<&Repo> = repos.iter()
+            .filter(|r| by_repo.contains_key(&r.repo_id))
+            .collect();
+        repo_order.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let mut rows: Vec<RenderRow> = Vec::new();
+        for repo in repo_order {
+            let tasks = by_repo.remove(&repo.repo_id).unwrap_or_default();
+            rows.push(RenderRow::RepoHeader {
+                prefix: repo.task_prefix.clone(),
+                name: repo.name.clone(),
+                open_count: tasks.len(),
+            });
+
+            let by_id: BTreeMap<Uuid, &Task> = tasks.iter().map(|t| (t.task_id, t)).collect();
+
+            let mut roots: Vec<&Task> = tasks.iter()
+                .filter(|t| {
+                    let no_blockers = blockers_of.get(&t.task_id)
+                        .map(|bs| bs.iter().all(|b| !by_id.contains_key(b)))
+                        .unwrap_or(true);
+                    matches!(t.kind, TaskKind::Epic) || no_blockers
+                })
+                .collect();
+            roots.sort_by_key(|t| (t.priority, t.seq));
+
+            let mut visited: HashSet<Uuid> = HashSet::new();
+            for r in &roots {
+                walk(
+                    r.task_id, 0, &repo.task_prefix, &children_of, &by_id,
+                    &mut visited, &mut rows,
+                );
+            }
+            // Cycle orphans and anything we missed.
+            for t in &tasks {
+                if !visited.contains(&t.task_id) {
+                    let n_children = children_of.get(&t.task_id).map(|v| v.len()).unwrap_or(0);
+                    rows.push(RenderRow::Task {
+                        task: t.clone(),
+                        prefix: repo.task_prefix.clone(),
+                        depth: 0,
+                        is_root: true,
+                        n_children,
+                    });
+                    visited.insert(t.task_id);
+                }
             }
         }
 
         self.rows = rows;
 
-        // Fallback — if this repo has no tasks yet, show the last 30 conversation
-        // nodes for the agent matching this repo name. Keeps the pane useful
-        // even when the user hasn't created any tasks yet.
-        self.fallback.clear();
         if self.rows.is_empty() {
-            let agent_name = repo.name.clone();
-            let convo: Vec<(String, serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-                r#"SELECT n.kind::text, n.content, n.created_at
-                   FROM nodes n JOIN agents a ON a.agent_id = n.agent_id
-                   WHERE a.agent_name = $1
-                   ORDER BY n.created_at DESC LIMIT 30"#
-            ).bind(&agent_name).fetch_all(pool).await.unwrap_or_default();
-            for (kind, content, ts) in convo.into_iter().rev() {
-                let snippet = content.get("text")
-                    .or_else(|| content.get("directive"))
-                    .or_else(|| content.get("summary"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let age_secs = (chrono::Utc::now() - ts).num_seconds();
-                self.fallback.push(FallbackRow::Convo { kind, snippet, age_secs });
-            }
-        }
-
-        let visible_len = if self.rows.is_empty() { self.fallback.len() } else { self.rows.len() };
-        if visible_len == 0 {
             self.state.select(None);
-        } else if self.state.selected().unwrap_or(0) >= visible_len {
+        } else if self.state.selected().unwrap_or(0) >= self.rows.len() {
             self.state.select(Some(0));
         }
         Ok(())
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(
-            " Task graph — {}  ({} open, epics at top)  ",
-            self.repo_name, self.rows.len()
-        );
+        let title = format!(" Task graph — {} open across all repos ", self.rows.iter()
+            .filter(|r| matches!(r, RenderRow::Task { .. })).count());
 
         if self.rows.is_empty() {
-            // Fallback: recent conversation nodes for this repo's agent.
-            if self.fallback.is_empty() {
-                let lines: Vec<Line> = vec![
-                    Line::from(""),
-                    Line::from(format!("  repo: {}", self.repo_name)),
-                    Line::from(""),
-                    Line::from("  No tasks registered and no conversation nodes found for this agent."),
-                    Line::from(""),
-                    Line::from("  Try:"),
-                    Line::from(Span::styled("    ygg task create \"...\" --kind task --priority 2",
-                        Style::default().fg(Color::Cyan))),
-                    Line::from(Span::styled("    ygg remember \"...\"",
-                        Style::default().fg(Color::Cyan))),
-                    Line::from("  Or use Claude Code in this repo — inject will populate the DAG."),
-                    Line::from(""),
-                    if !self.last_status.is_empty() {
-                        Line::from(vec![
-                            Span::styled("  ! ", Style::default().fg(Color::Red)),
-                            Span::raw(self.last_status.clone()),
-                        ])
-                    } else { Line::from("") },
-                ];
-                let para = ratatui::widgets::Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title(title));
-                frame.render_widget(para, area);
-                return;
-            }
-            let items: Vec<ListItem> = self.fallback.iter().map(|r| {
-                let FallbackRow::Convo { kind, snippet, age_secs } = r;
-                let (color, glyph) = match kind.as_str() {
-                    "user_message"      => (Color::Cyan,    "●"),
-                    "assistant_message" => (Color::Green,   "◉"),
-                    "tool_call"         => (Color::Yellow,  "⚙"),
-                    "tool_result"       => (Color::DarkGray,"↳"),
-                    "digest"            => (Color::Magenta, "◈"),
-                    "directive"         => (Color::Blue,    "♦"),
-                    _                   => (Color::White,   "◇"),
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{glyph} {kind:<18}"), Style::default().fg(color)),
-                    Span::styled(format!(" {:>7} ago  ", human_age(*age_secs)),
-                        Style::default().fg(Color::DarkGray)),
-                    Span::raw(truncate(snippet, 80)),
-                ]))
-            }).collect();
-            let title = format!(" Conversation — {} (no tasks yet; showing recent nodes) ", self.repo_name);
-            let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .highlight_style(Style::default().bg(Color::DarkGray));
-            frame.render_stateful_widget(list, area, &mut self.state);
+            let lines: Vec<Line> = vec![
+                Line::from(""),
+                Line::from("  No open tasks in any registered repo yet."),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  Try "),
+                    Span::styled("ygg task create \"...\" --kind task --priority 2",
+                        Style::default().fg(Color::Cyan)),
+                    Span::raw(" from inside a project."),
+                ]),
+                Line::from(""),
+                if !self.last_status.is_empty() {
+                    Line::from(vec![
+                        Span::styled("  · ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(self.last_status.clone(), Style::default().fg(Color::DarkGray)),
+                    ])
+                } else { Line::from("") },
+            ];
+            let para = ratatui::widgets::Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title(title));
+            frame.render_widget(para, area);
             return;
         }
 
-        let items: Vec<ListItem> = self.rows.iter().map(|r| {
-            let t = &r.task;
-            let indent = "  ".repeat(r.depth);
-            let connector = if r.depth == 0 { "" } else { "└─ " };
+        let items: Vec<ListItem> = self.rows.iter().map(|r| match r {
+            RenderRow::RepoHeader { prefix, name, open_count } => {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("  ▸ {name}"),
+                        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("  ({prefix}, {open_count} open)"),
+                        Style::default().fg(Color::DarkGray)),
+                ]))
+            }
+            RenderRow::Task { task: t, prefix, depth, is_root: _, n_children } => {
+                let indent = "  ".repeat(depth + 1);
+                let connector = if *depth == 0 { "" } else { "└─ " };
 
-            // Kind + glyph
-            let (kind_color, kind_glyph) = match t.kind {
-                TaskKind::Epic    => (Color::Magenta, "◉"),
-                TaskKind::Feature => (Color::Cyan,    "✚"),
-                TaskKind::Bug     => (Color::Red,     "✗"),
-                TaskKind::Chore   => (Color::DarkGray,"·"),
-                TaskKind::Task    => (Color::White,   "○"),
-            };
+                let (kind_color, kind_glyph) = match t.kind {
+                    TaskKind::Epic    => (Color::Magenta, "◉"),
+                    TaskKind::Feature => (Color::Cyan,    "✚"),
+                    TaskKind::Bug     => (Color::Red,     "✗"),
+                    TaskKind::Chore   => (Color::DarkGray,"·"),
+                    TaskKind::Task    => (Color::White,   "○"),
+                };
 
-            // Status
-            let (status_color, status_label) = match t.status {
-                TaskStatus::Open        => (Color::Gray,    "open"),
-                TaskStatus::InProgress  => (Color::Yellow,  "wip "),
-                TaskStatus::Blocked     => (Color::Red,     "blkd"),
-                TaskStatus::Closed      => (Color::DarkGray,"done"),
-            };
+                let (status_color, status_label) = match t.status {
+                    TaskStatus::Open        => (Color::Gray,    "open"),
+                    TaskStatus::InProgress  => (Color::Yellow,  "wip "),
+                    TaskStatus::Blocked     => (Color::Red,     "blkd"),
+                    TaskStatus::Closed      => (Color::DarkGray,"done"),
+                };
 
-            // Prio color
-            let prio_style = match t.priority {
-                0 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                1 => Style::default().fg(Color::Yellow),
-                2 => Style::default().fg(Color::White),
-                _ => Style::default().fg(Color::DarkGray),
-            };
+                let prio_style = match t.priority {
+                    0 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    1 => Style::default().fg(Color::Yellow),
+                    2 => Style::default().fg(Color::White),
+                    _ => Style::default().fg(Color::DarkGray),
+                };
 
-            let children_badge = if r.n_children > 0 {
-                format!(" {}↓", r.n_children)
-            } else { String::new() };
+                let children_badge = if *n_children > 0 {
+                    format!(" {}↓", n_children)
+                } else { String::new() };
 
-            let id = format!("-{}", t.seq);
+                let id = format!("{}-{}", prefix, t.seq);
 
-            ListItem::new(Line::from(vec![
-                Span::raw(indent),
-                Span::raw(connector),
-                Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
-                Span::styled(status_label, Style::default().fg(status_color)),
-                Span::raw(" "),
-                Span::styled(format!("P{}", t.priority), prio_style),
-                Span::raw(" "),
-                Span::styled(id, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::raw(truncate(&t.title, 70)),
-                Span::styled(children_badge, Style::default().fg(Color::Cyan)),
-            ]))
+                ListItem::new(Line::from(vec![
+                    Span::raw(indent),
+                    Span::raw(connector),
+                    Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
+                    Span::styled(status_label, Style::default().fg(status_color)),
+                    Span::raw(" "),
+                    Span::styled(format!("P{}", t.priority), prio_style),
+                    Span::raw(" "),
+                    Span::styled(id, Style::default().fg(Color::DarkGray)),
+                    Span::raw("  "),
+                    Span::raw(truncate(&t.title, 70)),
+                    Span::styled(children_badge, Style::default().fg(Color::Cyan)),
+                ]))
+            }
         }).collect();
 
         let list = List::new(items)
@@ -302,7 +261,7 @@ impl DagView {
 fn walk(
     id: Uuid,
     depth: usize,
-    is_root: bool,
+    prefix: &str,
     children_of: &HashMap<Uuid, Vec<Uuid>>,
     by_id: &BTreeMap<Uuid, &Task>,
     visited: &mut HashSet<Uuid>,
@@ -313,14 +272,19 @@ fn walk(
     let children = children_of.get(&id).cloned().unwrap_or_default();
     let n_children = children.iter().filter(|c| by_id.contains_key(c)).count();
 
-    rows.push(RenderRow { task: task.clone(), depth, is_root, n_children });
+    rows.push(RenderRow::Task {
+        task: task.clone(),
+        prefix: prefix.to_string(),
+        depth,
+        is_root: depth == 0,
+        n_children,
+    });
 
-    // Sort children by priority then seq for stable rendering.
     let mut sorted: Vec<&Uuid> = children.iter().filter(|c| by_id.contains_key(c)).collect();
     sorted.sort_by_key(|c| by_id.get(c).map(|t| (t.priority, t.seq)));
 
     for child in sorted {
-        walk(*child, depth + 1, false, children_of, by_id, visited, rows);
+        walk(*child, depth + 1, prefix, children_of, by_id, visited, rows);
     }
 }
 
@@ -330,9 +294,3 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
-fn human_age(secs: i64) -> String {
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else { format!("{}d", secs / 86400) }
-}
