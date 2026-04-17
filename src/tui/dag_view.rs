@@ -29,6 +29,10 @@ pub struct DagView {
     pub fallback: Vec<FallbackRow>,
     pub state: ListState,
     pub repo_name: String,
+    /// What happened on the last refresh. Shown in the empty-state so it
+    /// is obvious whether we have an error, a registered repo with no
+    /// tasks, or a fallback with no conversation either.
+    pub last_status: String,
 }
 
 pub struct RenderRow {
@@ -42,7 +46,8 @@ impl DagView {
     pub fn new() -> Self {
         let mut st = ListState::default();
         st.select(Some(0));
-        Self { rows: vec![], fallback: vec![], state: st, repo_name: String::new() }
+        Self { rows: vec![], fallback: vec![], state: st, repo_name: String::new(),
+            last_status: String::new() }
     }
 
     // Kept for compatibility with existing app.rs entry — a no-op here
@@ -64,9 +69,16 @@ impl DagView {
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
         let repo = match resolve_cwd_repo(pool).await {
             Ok(r) => r,
-            Err(_) => { self.rows.clear(); self.repo_name = "?".into(); return Ok(()); }
+            Err(e) => {
+                self.rows.clear();
+                self.fallback.clear();
+                self.repo_name = "?".into();
+                self.last_status = format!("could not resolve repo: {e}");
+                return Ok(());
+            }
         };
         self.repo_name = format!("{} ({})", repo.name, repo.task_prefix);
+        self.last_status = String::new();
 
         // All non-closed tasks in this repo.
         let all = TaskRepo::new(pool).list(Some(repo.repo_id), None).await.unwrap_or_default();
@@ -178,11 +190,29 @@ impl DagView {
         if self.rows.is_empty() {
             // Fallback: recent conversation nodes for this repo's agent.
             if self.fallback.is_empty() {
-                let list = List::new(vec![ListItem::new(
-                    "No tasks and no conversation yet. Try `ygg task create` or use Claude Code in this repo."
-                )])
-                .block(Block::default().borders(Borders::ALL).title(title));
-                frame.render_widget(list, area);
+                let lines: Vec<Line> = vec![
+                    Line::from(""),
+                    Line::from(format!("  repo: {}", self.repo_name)),
+                    Line::from(""),
+                    Line::from("  No tasks registered and no conversation nodes found for this agent."),
+                    Line::from(""),
+                    Line::from("  Try:"),
+                    Line::from(Span::styled("    ygg task create \"...\" --kind task --priority 2",
+                        Style::default().fg(Color::Cyan))),
+                    Line::from(Span::styled("    ygg remember \"...\"",
+                        Style::default().fg(Color::Cyan))),
+                    Line::from("  Or use Claude Code in this repo — inject will populate the DAG."),
+                    Line::from(""),
+                    if !self.last_status.is_empty() {
+                        Line::from(vec![
+                            Span::styled("  ! ", Style::default().fg(Color::Red)),
+                            Span::raw(self.last_status.clone()),
+                        ])
+                    } else { Line::from("") },
+                ];
+                let para = ratatui::widgets::Paragraph::new(lines)
+                    .block(Block::default().borders(Borders::ALL).title(title));
+                frame.render_widget(para, area);
                 return;
             }
             let items: Vec<ListItem> = self.fallback.iter().map(|r| {

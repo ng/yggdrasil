@@ -160,11 +160,21 @@ impl DashboardView {
     }
 
     fn render_pulse(&self, frame: &mut Frame, area: Rect) {
-        // Split: left = numeric snapshot, right = prompts sparkline
+        // Split: left = prompts sparkline (visual trend first), right = numeric snapshot
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(area);
+
+        // Sparkline on the left
+        let max = *self.prompts_hourly.iter().max().unwrap_or(&1);
+        let spark = Sparkline::default()
+            .block(Block::default().borders(Borders::ALL)
+                .title(format!(" Prompts / hour — 24h  ·  peak {}  ·  ← old · now → ", max)))
+            .data(&self.prompts_hourly)
+            .max(max.max(1))
+            .style(Style::default().fg(Color::Cyan));
+        frame.render_widget(spark, cols[0]);
 
         let cache_rate = if self.cache_total_24h > 0 {
             (self.cache_hits_24h as f64 / self.cache_total_24h as f64 * 100.0) as i64
@@ -199,17 +209,7 @@ impl DashboardView {
         ];
         let pulse = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" System pulse "));
-        frame.render_widget(pulse, cols[0]);
-
-        // Sparkline for prompts/hour
-        let max = *self.prompts_hourly.iter().max().unwrap_or(&1);
-        let spark = Sparkline::default()
-            .block(Block::default().borders(Borders::ALL)
-                .title(format!(" Prompts / hour — 24h (peak {}) ", max)))
-            .data(&self.prompts_hourly)
-            .max(max.max(1))
-            .style(Style::default().fg(Color::Cyan));
-        frame.render_widget(spark, cols[1]);
+        frame.render_widget(pulse, cols[1]);
     }
 
     fn render_agents_table(&self, frame: &mut Frame, area: Rect) {
@@ -226,12 +226,18 @@ impl DashboardView {
                 Style::default().bg(Color::DarkGray)
             } else { Style::default() };
 
-            let state_color = match agent.current_state {
-                crate::models::agent::AgentState::Executing => Color::Green,
-                crate::models::agent::AgentState::Idle => Color::Gray,
-                crate::models::agent::AgentState::HumanOverride => Color::Yellow,
-                crate::models::agent::AgentState::Error => Color::Red,
-                _ => Color::White,
+            // Humanize: the enum names read like internals ("context_flush")
+            // but most of them map to an intuitive one-word label.
+            let (state_label, state_color): (&str, Color) = match agent.current_state {
+                crate::models::agent::AgentState::Idle           => ("idle",      Color::Gray),
+                crate::models::agent::AgentState::Planning       => ("planning",  Color::Cyan),
+                crate::models::agent::AgentState::Executing      => ("working",   Color::Green),
+                crate::models::agent::AgentState::WaitingTool    => ("tool",      Color::Yellow),
+                crate::models::agent::AgentState::ContextFlush   => ("digesting", Color::Magenta),
+                crate::models::agent::AgentState::HumanOverride  => ("paused",    Color::Yellow),
+                crate::models::agent::AgentState::Mediation      => ("mediating", Color::Cyan),
+                crate::models::agent::AgentState::Error          => ("error",     Color::Red),
+                crate::models::agent::AgentState::Shutdown       => ("shutdown",  Color::DarkGray),
             };
 
             // Pressure comes from the TRANSCRIPT file size, not our
@@ -240,20 +246,25 @@ impl DashboardView {
             // is findable for this agent.
             let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
-            let pressure_bar = match agent_pressure_tokens(&agent.agent_name) {
+            let (pressure_bar, pressure_color) = match agent_pressure_tokens(&agent.agent_name) {
                 Some(tokens) if limit > 0 => {
                     let pct = ((tokens as f64 / limit as f64) * 100.0).min(999.0) as u32;
                     let blocks = (pct / 10).min(10) as usize;
-                    format!("{}{} {}% ({}K)",
-                        "█".repeat(blocks), "░".repeat(10 - blocks), pct, tokens / 1000)
+                    let color = if pct >= 90 { Color::Red }
+                                else if pct >= 75 { Color::Yellow }
+                                else if pct >= 50 { Color::Cyan }
+                                else { Color::Green };
+                    (format!("{}{} {}% ({}K)",
+                        "█".repeat(blocks), "░".repeat(10 - blocks), pct, tokens / 1000),
+                     color)
                 }
-                _ => "—".to_string(),
+                _ => ("—".to_string(), Color::DarkGray),
             };
 
             Row::new(vec![
                 Cell::from(agent.agent_name.clone()),
-                Cell::from(agent.current_state.to_string()).style(Style::default().fg(state_color)),
-                Cell::from(pressure_bar),
+                Cell::from(state_label).style(Style::default().fg(state_color)),
+                Cell::from(pressure_bar).style(Style::default().fg(pressure_color)),
                 Cell::from(
                     agent.head_node_id.map(|id| id.to_string()[..8].to_string()).unwrap_or_else(|| "—".into()),
                 ),
