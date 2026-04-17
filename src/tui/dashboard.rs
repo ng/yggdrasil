@@ -8,6 +8,43 @@ use uuid::Uuid;
 use crate::lock::LockManager;
 use crate::models::agent::{AgentRepo, AgentWorkflow};
 
+/// Rough token-window estimate from the latest Claude Code transcript for
+/// the given agent. Matches the bar/meter logic: find `~/.claude/projects/<slug>/*.jsonl`
+/// whose slug ends with the agent name, take the most-recently-modified
+/// file's size, divide by 10 bytes-per-token. Returns None if no
+/// transcript is found (agent is a DB-only row — e.g. we saw it once but
+/// CC hasn't had a session for it).
+fn agent_pressure_tokens(agent_name: &str) -> Option<i64> {
+    let home = std::env::var("HOME").ok()?;
+    let projects = std::path::PathBuf::from(&home).join(".claude/projects");
+    if !projects.exists() { return None; }
+    let entries = std::fs::read_dir(&projects).ok()?;
+    // We look for a directory whose name ends with the agent slug. CC munges
+    // absolute paths into `-Users-ng-…-<agent_name>`, so the suffix match
+    // is safe.
+    let needle = format!("-{agent_name}");
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
+        if !name.ends_with(&needle) { continue; }
+        let Ok(inner) = std::fs::read_dir(entry.path()) else { continue };
+        for f in inner.flatten() {
+            if f.path().extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+            let mt = f.metadata().ok().and_then(|m| m.modified().ok());
+            if let Some(t) = mt {
+                match &best {
+                    None => best = Some((t, f.path())),
+                    Some((bt, _)) if t > *bt => best = Some((t, f.path())),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let (_, path) = best?;
+    let bytes = std::fs::metadata(&path).ok()?.len() as i64;
+    Some(bytes / 10)
+}
+
 /// Dashboard view — system pulse at top, agents in the middle,
 /// meaningful locks table at bottom.
 pub struct DashboardView {
@@ -197,17 +234,21 @@ impl DashboardView {
                 _ => Color::White,
             };
 
-            let pressure_pct = if agent.context_tokens > 0 {
-                (agent.context_tokens as f64 / 250000.0 * 100.0).min(999.0) as u32
-            } else { 0 };
-
-            let blocks = (pressure_pct / 10).min(10) as usize;
-            let pressure_bar = format!(
-                "{}{} {}%",
-                "█".repeat(blocks),
-                "░".repeat(10 - blocks),
-                pressure_pct,
-            );
+            // Pressure comes from the TRANSCRIPT file size, not our
+            // agents.context_tokens counter (which only reflects nodes WE
+            // write and drifts badly). Falls through to — if no transcript
+            // is findable for this agent.
+            let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+            let pressure_bar = match agent_pressure_tokens(&agent.agent_name) {
+                Some(tokens) if limit > 0 => {
+                    let pct = ((tokens as f64 / limit as f64) * 100.0).min(999.0) as u32;
+                    let blocks = (pct / 10).min(10) as usize;
+                    format!("{}{} {}% ({}K)",
+                        "█".repeat(blocks), "░".repeat(10 - blocks), pct, tokens / 1000)
+                }
+                _ => "—".to_string(),
+            };
 
             Row::new(vec![
                 Cell::from(agent.agent_name.clone()),

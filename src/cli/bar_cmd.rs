@@ -171,11 +171,13 @@ fn token_count(j: &serde_json::Value) -> Option<i64> {
 }
 
 fn format_tokens(n: i64) -> String {
-    // Return just the magnitude; the caller wraps with the dim "tok" label.
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
+    // Always K up to 10M (900K ≠ 1M is a big deal); M only when the
+    // thousands digit stops carrying useful information. No decimal — we
+    // want to see the thousands place, not lose it to rounding.
+    if n >= 10_000_000 {
+        format!("{}M", n / 1_000_000)
     } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
+        format!("{}K", n / 1_000)
     } else {
         format!("{n}")
     }

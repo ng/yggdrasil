@@ -273,8 +273,9 @@ async fn hourly_series(pool: &PgPool, predicate: &str) -> Vec<u64> {
 }
 
 fn format_tokens(n: i64) -> String {
-    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
-    else if n >= 1_000 { format!("{:.1}K", n as f64 / 1_000.0) }
+    // Always K up to 10M — don't collapse 900K into 0.9M.
+    if n >= 10_000_000 { format!("{}M", n / 1_000_000) }
+    else if n >= 1_000 { format!("{}K", n / 1_000) }
     else { format!("{n}") }
 }
 
