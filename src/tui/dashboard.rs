@@ -11,20 +11,15 @@ use crate::models::agent::{AgentRepo, AgentWorkflow};
 
 const PRESSURE_TTL: Duration = Duration::from_secs(5);
 
-/// Rough token-window estimate from the latest Claude Code transcript for
-/// the given agent. Matches the bar/meter logic: find `~/.claude/projects/<slug>/*.jsonl`
-/// whose slug ends with the agent name, take the most-recently-modified
-/// file's size, divide by 10 bytes-per-token. Returns None if no
-/// transcript is found (agent is a DB-only row — e.g. we saw it once but
-/// CC hasn't had a session for it).
+/// Actual context-window tokens for the given agent, extracted from the
+/// latest `usage` block in its Claude Code transcript. This is the same
+/// number CC's own status line shows: cache_read + cache_creation + output.
+/// Falls back to a file-size estimate only if no usage block is found.
 fn agent_pressure_tokens(agent_name: &str) -> Option<i64> {
     let home = std::env::var("HOME").ok()?;
     let projects = std::path::PathBuf::from(&home).join(".claude/projects");
     if !projects.exists() { return None; }
     let entries = std::fs::read_dir(&projects).ok()?;
-    // We look for a directory whose name ends with the agent slug. CC munges
-    // absolute paths into `-Users-ng-…-<agent_name>`, so the suffix match
-    // is safe.
     let needle = format!("-{agent_name}");
     let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     for entry in entries.flatten() {
@@ -44,8 +39,45 @@ fn agent_pressure_tokens(agent_name: &str) -> Option<i64> {
         }
     }
     let (_, path) = best?;
+
+    if let Some(tokens) = parse_last_usage_tokens(&path) {
+        return Some(tokens);
+    }
+    // Only fall back if we couldn't find any usage entry — 30 bytes/token
+    // is closer to reality for JSONL than the old 10 (those were 5-6x high).
     let bytes = std::fs::metadata(&path).ok()?.len() as i64;
-    Some(bytes / 10)
+    Some(bytes / 30)
+}
+
+/// Walk the JSONL from end to start looking for the last `usage` object
+/// and sum the fields that count against the context window.
+fn parse_last_usage_tokens(path: &std::path::Path) -> Option<i64> {
+    // Read the last 200KB — usage blocks are always near the tail, and we
+    // avoid reading multi-MB transcripts in full on every refresh.
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let tail_start = len.saturating_sub(200_000);
+    file.seek(SeekFrom::Start(tail_start)).ok()?;
+    let mut buf = String::new();
+    file.take(200_000).read_to_string(&mut buf).ok()?;
+
+    // Scan lines in reverse order for the first JSON with a usable usage block.
+    for line in buf.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        // Usage can appear nested under message.usage (assistant entries) or
+        // at the top level, depending on the record shape.
+        let usage = v.pointer("/message/usage")
+            .or_else(|| v.pointer("/usage"));
+        let Some(u) = usage else { continue };
+        let cr = u.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let cc = u.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let inp = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let out = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let total = cr + cc + inp + out;
+        if total > 0 { return Some(total); }
+    }
+    None
 }
 
 /// Dashboard view — system pulse at top, agents in the middle,
@@ -65,6 +97,8 @@ pub struct DashboardView {
     redactions_24h: i64,
     prompts_hourly: Vec<u64>,                 // global, last 24h, oldest→newest
     per_agent_hourly: HashMap<Uuid, [u64; 24]>, // per agent, last 24h
+    recent_transitions: Vec<(chrono::DateTime<chrono::Utc>, String, String, String, Option<String>)>,
+    // (ts, agent_name, from_state, to_state, tool)
 
     /// Transcript-file-size pressure cache. Reading ~/.claude/projects on
     /// every 500ms render is expensive; cache per-agent for PRESSURE_TTL.
@@ -80,6 +114,7 @@ impl DashboardView {
             cache_hits_24h: 0, cache_total_24h: 0, redactions_24h: 0,
             prompts_hourly: vec![0; 24],
             per_agent_hourly: HashMap::new(),
+            recent_transitions: Vec::new(),
             pressure_cache: HashMap::new(),
         }
     }
@@ -165,6 +200,20 @@ impl DashboardView {
             entry[idx] = n as u64;
         }
 
+        // Last 5 agent state transitions for the timeline widget.
+        let trans: Vec<(chrono::DateTime<chrono::Utc>, String, serde_json::Value)> =
+            sqlx::query_as(
+                "SELECT created_at, agent_name, payload FROM events
+                 WHERE event_kind = 'agent_state_changed'
+                 ORDER BY created_at DESC LIMIT 5"
+            ).fetch_all(pool).await.unwrap_or_default();
+        self.recent_transitions = trans.into_iter().map(|(ts, name, p)| {
+            let from = p.get("from").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            let to   = p.get("to").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            let tool = p.get("tool").and_then(|v| v.as_str()).map(String::from);
+            (ts, name, from, to, tool)
+        }).collect();
+
         Ok(())
     }
 
@@ -183,13 +232,14 @@ impl DashboardView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        // Layout: alerts (top) · pulse · agents (stretch) · locks (bottom)
+        // Layout: alerts · pulse · agents (stretch) · transitions · locks
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),  // alerts
                 Constraint::Length(6),  // system pulse
                 Constraint::Min(8),     // agents
+                Constraint::Length(7),  // state transitions
                 Constraint::Length(10), // locks
             ])
             .split(area);
@@ -197,7 +247,39 @@ impl DashboardView {
         self.render_alerts(frame, chunks[0]);
         self.render_pulse(frame, chunks[1]);
         self.render_agents_table(frame, chunks[2]);
-        self.render_locks_table(frame, chunks[3]);
+        self.render_transitions(frame, chunks[3]);
+        self.render_locks_table(frame, chunks[4]);
+    }
+
+    fn render_transitions(&self, frame: &mut Frame, area: Rect) {
+        let lines: Vec<Line> = if self.recent_transitions.is_empty() {
+            vec![Line::from(Span::styled(
+                "  · no agent state changes yet — transitions appear here when hooks fire",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            self.recent_transitions.iter().map(|(ts, name, from, to, tool)| {
+                let t = ts.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+                let to_color = state_color(to);
+                let mut spans = vec![
+                    Span::styled(t, Style::default().fg(Color::DarkGray)),
+                    Span::raw("  "),
+                    Span::styled(name.clone(), Style::default().fg(Color::Cyan)),
+                    Span::raw("  "),
+                    Span::styled(from.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::raw(" → "),
+                    Span::styled(to.clone(), Style::default().fg(to_color).add_modifier(Modifier::BOLD)),
+                ];
+                if let Some(t) = tool {
+                    spans.push(Span::styled(format!(" ({t})"),
+                        Style::default().fg(Color::Yellow)));
+                }
+                Line::from(spans)
+            }).collect()
+        };
+        let para = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Recent state transitions "));
+        frame.render_widget(para, area);
     }
 
     fn render_alerts(&mut self, frame: &mut Frame, area: Rect) {
@@ -496,6 +578,19 @@ fn short_resource(s: &str) -> String {
 fn humanize_since(ts: chrono::DateTime<chrono::Utc>) -> String {
     let secs = (Utc::now() - ts).num_seconds().max(0);
     humanize_duration(secs) + " ago"
+}
+
+fn state_color(s: &str) -> Color {
+    match s {
+        "idle" => Color::Gray,
+        "executing" | "working" => Color::Green,
+        "waiting_tool" | "tool" => Color::Yellow,
+        "context_flush" | "digesting" => Color::Magenta,
+        "error" => Color::Red,
+        "human_override" | "paused" => Color::Yellow,
+        "planning" | "mediation" => Color::Cyan,
+        _ => Color::Gray,
+    }
 }
 
 /// Render a 24-hour series as block-char sparkline. `max` is the shared y-axis

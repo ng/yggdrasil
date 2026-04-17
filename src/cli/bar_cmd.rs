@@ -160,14 +160,39 @@ fn token_count(j: &serde_json::Value) -> Option<i64> {
         let o = j.pointer(out_p).and_then(|v| v.as_i64()).unwrap_or(0);
         if i + o > 0 { return Some(i + o); }
     }
-    // Fallback: estimate from the transcript on disk. CC reliably provides
-    // `transcript_path`. ~4 chars per token is the standard rough estimate;
-    // for a JSONL transcript with tool calls and structured content, this
-    // tends to slightly under-count real tokens but is the right order.
+    // Fallback: parse the last `usage` entry from the transcript JSONL —
+    // same signal CC's own status line uses (cache_read + cache_creation +
+    // input + output). Reads only the tail of the file.
     let transcript = j.get("transcript_path").and_then(|v| v.as_str())?;
+    if let Some(n) = last_usage_tokens_from_transcript(std::path::Path::new(transcript)) {
+        return Some(n);
+    }
+    // Very last resort: bytes / 30 is much closer to reality for JSONL than
+    // the old /8 heuristic, which was ~4x high.
     let bytes = std::fs::metadata(transcript).ok()?.len() as i64;
-    // JSONL has heavy framing; halve the naive bytes/4 to account for it.
-    Some((bytes / 8).max(0))
+    Some((bytes / 30).max(0))
+}
+
+fn last_usage_tokens_from_transcript(path: &std::path::Path) -> Option<i64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let tail_start = len.saturating_sub(200_000);
+    file.seek(SeekFrom::Start(tail_start)).ok()?;
+    let mut buf = String::new();
+    file.take(200_000).read_to_string(&mut buf).ok()?;
+    for line in buf.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let usage = v.pointer("/message/usage").or_else(|| v.pointer("/usage"));
+        let Some(u) = usage else { continue };
+        let cr = u.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let cc = u.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let inp = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let out = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let total = cr + cc + inp + out;
+        if total > 0 { return Some(total); }
+    }
+    None
 }
 
 fn format_tokens(n: i64) -> String {

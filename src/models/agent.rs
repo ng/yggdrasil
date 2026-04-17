@@ -96,7 +96,9 @@ impl<'a> AgentRepo<'a> {
 
     /// Set the agent's state unconditionally, optionally recording the tool
     /// it's waiting on. Hook-driven state updates can't guess the current
-    /// state, so they use this rather than the OCC transition().
+    /// state, so they use this rather than the OCC transition(). Emits an
+    /// `agent_state_changed` event when the state actually changes so the
+    /// dashboard timeline can render transitions.
     pub async fn force_state(
         &self,
         agent_id: Uuid,
@@ -107,20 +109,46 @@ impl<'a> AgentRepo<'a> {
             Some(t) => serde_json::json!({"last_tool": t}),
             None => serde_json::json!({"last_tool": null}),
         };
-        sqlx::query(
+        // Returns (old_state, agent_name) so we can emit a transition event.
+        let row: Option<(AgentState, String)> = sqlx::query_as(
             r#"
+            WITH prior AS (
+                SELECT current_state AS old_state, agent_name FROM agents WHERE agent_id = $1
+            )
             UPDATE agents
                SET current_state = $2::agent_state,
                    metadata = metadata || $3::jsonb,
                    updated_at = now()
              WHERE agent_id = $1
+             RETURNING (SELECT old_state FROM prior) AS old_state,
+                       (SELECT agent_name FROM prior) AS agent_name
             "#,
         )
         .bind(agent_id)
         .bind(&to)
         .bind(meta_patch)
-        .execute(self.pool)
+        .fetch_optional(self.pool)
         .await?;
+
+        // Emit only on actual change — no-op transitions aren't useful signal.
+        if let Some((old, name)) = row {
+            if old != to {
+                let payload = serde_json::json!({
+                    "from": old.to_string(),
+                    "to": to.to_string(),
+                    "tool": last_tool,
+                });
+                let _ = sqlx::query(
+                    "INSERT INTO events (event_kind, agent_id, agent_name, payload)
+                     VALUES ('agent_state_changed', $1, $2, $3)"
+                )
+                .bind(agent_id)
+                .bind(&name)
+                .bind(payload)
+                .execute(self.pool)
+                .await;
+            }
+        }
         Ok(())
     }
 

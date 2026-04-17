@@ -101,6 +101,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::ScoringDecision  => (GRAY,  "·"),
         EventKind::RedactionApplied => (RED,   "✂"),
         EventKind::HitReferenced    => (GREEN, "✓"),
+        EventKind::AgentStateChanged => (BLUE, "↪"),
     }
 }
 
@@ -222,6 +223,13 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let overlap = p["overlap"].as_f64().unwrap_or(0.0);
             let method = p["method"].as_str().unwrap_or("");
             format!("{GREEN}referenced{RESET} {DIM}overlap={overlap:.2} method={method}{RESET}")
+        }
+        EventKind::AgentStateChanged => {
+            let from = p["from"].as_str().unwrap_or("?");
+            let to = p["to"].as_str().unwrap_or("?");
+            let tool = p["tool"].as_str();
+            let suffix = tool.map(|t| format!(" {DIM}({t}){RESET}")).unwrap_or_default();
+            format!("{BLUE}{from}{RESET} → {to}{suffix}")
         }
     }
 }
