@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use sqlx::PgPool;
 
 const FILTERS: &[&str] = &[
@@ -26,14 +26,17 @@ pub struct LogView {
     pub filter_idx: usize,
     pub state: ListState,
     pub limit: i64,
+    pub detail_open: bool,
 }
 
 impl LogView {
     pub fn new() -> Self {
         let mut st = ListState::default();
         st.select(Some(0));
-        Self { events: vec![], filter_idx: 0, state: st, limit: 200 }
+        Self { events: vec![], filter_idx: 0, state: st, limit: 200, detail_open: false }
     }
+
+    pub fn toggle_detail(&mut self) { self.detail_open = !self.detail_open; }
 
     pub fn filter(&self) -> &'static str { FILTERS[self.filter_idx] }
 
@@ -75,6 +78,19 @@ impl LogView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        let list_area = if self.detail_open {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(area);
+            // Render detail panel in the right half.
+            let detail_para = self.build_detail_paragraph();
+            frame.render_widget(detail_para, cols[1]);
+            cols[0]
+        } else {
+            area
+        };
+
         let items: Vec<ListItem> = self.events.iter().map(|(ts, kind, agent, p)| {
             let ts_str = ts.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
             let (color, glyph) = kind_style(kind);
@@ -82,39 +98,79 @@ impl LogView {
             ListItem::new(Line::from(vec![
                 Span::styled(ts_str, Style::default().fg(Color::DarkGray)),
                 Span::raw(" "),
-                Span::styled(format!("{glyph}{kind:<20}"), Style::default().fg(color)),
+                Span::styled(format!("{glyph} {kind:<18}"), Style::default().fg(color)),
                 Span::styled(format!(" {agent:<16}"), Style::default().fg(Color::DarkGray)),
                 Span::raw(" "),
                 Span::raw(detail),
             ]))
         }).collect();
 
-        let title = format!(" Logs — filter: [{}]  (f: cycle)  {} events ",
+        let hint = if self.detail_open { "Enter: close detail" } else { "Enter: open detail" };
+        let title = format!(" Logs — filter [{}] · {} events · f: cycle · {hint} ",
             self.filter(), self.events.len());
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(Style::default().bg(Color::DarkGray));
-        frame.render_stateful_widget(list, area, &mut self.state);
+        frame.render_stateful_widget(list, list_area, &mut self.state);
+    }
+
+    fn build_detail_paragraph(&self) -> Paragraph<'static> {
+        let Some(i) = self.state.selected() else {
+            return Paragraph::new("no event selected")
+                .block(Block::default().borders(Borders::ALL).title(" Detail "));
+        };
+        let Some((ts, kind, agent, payload)) = self.events.get(i) else {
+            return Paragraph::new("(empty)")
+                .block(Block::default().borders(Borders::ALL).title(" Detail "));
+        };
+        let local_ts = ts.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string();
+        let (color, glyph) = kind_style(kind);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled(format!("{glyph} {kind}"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("at    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(local_ts),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("agent ", Style::default().fg(Color::DarkGray)),
+            Span::raw(agent.clone()),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("payload:", Style::default().fg(Color::DarkGray))));
+        // Pretty-print JSON
+        let pretty = serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
+        for l in pretty.lines() {
+            lines.push(Line::from(l.to_string()));
+        }
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Event detail "))
+            .wrap(Wrap { trim: false })
     }
 }
 
 fn kind_style(kind: &str) -> (Color, &'static str) {
+    // Every kind gets a distinct glyph. No more bare dots.
     match kind {
-        "similarity_hit" => (Color::Cyan, "≈"),
-        "embedding_call" => (Color::Blue, "⚡"),
-        "embedding_cache_hit" => (Color::Green, "⚡"),
-        "scoring_decision" => (Color::DarkGray, "·"),
-        "classifier_decision" => (Color::Magenta, "⚖"),
-        "hit_referenced" => (Color::Green, "✓"),
-        "digest_written" => (Color::Yellow, "◈"),
-        "node_written" => (Color::Green, "●"),
-        "redaction_applied" => (Color::Red, "✂"),
-        "task_created" => (Color::Green, "✚"),
-        "task_status_changed" => (Color::Yellow, "◆"),
-        "lock_acquired" => (Color::Yellow, "⚿"),
-        "lock_released" => (Color::DarkGray, "○"),
-        "remembered" => (Color::Cyan, "♦"),
-        _ => (Color::White, "·"),
+        "similarity_hit"       => (Color::Cyan,     "≈"),
+        "embedding_call"       => (Color::Blue,     "⚡"),
+        "embedding_cache_hit"  => (Color::Green,    "↻"),
+        "scoring_decision"     => (Color::Gray,     "▼"),
+        "classifier_decision"  => (Color::Magenta,  "⚖"),
+        "hit_referenced"       => (Color::Green,    "✓"),
+        "digest_written"       => (Color::Yellow,   "◈"),
+        "node_written"         => (Color::Green,    "●"),
+        "redaction_applied"    => (Color::Red,      "✂"),
+        "task_created"         => (Color::Green,    "✚"),
+        "task_status_changed"  => (Color::Yellow,   "◆"),
+        "lock_acquired"        => (Color::Yellow,   "⚿"),
+        "lock_released"        => (Color::DarkGray, "○"),
+        "remembered"           => (Color::Cyan,     "♦"),
+        "hook_fired"           => (Color::Gray,     "▸"),
+        "correction_detected"  => (Color::Red,      "✗"),
+        _                      => (Color::White,    "◇"),
     }
 }
 

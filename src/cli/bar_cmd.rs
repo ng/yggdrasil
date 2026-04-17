@@ -66,25 +66,36 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
 
     let mut segments: Vec<String> = Vec::new();
 
-    // Context usage — always labelled so it's not confusable with cache %.
-    let bar_color = if pct >= 90 { YELL } else if pct >= 75 { CYAN } else { GREEN };
+    // Context + tokens are the same dimension (how full is the window), so
+    // merge them into one segment. Color climbs neutral → yellow → red as
+    // pressure rises. The numeric part itself also gets the color so it's
+    // obvious at a glance when you're deep in the window.
+    let red = "\x1b[38;5;203m";
+    let (bar_color, value_style) = if pct >= 90 {
+        (red, format!("{red}{BOLD}"))
+    } else if pct >= 75 {
+        (YELL, format!("{YELL}{BOLD}"))
+    } else if pct >= 50 {
+        (CYAN, format!("{CYAN}{BOLD}"))
+    } else {
+        (GREEN, format!("{BOLD}"))
+    };
+    let tok_suffix = if tok_total > 0 {
+        format!(" {DIM}({}){RESET}", format_tokens(tok_total))
+    } else { String::new() };
     segments.push(format!(
-        "{bar_color}▊{RESET} {DIM}ctx{RESET} {BOLD}{pct}%{RESET}"
+        "{bar_color}▊{RESET} {DIM}ctx{RESET} {value_style}{pct}%{RESET}{tok_suffix}"
     ));
 
-    // Tokens — styled like ctx (dim label + bold value), sits next to it.
-    if tok_total > 0 {
-        segments.push(format!("{DIM}tok{RESET} {BOLD}{}{RESET}", format_tokens(tok_total)));
-    }
-
-    // Session cost — 2dp.
+    // Session cost — 2dp. Label as "spend" so it reads as verb-action.
     if cost_usd > 0.0 {
-        segments.push(format!("{DIM}cost{RESET} {BOLD}${:.2}{RESET}", cost_usd));
+        segments.push(format!("{DIM}spend{RESET} {BOLD}${:.2}{RESET}", cost_usd));
     }
 
-    // Cache — absolute "X of Y cached" with a trend arrow comparing the
-    // current 24h hit rate to the preceding 24h's rate. Rising = pool
-    // warming or workload getting more repetitive. Flat-band is ±5 pct pts.
+    // Yggdrasil metrics — label explicitly with the "ygg" prefix so it's
+    // obvious these are our numbers, not Claude Code's. 24h window on both
+    // because we don't yet plumb session_id through events — see
+    // yggdrasil-26 for the per-session upgrade.
     let cache_total = cache_hits + embed_calls;
     if cache_total > 0 {
         let rate_now = cache_hits as f64 / cache_total as f64;
@@ -92,24 +103,20 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         let trend = if prev_total >= 10 {
             let rate_prev = cache_prev as f64 / prev_total as f64;
             trend_arrow(rate_now - rate_prev, 0.05)
-        } else {
-            "" // Not enough history to make a trend claim.
-        };
+        } else { "" };
         segments.push(format!(
-            "{GREEN}cache {cache_hits}/{cache_total}{RESET}{trend}"
+            "{DIM}ygg cache{RESET} {GREEN}{cache_hits}/{cache_total}{RESET}{trend}"
         ));
     }
 
-    // Recalls (last 24h) with a trend arrow comparing to the preceding 24h.
-    // Flat-band is ±15% of the prior window count.
     if hits_today > 0 {
         let trend = if hits_prev >= 10 {
             let pct_change = (hits_today - hits_prev) as f64 / hits_prev as f64;
             trend_arrow(pct_change, 0.15)
-        } else {
-            ""
-        };
-        segments.push(format!("{DIM}{hits_today} recalls/24h{RESET}{trend}"));
+        } else { "" };
+        segments.push(format!(
+            "{DIM}ygg recalls/24h{RESET} {BOLD}{hits_today}{RESET}{trend}"
+        ));
     }
 
     println!("{}", segments.join(" · "));

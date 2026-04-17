@@ -137,14 +137,16 @@ impl App {
                 ActiveView::Logs => self.logs.scroll_down(),
                 _ => {}
             },
-            KeyCode::Enter => {
-                if self.active_view == ActiveView::Dashboard {
+            KeyCode::Enter => match self.active_view {
+                ActiveView::Dashboard => {
                     if let Some(agent_name) = self.dashboard.selected_agent() {
                         self.dag.set_agent(agent_name);
                         self.active_view = ActiveView::Dag;
                     }
                 }
-            }
+                ActiveView::Logs => self.logs.toggle_detail(),
+                _ => {}
+            },
             _ => {}
         }
     }

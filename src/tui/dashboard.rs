@@ -142,10 +142,6 @@ impl DashboardView {
                 Span::styled("agents    ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{} total · {} active", self.agents.len(), active),
                     Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("    "),
-                Span::styled("locks    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} held",  self.locks.len()),
-                    Style::default().add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
                 Span::styled("last 1h   ", Style::default().fg(Color::DarkGray)),
@@ -253,7 +249,7 @@ impl DashboardView {
                 .unwrap_or_else(|| format!("{}…", &l.agent_id.to_string()[..8]));
             let held = humanize_since(l.acquired_at);
             let ttl_secs = (l.expires_at - now).num_seconds();
-            let ttl = if ttl_secs <= 0 {
+            let (ttl_label, ttl_color) = if ttl_secs <= 0 {
                 ("expired", Color::Red)
             } else if ttl_secs < 60 {
                 ("<1m",    Color::Yellow)
@@ -262,7 +258,13 @@ impl DashboardView {
             } else {
                 ("ok",     Color::Green)
             };
-            let ttl_str = format!("{}  ({})", humanize_duration(ttl_secs), ttl.0);
+            // "0s (expired)" reads worse than just "expired".
+            let ttl_str = if ttl_secs <= 0 {
+                "expired".to_string()
+            } else {
+                format!("{}  ({})", humanize_duration(ttl_secs), ttl_label)
+            };
+            let ttl = (ttl_label, ttl_color);
 
             Row::new(vec![
                 Cell::from(resource),
