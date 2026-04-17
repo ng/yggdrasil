@@ -2,6 +2,7 @@ pub mod app;
 pub mod dag_view;
 pub mod dashboard;
 pub mod log_view;
+pub mod memgraph_view;
 pub mod query_view;
 pub mod task_view;
 pub mod tasks_view;
