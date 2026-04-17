@@ -132,6 +132,27 @@ enum Commands {
         #[arg(long)]
         transcript: Option<String>,
     },
+
+    /// Task tracking (replaces beads for this repo)
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
+
+    /// Persist a durable directive the similarity retriever can surface later
+    Remember {
+        /// The memory text
+        text: Option<String>,
+        /// Agent name (defaults to env / pwd basename)
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// If set, list recent remembered directives instead of writing one
+        #[arg(long)]
+        list: bool,
+        /// Maximum number of entries to list
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -154,6 +175,82 @@ enum LockAction {
     },
     /// List all active locks
     List,
+}
+
+#[derive(Subcommand)]
+enum TaskAction {
+    /// Create a new task in the current repo
+    Create {
+        title: String,
+        #[arg(short, long)] description: Option<String>,
+        #[arg(short, long)] kind: Option<String>,
+        #[arg(short, long)] priority: Option<i16>,
+        #[arg(long)] acceptance: Option<String>,
+        #[arg(long)] design: Option<String>,
+        #[arg(long)] notes: Option<String>,
+        #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// List tasks (defaults to current repo; pass --all for every repo)
+    List {
+        #[arg(long)] all: bool,
+        #[arg(short, long)] status: Option<String>,
+    },
+    /// Show tasks with no unsatisfied blockers
+    Ready,
+    /// Show tasks blocked by another open task
+    Blocked,
+    /// Show a task by "<prefix>-<seq>" or UUID
+    Show { reference: String },
+    /// Update task fields
+    Update {
+        reference: String,
+        #[arg(long)] title: Option<String>,
+        #[arg(long)] description: Option<String>,
+        #[arg(long)] priority: Option<i16>,
+        #[arg(long)] kind: Option<String>,
+        #[arg(long)] acceptance: Option<String>,
+        #[arg(long)] design: Option<String>,
+        #[arg(long)] notes: Option<String>,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Claim a task (assignee + in_progress)
+    Claim {
+        reference: String,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Close a task
+    Close {
+        reference: String,
+        #[arg(short, long)] reason: Option<String>,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Change a task's status
+    Status {
+        reference: String,
+        status: String,
+        #[arg(short, long)] reason: Option<String>,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Add a dependency: <task> depends on <blocker>
+    Dep {
+        task: String,
+        blocker: String,
+    },
+    /// Remove a dependency
+    Undep {
+        task: String,
+        blocker: String,
+    },
+    /// Add a label to a task
+    Label {
+        reference: String,
+        label: String,
+    },
+    /// Count open/in_progress/blocked/closed
+    Stats {
+        #[arg(long)] all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -328,6 +425,87 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| "ygg".to_string())
                 });
             ygg::cli::prime::execute(&agent_name, transcript.as_deref()).await?;
+        }
+        Commands::Task { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let default_agent = || {
+                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                })
+            };
+            match action {
+                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::task_cmd::create(&pool, ygg::cli::task_cmd::CreateOpts {
+                        title: &title,
+                        description: description.as_deref(),
+                        kind: kind.as_deref(),
+                        priority,
+                        acceptance: acceptance.as_deref(),
+                        design: design.as_deref(),
+                        notes: notes.as_deref(),
+                        labels: &label,
+                        agent_name: &agent_name,
+                    }).await?;
+                }
+                TaskAction::List { all, status } => {
+                    ygg::cli::task_cmd::list(&pool, all, status.as_deref()).await?;
+                }
+                TaskAction::Ready => { ygg::cli::task_cmd::ready(&pool).await?; }
+                TaskAction::Blocked => { ygg::cli::task_cmd::blocked(&pool).await?; }
+                TaskAction::Show { reference } => { ygg::cli::task_cmd::show(&pool, &reference).await?; }
+                TaskAction::Update { reference, title, description, priority, kind, acceptance, design, notes, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::task_cmd::update(&pool, &reference,
+                        title.as_deref(), description.as_deref(), priority, kind.as_deref(),
+                        acceptance.as_deref(), design.as_deref(), notes.as_deref(),
+                        &agent_name).await?;
+                }
+                TaskAction::Claim { reference, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::task_cmd::claim(&pool, &reference, &agent_name).await?;
+                }
+                TaskAction::Close { reference, reason, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::task_cmd::close(&pool, &reference, reason.as_deref(), &agent_name).await?;
+                }
+                TaskAction::Status { reference, status, reason, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::task_cmd::set_status(&pool, &reference, &status, reason.as_deref(), &agent_name).await?;
+                }
+                TaskAction::Dep { task, blocker } => {
+                    ygg::cli::task_cmd::add_dep(&pool, &task, &blocker).await?;
+                }
+                TaskAction::Undep { task, blocker } => {
+                    ygg::cli::task_cmd::remove_dep(&pool, &task, &blocker).await?;
+                }
+                TaskAction::Label { reference, label } => {
+                    ygg::cli::task_cmd::label(&pool, &reference, &label).await?;
+                }
+                TaskAction::Stats { all } => {
+                    ygg::cli::task_cmd::stats(&pool, all).await?;
+                }
+            }
+        }
+        Commands::Remember { text, agent, list, limit } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let agent_name = agent.clone().or_else(|| std::env::var("YGG_AGENT_NAME").ok()).unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "ygg".to_string())
+            });
+            if list {
+                ygg::cli::remember::list(&pool, agent.as_deref(), limit).await?;
+            } else {
+                let text = text.ok_or_else(|| anyhow::anyhow!("provide text to remember, or pass --list"))?;
+                ygg::cli::remember::remember(&pool, &agent_name, &text).await?;
+            }
         }
     }
 

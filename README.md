@@ -108,6 +108,10 @@ From inside Claude Code:
 
 ```bash
 ygg status                     # see every agent + outstanding locks
+ygg task ready                 # show unblocked tasks in this repo
+ygg task create "fix migration order"     # create a task
+ygg task claim yggdrasil-3     # take a task
+ygg remember "migrations must be backwards-compatible — blue/green deploy"
 ygg lock acquire src/db.rs     # before you edit a shared file
 ygg spawn --task "..."         # open a parallel agent in a new window
 ygg logs --follow              # live event stream (every hook fire, embedding call, digest)
@@ -133,6 +137,8 @@ ygg logs --follow              # live event stream (every hook fire, embedding c
 | `dashboard` | Launch the TUI dashboard directly.                                      |
 | `watcher`   | Background daemon — heartbeats, lock expiry, digest triggers.           |
 | `recover`   | Recover orphaned agents stuck in active states.                         |
+| `task`      | Task tracking scoped to the current repo (create / list / ready / claim / close / dep / ...). Replaces `bd`. |
+| `remember`  | Write a durable directive node (scoped to current repo) the similarity retriever surfaces later. |
 
 ## Project layout
 

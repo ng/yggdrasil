@@ -1,4 +1,13 @@
-use crate::{config::AppConfig, db, lock::LockManager, models::agent::AgentRepo};
+use crate::{
+    config::AppConfig,
+    db,
+    lock::LockManager,
+    models::{
+        agent::AgentRepo,
+        repo::{detect_git_repo, slugify, RepoRepo},
+        task::{Task, TaskRepo},
+    },
+};
 
 /// Output agent context as markdown — injected by SessionStart and PreCompact hooks.
 /// Accepts an optional transcript path to estimate context pressure from file size.
@@ -25,6 +34,9 @@ struct PrimeContext {
     last_digest: Option<DigestInfo>,
     node_count: i64,
     transcript_tokens: Option<i64>,
+    repo_label: Option<String>,
+    ready_tasks: Vec<Task>,
+    open_count: i64,
 }
 
 struct DigestInfo {
@@ -95,6 +107,9 @@ async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<
         std::fs::metadata(p).ok().map(|m| (m.len() / 10) as i64)
     });
 
+    // Best-effort: detect current repo, surface a few ready tasks.
+    let (repo_label, ready_tasks, open_count) = resolve_repo_context(&pool).await;
+
     Ok(PrimeContext {
         state: agent.current_state.to_string(),
         context_tokens: agent.context_tokens,
@@ -104,7 +119,38 @@ async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<
         last_digest,
         node_count,
         transcript_tokens,
+        repo_label,
+        ready_tasks,
+        open_count,
     })
+}
+
+async fn resolve_repo_context(pool: &sqlx::PgPool) -> (Option<String>, Vec<Task>, i64) {
+    let Ok(cwd) = std::env::current_dir() else { return (None, vec![], 0); };
+    let repo_repo = RepoRepo::new(pool);
+
+    // Look up the repo without registering: prime should be side-effect-free
+    // at the ID-allocation layer. Registration happens when the user creates a task.
+    let repo_opt = if let Some((url, _top, name)) = detect_git_repo(&cwd) {
+        let prefix = slugify(&name);
+        if let Some(u) = url.as_deref() {
+            match repo_repo.get_by_url(u).await {
+                Ok(Some(r)) => Some(r),
+                _ => repo_repo.get_by_prefix(&prefix).await.ok().flatten(),
+            }
+        } else {
+            repo_repo.get_by_prefix(&prefix).await.ok().flatten()
+        }
+    } else {
+        None
+    };
+
+    let Some(repo) = repo_opt else { return (None, vec![], 0); };
+    let task_repo = TaskRepo::new(pool);
+    let ready = task_repo.ready(repo.repo_id).await.unwrap_or_default();
+    let stats = task_repo.stats(Some(repo.repo_id)).await.ok();
+    let open_count = stats.map(|s| s.open + s.in_progress).unwrap_or(0);
+    (Some(format!("{} ({})", repo.name, repo.task_prefix)), ready, open_count)
 }
 
 fn print_rich(agent_name: &str, ctx: &PrimeContext) {
@@ -175,16 +221,37 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
         println!("> context at {pct}% — digest will trigger at 100%");
     }
 
+    if let Some(label) = &ctx.repo_label {
+        println!();
+        println!("**repo** {label} — {} open / in-progress", ctx.open_count);
+        if !ctx.ready_tasks.is_empty() {
+            println!();
+            println!("**ready tasks** (no unsatisfied blockers)");
+            for t in ctx.ready_tasks.iter().take(5) {
+                let prefix = label.split_once('(')
+                    .and_then(|(_, rest)| rest.strip_suffix(')'))
+                    .unwrap_or("");
+                println!("  - `{}-{}`  P{} [{}]  {}", prefix, t.seq, t.priority, t.status, t.title);
+            }
+            if ctx.ready_tasks.len() > 5 {
+                println!("  … and {} more (`ygg task ready`)", ctx.ready_tasks.len() - 5);
+            }
+        }
+    }
+
     println!();
     println!("### When to use `ygg`");
     println!();
-    println!("- **Before editing a shared resource** (file, branch, migration) another agent might touch → `ygg lock acquire <key>`. Release when done.");
+    println!("- **Finding work** → `ygg task ready` for unblocked tasks in this repo; `ygg task list` for everything.");
+    println!("- **Tracking work** → `ygg task create \"...\"` before starting non-trivial work; `ygg task claim <id>` to take one; `ygg task close <id>` when done.");
+    println!("- **Persistent memory** → `ygg remember \"...\"` for durable notes the similarity retriever should surface in future sessions.");
+    println!("- **Before editing a shared resource** another agent might touch → `ygg lock acquire <key>`. Release when done.");
     println!("- **For parallel work** that warrants its own context window → `ygg spawn --task \"...\"` instead of the native Task/Agent tool.");
     println!("- **To steer or take over** another agent → `ygg interrupt take-over --agent <name>`.");
     println!("- **Before assuming you're alone** → `ygg status` to see other agents' state and locks.");
     println!("- **`[ygg memory | ...]` injections above your user prompts are real prior context** — read them.");
     println!();
-    println!("Intra-session step tracking: native tasks are fine. Ygg persists nodes + digests automatically; do **not** use `bd` / beads in this project.");
+    println!("Do **not** use `bd` / beads in this project — `ygg task` replaces it.");
 }
 
 fn print_degraded(agent_name: &str, err: &anyhow::Error) {

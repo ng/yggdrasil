@@ -15,7 +15,9 @@ ADRs are append-only. Superseded decisions get a new ADR that references the old
 | 0005 | [Shell hooks over MCP server or Agent SDK plugin](0005-shell-hook-integration.md) | Accepted  |
 | 0006 | [Dogfood Yggdrasil; remove beads directives from this repo](0006-dogfood-drop-beads.md) | Accepted  |
 | 0007 | [tmux as the multi-agent display substrate](0007-tmux-as-substrate.md) | Accepted  |
-| 0008 | [One global database across repos; agents auto-keyed by pwd](0008-shared-db-across-repos.md) | Accepted  |
+| 0008 | [One global database across repos; agents auto-keyed by pwd](0008-shared-db-across-repos.md) | Accepted (partially superseded by 0009) |
+| 0009 | [Repos and sessions as first-class dimensions](0009-repos-and-sessions-first-class.md) | Accepted |
+| 0010 | [Tasks: beads replacement inside Yggdrasil](0010-tasks-beads-replacement.md) | Accepted |
 
 ## Writing a new ADR
 

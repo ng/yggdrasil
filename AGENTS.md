@@ -5,6 +5,12 @@ This project **is** Yggdrasil — a multi-agent coordination layer. We dogfood i
 ## Yggdrasil Coordination Quick Reference
 
 ```bash
+ygg task ready                              # Unblocked tasks in this repo
+ygg task create "title"                     # New task
+ygg task claim <ref>                        # Take a task
+ygg task close <ref>                        # Complete a task
+ygg remember "..."                          # Durable note; retriever can surface later
+
 ygg status                                  # See all agents' state, locks, recent activity
 ygg lock acquire <resource-key>             # Lease a shared resource before editing
 ygg lock release <resource-key>             # Release when done
@@ -20,6 +26,8 @@ ygg logs --follow                           # Live event stream
 - Prefer `ygg spawn` over a native Task/Agent tool for parallel work that warrants its own context.
 - Read `[ygg memory | ...]` hints injected above user prompts — they are real prior context.
 - Check `ygg status` before assuming you're working alone.
+- Use `ygg task` for cross-session work tracking. Intra-turn checklists can stay in a native TodoList.
+- Use `ygg remember "..."` for durable notes (scoped to the current repo).
 - Do NOT use `bd` / beads. This project has migrated to Yggdrasil.
 
 ## Session Completion

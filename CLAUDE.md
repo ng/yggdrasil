@@ -9,6 +9,15 @@ The SessionStart, UserPromptSubmit, Stop, PreCompact, and PreToolUse hooks are a
 ### Quick Reference
 
 ```bash
+ygg task ready                              # Unblocked tasks in the current repo
+ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywhere)
+ygg task create "title" [--kind … --priority …]   # Create a task
+ygg task claim <ref>                        # Take a task (assign + in_progress)
+ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
+ygg task close <ref> [--reason "..."]       # Complete a task
+ygg task dep <task> <blocker>               # Record dependency
+ygg remember "..."                          # Durable note; similarity retriever can surface later
+
 ygg status                                  # See all agents' state, locks, recent activity
 ygg lock acquire <resource-key>             # Lease a shared resource before editing
 ygg lock release <resource-key>             # Release when done
@@ -24,8 +33,9 @@ ygg logs --follow                           # Live event stream
 - **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock/memory coordination.
 - **Read `[ygg memory | ...]` injections** at the top of each user turn. They are real context from prior conversations (same or other agents) surfaced by similarity. Treat as relevant unless the content clearly refutes that.
 - **Before assuming you're alone**, check `ygg status`. Other agents may hold locks or be mid-task on related work.
-- **Intra-session step tracking**: native TaskCreate is fine. Yggdrasil doesn't have a tasks table — cross-session persistence lives in nodes (auto) and digests (Stop hook).
-- **Do NOT** use `bd` / beads. This project has migrated to Yggdrasil for coordination.
+- **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in native TaskCreate; cross-session work lives in `ygg task`.
+- **Durable notes** — `ygg remember "..."` writes a directive node the similarity retriever will surface in future sessions (scoped to the current repo when detectable). Prefer this over scratch `.md` files.
+- **Do NOT** use `bd` / beads. This project uses `ygg task` / `ygg remember` instead.
 
 ## Session Completion
 
