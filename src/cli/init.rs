@@ -873,7 +873,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             head("project integration");
             if super::init_project::has_any_content(&cwd) {
                 hint("CLAUDE.md or AGENTS.md already has content — skipping auto-install");
-                hint("run `ygg init-project` to install the managed block, `--remove` to strip it");
+                hint("run `ygg integrate` to install the managed block, `--remove` to strip it");
             } else {
                 match super::init_project::install(&cwd) {
                     Ok(report) => {

@@ -139,8 +139,9 @@ enum Commands {
         action: TaskAction,
     },
 
-    /// Install / update / remove Yggdrasil's managed block in CLAUDE.md + AGENTS.md
-    InitProject {
+    /// Integrate Yggdrasil into a project — install / update / remove the managed
+    /// block in CLAUDE.md and AGENTS.md so agents in this repo know to use `ygg`.
+    Integrate {
         /// Remove the managed block (and delete the file if that's all that remains)
         #[arg(long)]
         remove: bool,
@@ -501,7 +502,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::InitProject { remove, path } => {
+        Commands::Integrate { remove, path } => {
             let cwd = path
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
