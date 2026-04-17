@@ -37,9 +37,11 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     let cost_usd = j.pointer("/cost/total_cost_usd")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
-    let in_tok = j.pointer("/token_usage/input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-    let out_tok = j.pointer("/token_usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-    let tok_total = in_tok + out_tok;
+    // Claude Code's statusLine JSON doesn't reliably expose token_usage
+    // under one path. Try several known spellings, then fall back to a
+    // transcript-byte-size estimate (~4 chars per token). This way tokens
+    // show up next to cost regardless of how CC labels the field.
+    let tok_total: i64 = token_count(&j).unwrap_or(0);
 
     // Look up today's cache savings and inference counts, plus the
     // preceding 24h window for trend deltas. One roundtrip.
@@ -125,6 +127,40 @@ fn trend_arrow(delta: f64, flat_band: f64) -> &'static str {
     } else {
         "\x1b[2m ─\x1b[0m"  // dim flat
     }
+}
+
+/// Pull a session token count from the Claude Code statusline JSON.
+/// CC has shipped several shapes over releases; check each, fall back to a
+/// transcript-file-size estimate (~4 chars per token).
+fn token_count(j: &serde_json::Value) -> Option<i64> {
+    let direct = [
+        "/token_usage/total_tokens",
+        "/tokens/total",
+        "/usage/total_tokens",
+    ];
+    for path in direct {
+        if let Some(n) = j.pointer(path).and_then(|v| v.as_i64()) {
+            if n > 0 { return Some(n); }
+        }
+    }
+    // Input + output sum, multiple spellings.
+    for (in_p, out_p) in [
+        ("/token_usage/input_tokens", "/token_usage/output_tokens"),
+        ("/tokens/input", "/tokens/output"),
+        ("/usage/input_tokens", "/usage/output_tokens"),
+    ] {
+        let i = j.pointer(in_p).and_then(|v| v.as_i64()).unwrap_or(0);
+        let o = j.pointer(out_p).and_then(|v| v.as_i64()).unwrap_or(0);
+        if i + o > 0 { return Some(i + o); }
+    }
+    // Fallback: estimate from the transcript on disk. CC reliably provides
+    // `transcript_path`. ~4 chars per token is the standard rough estimate;
+    // for a JSONL transcript with tool calls and structured content, this
+    // tends to slightly under-count real tokens but is the right order.
+    let transcript = j.get("transcript_path").and_then(|v| v.as_str())?;
+    let bytes = std::fs::metadata(transcript).ok()?.len() as i64;
+    // JSONL has heavy framing; halve the naive bytes/4 to account for it.
+    Some((bytes / 8).max(0))
 }
 
 fn format_tokens(n: i64) -> String {
