@@ -136,14 +136,34 @@ impl Classifier {
             memories_block.push_str(&format!("{}. {}\n", i + 1, snippet));
         }
 
+        // Calibrated prompt (yggdrasil-12). Small models rubber-stamp when
+        // asked for a vague "relevance" score — give them concrete anchor
+        // points and a one-shot example that explicitly drops a 0.0. This
+        // produces more differentiated outputs without forcing a rubric
+        // the model can't actually apply.
         let instruction = format!(
-            "You are rating which past memories are relevant to the user's current prompt. \
-             For each numbered memory, emit a relevance score between 0.0 and 1.0. \
-             Respond with JSON only, shape: {{\"scores\": [<n floats>]}}. Exactly {} scores, \
-             in the order given.\n\n\
-             Current prompt: {prompt}\n\n\
-             Memories:\n{memories_block}\nJSON:",
-            candidates.len()
+            "Rate how useful each past memory would be for answering the current prompt.\n\
+             \n\
+             Rubric:\n\
+             * 1.0 = directly answers the question or provides key context\n\
+             * 0.7 = closely related topic, likely informative\n\
+             * 0.4 = tangential, shared jargon but different intent\n\
+             * 0.1 = unrelated\n\
+             * 0.0 = completely off-topic\n\
+             \n\
+             Example:\n\
+             Current prompt: \"how do I handle database migrations\"\n\
+             Memories:\n\
+             1. migrations must stay backwards-compatible because we run blue-green deploys\n\
+             2. the cafeteria is closed on Fridays\n\
+             Answer: {{\"scores\": [0.9, 0.0]}}\n\
+             \n\
+             Now rate these. Respond with JSON only: {{\"scores\": [<{n} floats>]}}. Be honest — use 0.0 for off-topic.\n\
+             \n\
+             Current prompt: {prompt}\n\
+             \n\
+             Memories:\n{memories_block}Answer:",
+            n = candidates.len()
         );
 
         let req = GenerateRequest {
