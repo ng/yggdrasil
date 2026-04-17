@@ -85,6 +85,9 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::CorrectionDetected => (RED,   "✗"),
         EventKind::HookFired         => (ORANGE, "▸"),
         EventKind::EmbeddingCall     => (CYAN,   "⚡"),
+        EventKind::TaskCreated       => (GREEN,  "✚"),
+        EventKind::TaskStatusChanged => (YELLOW, "◆"),
+        EventKind::Remembered        => (BLUE,   "♦"),
     }
 }
 
@@ -129,6 +132,25 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let ok    = p["success"].as_bool().unwrap_or(false);
             let status = if ok { format!("{GREEN}ok{RESET}") } else { format!("{RED}fail{RESET}") };
             format!("{CYAN}{model}{RESET}  {chars} chars  {ms}ms  {status}")
+        }
+        EventKind::TaskCreated => {
+            let rref = p["ref"].as_str().unwrap_or("?");
+            let title = p["title"].as_str().unwrap_or("");
+            let kind = p["kind"].as_str().unwrap_or("task");
+            let pri = p["priority"].as_i64().unwrap_or(2);
+            format!("{GREEN}{rref}{RESET}  {DIM}P{pri} {kind}{RESET}  {}", truncate(title, 50))
+        }
+        EventKind::TaskStatusChanged => {
+            let rref = p["ref"].as_str().unwrap_or("?");
+            let to = p["to"].as_str().unwrap_or("?");
+            let reason = p["reason"].as_str();
+            let extra = reason.map(|r| format!("  {DIM}{}{RESET}", truncate(r, 40))).unwrap_or_default();
+            format!("{YELLOW}{rref}{RESET} → {to}{extra}")
+        }
+        EventKind::Remembered => {
+            let tok = p["tokens"].as_i64().unwrap_or(0);
+            let snip = p["snippet"].as_str().unwrap_or("");
+            format!("{DIM}{tok}tok{RESET}  {}", truncate(snip, 55))
         }
     }
 }

@@ -14,6 +14,9 @@ pub enum EventKind {
     CorrectionDetected,
     HookFired,
     EmbeddingCall,
+    TaskCreated,
+    TaskStatusChanged,
+    Remembered,
 }
 
 impl EventKind {
@@ -27,6 +30,9 @@ impl EventKind {
             Self::CorrectionDetected => "correction",
             Self::HookFired        => "hook_fired",
             Self::EmbeddingCall    => "embedding_call",
+            Self::TaskCreated      => "task_created",
+            Self::TaskStatusChanged => "task_status",
+            Self::Remembered       => "remembered",
         }
     }
 }

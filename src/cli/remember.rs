@@ -5,6 +5,7 @@
 
 use crate::embed::Embedder;
 use crate::models::agent::AgentRepo;
+use crate::models::event::{EventKind, EventRepo};
 use crate::models::node::{NodeKind, NodeRepo};
 use crate::models::repo::RepoRepo;
 
@@ -52,6 +53,18 @@ pub async fn remember(
             .execute(pool)
             .await;
     }
+
+    let snippet = if text.len() > 80 { format!("{}…", &text[..80]) } else { text.to_string() };
+    let _ = EventRepo::new(pool).emit(
+        EventKind::Remembered,
+        agent_name,
+        Some(agent.agent_id),
+        serde_json::json!({
+            "snippet": snippet,
+            "tokens": token_count,
+            "repo_id": repo_id,
+        }),
+    ).await;
 
     println!("Remembered ({} tokens).", token_count);
     if let Some(rid) = repo_id {

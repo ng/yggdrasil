@@ -1,4 +1,5 @@
 use crate::models::agent::AgentRepo;
+use crate::models::event::{EventKind, EventRepo};
 use crate::models::repo::{detect_git_repo, slugify, RepoRepo};
 use crate::models::task::{Task, TaskCreate, TaskKind, TaskRepo, TaskStatus, TaskUpdate};
 use std::str::FromStr;
@@ -107,6 +108,18 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
             },
         )
         .await?;
+
+    let _ = EventRepo::new(pool).emit(
+        EventKind::TaskCreated,
+        opts.agent_name,
+        created_by,
+        serde_json::json!({
+            "ref": format!("{}-{}", repo.task_prefix, task.seq),
+            "title": task.title,
+            "kind": task.kind.to_string(),
+            "priority": task.priority,
+        }),
+    ).await;
 
     println!("Created {}-{}  {}", repo.task_prefix, task.seq, task.title);
     Ok(())
@@ -240,6 +253,20 @@ pub async fn set_status(
     let status = TaskStatus::from_str(status).map_err(|e| anyhow::anyhow!(e))?;
 
     TaskRepo::new(pool).set_status(t.task_id, status.clone(), agent_id, reason).await?;
+
+    let repo = RepoRepo::new(pool).get(t.repo_id).await?;
+    let _ = EventRepo::new(pool).emit(
+        EventKind::TaskStatusChanged,
+        agent_name,
+        agent_id,
+        serde_json::json!({
+            "ref": format!("{}-{}", repo.as_ref().map(|r| r.task_prefix.as_str()).unwrap_or("?"), t.seq),
+            "to": status.to_string(),
+            "reason": reason,
+            "title": t.title,
+        }),
+    ).await;
+
     println!("{reference} → {status}");
     Ok(())
 }
