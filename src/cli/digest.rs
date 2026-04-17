@@ -42,42 +42,35 @@ pub async fn execute(
     let heuristic_reinforcements = extract_reinforcements(&entries);
     let files_touched = extract_files_touched(&entries);
 
-    // LLM digest (yggdrasil-4). Calls Ollama for a structured summary +
-    // corrections + reinforcements + open_threads. Falls back to the
-    // heuristic extractor when YGG_LLM_DIGEST=off, Ollama is down, the
-    // model times out, or emits unparseable JSON.
+    // LLM digest (yggdrasil-4). Asks Ollama ONLY for summary + open_threads
+    // — the two fields where a narrative model earns its keep. Corrections
+    // and reinforcements stay on the heuristic path; pattern-matching on
+    // "no/stop/actually/..." is deterministic and doesn't produce the
+    // generic placeholder garbage ("what the user corrected") that a 1B
+    // model emits when asked for structured judgments.
     let turn_pairs: Vec<(String, String)> = entries.iter()
         .map(|t| (t.role.clone(), t.text.clone()))
         .collect();
     let llm_result = crate::llm_digest::LlmDigester::from_env().digest(&turn_pairs).await;
     let method = if llm_result.is_some() { "llm" } else { "heuristic" };
 
-    // Canonical summary + corrections + reinforcements — LLM wins if present,
-    // else fall back to heuristic-built versions.
+    // Summary: LLM if it produced a non-placeholder sentence; else heuristic.
     let summary = llm_result.as_ref()
         .map(|r| r.summary.clone())
         .unwrap_or_else(|| build_summary(&entries, &heuristic_corrections));
 
-    let corrections_json: Vec<serde_json::Value> = if let Some(ref r) = llm_result {
-        r.corrections.iter().map(|c| serde_json::json!({
-            "feedback": c.feedback, "context": c.context,
-        })).collect()
-    } else {
-        heuristic_corrections.iter().map(|c| serde_json::json!({
+    // Corrections + reinforcements: always heuristic. Regex is the right
+    // tool here; the LLM demonstrably emits placeholders at 1B.
+    let corrections_json: Vec<serde_json::Value> = heuristic_corrections.iter()
+        .map(|c| serde_json::json!({
             "feedback": c.feedback, "context": c.context, "sentiment": c.sentiment.to_str(),
-        })).collect()
-    };
-
-    let reinforcements_json: Vec<serde_json::Value> = if let Some(ref r) = llm_result {
-        r.reinforcements.iter().map(|c| serde_json::json!({
-            "feedback": c.feedback, "context": c.context,
-        })).collect()
-    } else {
-        heuristic_reinforcements.iter().map(|r| serde_json::json!({
+        })).collect();
+    let reinforcements_json: Vec<serde_json::Value> = heuristic_reinforcements.iter()
+        .map(|r| serde_json::json!({
             "feedback": r.feedback, "context": r.context,
-        })).collect()
-    };
+        })).collect();
 
+    // Open threads: LLM-only. Heuristic has no equivalent.
     let open_threads: Vec<String> = llm_result.as_ref()
         .map(|r| r.open_threads.clone())
         .unwrap_or_default();

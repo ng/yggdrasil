@@ -23,18 +23,13 @@ const MAX_CHARS_PER_TURN: usize = 400;    // truncate each turn snippet
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LlmDigestResult {
     pub summary: String,
-    pub corrections: Vec<DigestItem>,
-    pub reinforcements: Vec<DigestItem>,
+    // Corrections and reinforcements live on the heuristic path — the 1B
+    // model produces generic placeholder garbage like "What the user
+    // corrected" which pollutes every post-recovery prime. Regex matching
+    // on "no/stop/actually/…" is deterministic and the right tool.
     pub open_threads: Vec<String>,
     pub model: String,
     pub latency_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DigestItem {
-    pub feedback: String,
-    #[serde(default)]
-    pub context: String,
 }
 
 pub struct LlmDigester {
@@ -75,14 +70,14 @@ impl LlmDigester {
 
         let transcript = build_transcript_block(turns);
         let instruction = format!(
-            "Summarize this Claude Code session. Respond with JSON only, shape:\n\
+            "Summarize this Claude Code session concretely. Respond with JSON only, shape:\n\
              {{\n\
-               \"summary\": \"one sentence describing what the session accomplished\",\n\
-               \"corrections\": [{{\"feedback\": \"what the user corrected\", \"context\": \"the situation\"}}],\n\
-               \"reinforcements\": [{{\"feedback\": \"what the user affirmed\", \"context\": \"the situation\"}}],\n\
-               \"open_threads\": [\"unresolved questions or follow-ups\"]\n\
+               \"summary\": \"one specific sentence — name what was built/fixed/decided, \
+not a meta-description like 'the user corrected X'\",\n\
+               \"open_threads\": [\"up to 3 specific unresolved questions or follow-ups\"]\n\
              }}\n\
-             Be concrete. Skip fields you can't fill (use empty arrays). Max 3 items each.\n\n\
+             Use concrete nouns from the transcript. If there is nothing specific to say, \
+return an empty summary and we will fall back to heuristic extraction.\n\n\
              Transcript:\n{transcript}\n\nJSON:"
         );
 
@@ -135,17 +130,13 @@ impl LlmDigester {
 
         let parsed = parse_digest_json(&raw)?;
         info!(
-            "llm_digest: summary={:?} corrections={} reinforcements={} open_threads={} ({latency_ms}ms)",
+            "llm_digest: summary={:?} open_threads={} ({latency_ms}ms)",
             &parsed.summary[..parsed.summary.len().min(80)],
-            parsed.corrections.len(),
-            parsed.reinforcements.len(),
             parsed.open_threads.len(),
         );
 
         Some(LlmDigestResult {
             summary: parsed.summary,
-            corrections: parsed.corrections,
-            reinforcements: parsed.reinforcements,
             open_threads: parsed.open_threads,
             model: self.model.clone(),
             latency_ms,
@@ -172,9 +163,25 @@ fn build_transcript_block(turns: &[(String, String)]) -> String {
 #[derive(Default)]
 struct ParsedDigest {
     summary: String,
-    corrections: Vec<DigestItem>,
-    reinforcements: Vec<DigestItem>,
     open_threads: Vec<String>,
+}
+
+/// Reject summaries that are obvious model-placeholder garbage —
+/// phrases that look like they could describe any session at all. If the
+/// model emits one, we fall back to the heuristic path.
+fn looks_like_placeholder(s: &str) -> bool {
+    let low = s.to_lowercase();
+    // Catches "the user corrected …", "what the user asked for", etc.
+    let tells = [
+        "what the user",
+        "the user corrected",
+        "the user affirmed",
+        "the user asked",
+        "the user requested",
+        "unresolved questions or follow-ups",
+        "one specific sentence",
+    ];
+    tells.iter().any(|t| low.contains(t))
 }
 
 fn parse_digest_json(raw: &str) -> Option<ParsedDigest> {
@@ -183,40 +190,26 @@ fn parse_digest_json(raw: &str) -> Option<ParsedDigest> {
     let mut out = ParsedDigest::default();
 
     if let Some(s) = obj.get("summary").and_then(|v| v.as_str()) {
-        out.summary = s.to_string();
-    }
-
-    // Corrections / reinforcements may be arrays of objects OR arrays of
-    // strings. Handle both shapes.
-    for (field, target) in [
-        ("corrections", &mut out.corrections),
-        ("reinforcements", &mut out.reinforcements),
-    ] {
-        if let Some(arr) = obj.get(field).and_then(|v| v.as_array()) {
-            for item in arr {
-                match item {
-                    serde_json::Value::String(s) => {
-                        target.push(DigestItem { feedback: s.clone(), context: String::new() });
-                    }
-                    serde_json::Value::Object(_) => {
-                        if let Ok(di) = serde_json::from_value::<DigestItem>(item.clone()) {
-                            if !di.feedback.is_empty() { target.push(di); }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        let trimmed = s.trim();
+        // Drop placeholder-shaped summaries — they're worse than no digest.
+        if !trimmed.is_empty() && !looks_like_placeholder(trimmed) {
+            out.summary = trimmed.to_string();
         }
     }
 
     if let Some(arr) = obj.get("open_threads").and_then(|v| v.as_array()) {
         for item in arr {
-            if let Some(s) = item.as_str() { out.open_threads.push(s.to_string()); }
+            if let Some(s) = item.as_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() && !looks_like_placeholder(trimmed) {
+                    out.open_threads.push(trimmed.to_string());
+                }
+            }
         }
     }
 
-    // Require at least a summary; empty digest is not useful.
-    if out.summary.trim().is_empty() { return None; }
+    // Require at least a real summary; empty/placeholder digest is not useful.
+    if out.summary.is_empty() { return None; }
     Some(out)
 }
 
@@ -226,26 +219,30 @@ mod tests {
 
     #[test]
     fn parses_standard_shape() {
-        let raw = r#"{"summary":"fixed a bug","corrections":[{"feedback":"use channels","context":"Arc<Mutex>"}],"reinforcements":[],"open_threads":["test coverage"]}"#;
+        let raw = r#"{"summary":"shipped the retrieval overhaul","open_threads":["test coverage"]}"#;
         let p = parse_digest_json(raw).unwrap();
-        assert_eq!(p.summary, "fixed a bug");
-        assert_eq!(p.corrections.len(), 1);
-        assert_eq!(p.corrections[0].feedback, "use channels");
+        assert_eq!(p.summary, "shipped the retrieval overhaul");
         assert_eq!(p.open_threads, vec!["test coverage"]);
     }
 
     #[test]
-    fn parses_string_array_corrections() {
-        // Small models sometimes emit bare strings instead of objects.
-        let raw = r#"{"summary":"stuff","corrections":["avoid X","prefer Y"],"reinforcements":[],"open_threads":[]}"#;
+    fn rejects_placeholder_summary() {
+        // This is exactly what llama3.2:1b emitted in a recovery-test;
+        // it must never land in the DB as a real digest.
+        let raw = r#"{"summary":"Claude Code session focused on what the user corrected","open_threads":[]}"#;
+        assert!(parse_digest_json(raw).is_none());
+    }
+
+    #[test]
+    fn drops_placeholder_open_threads() {
+        let raw = r#"{"summary":"fixed a bug","open_threads":["unresolved questions or follow-ups","real follow-up about the migration"]}"#;
         let p = parse_digest_json(raw).unwrap();
-        assert_eq!(p.corrections.len(), 2);
-        assert_eq!(p.corrections[0].feedback, "avoid X");
+        assert_eq!(p.open_threads, vec!["real follow-up about the migration"]);
     }
 
     #[test]
     fn rejects_empty_summary() {
-        let raw = r#"{"summary":"","corrections":[],"reinforcements":[],"open_threads":[]}"#;
+        let raw = r#"{"summary":"","open_threads":[]}"#;
         assert!(parse_digest_json(raw).is_none());
     }
 
