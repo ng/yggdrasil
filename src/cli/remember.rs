@@ -39,7 +39,7 @@ pub async fn remember(
     // Best-effort embed so similarity retrieval picks it up.
     let embedder = Embedder::default_ollama();
     if embedder.health_check().await {
-        if let Ok(vec) = embedder.embed(text).await {
+        if let Ok((vec, _cached)) = embedder.embed_cached(pool, text).await {
             let _ = NodeRepo::new(pool).set_embedding(node.id, vec).await;
         }
     }

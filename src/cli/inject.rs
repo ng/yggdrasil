@@ -66,11 +66,12 @@ pub async fn execute(
             debug!("inject: embedding {} chars", query_text.len());
 
             let embed_start = std::time::Instant::now();
-            let embed_result = embedder.embed(query_text).await;
+            let embed_result = embedder.embed_cached(pool, query_text).await;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
 
+            let cached = matches!(&embed_result, Ok((_, true)));
             let _ = event_repo.emit(
-                EventKind::EmbeddingCall,
+                if cached { EventKind::EmbeddingCacheHit } else { EventKind::EmbeddingCall },
                 agent_name,
                 Some(agent.agent_id),
                 serde_json::json!({
@@ -79,12 +80,13 @@ pub async fn execute(
                     "latency_ms": embed_ms,
                     "success": embed_result.is_ok(),
                     "purpose": "prompt_embed",
+                    "cached": cached,
                 }),
             ).await;
 
             match embed_result {
                 Err(e) => warn!("inject: embed failed ({embed_ms}ms): {e}"),
-                Ok(query_vec) => {
+                Ok((query_vec, _was_cached)) => {
                     // Write this prompt as a UserMessage node and advance head_node_id
                     let node = node_repo.insert(
                         agent.head_node_id,

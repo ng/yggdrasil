@@ -88,6 +88,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::TaskCreated       => (GREEN,  "✚"),
         EventKind::TaskStatusChanged => (YELLOW, "◆"),
         EventKind::Remembered        => (BLUE,   "♦"),
+        EventKind::EmbeddingCacheHit => (GREEN,  "⚡"),
     }
 }
 
@@ -151,6 +152,13 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let tok = p["tokens"].as_i64().unwrap_or(0);
             let snip = p["snippet"].as_str().unwrap_or("");
             format!("{DIM}{tok}tok{RESET}  {}", truncate(snip, 55))
+        }
+        EventKind::EmbeddingCacheHit => {
+            let model = p["model"].as_str().unwrap_or("?");
+            let ms    = p["latency_ms"].as_u64().unwrap_or(0);
+            let chars = p["input_chars"].as_u64().unwrap_or(0);
+            let purpose = p["purpose"].as_str().unwrap_or("");
+            format!("{GREEN}{model}{RESET}  {chars} chars  {ms}ms  {DIM}{purpose} (cached){RESET}")
         }
     }
 }

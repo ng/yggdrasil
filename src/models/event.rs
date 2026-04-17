@@ -17,6 +17,7 @@ pub enum EventKind {
     TaskCreated,
     TaskStatusChanged,
     Remembered,
+    EmbeddingCacheHit,
 }
 
 impl EventKind {
@@ -33,6 +34,7 @@ impl EventKind {
             Self::TaskCreated      => "task_created",
             Self::TaskStatusChanged => "task_status",
             Self::Remembered       => "remembered",
+            Self::EmbeddingCacheHit => "cache_hit",
         }
     }
 }

@@ -1,6 +1,7 @@
 use pgvector::Vector;
 use reqwest;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Embedder using Ollama's /api/embed endpoint.
 /// Uses all-minilm model (384d) — pull with: ollama pull all-minilm
@@ -70,6 +71,58 @@ impl Embedder {
             .ok_or_else(|| crate::YggError::Ollama("no embedding returned".into()))?;
 
         Ok(Vector::from(vec))
+    }
+
+    /// Embed with a Postgres-backed content-addressable cache. Returns the
+    /// vector and a flag indicating whether it was a cache hit (true) or a
+    /// fresh Ollama call (false). On cache errors the call falls through to
+    /// a plain embed — caching is a performance optimization, never a
+    /// correctness requirement.
+    pub async fn embed_cached(
+        &self,
+        pool: &sqlx::PgPool,
+        text: &str,
+    ) -> Result<(Vector, bool), crate::YggError> {
+        let hash = Sha256::digest(text.as_bytes()).to_vec();
+
+        // Cache lookup. Any error here (schema drift, DB down) means we
+        // skip the cache and hit Ollama.
+        if let Ok(row) = sqlx::query_as::<_, (Vector,)>(
+            "SELECT embedding FROM embedding_cache WHERE content_hash = $1 AND model = $2",
+        )
+        .bind(&hash)
+        .bind(&self.model)
+        .fetch_optional(pool)
+        .await
+        {
+            if let Some((vec,)) = row {
+                let _ = sqlx::query(
+                    "UPDATE embedding_cache SET hit_count = hit_count + 1, last_hit_at = now()
+                     WHERE content_hash = $1 AND model = $2",
+                )
+                .bind(&hash)
+                .bind(&self.model)
+                .execute(pool)
+                .await;
+                return Ok((vec, true));
+            }
+        }
+
+        // Miss → embed, then store.
+        let vec = self.embed(text).await?;
+
+        let _ = sqlx::query(
+            "INSERT INTO embedding_cache (content_hash, model, embedding)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (content_hash, model) DO NOTHING",
+        )
+        .bind(&hash)
+        .bind(&self.model)
+        .bind(&vec)
+        .execute(pool)
+        .await;
+
+        Ok((vec, false))
     }
 
     /// Check if the embedding service is reachable.

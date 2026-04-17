@@ -70,6 +70,7 @@ indicatif = "0.17"
 # Signal handling
 tokio-util = { version = "0.7", features = ["rt"] }
 regex = "1.12.3"
+sha2 = "0.11.0"
 
 [dev-dependencies]
 tokio-test = "0.4"
