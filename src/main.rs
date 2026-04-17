@@ -178,6 +178,18 @@ enum Commands {
         hours: i64,
     },
 
+    /// Pressure-test recovery paths: compaction, skip-it, crash. Reports
+    /// PASS/FAIL for each scenario with forensic detail. Run periodically
+    /// to catch regressions in the memory-survival story.
+    RecoveryTest {
+        /// compact | skip-it | crash | all (default all)
+        #[arg(long, default_value = "all")]
+        scenario: String,
+        /// Agent to test against (defaults to env / pwd basename)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+
     /// Show the full pipeline trace for recent user turns — embed →
     /// retrieve → score → emit → (reference, after digest). Lets you
     /// see what Yggdrasil actually did vs. what you think it did.
@@ -598,6 +610,20 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::trace_cmd::execute(&pool, last, agent.as_deref()).await?;
+        }
+        Commands::RecoveryTest { scenario, agent } => {
+            let agent_name = agent
+                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
+                .unwrap_or_else(|| {
+                    std::env::current_dir().ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                });
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let scenario = ygg::cli::recovery_cmd::Scenario::parse(&scenario)
+                .ok_or_else(|| anyhow::anyhow!("unknown scenario — use compact|skip-it|crash|all"))?;
+            ygg::cli::recovery_cmd::test(&pool, scenario, &agent_name).await?;
         }
         Commands::Bar => {
             let config = ygg::config::AppConfig::from_env()?;
