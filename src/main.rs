@@ -241,12 +241,14 @@ enum TaskAction {
     /// Create a new task in the current repo
     Create {
         title: String,
-        #[arg(short, long)] description: Option<String>,
+        // allow_hyphen_values so "-- item" / "* foo" etc. don't get silently
+        // interpreted as new flags (yggdrasil-21).
+        #[arg(short, long, allow_hyphen_values = true)] description: Option<String>,
         #[arg(short, long)] kind: Option<String>,
         #[arg(short, long, value_parser = parse_priority)] priority: Option<i16>,
-        #[arg(long)] acceptance: Option<String>,
-        #[arg(long)] design: Option<String>,
-        #[arg(long)] notes: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] acceptance: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] design: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
         #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
         #[arg(short, long)] agent: Option<String>,
     },
@@ -264,13 +266,13 @@ enum TaskAction {
     /// Update task fields
     Update {
         reference: String,
-        #[arg(long)] title: Option<String>,
-        #[arg(long)] description: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] title: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] description: Option<String>,
         #[arg(long, value_parser = parse_priority)] priority: Option<i16>,
         #[arg(long)] kind: Option<String>,
-        #[arg(long)] acceptance: Option<String>,
-        #[arg(long)] design: Option<String>,
-        #[arg(long)] notes: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] acceptance: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] design: Option<String>,
+        #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
         #[arg(short, long)] agent: Option<String>,
     },
     /// Claim a task (assignee + in_progress)
