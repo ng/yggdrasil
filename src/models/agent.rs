@@ -94,6 +94,36 @@ impl<'a> AgentRepo<'a> {
         .await
     }
 
+    /// Set the agent's state unconditionally, optionally recording the tool
+    /// it's waiting on. Hook-driven state updates can't guess the current
+    /// state, so they use this rather than the OCC transition().
+    pub async fn force_state(
+        &self,
+        agent_id: Uuid,
+        to: AgentState,
+        last_tool: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let meta_patch = match last_tool {
+            Some(t) => serde_json::json!({"last_tool": t}),
+            None => serde_json::json!({"last_tool": null}),
+        };
+        sqlx::query(
+            r#"
+            UPDATE agents
+               SET current_state = $2::agent_state,
+                   metadata = metadata || $3::jsonb,
+                   updated_at = now()
+             WHERE agent_id = $1
+            "#,
+        )
+        .bind(agent_id)
+        .bind(&to)
+        .bind(meta_patch)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Update the head node and context token count.
     pub async fn update_head(
         &self,

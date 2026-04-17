@@ -222,6 +222,15 @@ enum Commands {
         redact_all: bool,
     },
 
+    /// Record that the agent is about to invoke a tool — PreToolUse hook.
+    AgentTool {
+        /// Tool name (Bash, Edit, Read, …)
+        tool: String,
+        /// Agent name (defaults to env / pwd basename)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+
     /// Persist a durable directive the similarity retriever can surface later
     Remember {
         /// The memory text
@@ -648,6 +657,17 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("pass --node <uuid>, --pattern <substring>, or --redact-all");
                 }
             }
+        }
+        Commands::AgentTool { tool, agent } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let agent_name = agent.clone().or_else(|| std::env::var("YGG_AGENT_NAME").ok()).unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "ygg".to_string())
+            });
+            ygg::cli::agent_cmd::set_tool(&pool, &agent_name, &tool).await?;
         }
         Commands::Remember { text, agent, list, limit } => {
             let config = ygg::config::AppConfig::from_env()?;

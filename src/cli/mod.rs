@@ -1,3 +1,4 @@
+pub mod agent_cmd;
 pub mod bar_cmd;
 pub mod dashboard_cmd;
 pub mod digest;

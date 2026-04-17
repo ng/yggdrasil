@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::config::AppConfig;
 use crate::embed::Embedder;
-use crate::models::agent::AgentRepo;
+use crate::models::agent::{AgentRepo, AgentState};
 use crate::models::event::{EventKind, EventRepo};
 use crate::models::node::{NodeKind, NodeRepo};
 
@@ -198,6 +198,12 @@ pub async fn execute(
                 "context": &c.context[..c.context.len().min(120)],
             }),
         ).await;
+    }
+
+    // Digest runs at Stop (session ended) and PreCompact (about to compact).
+    // Either way the agent is no longer actively working — land in Idle.
+    if let Err(e) = agent_repo.force_state(agent.agent_id, AgentState::Idle, None).await {
+        warn!("digest: force_state failed: {e}");
     }
 
     // Print a summary to stdout (appears in terminal, not injected)

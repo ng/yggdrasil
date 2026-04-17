@@ -228,7 +228,7 @@ impl DashboardView {
 
             // Humanize: the enum names read like internals ("context_flush")
             // but most of them map to an intuitive one-word label.
-            let (state_label, state_color): (&str, Color) = match agent.current_state {
+            let (base_label, state_color): (&str, Color) = match agent.current_state {
                 crate::models::agent::AgentState::Idle           => ("idle",      Color::Gray),
                 crate::models::agent::AgentState::Planning       => ("planning",  Color::Cyan),
                 crate::models::agent::AgentState::Executing      => ("working",   Color::Green),
@@ -238,6 +238,15 @@ impl DashboardView {
                 crate::models::agent::AgentState::Mediation      => ("mediating", Color::Cyan),
                 crate::models::agent::AgentState::Error          => ("error",     Color::Red),
                 crate::models::agent::AgentState::Shutdown       => ("shutdown",  Color::DarkGray),
+            };
+            // For WaitingTool, append the tool name (e.g. "tool: Bash") from metadata
+            let state_label: String = if matches!(agent.current_state, crate::models::agent::AgentState::WaitingTool) {
+                match agent.metadata.get("last_tool").and_then(|v| v.as_str()) {
+                    Some(t) if !t.is_empty() => format!("{base_label}: {t}"),
+                    _ => base_label.to_string(),
+                }
+            } else {
+                base_label.to_string()
             };
 
             // Pressure comes from the TRANSCRIPT file size, not our

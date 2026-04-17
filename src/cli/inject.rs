@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::embed::Embedder;
-use crate::models::agent::AgentRepo;
+use crate::models::agent::{AgentRepo, AgentState};
 use crate::models::event::{EventKind, EventRepo};
 use crate::models::node::{NodeKind, NodeRepo};
 use crate::lock::LockManager;
@@ -38,6 +38,12 @@ pub async fn execute(
         "inject: agent='{}' state={} tokens={} head_node={:?}",
         agent_name, agent.current_state, agent.context_tokens, agent.head_node_id
     );
+
+    // Mark the agent as actively working now that a user prompt has landed.
+    // This is fire-and-forget: a stale state is worse than a missing update.
+    if let Err(e) = agent_repo.force_state(agent.agent_id, AgentState::Executing, None).await {
+        warn!("inject: force_state failed: {e}");
+    }
 
     let mut output: Vec<String> = Vec::new();
 
