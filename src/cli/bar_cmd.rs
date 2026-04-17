@@ -72,14 +72,14 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         "{bar_color}▊{RESET} {DIM}ctx{RESET} {BOLD}{pct}%{RESET}"
     ));
 
-    // Tokens: e.g. "9.3K tok"
+    // Tokens — styled like ctx (dim label + bold value), sits next to it.
     if tok_total > 0 {
-        segments.push(format_tokens(tok_total));
+        segments.push(format!("{DIM}tok{RESET} {BOLD}{}{RESET}", format_tokens(tok_total)));
     }
 
     // Session cost — 2dp.
     if cost_usd > 0.0 {
-        segments.push(format!("${:.2}", cost_usd));
+        segments.push(format!("{DIM}cost{RESET} {BOLD}${:.2}{RESET}", cost_usd));
     }
 
     // Cache — absolute "X of Y cached" with a trend arrow comparing the
@@ -164,11 +164,12 @@ fn token_count(j: &serde_json::Value) -> Option<i64> {
 }
 
 fn format_tokens(n: i64) -> String {
+    // Return just the magnitude; the caller wraps with the dim "tok" label.
     if n >= 1_000_000 {
-        format!("{:.1}M tok", n as f64 / 1_000_000.0)
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
-        format!("{:.1}K tok", n as f64 / 1_000.0)
+        format!("{:.1}K", n as f64 / 1_000.0)
     } else {
-        format!("{n} tok")
+        format!("{n}")
     }
 }
