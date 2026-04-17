@@ -1,4 +1,5 @@
 use std::io::BufRead;
+use std::path::PathBuf;
 
 use crate::config::AppConfig;
 use crate::embed::Embedder;
@@ -418,4 +419,33 @@ fn build_embed_text(
 
 fn estimate_tokens(text: &str) -> i32 {
     (text.len() / 4).max(1) as i32
+}
+
+/// Locate the most recently modified Claude Code transcript for the current
+/// working directory's session. Used by `ygg digest --now` so the user doesn't
+/// have to pass `--transcript` explicitly mid-session.
+///
+/// Claude Code stores transcripts under `~/.claude/projects/<slug>/<session>.jsonl`
+/// where the slug is a munged version of the project path (e.g.
+/// `/Users/ng/Documents/GitHub/yggdrasil` → `-Users-ng-Documents-GitHub-yggdrasil`).
+pub fn find_latest_transcript() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let slug = cwd.to_string_lossy().replace('/', "-");
+    let home = std::env::var("HOME").ok()?;
+    let project_dir = PathBuf::from(&home).join(".claude/projects").join(&slug);
+    if !project_dir.exists() {
+        return None;
+    }
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&project_dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
+        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok())?;
+        match &newest {
+            None => newest = Some((mtime, p)),
+            Some((t, _)) if mtime > *t => newest = Some((mtime, p)),
+            _ => {}
+        }
+    }
+    newest.map(|(_, p)| p.to_string_lossy().to_string())
 }

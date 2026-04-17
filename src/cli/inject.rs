@@ -111,7 +111,12 @@ pub async fn execute(
                         EventKind::NodeWritten,
                         agent_name,
                         Some(agent.agent_id),
-                        serde_json::json!({ "node_id": node.id, "tokens": node.token_count, "snippet": snippet }),
+                        serde_json::json!({
+                            "node_id": node.id,
+                            "kind": "user_message",
+                            "tokens": node.token_count,
+                            "snippet": snippet,
+                        }),
                     ).await;
 
                     // Search ALL agents for similar past context
@@ -278,8 +283,11 @@ pub async fn execute(
                             }),
                         ).await;
                         output.push(format!(
-                            "[ygg memory | {} | {} | sim={:.0}%] {}",
-                            hit.agent_name, age, hit.similarity() * 100.0, snippet,
+                            "[{} · {} · {}] {}",
+                            strength_label(scored[i].scores.total),
+                            hit.agent_name,
+                            age,
+                            snippet,
                         ));
                     }
                 }
@@ -329,6 +337,15 @@ fn extract_snippet(content: &serde_json::Value) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Map a mechanical total score to a human-readable strength band.
+/// Labels chosen to make "why was this surfaced?" legible without requiring
+/// the reader to know the cosine distribution or weight tuning.
+fn strength_label(total: f64) -> &'static str {
+    if total >= 0.6       { "strong recall" }
+    else if total >= 0.3  { "recall" }
+    else                  { "faint recall" }
 }
 
 fn format_age(ts: chrono::DateTime<chrono::Utc>) -> String {

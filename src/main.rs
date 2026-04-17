@@ -113,14 +113,20 @@ enum Commands {
         agent: Option<String>,
     },
 
-    /// Digest a session transcript — extract corrections, write Digest node (called by Stop hook)
+    /// Digest a session transcript — extract corrections, write Digest node.
+    /// Called by the Stop and PreCompact hooks automatically; can be run
+    /// manually as `ygg digest --now` to proactively checkpoint a
+    /// long-running session before auto-compaction hits.
     Digest {
         /// Agent name
         #[arg(short, long)]
         agent: Option<String>,
         /// Path to the Claude Code transcript JSONL file
         #[arg(long)]
-        transcript: String,
+        transcript: Option<String>,
+        /// Find and digest the most recent transcript for this agent
+        #[arg(long)]
+        now: bool,
     },
 
     /// Output agent context as markdown (called by SessionStart and PreCompact hooks)
@@ -420,7 +426,7 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::logs_cmd::execute(&pool, follow, tail, agent.as_deref()).await?;
         }
-        Commands::Digest { agent, transcript } => {
+        Commands::Digest { agent, transcript, now } => {
             let agent_name = agent
                 .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
                 .unwrap_or_else(|| {
@@ -431,7 +437,18 @@ async fn main() -> anyhow::Result<()> {
                 });
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::digest::execute(&pool, &config, &agent_name, &transcript).await?;
+
+            let path = match (transcript, now) {
+                (Some(p), _) => p,
+                (None, true) => {
+                    match ygg::cli::digest::find_latest_transcript() {
+                        Some(p) => p,
+                        None => { eprintln!("no Claude Code transcript found — run with --transcript <path>"); return Ok(()); }
+                    }
+                }
+                (None, false) => { eprintln!("pass --transcript <path> or --now"); return Ok(()); }
+            };
+            ygg::cli::digest::execute(&pool, &config, &agent_name, &path).await?;
         }
         Commands::Prime { agent, transcript } => {
             let agent_name = agent

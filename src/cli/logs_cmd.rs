@@ -66,13 +66,26 @@ pub async fn execute(
 fn print_event(event: &Event) {
     let ts = event.created_at.with_timezone(&chrono::Local).format("%H:%M:%S");
     let (color, symbol) = kind_style(&event.event_kind);
-    let label = format!("{:<18}", event.event_kind.label());
-    let agent = format!("{:<16}", truncate(&event.agent_name, 16));
+    // Visible-width padding (count chars, not bytes) so multi-byte glyphs
+    // don't shear later columns.
+    let label = pad_visible(event.event_kind.label(), 15);
+    let agent = pad_visible(&truncate(&event.agent_name, 14), 14);
     let detail = format_payload(&event.event_kind, &event.payload);
 
     println!(
-        "{DIM}{ts}{RESET}  {color}{symbol} {label}{RESET}  {GRAY}{agent}{RESET}  {detail}"
+        "{DIM}{ts}{RESET}  {color}{symbol}{RESET}  {color}{label}{RESET}  {GRAY}{agent}{RESET}  {detail}"
     );
+}
+
+/// Pad a string to a fixed visible-char width (char count, not byte count).
+/// Assumes all chars render as 1 column; fine for our labels which are ASCII.
+fn pad_visible(s: &str, width: usize) -> String {
+    let w = s.chars().count();
+    if w >= width {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(width - w))
+    }
 }
 
 fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
@@ -97,9 +110,23 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
 fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
     match kind {
         EventKind::NodeWritten => {
+            let kind = p["kind"].as_str().unwrap_or("node");
             let tok = p["tokens"].as_i64().unwrap_or(0);
             let snip = p["snippet"].as_str().unwrap_or("");
-            format!("{DIM}{tok}tok{RESET}  {}", truncate(snip, 50))
+            // Humanize kind; omit raw token count (it's an estimate, not load-bearing
+            // to the human reader). The snippet is what actually matters.
+            let kind_label = match kind {
+                "user_message" => "user",
+                "assistant_message" => "assistant",
+                "tool_call" => "tool call",
+                "tool_result" => "tool result",
+                "digest" => "digest",
+                "directive" => "directive",
+                "human_override" => "override",
+                "system" => "system",
+                _ => kind,
+            };
+            format!("{CYAN}{kind_label:<11}{RESET} {DIM}~{tok}t{RESET}  {}", truncate(snip, 50))
         }
         EventKind::LockAcquired | EventKind::LockReleased => {
             p["resource"].as_str()
@@ -115,10 +142,13 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             )
         }
         EventKind::SimilarityHit => {
-            let sim  = p["similarity"].as_f64().unwrap_or(0.0) * 100.0;
+            let score = p["total_score"].as_f64().unwrap_or_else(|| p["similarity"].as_f64().unwrap_or(0.0));
             let src  = p["source_agent"].as_str().unwrap_or("?");
             let snip = p["snippet"].as_str().unwrap_or("");
-            format!("{BLUE}sim={sim:.0}%{RESET} {DIM}from {src}{RESET}  {}", truncate(snip, 40))
+            let label = if score >= 0.6 { format!("{GREEN}strong{RESET}") }
+                        else if score >= 0.3 { format!("{BLUE}recall{RESET}") }
+                        else { format!("{DIM}faint{RESET}") };
+            format!("{label} {DIM}{score:.2} from {src}{RESET}  {}", truncate(snip, 40))
         }
         EventKind::CorrectionDetected => {
             let fb   = p["feedback"].as_str().unwrap_or("");
@@ -153,7 +183,7 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
         EventKind::Remembered => {
             let tok = p["tokens"].as_i64().unwrap_or(0);
             let snip = p["snippet"].as_str().unwrap_or("");
-            format!("{DIM}{tok}tok{RESET}  {}", truncate(snip, 55))
+            format!("{CYAN}directive{RESET}   {DIM}~{tok}t{RESET}  {}", truncate(snip, 50))
         }
         EventKind::EmbeddingCacheHit => {
             let model = p["model"].as_str().unwrap_or("?");

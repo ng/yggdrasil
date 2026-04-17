@@ -216,9 +216,17 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
         }
     }
 
-    if pct > 75 {
+    // Context-pressure guidance — accurate about what Yggdrasil actually does.
+    // We do NOT automatically compact or clear; Claude Code owns the window.
+    // We DO write a digest on Stop and PreCompact, so no information is lost.
+    if pct >= 90 {
         println!();
-        println!("> context at {pct}% — digest will trigger at 100%");
+        println!("> **context at {pct}%** — Claude Code will auto-compact soon.");
+        println!("> Before it does: consider `/clear` (fresh window) or `ygg digest --now`");
+        println!("> (captures a summary node Yggdrasil will use to re-prime the next session).");
+    } else if pct >= 75 {
+        println!();
+        println!("> context at {pct}% — Yggdrasil digests on Stop / PreCompact automatically; no action required.");
     }
 
     if let Some(label) = &ctx.repo_label {
