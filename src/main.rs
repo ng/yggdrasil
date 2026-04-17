@@ -222,6 +222,12 @@ enum Commands {
         redact_all: bool,
     },
 
+    /// Manage scoped, embedded memories (global / repo / session)
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+
     /// Record that the agent is about to invoke a tool — PreToolUse hook.
     AgentTool {
         /// Tool name (Bash, Edit, Read, …)
@@ -245,6 +251,34 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Create a memory at the given scope (global / repo / session)
+    Create {
+        text: String,
+        #[arg(short, long, default_value = "global")] scope: String,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// List memories, optionally filtered by scope
+    List {
+        #[arg(short, long)] scope: Option<String>,
+        #[arg(long, default_value = "20")] limit: i64,
+    },
+    /// Semantic search across memories visible in the current scope
+    Search {
+        query: String,
+        #[arg(long, default_value = "10")] limit: i64,
+    },
+    /// Pin a memory so it surfaces first in listings and retrieval
+    Pin { id: String },
+    /// Unpin a previously-pinned memory
+    Unpin { id: String },
+    /// Expire a memory after N seconds (useful for temporary scratch)
+    Expire { id: String, seconds: i64 },
+    /// Delete a memory permanently
+    Delete { id: String },
 }
 
 #[derive(Subcommand)]
@@ -655,6 +689,62 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _ => {
                     eprintln!("pass --node <uuid>, --pattern <substring>, or --redact-all");
+                }
+            }
+        }
+        Commands::Memory { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let agent_name_default = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                std::env::current_dir().ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "ygg".to_string())
+            });
+            // Allow an 8-char prefix or full UUID — memory IDs printed by `list` use the prefix.
+            async fn parse_id(pool: &sqlx::PgPool, s: &str) -> Result<uuid::Uuid, anyhow::Error> {
+                if let Ok(u) = uuid::Uuid::parse_str(s) { return Ok(u); }
+                let matches: Vec<uuid::Uuid> = sqlx::query_scalar(
+                    "SELECT memory_id FROM memories WHERE memory_id::text LIKE $1"
+                )
+                .bind(format!("{s}%"))
+                .fetch_all(pool).await?;
+                match matches.len() {
+                    0 => Err(anyhow::anyhow!("no memory matches id prefix '{s}'")),
+                    1 => Ok(matches[0]),
+                    n => Err(anyhow::anyhow!("ambiguous id prefix '{s}' ({n} matches)")),
+                }
+            }
+            match action {
+                MemoryAction::Create { text, scope, agent } => {
+                    let scope = ygg::models::memory::MemoryScope::parse(&scope)
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "scope must be one of: global, repo, session"
+                        ))?;
+                    let agent_name = agent.unwrap_or_else(agent_name_default);
+                    ygg::cli::memory_cmd::create(&pool, &agent_name, scope, &text).await?;
+                }
+                MemoryAction::List { scope, limit } => {
+                    let scope = scope.as_deref().and_then(ygg::models::memory::MemoryScope::parse);
+                    ygg::cli::memory_cmd::list(&pool, scope, limit).await?;
+                }
+                MemoryAction::Search { query, limit } => {
+                    ygg::cli::memory_cmd::search(&pool, &query, limit).await?;
+                }
+                MemoryAction::Pin { id } => {
+                    let uuid = parse_id(&pool, &id).await?;
+                    ygg::cli::memory_cmd::pin(&pool, uuid, true).await?;
+                }
+                MemoryAction::Unpin { id } => {
+                    let uuid = parse_id(&pool, &id).await?;
+                    ygg::cli::memory_cmd::pin(&pool, uuid, false).await?;
+                }
+                MemoryAction::Expire { id, seconds } => {
+                    let uuid = parse_id(&pool, &id).await?;
+                    ygg::cli::memory_cmd::expire(&pool, uuid, seconds).await?;
+                }
+                MemoryAction::Delete { id } => {
+                    let uuid = parse_id(&pool, &id).await?;
+                    ygg::cli::memory_cmd::delete(&pool, uuid).await?;
                 }
             }
         }
