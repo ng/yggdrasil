@@ -364,4 +364,115 @@ impl<'a> NodeRepo<'a> {
 
         Ok(hits)
     }
+
+    /// Hybrid retrieval: union pgvector top-k with Postgres full-text
+    /// top-k over the same query string, then merge via reciprocal rank
+    /// fusion (RRF). RRF with k=60 is the retrieval-literature default.
+    /// Each candidate gets score = sum over sources of 1/(60 + rank).
+    /// Better recall than cosine-only, same SearchHit shape so callers
+    /// don't have to care whether a hit came from lexical or semantic.
+    pub async fn hybrid_search_global(
+        &self,
+        query_vec: &Vector,
+        query_text: &str,
+        kinds: &[NodeKind],
+        limit: i32,
+        max_distance: f64,
+    ) -> Result<Vec<SearchHit>, sqlx::Error> {
+        let kind_strings: Vec<String> = kinds.iter().map(|k| {
+            format!("{k:?}").to_lowercase()
+                .replace("usermessage", "user_message")
+                .replace("assistantmessage", "assistant_message")
+                .replace("toolcall", "tool_call")
+                .replace("toolresult", "tool_result")
+                .replace("humanoverride", "human_override")
+        }).collect();
+
+        // Pull 2× limit per side so the post-RRF top-k has room to pick winners.
+        let per_side = (limit as i64) * 2;
+        let rrf_k = 60.0_f64;
+
+        // Build a plain websearch_to_tsquery from the raw query — tolerant
+        // of bad input, ignores stop words, good default for natural prose.
+        let rows = sqlx::query(
+            r#"
+            WITH vec AS (
+                SELECT n.id, (n.embedding <=> $1)::float8 AS dist,
+                       row_number() OVER (ORDER BY n.embedding <=> $1) AS rank
+                FROM nodes n
+                WHERE n.embedding IS NOT NULL
+                  AND n.kind::text = ANY($2)
+                  AND (n.embedding <=> $1) < $3
+                ORDER BY n.embedding <=> $1
+                LIMIT $4
+            ),
+            lex AS (
+                SELECT n.id,
+                       row_number() OVER (ORDER BY ts_rank_cd(n.content_tsv, q) DESC) AS rank
+                FROM nodes n, websearch_to_tsquery('english', $5) q
+                WHERE n.kind::text = ANY($2)
+                  AND n.content_tsv @@ q
+                ORDER BY ts_rank_cd(n.content_tsv, q) DESC
+                LIMIT $4
+            ),
+            fused AS (
+                SELECT id,
+                       SUM(score)::float8 AS fused_score,
+                       MIN(dist)::float8 AS dist
+                FROM (
+                    SELECT id, 1.0 / ($6 + rank) AS score, dist FROM vec
+                    UNION ALL
+                    SELECT id, 1.0 / ($6 + rank) AS score, NULL::float8 AS dist FROM lex
+                ) x
+                GROUP BY id
+            )
+            SELECT n.id, n.agent_id, a.agent_name, n.kind::text AS kind_text,
+                   n.content, n.token_count, n.created_at,
+                   COALESCE(f.dist, 1.0)::float8 AS distance,
+                   f.fused_score
+            FROM fused f
+            JOIN nodes  n ON n.id = f.id
+            JOIN agents a ON a.agent_id = n.agent_id
+            ORDER BY f.fused_score DESC
+            LIMIT $7
+            "#,
+        )
+        .bind(query_vec)
+        .bind(&kind_strings)
+        .bind(max_distance)
+        .bind(per_side)
+        .bind(query_text)
+        .bind(rrf_k)
+        .bind(limit as i64)
+        .fetch_all(self.pool)
+        .await?;
+
+        let hits = rows.into_iter().map(|row| {
+            use sqlx::Row;
+            SearchHit {
+                id: row.get("id"),
+                agent_id: row.get("agent_id"),
+                agent_name: row.get("agent_name"),
+                kind: {
+                    let k: String = row.get("kind_text");
+                    match k.as_str() {
+                        "user_message" => NodeKind::UserMessage,
+                        "assistant_message" => NodeKind::AssistantMessage,
+                        "tool_call" => NodeKind::ToolCall,
+                        "tool_result" => NodeKind::ToolResult,
+                        "digest" => NodeKind::Digest,
+                        "directive" => NodeKind::Directive,
+                        "human_override" => NodeKind::HumanOverride,
+                        _ => NodeKind::System,
+                    }
+                },
+                content: row.get("content"),
+                token_count: row.get("token_count"),
+                created_at: row.get("created_at"),
+                distance: row.get("distance"),
+            }
+        }).collect();
+
+        Ok(hits)
+    }
 }

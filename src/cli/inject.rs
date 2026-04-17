@@ -126,15 +126,23 @@ pub async fn execute(
                         }),
                     ).await;
 
-                    // Search ALL agents for similar past context
-                    let hits = node_repo
-                        .similarity_search_global(
-                            &query_vec,
-                            &[NodeKind::UserMessage, NodeKind::Directive, NodeKind::Digest],
-                            8,
-                            0.6, // cosine distance < 0.6 ≈ similarity > 0.4 for all-minilm
-                        )
-                        .await?;
+                    // Hybrid retrieval (yggdrasil-8): union pgvector top-k
+                    // with tsvector full-text top-k via reciprocal rank
+                    // fusion. Falls back to vector-only if hybrid errors
+                    // (e.g. pre-migration DB without content_tsv column).
+                    let kinds = [NodeKind::UserMessage, NodeKind::Directive, NodeKind::Digest];
+                    let hits = match node_repo
+                        .hybrid_search_global(&query_vec, query_text, &kinds, 8, 0.6)
+                        .await
+                    {
+                        Ok(h) => h,
+                        Err(e) => {
+                            debug!("inject: hybrid search failed ({e}), falling back to vector-only");
+                            node_repo
+                                .similarity_search_global(&query_vec, &kinds, 8, 0.6)
+                                .await?
+                        }
+                    };
 
                     debug!("inject: global search returned {} hits", hits.len());
 
@@ -261,7 +269,7 @@ pub async fn execute(
                     // needs.
                     for (hit, sd) in candidates.iter().zip(scored.iter()) {
                         if !sd.dropped { continue; }
-                        let snippet = extract_snippet(&hit.content);
+                        let snippet = extract_snippet_around(&hit.content, Some(query_text));
                         let _ = event_repo.emit(
                             EventKind::ScoringDecision,
                             agent_name,
@@ -313,7 +321,7 @@ pub async fn execute(
                         if !classifier_kept { continue; }
 
                         let age = format_age(hit.created_at);
-                        let snippet = extract_snippet(&hit.content);
+                        let snippet = extract_snippet_around(&hit.content, Some(query_text));
                         let _ = pos_in_survivors; // reserved for future rank-aware logging
                         let _ = event_repo.emit(
                             EventKind::SimilarityHit,
@@ -368,21 +376,58 @@ fn estimate_tokens(text: &str) -> i32 {
 }
 
 fn extract_snippet(content: &serde_json::Value) -> String {
-    // UserMessage nodes store { "text": "..." }
-    // Directive nodes store { "directive": "..." }
-    // Digest nodes store { "summary": "..." } or similar
+    extract_snippet_around(content, None)
+}
+
+/// Pick a snippet from node content that's most informative for the user.
+/// When `query` is provided, we centre the window on the first query-token
+/// match (query-centered snippet — yggdrasil-15); otherwise we take the
+/// head of the string.
+fn extract_snippet_around(content: &serde_json::Value, query: Option<&str>) -> String {
     let text = content.get("text")
         .or_else(|| content.get("directive"))
         .or_else(|| content.get("summary"))
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| content.as_str().unwrap_or("(no text)"));
 
-    // Truncate to 120 chars
-    if text.len() > 120 {
-        format!("{}…", &text[..117])
-    } else {
-        text.to_string()
+    const WINDOW: usize = 120;
+
+    if text.len() <= WINDOW {
+        return text.to_string();
     }
+
+    if let Some(q) = query {
+        // Find the earliest char-offset match of any query word (>= 3 chars,
+        // not a stopword). Case-insensitive.
+        let hay_lower = text.to_lowercase();
+        let mut best: Option<usize> = None;
+        for word in q.split(|c: char| !c.is_alphanumeric()) {
+            if word.len() < 4 { continue; }
+            let w = word.to_lowercase();
+            if matches!(w.as_str(),
+                "what" | "when" | "where" | "which" | "with" | "from" | "does" | "this" | "that" | "have" | "will"
+            ) { continue; }
+            if let Some(pos) = hay_lower.find(&w) {
+                best = Some(best.map(|b| b.min(pos)).unwrap_or(pos));
+            }
+        }
+        if let Some(pos) = best {
+            // Center a WINDOW-size slice around pos, snap to char boundaries.
+            let half = WINDOW / 2;
+            let start = pos.saturating_sub(half);
+            let end = (start + WINDOW).min(text.len());
+            // Adjust start/end to UTF-8 char boundaries.
+            let start = (0..=start).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+            let end = (end..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+            let prefix = if start > 0 { "…" } else { "" };
+            let suffix = if end < text.len() { "…" } else { "" };
+            return format!("{prefix}{}{suffix}", &text[start..end]);
+        }
+    }
+
+    // Fallback: head of the string.
+    let cut = (0..=117).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+    format!("{}…", &text[..cut])
 }
 
 /// Map a mechanical total score to a human-readable strength band.
