@@ -1,5 +1,10 @@
 pub mod app;
 pub mod dag_view;
 pub mod dashboard;
+pub mod log_view;
+pub mod meter_view;
+pub mod query_view;
 pub mod task_view;
+pub mod tasks_view;
+pub mod trace_view;
 pub mod widgets;
