@@ -69,6 +69,27 @@ impl<'a> NodeRepo<'a> {
         content: serde_json::Value,
         token_count: i32,
     ) -> Result<Node, sqlx::Error> {
+        // Secret redaction — run at this chokepoint so every write path
+        // (inject, remember, digest, observe) gets it for free. Failure
+        // mode is permissive: clean content passes through untouched.
+        let (content, redacted) = crate::redaction::redact_json(content);
+        if !redacted.is_clean() {
+            // Emit audit event directly via raw SQL so we don't need an
+            // EventRepo dependency on NodeRepo. Best-effort — a failed
+            // audit insert must not block the node insert.
+            let _ = sqlx::query(
+                "INSERT INTO events (event_kind, agent_id, agent_name, payload)
+                 VALUES ('redaction_applied', $1, COALESCE((SELECT agent_name FROM agents WHERE agent_id = $1), ''), $2)",
+            )
+            .bind(agent_id)
+            .bind(serde_json::json!({
+                "total": redacted.total,
+                "kinds": redacted.counts,
+                "node_kind": format!("{:?}", &kind).to_lowercase(),
+            }))
+            .execute(self.pool)
+            .await;
+        }
         sqlx::query_as::<_, Node>(
             r#"
             WITH parent AS (

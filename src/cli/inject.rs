@@ -106,7 +106,14 @@ pub async fn execute(
                         node.id, node.token_count
                     );
 
-                    let snippet = if prompt.len() > 80 { &prompt[..80] } else { prompt };
+                    // Defense in depth: redact the event snippet too.
+                    let (redacted_prompt, _) = crate::redaction::redact_str(prompt);
+                    let snippet = if redacted_prompt.len() > 80 {
+                        redacted_prompt[..80].to_string()
+                    } else {
+                        redacted_prompt.clone()
+                    };
+                    let snippet: &str = &snippet;
                     let _ = event_repo.emit(
                         EventKind::NodeWritten,
                         agent_name,

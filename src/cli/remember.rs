@@ -54,7 +54,15 @@ pub async fn remember(
             .await;
     }
 
-    let snippet = if text.len() > 80 { format!("{}…", &text[..80]) } else { text.to_string() };
+    // Defense in depth: redact the event snippet too. Node storage is
+    // already redacted via NodeRepo::insert, but event snippets are a
+    // separate path and must be sanitized independently.
+    let (redacted_text, _) = crate::redaction::redact_str(text);
+    let snippet = if redacted_text.len() > 80 {
+        format!("{}…", &redacted_text[..80])
+    } else {
+        redacted_text.clone()
+    };
     let _ = EventRepo::new(pool).emit(
         EventKind::Remembered,
         agent_name,

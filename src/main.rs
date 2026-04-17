@@ -183,6 +183,21 @@ enum Commands {
     /// cache hit rate, recalls/24h.
     Bar,
 
+    /// Retroactively scrub content from already-stored nodes. Use when a
+    /// secret slipped past the write-time redactor. See ADR yggdrasil-18.
+    Forget {
+        /// Delete a specific node by UUID (and its embedding cache entry).
+        #[arg(long)]
+        node: Option<String>,
+        /// Replace a literal substring with `[redacted:manual]` across every node.
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Re-run the secret redactor over every existing node's content.
+        /// Useful after adding new patterns.
+        #[arg(long)]
+        redact_all: bool,
+    },
+
     /// Persist a durable directive the similarity retriever can surface later
     Remember {
         /// The memory text
@@ -569,6 +584,25 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::bar_cmd::execute(&pool).await?;
+        }
+        Commands::Forget { node, pattern, redact_all } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            match (node, pattern, redact_all) {
+                (Some(id), _, _) => {
+                    let uuid: uuid::Uuid = id.parse().map_err(|_| anyhow::anyhow!("invalid UUID"))?;
+                    ygg::cli::forget_cmd::forget_node(&pool, uuid).await?;
+                }
+                (None, Some(pat), _) => {
+                    ygg::cli::forget_cmd::forget_pattern(&pool, &pat).await?;
+                }
+                (None, None, true) => {
+                    ygg::cli::forget_cmd::redact_all(&pool).await?;
+                }
+                _ => {
+                    eprintln!("pass --node <uuid>, --pattern <substring>, or --redact-all");
+                }
+            }
         }
         Commands::Remember { text, agent, list, limit } => {
             let config = ygg::config::AppConfig::from_env()?;

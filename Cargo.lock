@@ -3573,6 +3573,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "indicatif",
+ "once_cell",
  "pgvector",
  "ratatui",
  "regex",

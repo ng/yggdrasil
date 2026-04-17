@@ -99,6 +99,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::EmbeddingCacheHit => (GREEN,  "⚡"),
         EventKind::ClassifierDecision => (CYAN,  "⚖"),
         EventKind::ScoringDecision  => (GRAY,  "·"),
+        EventKind::RedactionApplied => (RED,   "✂"),
     }
 }
 
@@ -207,6 +208,14 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let verdict = if kept { format!("{GREEN}keep{RESET}") } else { format!("{RED}drop{RESET}") };
             let extra = if !reason.is_empty() && !kept { format!(" {DIM}({reason}){RESET}") } else { String::new() };
             format!("{verdict}{extra} {DIM}{total:.2} from {src}{RESET}  {}", truncate(snip, 35))
+        }
+        EventKind::RedactionApplied => {
+            let total = p["total"].as_i64().unwrap_or(0);
+            let node_kind = p["node_kind"].as_str().unwrap_or("");
+            let kinds = p["kinds"].as_object()
+                .map(|o| o.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" "))
+                .unwrap_or_default();
+            format!("{RED}{total} redacted{RESET} {DIM}in {node_kind} · {kinds}{RESET}")
         }
     }
 }

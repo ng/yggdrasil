@@ -11,6 +11,7 @@ pub mod models;
 pub mod ollama;
 pub mod pressure;
 pub mod prompt;
+pub mod redaction;
 pub mod salience;
 pub mod scoring;
 pub mod stats;
