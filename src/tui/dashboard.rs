@@ -1,32 +1,93 @@
+use chrono::{Duration as CDuration, Utc};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 use sqlx::PgPool;
+use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::lock::LockManager;
 use crate::models::agent::{AgentRepo, AgentWorkflow};
 
-/// Dashboard view showing all agents, locks, and summary stats.
+/// Dashboard view — system pulse at top, agents in the middle,
+/// meaningful locks table at bottom.
 pub struct DashboardView {
     agents: Vec<AgentWorkflow>,
     locks: Vec<crate::lock::ResourceLock>,
     selected: usize,
+    agent_name_by_id: HashMap<Uuid, String>,
+
+    // Pulse numbers
+    prompts_1h: i64,
+    digests_1h: i64,
+    hits_1h: i64,
+    cache_hits_24h: i64,
+    cache_total_24h: i64,
+    redactions_24h: i64,
+    prompts_hourly: Vec<u64>, // last 24h, oldest→newest
 }
 
 impl DashboardView {
     pub fn new() -> Self {
         Self {
-            agents: vec![],
-            locks: vec![],
-            selected: 0,
+            agents: vec![], locks: vec![], selected: 0,
+            agent_name_by_id: HashMap::new(),
+            prompts_1h: 0, digests_1h: 0, hits_1h: 0,
+            cache_hits_24h: 0, cache_total_24h: 0, redactions_24h: 0,
+            prompts_hourly: vec![0; 24],
         }
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
         let agent_repo = AgentRepo::new(pool);
         self.agents = agent_repo.list().await?;
+        self.agent_name_by_id = self.agents.iter()
+            .map(|a| (a.agent_id, a.agent_name.clone()))
+            .collect();
 
         let lock_mgr = LockManager::new(pool, 300);
         self.locks = lock_mgr.list_all().await?;
+
+        // Pulse queries — single roundtrip for the small counters.
+        let since_1h = Utc::now() - CDuration::hours(1);
+        let since_24h = Utc::now() - CDuration::hours(24);
+        let (p1h, d1h, h1h): (i64, i64, i64) = sqlx::query_as(
+            r#"SELECT
+                 COUNT(*) FILTER (WHERE event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'digest_written'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
+               FROM events WHERE created_at >= $1"#
+        ).bind(since_1h).fetch_one(pool).await.unwrap_or((0, 0, 0));
+        self.prompts_1h = p1h;
+        self.digests_1h = d1h;
+        self.hits_1h = h1h;
+
+        let (ch24, cc24, r24): (i64, i64, i64) = sqlx::query_as(
+            r#"SELECT
+                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'redaction_applied')
+               FROM events WHERE created_at >= $1"#
+        ).bind(since_24h).fetch_one(pool).await.unwrap_or((0, 0, 0));
+        self.cache_hits_24h = ch24;
+        self.cache_total_24h = ch24 + cc24;
+        self.redactions_24h = r24;
+
+        // Prompts per hour sparkline, 24h.
+        let sparkline: Vec<(i32, i64)> = sqlx::query_as(
+            "SELECT (24 - FLOOR(EXTRACT(EPOCH FROM (now() - created_at)) / 3600))::int,
+                    COUNT(*)
+             FROM events
+             WHERE created_at >= now() - interval '24 hours'
+               AND event_kind::text = 'node_written'
+               AND payload->>'kind' = 'user_message'
+             GROUP BY 1 ORDER BY 1"
+        ).fetch_all(pool).await.unwrap_or_default();
+        let mut series = vec![0u64; 24];
+        for (b, n) in sparkline {
+            let idx = (b - 1).clamp(0, 23) as usize;
+            series[idx] = n as u64;
+        }
+        self.prompts_hourly = series;
 
         Ok(())
     }
@@ -46,18 +107,76 @@ impl DashboardView {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
+        // Layout: pulse (top) · agents (middle, stretch) · locks (bottom)
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(8),
-                Constraint::Length(8),
-                Constraint::Length(3),
+                Constraint::Length(6),  // system pulse
+                Constraint::Min(8),     // agents
+                Constraint::Length(10), // locks
             ])
             .split(area);
 
-        self.render_agents_table(frame, chunks[0]);
-        self.render_locks_table(frame, chunks[1]);
-        self.render_summary(frame, chunks[2]);
+        self.render_pulse(frame, chunks[0]);
+        self.render_agents_table(frame, chunks[1]);
+        self.render_locks_table(frame, chunks[2]);
+    }
+
+    fn render_pulse(&self, frame: &mut Frame, area: Rect) {
+        // Split: left = numeric snapshot, right = prompts sparkline
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
+
+        let cache_rate = if self.cache_total_24h > 0 {
+            (self.cache_hits_24h as f64 / self.cache_total_24h as f64 * 100.0) as i64
+        } else { 0 };
+
+        let active = self.agents.iter()
+            .filter(|a| a.current_state == crate::models::agent::AgentState::Executing)
+            .count();
+
+        let lines: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled("agents    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} total · {} active", self.agents.len(), active),
+                    Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("    "),
+                Span::styled("locks    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} held",  self.locks.len()),
+                    Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("last 1h   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} prompts · {} digests · {} recalls",
+                    self.prompts_1h, self.digests_1h, self.hits_1h),
+                    Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("last 24h  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("cache {}/{} ({}%) ",
+                    self.cache_hits_24h, self.cache_total_24h, cache_rate),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("· redacted {}", self.redactions_24h),
+                    if self.redactions_24h > 0 {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else { Style::default().add_modifier(Modifier::BOLD) }),
+            ]),
+        ];
+        let pulse = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" System pulse "));
+        frame.render_widget(pulse, cols[0]);
+
+        // Sparkline for prompts/hour
+        let max = *self.prompts_hourly.iter().max().unwrap_or(&1);
+        let spark = Sparkline::default()
+            .block(Block::default().borders(Borders::ALL)
+                .title(format!(" Prompts / hour — 24h (peak {}) ", max)))
+            .data(&self.prompts_hourly)
+            .max(max.max(1))
+            .style(Style::default().fg(Color::Cyan));
+        frame.render_widget(spark, cols[1]);
     }
 
     fn render_agents_table(&self, frame: &mut Frame, area: Rect) {
@@ -67,63 +186,51 @@ impl DashboardView {
             Cell::from("PRESSURE"),
             Cell::from("HEAD"),
             Cell::from("UPDATED"),
+        ]).height(1);
+
+        let rows: Vec<Row> = self.agents.iter().enumerate().map(|(i, agent)| {
+            let style = if i == self.selected {
+                Style::default().bg(Color::DarkGray)
+            } else { Style::default() };
+
+            let state_color = match agent.current_state {
+                crate::models::agent::AgentState::Executing => Color::Green,
+                crate::models::agent::AgentState::Idle => Color::Gray,
+                crate::models::agent::AgentState::HumanOverride => Color::Yellow,
+                crate::models::agent::AgentState::Error => Color::Red,
+                _ => Color::White,
+            };
+
+            let pressure_pct = if agent.context_tokens > 0 {
+                (agent.context_tokens as f64 / 250000.0 * 100.0).min(999.0) as u32
+            } else { 0 };
+
+            let blocks = (pressure_pct / 10).min(10) as usize;
+            let pressure_bar = format!(
+                "{}{} {}%",
+                "█".repeat(blocks),
+                "░".repeat(10 - blocks),
+                pressure_pct,
+            );
+
+            Row::new(vec![
+                Cell::from(agent.agent_name.clone()),
+                Cell::from(agent.current_state.to_string()).style(Style::default().fg(state_color)),
+                Cell::from(pressure_bar),
+                Cell::from(
+                    agent.head_node_id.map(|id| id.to_string()[..8].to_string()).unwrap_or_else(|| "—".into()),
+                ),
+                Cell::from(humanize_since(agent.updated_at)),
+            ]).style(style)
+        }).collect();
+
+        let table = Table::new(rows, [
+            Constraint::Percentage(25),
+            Constraint::Percentage(15),
+            Constraint::Percentage(25),
+            Constraint::Percentage(15),
+            Constraint::Percentage(20),
         ])
-        .height(1);
-
-        let rows: Vec<Row> = self
-            .agents
-            .iter()
-            .enumerate()
-            .map(|(i, agent)| {
-                let style = if i == self.selected {
-                    Style::default().bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
-
-                let state_color = match agent.current_state {
-                    crate::models::agent::AgentState::Executing => Color::Green,
-                    crate::models::agent::AgentState::Idle => Color::Gray,
-                    crate::models::agent::AgentState::HumanOverride => Color::Yellow,
-                    crate::models::agent::AgentState::Error => Color::Red,
-                    _ => Color::White,
-                };
-
-                let pressure_pct = if agent.context_tokens > 0 {
-                    (agent.context_tokens as f64 / 250000.0 * 100.0) as u32
-                } else {
-                    0
-                };
-
-                let pressure_bar = format!(
-                    "{} {}%",
-                    "█".repeat((pressure_pct / 10) as usize).chars().take(10).collect::<String>(),
-                    pressure_pct,
-                );
-
-                Row::new(vec![
-                    Cell::from(agent.agent_name.clone()),
-                    Cell::from(agent.current_state.to_string()).style(Style::default().fg(state_color)),
-                    Cell::from(pressure_bar),
-                    Cell::from(
-                        agent.head_node_id.map(|id| id.to_string()[..8].to_string()).unwrap_or_else(|| "—".into()),
-                    ),
-                    Cell::from(agent.updated_at.format("%H:%M:%S").to_string()),
-                ])
-                .style(style)
-            })
-            .collect();
-
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Percentage(25),
-                Constraint::Percentage(15),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-            ],
-        )
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(" Agents "));
 
@@ -133,51 +240,70 @@ impl DashboardView {
     fn render_locks_table(&self, frame: &mut Frame, area: Rect) {
         let header = Row::new(vec![
             Cell::from("RESOURCE").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Cell::from("AGENT"),
+            Cell::from("HELD BY"),
+            Cell::from("HELD FOR"),
             Cell::from("EXPIRES"),
-        ]);
+        ]).height(1);
 
-        let rows: Vec<Row> = self
-            .locks
-            .iter()
-            .map(|lock| {
-                Row::new(vec![
-                    Cell::from(lock.resource_key.clone()),
-                    Cell::from(lock.agent_id.to_string()[..8].to_string()),
-                    Cell::from(lock.expires_at.format("%H:%M:%S").to_string()),
-                ])
-            })
-            .collect();
+        let now = Utc::now();
+        let rows: Vec<Row> = self.locks.iter().map(|l| {
+            let resource = short_resource(&l.resource_key);
+            let agent = self.agent_name_by_id.get(&l.agent_id)
+                .cloned()
+                .unwrap_or_else(|| format!("{}…", &l.agent_id.to_string()[..8]));
+            let held = humanize_since(l.acquired_at);
+            let ttl_secs = (l.expires_at - now).num_seconds();
+            let ttl = if ttl_secs <= 0 {
+                ("expired", Color::Red)
+            } else if ttl_secs < 60 {
+                ("<1m",    Color::Yellow)
+            } else if ttl_secs < 300 {
+                ("<5m",    Color::Yellow)
+            } else {
+                ("ok",     Color::Green)
+            };
+            let ttl_str = format!("{}  ({})", humanize_duration(ttl_secs), ttl.0);
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Percentage(40),
-                Constraint::Percentage(30),
-                Constraint::Percentage(30),
-            ],
-        )
+            Row::new(vec![
+                Cell::from(resource),
+                Cell::from(agent).style(Style::default().fg(Color::Cyan)),
+                Cell::from(held).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(ttl_str).style(Style::default().fg(ttl.1)),
+            ])
+        }).collect();
+
+        let title = format!(" Locks — {} held (advisory) ", self.locks.len());
+        let table = Table::new(rows, [
+            Constraint::Percentage(45),
+            Constraint::Percentage(20),
+            Constraint::Percentage(15),
+            Constraint::Percentage(20),
+        ])
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Locks "));
+        .block(Block::default().borders(Borders::ALL).title(title));
 
         frame.render_widget(table, area);
     }
+}
 
-    fn render_summary(&self, frame: &mut Frame, area: Rect) {
-        let active = self.agents.iter().filter(|a| {
-            a.current_state == crate::models::agent::AgentState::Executing
-        }).count();
+/// Trim a resource key (usually an abs path) to the last two path
+/// components plus an ellipsis prefix. Keeps the informative tail visible.
+fn short_resource(s: &str) -> String {
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() <= 2 { return s.to_string(); }
+    let tail = parts[parts.len() - 2..].join("/");
+    format!("…/{tail}")
+}
 
-        let text = format!(
-            " {} agent(s) | {} active | {} lock(s)",
-            self.agents.len(),
-            active,
-            self.locks.len(),
-        );
+fn humanize_since(ts: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (Utc::now() - ts).num_seconds().max(0);
+    humanize_duration(secs) + " ago"
+}
 
-        let para = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title(" Summary "));
-
-        frame.render_widget(para, area);
-    }
+fn humanize_duration(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 60 { format!("{secs}s") }
+    else if secs < 3600 { format!("{}m", secs / 60) }
+    else if secs < 86400 { format!("{}h", secs / 3600) }
+    else { format!("{}d", secs / 86400) }
 }
