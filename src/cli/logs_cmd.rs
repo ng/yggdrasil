@@ -89,6 +89,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::TaskStatusChanged => (YELLOW, "◆"),
         EventKind::Remembered        => (BLUE,   "♦"),
         EventKind::EmbeddingCacheHit => (GREEN,  "⚡"),
+        EventKind::ClassifierDecision => (CYAN,  "⚖"),
     }
 }
 
@@ -159,6 +160,17 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let chars = p["input_chars"].as_u64().unwrap_or(0);
             let purpose = p["purpose"].as_str().unwrap_or("");
             format!("{GREEN}{model}{RESET}  {chars} chars  {ms}ms  {DIM}{purpose} (cached){RESET}")
+        }
+        EventKind::ClassifierDecision => {
+            let score = p["score"].as_f64().unwrap_or(0.0);
+            let kept = p["kept"].as_bool().unwrap_or(false);
+            let bypassed = p["bypassed"].as_bool().unwrap_or(false);
+            let src = p["source_agent"].as_str().unwrap_or("?");
+            let snip = p["snippet"].as_str().unwrap_or("");
+            let verdict = if bypassed { format!("{DIM}bypass{RESET}") }
+                          else if kept { format!("{GREEN}keep{RESET}") }
+                          else { format!("{RED}drop{RESET}") };
+            format!("{verdict} {CYAN}score={score:.2}{RESET} {DIM}from {src}{RESET}  {}", truncate(snip, 40))
         }
     }
 }

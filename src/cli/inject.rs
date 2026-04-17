@@ -134,14 +134,47 @@ pub async fn execute(
                     }
 
                     // Exclude the node we just wrote (distance ≈ 0), surface the rest
-                    let memories: Vec<_> = hits.iter()
+                    let candidates: Vec<_> = hits.iter()
                         .filter(|h| h.id != node.id && h.distance > 0.01)
                         .collect();
 
+                    // Classifier pass — zero-shot pairwise relevance scoring.
+                    // Fails open: on any error every candidate survives, so
+                    // we never regress below cosine-only behavior.
+                    let classifier = crate::classifier::Classifier::from_env();
+                    let snippets: Vec<String> = candidates.iter()
+                        .map(|h| extract_snippet(&h.content))
+                        .collect();
+                    let snippet_refs: Vec<&str> = snippets.iter().map(String::as_str).collect();
+                    let decisions = classifier.classify_batch(prompt, &snippet_refs).await;
+
+                    for (hit, (decision, snippet)) in candidates.iter().zip(decisions.iter().zip(snippets.iter())) {
+                        let _ = event_repo.emit(
+                            EventKind::ClassifierDecision,
+                            agent_name,
+                            Some(agent.agent_id),
+                            serde_json::json!({
+                                "source_agent": hit.agent_name,
+                                "similarity": hit.similarity(),
+                                "score": decision.score,
+                                "kept": decision.kept,
+                                "bypassed": decision.bypassed,
+                                "reason": decision.reason,
+                                "model": classifier.model(),
+                                "threshold": classifier.threshold(),
+                                "snippet": snippet,
+                            }),
+                        ).await;
+                    }
+
+                    let memories: Vec<_> = candidates.iter()
+                        .zip(decisions.iter().zip(snippets.iter()))
+                        .filter(|(_, (decision, _))| decision.kept)
+                        .collect();
+
                     if !memories.is_empty() {
-                        for hit in memories {
+                        for (hit, (decision, snippet)) in memories {
                             let age = format_age(hit.created_at);
-                            let snippet = extract_snippet(&hit.content);
                             let _ = event_repo.emit(
                                 EventKind::SimilarityHit,
                                 agent_name,
@@ -150,7 +183,8 @@ pub async fn execute(
                                     "source_agent": hit.agent_name,
                                     "distance": hit.distance,
                                     "similarity": hit.similarity(),
-                                    "snippet": &snippet,
+                                    "score": decision.score,
+                                    "snippet": snippet,
                                 }),
                             ).await;
                             output.push(format!(

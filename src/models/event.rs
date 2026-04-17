@@ -18,6 +18,7 @@ pub enum EventKind {
     TaskStatusChanged,
     Remembered,
     EmbeddingCacheHit,
+    ClassifierDecision,
 }
 
 impl EventKind {
@@ -35,6 +36,7 @@ impl EventKind {
             Self::TaskStatusChanged => "task_status",
             Self::Remembered       => "remembered",
             Self::EmbeddingCacheHit => "cache_hit",
+            Self::ClassifierDecision => "classifier",
         }
     }
 }
