@@ -90,19 +90,34 @@ impl Scorer {
             }
         }).collect();
 
-        // Mark near-duplicates (kept first-seen). O(k^2) but k is small (<=20).
-        // We dedupe on snippet text equality — a stricter version would use
-        // cosine between candidate embeddings, but we don't have those here.
+        // Near-duplicate dedup (yggdrasil-17). Two tiers, both O(k^2) but k
+        // is bounded (~20):
+        //   1. Exact/normalized snippet match — catches re-embeds of the
+        //      same text across agents.
+        //   2. Token-set Jaccard — catches paraphrases and re-wordings that
+        //      share most content words without being byte-identical.
+        // A cosine-on-embeddings tier would be more precise but we don't
+        // carry embeddings on SearchHit today. That's the v2 upgrade path.
+        let threshold = env_f64("YGG_MECH_DEDUP_JACCARD", 0.75);
         let mut seen_snippets: Vec<String> = Vec::with_capacity(scored.len());
+        let mut seen_tokens: Vec<std::collections::HashSet<String>> = Vec::with_capacity(scored.len());
         for (i, h) in hits.iter().enumerate() {
             if scored[i].dropped { continue; }
             let snippet = snippet_key(&h.content);
             if seen_snippets.iter().any(|s| s == &snippet) {
                 scored[i].dropped = true;
                 scored[i].drop_reason = "duplicate";
-            } else {
-                seen_snippets.push(snippet);
+                continue;
             }
+            let tokens = token_set(&snippet);
+            let near_dup = seen_tokens.iter().any(|prev| jaccard_set(prev, &tokens) >= threshold);
+            if near_dup {
+                scored[i].dropped = true;
+                scored[i].drop_reason = "near_duplicate";
+                continue;
+            }
+            seen_snippets.push(snippet);
+            seen_tokens.push(tokens);
         }
 
         // Sort by total score descending (preserving dropped flags).
@@ -159,6 +174,22 @@ fn snippet_key(content: &serde_json::Value) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+fn token_set(text: &str) -> std::collections::HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter_map(|w| {
+            let w = w.to_lowercase();
+            if w.len() < 3 { None } else { Some(w) }
+        })
+        .collect()
+}
+
+fn jaccard_set(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    if a.is_empty() || b.is_empty() { return 0.0; }
+    let inter = a.intersection(b).count();
+    let union = a.union(b).count();
+    if union == 0 { 0.0 } else { inter as f64 / union as f64 }
 }
 
 fn env_f64(k: &str, default: f64) -> f64 {

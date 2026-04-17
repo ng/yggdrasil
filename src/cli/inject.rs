@@ -151,32 +151,71 @@ pub async fn execute(
                         .collect();
 
                     // Disclosure gate — drop candidates we already surfaced
-                    // to THIS agent within the cooldown window. Avoids
-                    // re-injecting the same memory on every prompt.
+                    // to THIS agent recently. Cooldown is measured in TOKENS
+                    // of context consumed since the last disclosure (matches
+                    // the habituation principle in docs/design-principles.md).
+                    // Approximated via cumulative node.token_count emitted
+                    // after the hit. Env:
+                    //   YGG_DISCLOSURE_COOLDOWN_TOKENS (default 4000 — ~1 user
+                    //     prompt + 1 assistant turn at our typical turn sizes)
+                    //   YGG_DISCLOSURE_COOLDOWN_SECS   (legacy time fallback)
+                    //   YGG_DISCLOSURE_MODE = tokens|time|both (default both)
+                    let cooldown_tokens: i64 = std::env::var("YGG_DISCLOSURE_COOLDOWN_TOKENS")
+                        .ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
                     let cooldown_secs: i64 = std::env::var("YGG_DISCLOSURE_COOLDOWN_SECS")
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(1800);
-                    if cooldown_secs > 0 && !candidates.is_empty() {
+                    let mode = std::env::var("YGG_DISCLOSURE_MODE").unwrap_or_else(|_| "both".into());
+
+                    if !candidates.is_empty() && (cooldown_tokens > 0 || cooldown_secs > 0) {
                         let cand_ids: Vec<uuid::Uuid> = candidates.iter().map(|c| c.id).collect();
-                        let recent_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-                            r#"SELECT DISTINCT (payload->>'source_node_id')::uuid
-                               FROM events
-                               WHERE event_kind::text = 'similarity_hit'
-                                 AND agent_id = $1
-                                 AND created_at > now() - make_interval(secs => $2)
-                                 AND payload->>'source_node_id' IS NOT NULL
-                                 AND (payload->>'source_node_id')::uuid = ANY($3)"#
-                        )
-                        .bind(agent.agent_id)
-                        .bind(cooldown_secs as f64)
-                        .bind(&cand_ids)
-                        .fetch_all(pool)
-                        .await
-                        .unwrap_or_default();
+
+                        // Two conditions in one query: source_node_id was
+                        // surfaced recently in time AND tokens-since-hit is
+                        // below budget. Either gate alone suppresses depending
+                        // on mode.
+                        let sql = r#"
+                            WITH cands AS (SELECT UNNEST($1::uuid[]) AS id),
+                            hits AS (
+                                SELECT (payload->>'source_node_id')::uuid AS src_id,
+                                       MAX(created_at) AS last_hit_at
+                                FROM events
+                                WHERE event_kind::text = 'similarity_hit'
+                                  AND agent_id = $2
+                                  AND payload->>'source_node_id' IS NOT NULL
+                                  AND (payload->>'source_node_id')::uuid = ANY($1)
+                                GROUP BY src_id
+                            ),
+                            scored AS (
+                                SELECT h.src_id,
+                                       EXTRACT(EPOCH FROM (now() - h.last_hit_at))::bigint AS age_secs,
+                                       COALESCE((
+                                           SELECT SUM(token_count)::bigint FROM nodes n
+                                           WHERE n.agent_id = $2 AND n.created_at > h.last_hit_at
+                                       ), 0) AS tokens_since
+                                FROM hits h
+                            )
+                            SELECT src_id FROM scored
+                            WHERE ($3 = 'time'   AND age_secs   < $4)
+                               OR ($3 = 'tokens' AND tokens_since < $5)
+                               OR ($3 = 'both'   AND age_secs   < $4 AND tokens_since < $5)
+                        "#;
+                        let recent_ids: Vec<uuid::Uuid> = sqlx::query_scalar(sql)
+                            .bind(&cand_ids)
+                            .bind(agent.agent_id)
+                            .bind(&mode)
+                            .bind(cooldown_secs)
+                            .bind(cooldown_tokens)
+                            .fetch_all(pool)
+                            .await
+                            .unwrap_or_default();
 
                         if !recent_ids.is_empty() {
                             let before = candidates.len();
                             candidates.retain(|c| !recent_ids.contains(&c.id));
-                            debug!("inject: disclosure gate suppressed {} candidate(s)", before - candidates.len());
+                            debug!(
+                                "inject: disclosure gate ({mode}) suppressed {} candidate(s)",
+                                before - candidates.len()
+                            );
                         }
                     }
 

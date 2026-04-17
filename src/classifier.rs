@@ -93,6 +93,26 @@ impl Classifier {
     pub fn model(&self) -> &str { &self.model }
     pub fn is_enabled(&self) -> bool { self.enabled }
 
+    /// Fire-and-forget warm-up ping so the classifier model is resident when
+    /// the next inject needs it. Zero-length prompt; just triggers the model
+    /// load path so the keep_alive timer starts. Safe to spawn in the
+    /// background from SessionStart.
+    pub async fn warm_up(&self) {
+        if !self.enabled { return; }
+        let req = GenerateRequest {
+            model: &self.model,
+            prompt: "ok".to_string(),
+            format: "json",
+            stream: false,
+            options: GenerateOptions { temperature: 0.0, num_predict: 1 },
+            keep_alive: "30m",
+        };
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            self.http.post(format!("{}/api/generate", self.base_url)).json(&req).send(),
+        ).await;
+    }
+
     /// Classify a batch in a SINGLE model call. Ollama serializes inference
     /// per model server-side, so parallel per-candidate calls don't reduce
     /// wall time — one batched prompt does. The model is asked to return a

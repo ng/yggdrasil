@@ -54,6 +54,13 @@ async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<
     // Register (or touch) this agent so it exists in the DB.
     let agent = agent_repo.register(agent_name).await?;
 
+    // Fire-and-forget classifier warm-up so the first inject doesn't
+    // eat a cold-start penalty. Only does anything if YGG_CLASSIFIER=on.
+    // yggdrasil-13.
+    tokio::spawn(async move {
+        crate::classifier::Classifier::from_env().warm_up().await;
+    });
+
     let lock_mgr = LockManager::new(&pool, config.lock_ttl_secs);
     let locks = lock_mgr
         .list_agent_locks(agent.agent_id)
