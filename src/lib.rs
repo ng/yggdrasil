@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod embed;
+pub mod epoch;
 pub mod executor;
 pub mod interrupt;
 pub mod llm_digest;

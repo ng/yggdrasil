@@ -365,6 +365,11 @@ pub async fn execute(
         println!("{}", output.join("\n"));
     }
 
+    // Epoch reflection check (yggdrasil-10). Fires a background digest
+    // if transcript growth has crossed the threshold since the last one.
+    // Non-blocking; returns instantly if nothing is due.
+    crate::epoch::maybe_fire(pool, agent.agent_id, agent_name).await;
+
     Ok(())
 }
 
