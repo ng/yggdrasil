@@ -77,7 +77,7 @@ fn print_event(event: &Event) {
     let detail = format_payload(&event.event_kind, &event.payload);
 
     println!(
-        "{DIM}{ts}{RESET} {color}{symbol} {label}{RESET} {SEP} {GRAY}{agent}{RESET} {SEP} {detail}"
+        "{DIM}{ts}{RESET} {color}{symbol}{label}{RESET} {SEP} {GRAY}{agent}{RESET} {SEP} {detail}"
     );
 }
 

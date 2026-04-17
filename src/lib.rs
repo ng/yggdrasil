@@ -16,6 +16,7 @@ pub mod redaction;
 pub mod references;
 pub mod salience;
 pub mod scoring;
+pub mod task_classify;
 pub mod stats;
 pub mod status;
 pub mod tmux;

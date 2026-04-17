@@ -81,15 +81,39 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
     let repo = resolve_cwd_repo(pool).await?;
     let created_by = resolve_agent_id(pool, opts.agent_name).await?;
 
-    let kind = opts.kind
-        .map(|k| TaskKind::from_str(k).map_err(|e| anyhow::anyhow!(e)))
-        .transpose()?
-        .unwrap_or_default();
+    // Auto-classify (yggdrasil-6) — only calls the LLM for the fields the
+    // user didn't explicitly pass. Explicit flags always win. Zero cost if
+    // Ollama is down (returns None, we fall back to defaults).
+    let missing_kind = opts.kind.is_none();
+    let missing_priority = opts.priority.is_none();
+    let missing_labels = opts.labels.is_empty();
+    let suggestion = if missing_kind || missing_priority || missing_labels {
+        crate::task_classify::suggest(opts.title, opts.description).await
+    } else {
+        None
+    };
 
-    let priority = opts.priority.unwrap_or(2);
+    let kind = match opts.kind {
+        Some(k) => TaskKind::from_str(k).map_err(|e| anyhow::anyhow!(e))?,
+        None => suggestion.as_ref()
+            .and_then(|s| s.kind.as_deref())
+            .and_then(|k| TaskKind::from_str(k).ok())
+            .unwrap_or_default(),
+    };
+
+    let priority = opts.priority
+        .or(suggestion.as_ref().and_then(|s| s.priority))
+        .unwrap_or(2);
     if !(0..=4).contains(&priority) {
         anyhow::bail!("priority must be between 0 (critical) and 4 (backlog)");
     }
+
+    let suggested_labels: Vec<String> = if opts.labels.is_empty() {
+        suggestion.as_ref().map(|s| s.labels.clone()).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let labels: &[String] = if opts.labels.is_empty() { &suggested_labels } else { opts.labels };
 
     let task = TaskRepo::new(pool)
         .create(
@@ -104,7 +128,7 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
                 kind,
                 priority,
                 assignee: None,
-                labels: opts.labels,
+                labels,
             },
         )
         .await?;
