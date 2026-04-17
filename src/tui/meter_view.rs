@@ -5,7 +5,7 @@
 
 use chrono::{Duration as CDuration, Utc};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Sparkline, Wrap};
 use sqlx::PgPool;
 
 pub struct MeterView {
@@ -23,7 +23,10 @@ pub struct MeterView {
     pub nodes_total: i64,
     pub redactions_24h: i64,
     pub last_digest_secs: Option<i64>,
-    pub recent_events: Vec<(String, String, String)>, // (ts, kind, detail)
+    // 24 hourly buckets ending now — oldest at index 0, newest at 23.
+    pub prompts_series: Vec<u64>,
+    pub cache_series: Vec<u64>,
+    pub referenced_series: Vec<u64>,
 }
 
 impl MeterView {
@@ -34,7 +37,9 @@ impl MeterView {
             referenced_rate: 0, referenced: 0, hits_emitted: 0,
             prompts_24h: 0, digests_24h: 0, nodes_total: 0, redactions_24h: 0,
             last_digest_secs: None,
-            recent_events: vec![],
+            prompts_series: vec![0; 24],
+            cache_series: vec![0; 24],
+            referenced_series: vec![0; 24],
         }
     }
 
@@ -106,16 +111,14 @@ impl MeterView {
                ORDER BY n.created_at DESC LIMIT 1"#
         ).bind(agent_name).fetch_optional(pool).await.ok().flatten();
 
-        // Event tape (last 10, newest last for bottom scroll feel).
-        let rows: Vec<(chrono::DateTime<Utc>, String, serde_json::Value)> = sqlx::query_as(
-            "SELECT created_at, event_kind::text, payload FROM events
-             ORDER BY created_at DESC LIMIT 10"
-        ).fetch_all(pool).await.unwrap_or_default();
-        self.recent_events = rows.into_iter().rev().map(|(t, k, p)| {
-            let ts = t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
-            let detail = short_detail(&k, &p);
-            (ts, k, detail)
-        }).collect();
+        // 24h time-series in 1-hour buckets. One query per metric so we can
+        // GROUP BY the bucket inline.
+        self.prompts_series = hourly_series(pool,
+            "event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'").await;
+        self.cache_series = hourly_series(pool,
+            "event_kind::text = 'embedding_cache_hit'").await;
+        self.referenced_series = hourly_series(pool,
+            "event_kind::text = 'hit_referenced'").await;
 
         Ok(())
     }
@@ -206,23 +209,67 @@ impl MeterView {
             .percent(digest_pct);
         frame.render_widget(digest_gauge, gauges[3]);
 
-        // Tape
-        let items: Vec<ListItem> = self.recent_events.iter().map(|(ts, k, d)| {
-            ListItem::new(Line::from(vec![
-                Span::styled(ts.clone(), Style::default().fg(Color::DarkGray)),
-                Span::raw(" "),
-                Span::styled(format!("{k:<18}"), Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::raw(d.clone()),
-            ]))
-        }).collect();
+        // Trends — three stacked 24-hour sparklines. More informative than
+        // a %-gauge because they show WHERE the rate is headed, not just
+        // where it is right now. The live-events tape moves to the global
+        // bottom status bar (app.rs) so it's visible across every pane.
+        let spark_area = tape_area;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Length(4),
+                Constraint::Length(4),
+                Constraint::Min(0),
+            ])
+            .split(spark_area);
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Live events "));
-        frame.render_widget(list, tape_area);
+        let p_max = *self.prompts_series.iter().max().unwrap_or(&1);
+        let c_max = *self.cache_series.iter().max().unwrap_or(&1);
+        let r_max = *self.referenced_series.iter().max().unwrap_or(&1);
+
+        let spark = |title: String, data: &[u64], color: Color, max: u64| -> Sparkline {
+            Sparkline::default()
+                .block(Block::default().borders(Borders::ALL).title(title))
+                .data(data)
+                .max(max.max(1))
+                .style(Style::default().fg(color))
+        };
+
+        frame.render_widget(
+            spark(format!(" Prompts / hour (24h · peak {p_max}) "),
+                &self.prompts_series, Color::Cyan, p_max),
+            chunks[0]);
+        frame.render_widget(
+            spark(format!(" Cache hits / hour (24h · peak {c_max}) "),
+                &self.cache_series, Color::Green, c_max),
+            chunks[1]);
+        frame.render_widget(
+            spark(format!(" Referenced / hour (24h · peak {r_max}) "),
+                &self.referenced_series, Color::Magenta, r_max),
+            chunks[2]);
 
         let _ = Paragraph::new("").wrap(Wrap { trim: true });
     }
+}
+
+/// Return 24 hourly buckets (u64) for events matching `predicate`,
+/// oldest first (index 0) → newest last (index 23). Missing hours = 0.
+async fn hourly_series(pool: &PgPool, predicate: &str) -> Vec<u64> {
+    let sql = format!(
+        "SELECT (24 - FLOOR(EXTRACT(EPOCH FROM (now() - created_at)) / 3600))::int AS bucket,
+                COUNT(*) AS n
+         FROM events
+         WHERE created_at >= now() - interval '24 hours' AND ({predicate})
+         GROUP BY bucket ORDER BY bucket"
+    );
+    let rows: Vec<(i32, i64)> = sqlx::query_as(&sql).fetch_all(pool).await.unwrap_or_default();
+    let mut out = vec![0u64; 24];
+    for (b, n) in rows {
+        let idx = (b - 1).clamp(0, 23) as usize;
+        out[idx] = n as u64;
+    }
+    out
 }
 
 fn format_tokens(n: i64) -> String {
@@ -244,27 +291,3 @@ fn human_age(secs: i64) -> String {
     else { format!("{}d", secs / 86400) }
 }
 
-fn short_detail(kind: &str, p: &serde_json::Value) -> String {
-    match kind {
-        "similarity_hit" => {
-            let s = p.get("total_score").or_else(|| p.get("similarity"))
-                .and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let src = p.get("source_agent").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("score={s:.2} from {src}")
-        }
-        "embedding_call" | "embedding_cache_hit" => {
-            let chars = p.get("input_chars").and_then(|v| v.as_u64()).unwrap_or(0);
-            let ms = p.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-            format!("{chars}c {ms}ms")
-        }
-        "hit_referenced" => {
-            let o = p.get("overlap").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            format!("overlap={o:.2}")
-        }
-        "digest_written" => {
-            let t = p.get("turns").and_then(|v| v.as_i64()).unwrap_or(0);
-            format!("{t} turns")
-        }
-        _ => String::new(),
-    }
-}

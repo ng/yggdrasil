@@ -40,6 +40,8 @@ pub struct App {
     pub logs: LogView,
     pub agent_name: String,
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
+    /// Recent events shown in the global bottom status bar across all panes.
+    pub status_tail: Vec<(String, String, String)>, // (hh:mm:ss, kind, one-line detail)
 }
 
 impl App {
@@ -56,7 +58,21 @@ impl App {
             logs: LogView::new(),
             agent_name,
             query_focus: false,
+            status_tail: Vec::new(),
         }
+    }
+
+    /// Pull the 3 most-recent events for the global bottom strip.
+    pub async fn refresh_status_tail(&mut self, pool: &PgPool) {
+        let rows: Vec<(chrono::DateTime<chrono::Utc>, String, serde_json::Value)> =
+            sqlx::query_as(
+                "SELECT created_at, event_kind::text, payload
+                 FROM events ORDER BY created_at DESC LIMIT 3"
+            ).fetch_all(pool).await.unwrap_or_default();
+        self.status_tail = rows.into_iter().rev().map(|(t, k, p)| {
+            let ts = t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+            (ts, k, short_status_detail(&p))
+        }).collect();
     }
 
     pub async fn handle_key(&mut self, pool: &PgPool, code: KeyCode, modifiers: KeyModifiers) {
@@ -97,7 +113,8 @@ impl App {
                 self.query_focus = true;
             }
             KeyCode::Char('7') => self.active_view = ActiveView::Logs,
-            KeyCode::Tab => self.cycle_view(),
+            KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
+            KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
             KeyCode::Char('i') if self.active_view == ActiveView::Query => {
                 self.query_focus = true;
             }
@@ -132,7 +149,7 @@ impl App {
         }
     }
 
-    fn cycle_view(&mut self) {
+    fn cycle_view_forward(&mut self) {
         self.active_view = match self.active_view {
             ActiveView::Dashboard => ActiveView::Dag,
             ActiveView::Dag => ActiveView::Tasks,
@@ -143,6 +160,47 @@ impl App {
             ActiveView::Logs => ActiveView::Dashboard,
         };
     }
+    fn cycle_view_backward(&mut self) {
+        self.active_view = match self.active_view {
+            ActiveView::Dashboard => ActiveView::Logs,
+            ActiveView::Dag => ActiveView::Dashboard,
+            ActiveView::Tasks => ActiveView::Dag,
+            ActiveView::Trace => ActiveView::Tasks,
+            ActiveView::Meter => ActiveView::Trace,
+            ActiveView::Query => ActiveView::Meter,
+            ActiveView::Logs => ActiveView::Query,
+        };
+    }
+}
+
+fn short_status_detail(p: &serde_json::Value) -> String {
+    // One-line detail for the bottom status strip. Best-effort per kind.
+    if let Some(score) = p.get("total_score").or_else(|| p.get("similarity"))
+        .and_then(|v| v.as_f64())
+    {
+        let src = p.get("source_agent").and_then(|v| v.as_str()).unwrap_or("?");
+        let snip = p.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+        let s = if snip.chars().count() > 40 {
+            snip.chars().take(40).collect::<String>() + "…"
+        } else { snip.to_string() };
+        return format!("score={score:.2} from {src}  {s}");
+    }
+    if let Some(t) = p.get("turns").and_then(|v| v.as_i64()) {
+        return format!("{t} turns");
+    }
+    if let Some(r) = p.get("ref").and_then(|v| v.as_str()) {
+        if let Some(to) = p.get("to").and_then(|v| v.as_str()) {
+            return format!("{r} → {to}");
+        }
+        return r.to_string();
+    }
+    if let Some(snip) = p.get("snippet").and_then(|v| v.as_str()) {
+        let s = if snip.chars().count() > 60 {
+            snip.chars().take(60).collect::<String>() + "…"
+        } else { snip.to_string() };
+        return s;
+    }
+    String::new()
 }
 
 /// Run the TUI event loop.
@@ -162,8 +220,9 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
     let mut app = App::new(agent_name);
 
     loop {
-        // Always refresh dashboard (cheap); refresh the active view too.
+        // Always refresh dashboard (cheap) + the global status tail; refresh the active view too.
         app.dashboard.refresh(pool).await?;
+        app.refresh_status_tail(pool).await;
         match app.active_view {
             ActiveView::Dag     => { app.dag.refresh(pool).await?; }
             ActiveView::Tasks   => { app.tasks.refresh(pool).await?; }
@@ -177,7 +236,11 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
             let area = frame.area();
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .constraints([
+                    Constraint::Length(1),   // tab bar
+                    Constraint::Min(0),      // active pane
+                    Constraint::Length(3),   // global status strip (3 recent events)
+                ])
                 .split(area);
 
             let tab = |label: &str, active: bool| -> Span<'static> {
@@ -197,7 +260,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[5] Meter",     app.active_view == ActiveView::Meter),
                 tab("[6] Query",     app.active_view == ActiveView::Query),
                 tab("[7] Logs",      app.active_view == ActiveView::Logs),
-                Span::raw("  q=quit  tab=next  f=filter(logs)  i=input(query)"),
+                Span::raw("  q=quit  ←→/tab=nav  f=filter(logs)  i=input(query)"),
             ];
             frame.render_widget(Line::from(titles), chunks[0]);
 
@@ -210,6 +273,22 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 ActiveView::Query     => app.query.render(frame, chunks[1]),
                 ActiveView::Logs      => app.logs.render(frame, chunks[1]),
             }
+
+            // Global status strip — 3 most recent events, always visible.
+            let lines: Vec<Line> = app.status_tail.iter().map(|(ts, kind, detail)| {
+                Line::from(vec![
+                    Span::styled(ts.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::styled(format!("{kind:<20}"), Style::default().fg(Color::Cyan)),
+                    Span::raw(" "),
+                    Span::styled(detail.clone(), Style::default().fg(Color::Gray)),
+                ])
+            }).collect();
+            let status = ratatui::widgets::Paragraph::new(lines)
+                .block(ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::TOP)
+                    .title(" events "));
+            frame.render_widget(status, chunks[2]);
         })?;
 
         // 500ms poll for key input; refresh loop ticks every 500ms regardless.
