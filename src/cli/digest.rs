@@ -38,40 +38,85 @@ pub async fn execute(
         return Ok(());
     }
 
-    let corrections = extract_corrections(&entries);
-    let reinforcements = extract_reinforcements(&entries);
+    let heuristic_corrections = extract_corrections(&entries);
+    let heuristic_reinforcements = extract_reinforcements(&entries);
     let files_touched = extract_files_touched(&entries);
-    let summary = build_summary(&entries, &corrections);
+
+    // LLM digest (yggdrasil-4). Calls Ollama for a structured summary +
+    // corrections + reinforcements + open_threads. Falls back to the
+    // heuristic extractor when YGG_LLM_DIGEST=off, Ollama is down, the
+    // model times out, or emits unparseable JSON.
+    let turn_pairs: Vec<(String, String)> = entries.iter()
+        .map(|t| (t.role.clone(), t.text.clone()))
+        .collect();
+    let llm_result = crate::llm_digest::LlmDigester::from_env().digest(&turn_pairs).await;
+    let method = if llm_result.is_some() { "llm" } else { "heuristic" };
+
+    // Canonical summary + corrections + reinforcements — LLM wins if present,
+    // else fall back to heuristic-built versions.
+    let summary = llm_result.as_ref()
+        .map(|r| r.summary.clone())
+        .unwrap_or_else(|| build_summary(&entries, &heuristic_corrections));
+
+    let corrections_json: Vec<serde_json::Value> = if let Some(ref r) = llm_result {
+        r.corrections.iter().map(|c| serde_json::json!({
+            "feedback": c.feedback, "context": c.context,
+        })).collect()
+    } else {
+        heuristic_corrections.iter().map(|c| serde_json::json!({
+            "feedback": c.feedback, "context": c.context, "sentiment": c.sentiment.to_str(),
+        })).collect()
+    };
+
+    let reinforcements_json: Vec<serde_json::Value> = if let Some(ref r) = llm_result {
+        r.reinforcements.iter().map(|c| serde_json::json!({
+            "feedback": c.feedback, "context": c.context,
+        })).collect()
+    } else {
+        heuristic_reinforcements.iter().map(|r| serde_json::json!({
+            "feedback": r.feedback, "context": r.context,
+        })).collect()
+    };
+
+    let open_threads: Vec<String> = llm_result.as_ref()
+        .map(|r| r.open_threads.clone())
+        .unwrap_or_default();
 
     info!(
-        "digest: {} turns, {} corrections, {} reinforcements, {} files",
-        entries.len(), corrections.len(), reinforcements.len(), files_touched.len()
+        "digest [{method}]: {} turns, {} corrections, {} reinforcements, {} open_threads, {} files",
+        entries.len(), corrections_json.len(), reinforcements_json.len(),
+        open_threads.len(), files_touched.len()
     );
 
-    if !corrections.is_empty() {
-        for c in &corrections {
-            info!("digest: correction — {:?}", c.feedback);
+    // Build the text we'll embed for cross-session similarity retrieval.
+    // Pull the canonical forms so the embedding reflects whichever path
+    // produced them.
+    let embed_text = {
+        let mut parts = vec![summary.clone()];
+        for c in &corrections_json {
+            if let Some(f) = c.get("feedback").and_then(|v| v.as_str()) {
+                parts.push(format!("avoid: {f}"));
+            }
         }
-    }
-
-    // Build the digest text for embedding
-    let embed_text = build_embed_text(&summary, &corrections, &reinforcements);
+        for r in &reinforcements_json {
+            if let Some(f) = r.get("feedback").and_then(|v| v.as_str()) {
+                parts.push(format!("good: {f}"));
+            }
+        }
+        for t in &open_threads { parts.push(format!("open: {t}")); }
+        parts.join(". ")
+    };
     debug!("digest: embed text ({} chars): {:?}", embed_text.len(), &embed_text[..embed_text.len().min(120)]);
 
     // Write Digest node
     let content = serde_json::json!({
         "summary": summary,
-        "corrections": corrections.iter().map(|c| serde_json::json!({
-            "feedback": c.feedback,
-            "context": c.context,
-            "sentiment": c.sentiment.to_str(),
-        })).collect::<Vec<_>>(),
-        "reinforcements": reinforcements.iter().map(|r| serde_json::json!({
-            "feedback": r.feedback,
-            "context": r.context,
-        })).collect::<Vec<_>>(),
+        "corrections": corrections_json,
+        "reinforcements": reinforcements_json,
+        "open_threads": open_threads,
         "files_touched": files_touched,
         "turn_count": entries.len(),
+        "method": method,
     });
 
     let token_count = estimate_tokens(&embed_text);
@@ -139,13 +184,17 @@ pub async fn execute(
         serde_json::json!({
             "node_id": node.id,
             "turns": entries.len(),
-            "corrections": corrections.len(),
-            "reinforcements": reinforcements.len(),
+            "corrections": corrections_json.len(),
+            "reinforcements": reinforcements_json.len(),
+            "method": method,
             "summary": &summary[..summary.len().min(120)],
         }),
     ).await;
 
-    for c in &corrections {
+    // Heuristic corrections still feed CorrectionDetected events (they carry
+    // sentiment info the LLM path doesn't produce). If the LLM path won, the
+    // heuristic array may still have useful entries — emit them regardless.
+    for c in &heuristic_corrections {
         let _ = event_repo.emit(
             EventKind::CorrectionDetected,
             agent_name,
@@ -159,13 +208,20 @@ pub async fn execute(
     }
 
     // Print a summary to stdout (appears in terminal, not injected)
-    if !corrections.is_empty() || !reinforcements.is_empty() {
-        println!("[ygg digest] session recorded");
-        for c in &corrections {
-            println!("  ✗ {}", c.feedback);
+    if !corrections_json.is_empty() || !reinforcements_json.is_empty() || !open_threads.is_empty() {
+        println!("[ygg digest] session recorded [{method}]");
+        for c in &corrections_json {
+            if let Some(f) = c.get("feedback").and_then(|v| v.as_str()) {
+                println!("  ✗ {f}");
+            }
         }
-        for r in &reinforcements {
-            println!("  ✓ {}", r.feedback);
+        for r in &reinforcements_json {
+            if let Some(f) = r.get("feedback").and_then(|v| v.as_str()) {
+                println!("  ✓ {f}");
+            }
+        }
+        for t in &open_threads {
+            println!("  … {t}");
         }
     }
 
@@ -415,21 +471,6 @@ fn build_summary(turns: &[Turn], corrections: &[CorrectionSignal]) -> String {
     }
 
     parts.join(" | ")
-}
-
-fn build_embed_text(
-    summary: &str,
-    corrections: &[CorrectionSignal],
-    reinforcements: &[ReinforcementSignal],
-) -> String {
-    let mut parts = vec![summary.to_string()];
-    for c in corrections {
-        parts.push(format!("avoid: {}", c.feedback));
-    }
-    for r in reinforcements {
-        parts.push(format!("good: {}", r.feedback));
-    }
-    parts.join(". ")
 }
 
 fn estimate_tokens(text: &str) -> i32 {

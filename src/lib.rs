@@ -6,6 +6,7 @@ pub mod db;
 pub mod embed;
 pub mod executor;
 pub mod interrupt;
+pub mod llm_digest;
 pub mod lock;
 pub mod models;
 pub mod ollama;
