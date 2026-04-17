@@ -4,7 +4,10 @@
 
 INPUT=$(cat)
 AGENT_NAME="${YGG_AGENT_NAME:-$(basename "$(pwd)")}"
-SESSION_ID="${CLAUDE_SESSION_ID:-$$}"
+# Prefer session_id from the hook payload; fall back to env, then shell pid.
+SID_FROM_INPUT=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+SESSION_ID="${SID_FROM_INPUT:-${CLAUDE_SESSION_ID:-$$}}"
+[ -n "$SESSION_ID" ] && export CLAUDE_SESSION_ID="$SESSION_ID"
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
 
 # Write session mapping so other hooks can find it

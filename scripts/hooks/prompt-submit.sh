@@ -5,6 +5,10 @@
 INPUT=$(cat)
 AGENT="${YGG_AGENT_NAME:-$(basename "$(pwd)")}"
 
+# Extract CC session id so every downstream event gets tagged with it.
+SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+[ -n "$SID" ] && export CLAUDE_SESSION_ID="$SID"
+
 # Extract prompt text from the hook's JSON payload (truncate to 2000 chars)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null | head -c 2000)
 

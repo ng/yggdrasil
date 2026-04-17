@@ -4,6 +4,8 @@
 INPUT=$(cat)
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
 FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // empty')
+SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+[ -n "$SID" ] && export CLAUDE_SESSION_ID="$SID"
 AGENT="${YGG_AGENT_NAME:-$(basename "$(pwd)")}"
 
 # Record tool use for every tool (not just edits) so the dashboard State column

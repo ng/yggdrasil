@@ -139,12 +139,13 @@ impl<'a> AgentRepo<'a> {
                     "tool": last_tool,
                 });
                 let _ = sqlx::query(
-                    "INSERT INTO events (event_kind, agent_id, agent_name, payload)
-                     VALUES ('agent_state_changed', $1, $2, $3)"
+                    "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id)
+                     VALUES ('agent_state_changed', $1, $2, $3, $4)"
                 )
                 .bind(agent_id)
                 .bind(&name)
                 .bind(payload)
+                .bind(crate::models::event::cc_session_id())
                 .execute(self.pool)
                 .await;
             }

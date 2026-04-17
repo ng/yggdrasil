@@ -160,6 +160,7 @@ impl App {
             },
             KeyCode::Esc => match self.active_view {
                 ActiveView::Dag if self.dag.detail_open => self.dag.detail_open = false,
+                ActiveView::MemGraph => self.memgraph.back_to_recent(),
                 _ => {}
             },
             _ => {}

@@ -4,6 +4,8 @@
 
 INPUT=$(cat)
 AGENT="${YGG_AGENT_NAME:-$(basename "$(pwd)")}"
+SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+[ -n "$SID" ] && export CLAUDE_SESSION_ID="$SID"
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
 
 # 1. Write a digest of the conversation about to be compacted — captures corrections,

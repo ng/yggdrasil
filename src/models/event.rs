@@ -59,6 +59,13 @@ pub struct Event {
     pub created_at: DateTime<Utc>,
 }
 
+/// Claude Code session id, read lazily from the environment. The hook scripts
+/// export CLAUDE_SESSION_ID; spawn/inject/digest inherit it from the shell
+/// that invoked them. Missing env var => None, the column stays NULL.
+pub fn cc_session_id() -> Option<String> {
+    std::env::var("CLAUDE_SESSION_ID").ok().filter(|s| !s.is_empty())
+}
+
 pub struct EventRepo<'a> {
     pool: &'a PgPool,
 }
@@ -75,13 +82,18 @@ impl<'a> EventRepo<'a> {
         agent_id: Option<Uuid>,
         payload: serde_json::Value,
     ) -> Result<(), sqlx::Error> {
+        // Auto-tag with the ambient CC session id when the hook path set it.
+        // Keeps every emit() callsite untouched.
+        let cc_session_id = cc_session_id();
         sqlx::query(
-            "INSERT INTO events (event_kind, agent_id, agent_name, payload) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id)
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&kind)
         .bind(agent_id)
         .bind(agent_name)
         .bind(payload)
+        .bind(cc_session_id)
         .execute(self.pool)
         .await?;
         Ok(())

@@ -78,8 +78,8 @@ impl<'a> NodeRepo<'a> {
             // EventRepo dependency on NodeRepo. Best-effort — a failed
             // audit insert must not block the node insert.
             let _ = sqlx::query(
-                "INSERT INTO events (event_kind, agent_id, agent_name, payload)
-                 VALUES ('redaction_applied', $1, COALESCE((SELECT agent_name FROM agents WHERE agent_id = $1), ''), $2)",
+                "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id)
+                 VALUES ('redaction_applied', $1, COALESCE((SELECT agent_name FROM agents WHERE agent_id = $1), ''), $2, $3)",
             )
             .bind(agent_id)
             .bind(serde_json::json!({
@@ -87,6 +87,7 @@ impl<'a> NodeRepo<'a> {
                 "kinds": redacted.counts,
                 "node_kind": format!("{:?}", &kind).to_lowercase(),
             }))
+            .bind(crate::models::event::cc_session_id())
             .execute(self.pool)
             .await;
         }

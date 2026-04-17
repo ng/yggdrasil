@@ -43,26 +43,44 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     // show up next to cost regardless of how CC labels the field.
     let tok_total: i64 = token_count(&j).unwrap_or(0);
 
-    // Look up today's cache savings and inference counts, plus the
-    // preceding 24h window for trend deltas. One roundtrip.
+    // When CC provides session_id, scope numbers to THIS session (the true
+    // "what am I getting out of ygg right now" signal). Otherwise fall back
+    // to a 24h global window like before.
+    let session_id = j.get("session_id").and_then(|v| v.as_str()).map(String::from);
     let now_minus_24 = Utc::now() - Duration::hours(24);
     let now_minus_48 = Utc::now() - Duration::hours(48);
-    let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-        r#"SELECT
-             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $1),
-             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $1),
-             COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at >= $1),
-             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at < $1 AND created_at >= $2),
-             COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at < $1 AND created_at >= $2),
-             COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at < $1 AND created_at >= $2)
-           FROM events"#,
-    )
-    .bind(now_minus_24)
-    .bind(now_minus_48)
-    .fetch_one(pool)
-    .await
-    .unwrap_or((0, 0, 0, 0, 0, 0));
-    let (cache_hits, embed_calls, hits_today, cache_prev, calls_prev, hits_prev) = row;
+    let (cache_hits, embed_calls, hits_today, cache_prev, calls_prev, hits_prev) =
+        if let Some(sid) = session_id.as_deref() {
+            // Session-scoped: current session vs last 24h global for trend comparison.
+            let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                r#"SELECT
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND cc_session_id = $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND cc_session_id = $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND cc_session_id = $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1)
+                   FROM events"#,
+            )
+            .bind(sid)
+            .bind(now_minus_24)
+            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0, 0));
+            row
+        } else {
+            let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                r#"SELECT
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at >= $1),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at < $1 AND created_at >= $2),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at < $1 AND created_at >= $2),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at < $1 AND created_at >= $2)
+                   FROM events"#,
+            )
+            .bind(now_minus_24).bind(now_minus_48)
+            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0, 0));
+            row
+        };
 
     let mut segments: Vec<String> = Vec::new();
 

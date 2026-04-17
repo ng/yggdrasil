@@ -212,16 +212,69 @@ impl MemGraphView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        // Three rows: stats strip / recent list / neighbors.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(55),
-                Constraint::Percentage(45),
+                Constraint::Length(3),          // stats strip
+                Constraint::Percentage(50),     // recent
+                Constraint::Percentage(50),     // neighbors
             ])
             .split(area);
 
-        self.render_recent(frame, chunks[0]);
-        self.render_neighbors(frame, chunks[1]);
+        self.render_stats(frame, chunks[0]);
+        self.render_recent(frame, chunks[1]);
+        self.render_neighbors(frame, chunks[2]);
+    }
+
+    fn render_stats(&self, frame: &mut Frame, area: Rect) {
+        let neighbor_count = self.neighbors.len();
+        let (min_sim, max_sim, mean_sim) = if neighbor_count > 0 {
+            let sims: Vec<f64> = self.neighbors.iter().map(|n| n.similarity).collect();
+            let mn = sims.iter().cloned().fold(f64::INFINITY, f64::min);
+            let mx = sims.iter().cloned().fold(0.0_f64, f64::max);
+            let mean = sims.iter().sum::<f64>() / sims.len() as f64;
+            (mn, mx, mean)
+        } else { (0.0, 0.0, 0.0) };
+
+        let active_label = match self.active {
+            Focus::Recent => "recent",
+            Focus::Neighbors => "neighbors",
+        };
+
+        let focus_line = if self.focus_id.is_some() {
+            format!("focus: {}", short(&self.focus_label, 70))
+        } else {
+            "focus: (none — Enter on a node to recenter)".to_string()
+        };
+
+        let line1 = Line::from(vec![
+            Span::styled("  active: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(active_label, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  space=switch  ·  Enter=recenter  ·  Esc=back to recent",
+                Style::default().fg(Color::DarkGray)),
+        ]);
+        let line2 = if neighbor_count > 0 {
+            Line::from(vec![
+                Span::styled(format!("  {}  ·  ", focus_line), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("neighbors: {neighbor_count}  "),
+                    Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("sim min {:.0}% / mean {:.0}% / max {:.0}%",
+                    min_sim*100.0, mean_sim*100.0, max_sim*100.0),
+                    Style::default().fg(Color::Green)),
+            ])
+        } else {
+            Line::from(Span::styled(format!("  {focus_line}"), Style::default().fg(Color::DarkGray)))
+        };
+
+        let para = Paragraph::new(vec![line1, line2])
+            .block(Block::default().borders(Borders::ALL).title(" Memgraph "));
+        frame.render_widget(para, area);
+    }
+
+    /// Esc — return to recent pane without recentering.
+    pub fn back_to_recent(&mut self) {
+        self.active = Focus::Recent;
     }
 
     fn render_recent(&mut self, frame: &mut Frame, area: Rect) {
