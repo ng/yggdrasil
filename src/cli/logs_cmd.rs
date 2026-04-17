@@ -226,6 +226,15 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
     }
 }
 
+/// Truncate at a char boundary, not a byte boundary. Prevents panics on
+/// multi-byte glyphs (e.g. snippets with ─ box-drawing chars from our own
+/// log output that made its way into the DAG as a node).
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max { return s; }
+    // Walk backwards from `max` to the nearest char boundary.
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
