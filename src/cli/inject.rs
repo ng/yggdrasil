@@ -61,9 +61,28 @@ pub async fn execute(
         debug!("inject: ollama health={}", ollama_alive);
 
         if ollama_alive {
-            // Truncate prompt to ~1500 chars — all-minilm has a 256-token limit
-            let query_text = if prompt.len() > 1500 { &prompt[..1500] } else { prompt };
-            debug!("inject: embedding {} chars", query_text.len());
+            // HyDE (yggdrasil-5) — if enabled, generate a hypothetical
+            // answer and embed THAT instead of the raw prompt. Answers
+            // cluster tighter with answer-shaped past content. Opt-in
+            // (YGG_HYDE=on) because it adds latency per inject.
+            let hyde = crate::hyde::Hyde::from_env();
+            let hyde_expansion = if hyde.is_enabled() {
+                hyde.expand(prompt).await
+            } else { None };
+
+            let embed_source: String = hyde_expansion.clone()
+                .map(|e| format!("{prompt}\n\n{e}"))  // Combine for both embedding + tsvector
+                .unwrap_or_else(|| prompt.to_string());
+
+            // Truncate to ~1500 chars — all-minilm has a 256-token limit
+            let query_text: &str = if embed_source.len() > 1500 {
+                &embed_source[..1500]
+            } else {
+                &embed_source
+            };
+            debug!("inject: embedding {} chars{}",
+                query_text.len(),
+                if hyde_expansion.is_some() { " (HyDE-expanded)" } else { "" });
 
             let embed_start = std::time::Instant::now();
             let embed_result = embedder.embed_cached(pool, query_text).await;
