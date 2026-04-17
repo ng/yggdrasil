@@ -1,69 +1,70 @@
 # Project Instructions for AI Agents
 
-This file provides instructions and context for AI coding agents working on this project.
+This project **is** Yggdrasil — a multi-agent coordination layer. We dogfood it: the `ygg` CLI and hooks installed in this repo coordinate the agents working on it. Refer to the project as **Yggdrasil** in prose; `ygg` is the command binary.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
-## Beads Issue Tracker
+## Yggdrasil Agent Coordination
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+The SessionStart, UserPromptSubmit, Stop, PreCompact, and PreToolUse hooks are active. They auto-prime context, inject similar past nodes, digest transcripts, and track state in Postgres. You will see their output at the top of each session (`<!-- ygg:prime -->`) and above each user prompt (`[ygg memory | <agent> | <age> | sim=<n>%]`).
 
 ### Quick Reference
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+ygg status                                  # See all agents' state, locks, recent activity
+ygg lock acquire <resource-key>             # Lease a shared resource before editing
+ygg lock release <resource-key>             # Release when done
+ygg lock list                               # See outstanding locks
+ygg spawn --task "..."                      # Spawn a parallel agent in a new tmux window
+ygg interrupt take-over --agent <name>      # Take over / steer another agent
+ygg logs --follow                           # Live event stream
 ```
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- **Before editing a resource another agent might touch** (shared file, branch, migration, config), acquire a lock: `ygg lock acquire <path-or-key>`. Release when done. This is Yggdrasil's core contract — bypassing it defeats the coordination layer we're building.
+- **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock/memory coordination.
+- **Read `[ygg memory | ...]` injections** at the top of each user turn. They are real context from prior conversations (same or other agents) surfaced by similarity. Treat as relevant unless the content clearly refutes that.
+- **Before assuming you're alone**, check `ygg status`. Other agents may hold locks or be mid-task on related work.
+- **Intra-session step tracking**: native TaskCreate is fine. Yggdrasil doesn't have a tasks table — cross-session persistence lives in nodes (auto) and digests (Stop hook).
+- **Do NOT** use `bd` / beads. This project has migrated to Yggdrasil for coordination.
 
 ## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+Work is NOT complete until `git push` succeeds.
 
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
+1. Run quality gates if code changed (tests, linters, `cargo check`).
+2. Release any locks you still hold (`ygg lock list` → `ygg lock release <key>`).
+3. Push:
    ```bash
    git pull --rebase
-   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
+4. If push fails, resolve and retry until it succeeds.
 
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
+**Never** stop before pushing; **never** say "ready to push when you are" — you push.
 
+## Non-Interactive Shell Commands
+
+Some systems alias `cp`/`mv`/`rm` to interactive mode which hangs agents. Use:
+
+```bash
+cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
+# scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
+```
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+cargo build --release        # Build the ygg binary
+cargo test                   # Run tests (requires Postgres via docker-compose)
+docker-compose up -d         # Start Postgres + pgvector
+ygg migrate                  # Run migrations
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
-
-## Conventions & Patterns
-
-_Add your project-specific conventions here_
+- **src/models/**: `agent` (state machine), `node` (DAG ledger with embeddings), `event` (live stream).
+- **src/cli/**: one file per subcommand — `prime`, `inject`, `spawn`, `lock`, `interrupt`, `digest`, `status`, `logs`, `observe`.
+- **src/lock.rs, src/pressure.rs, src/salience.rs, src/embed.rs**: coordination primitives.
+- **migrations/**: Postgres schema with `pgvector` + `uuid-ossp`.
+- **Hooks** in `~/.claude/ygg-hooks/` → call `ygg` subcommands at Claude Code lifecycle events.

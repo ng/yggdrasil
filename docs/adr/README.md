@@ -1,0 +1,26 @@
+# Architecture Decision Records
+
+This directory holds the non-obvious architectural choices behind Yggdrasil, in the [Markdown Any Decision Records (MADR)](https://adr.github.io/madr/) style. Each record captures the context, the decision, and the consequences — especially the ones we'll regret if we forget.
+
+ADRs are append-only. Superseded decisions get a new ADR that references the old one; the old file stays in place for provenance.
+
+## Index
+
+| #    | Title                                                            | Status    |
+|------|------------------------------------------------------------------|-----------|
+| 0001 | [Postgres + pgvector as the single source of truth](0001-postgres-pgvector-single-store.md) | Accepted  |
+| 0002 | [Local Ollama embeddings over API-hosted models](0002-local-ollama-embeddings.md) | Accepted  |
+| 0003 | [Explicit resource leases over optimistic coordination](0003-lock-graph-coordination.md) | Accepted  |
+| 0004 | [Conversation as a typed DAG, not a flat transcript](0004-conversation-dag.md) | Accepted  |
+| 0005 | [Shell hooks over MCP server or Agent SDK plugin](0005-shell-hook-integration.md) | Accepted  |
+| 0006 | [Dogfood Yggdrasil; remove beads directives from this repo](0006-dogfood-drop-beads.md) | Accepted  |
+| 0007 | [tmux as the multi-agent display substrate](0007-tmux-as-substrate.md) | Accepted  |
+| 0008 | [One global database across repos; agents auto-keyed by pwd](0008-shared-db-across-repos.md) | Accepted  |
+
+## Writing a new ADR
+
+1. Copy the most recent ADR as a template.
+2. Number sequentially (zero-padded to four digits).
+3. Keep it short — one page is the target. If it needs to be longer, the decision probably isn't crisp yet.
+4. State the alternatives you rejected and *why*. Future-you needs to know what you considered, not just what you picked.
+5. Link from this index.

@@ -176,13 +176,15 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
     }
 
     println!();
-    println!(
-        "**commands** \
-        `ygg status` · \
-        `ygg spawn --task \"...\"` · \
-        `ygg lock list` · \
-        `ygg interrupt take-over --agent <name>`"
-    );
+    println!("### When to use `ygg`");
+    println!();
+    println!("- **Before editing a shared resource** (file, branch, migration) another agent might touch → `ygg lock acquire <key>`. Release when done.");
+    println!("- **For parallel work** that warrants its own context window → `ygg spawn --task \"...\"` instead of the native Task/Agent tool.");
+    println!("- **To steer or take over** another agent → `ygg interrupt take-over --agent <name>`.");
+    println!("- **Before assuming you're alone** → `ygg status` to see other agents' state and locks.");
+    println!("- **`[ygg memory | ...]` injections above your user prompts are real prior context** — read them.");
+    println!();
+    println!("Intra-session step tracking: native tasks are fine. Ygg persists nodes + digests automatically; do **not** use `bd` / beads in this project.");
 }
 
 fn print_degraded(agent_name: &str, err: &anyhow::Error) {
@@ -195,6 +197,9 @@ fn print_degraded(agent_name: &str, err: &anyhow::Error) {
         "Hooks are active (file locks, context injection). \
         Run `ygg init` if the database is not configured."
     );
+    println!();
+    println!("Once the DB is reachable, `ygg prime` emits agent-coordination rules — for now, \
+        coordinate via `ygg lock acquire/release`, `ygg spawn`, `ygg status`. Do not use `bd` / beads.");
 }
 
 fn pressure_bar(pct: u64) -> &'static str {
