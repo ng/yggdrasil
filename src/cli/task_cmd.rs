@@ -264,6 +264,33 @@ pub async fn ready(pool: &sqlx::PgPool, json: bool) -> Result<(), anyhow::Error>
     print_task_table(pool, &tasks).await
 }
 
+pub async fn stale(
+    pool: &sqlx::PgPool,
+    days: i32,
+    all_repos: bool,
+    status: Option<&str>,
+    json: bool,
+) -> Result<(), anyhow::Error> {
+    let repo_id = if all_repos {
+        None
+    } else {
+        Some(resolve_cwd_repo(pool).await?.repo_id)
+    };
+    let mut tasks = TaskRepo::new(pool).stale(repo_id, days).await?;
+    if let Some(s) = status {
+        let want = TaskStatus::from_str(s).map_err(|e| anyhow::anyhow!(e))?;
+        tasks.retain(|t| t.status == want);
+    }
+    if json {
+        return emit_tasks_json(pool, &tasks).await;
+    }
+    if tasks.is_empty() {
+        println!("No stale tasks (> {days}d untouched).");
+        return Ok(());
+    }
+    print_task_table(pool, &tasks).await
+}
+
 pub async fn blocked(pool: &sqlx::PgPool, json: bool) -> Result<(), anyhow::Error> {
     let repo = resolve_cwd_repo(pool).await?;
     let tasks = TaskRepo::new(pool).blocked(repo.repo_id).await?;

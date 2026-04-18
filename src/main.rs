@@ -489,6 +489,18 @@ enum TaskAction {
         /// Emit results as JSON array
         #[arg(long)] json: bool,
     },
+    /// Surface tasks that haven't been touched recently — useful for
+    /// triage of abandoned in_progress claims.
+    Stale {
+        /// Age threshold in days (default 30)
+        #[arg(long, default_value_t = 30)] days: i32,
+        /// Scan every repo instead of just the current one
+        #[arg(long)] all: bool,
+        /// Filter to a specific status (e.g. in_progress)
+        #[arg(short, long)] status: Option<String>,
+        /// Emit results as JSON array
+        #[arg(long)] json: bool,
+    },
     /// Show a task by "<prefix>-<seq>" or UUID
     Show {
         reference: String,
@@ -970,6 +982,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TaskAction::Ready { json } => { ygg::cli::task_cmd::ready(&pool, json).await?; }
                 TaskAction::Blocked { json } => { ygg::cli::task_cmd::blocked(&pool, json).await?; }
+                TaskAction::Stale { days, all, status, json } => {
+                    ygg::cli::task_cmd::stale(&pool, days, all, status.as_deref(), json).await?;
+                }
                 TaskAction::Show { reference, json } => { ygg::cli::task_cmd::show(&pool, &reference, json).await?; }
                 TaskAction::Update { reference, title, description, priority, kind, acceptance, design, notes, agent } => {
                     let agent_name = agent.unwrap_or_else(default_agent);

@@ -286,6 +286,33 @@ impl<'a> TaskRepo<'a> {
         .await
     }
 
+    /// Tasks not updated in `>= days` days, still open/in_progress/blocked.
+    /// Pass `repo_id = None` to scan every repo. Useful for triage of abandoned
+    /// claims — particularly `status = 'in_progress'` rows whose updated_at
+    /// has gone quiet.
+    pub async fn stale(
+        &self,
+        repo_id: Option<Uuid>,
+        days: i32,
+    ) -> Result<Vec<Task>, sqlx::Error> {
+        sqlx::query_as::<_, Task>(
+            r#"
+            SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
+                   kind, status, priority, created_by, assignee, human_flag,
+                   created_at, updated_at, closed_at, close_reason, relevance
+            FROM tasks
+            WHERE ($1::UUID IS NULL OR repo_id = $1)
+              AND status <> 'closed'
+              AND updated_at < now() - make_interval(days => $2)
+            ORDER BY updated_at ASC, priority, seq
+            "#,
+        )
+        .bind(repo_id)
+        .bind(days)
+        .fetch_all(self.pool)
+        .await
+    }
+
     pub async fn blocked(&self, repo_id: Uuid) -> Result<Vec<Task>, sqlx::Error> {
         sqlx::query_as::<_, Task>(
             r#"
