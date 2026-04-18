@@ -412,8 +412,13 @@ pub async fn run_with_reporter(
         Some(p) => format!("{agent_name}:{p}"),
         None => agent_name.to_string(),
     };
+    // Append a short random suffix so a second spawn of the same task
+    // (e.g. accidental double-Enter in the TUI) doesn't collide with the
+    // existing tmux window name.
+    let uniq: String = Uuid::new_v4().to_string().chars().take(4).collect();
     let window = sanitize_tmux_name(&format!(
-        "{agent_label}·{}-{}", repo.task_prefix, task.seq
+        "{agent_label}·{}-{}·{uniq}",
+        repo.task_prefix, task.seq
     ));
     spawn_tmux(&window, &wt.path, &task, &repo)?;
 

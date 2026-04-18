@@ -457,20 +457,21 @@ impl DagView {
                     TaskKind::Task    => (Color::White,   "○"),
                 };
 
-                // Run-state glyph for click-to-do visibility: queued,
-                // running, blocked, done, failed. Failed is detected from
-                // close_reason containing "fail" so we don't need a new
-                // enum variant yet.
-                let (status_color, status_label, run_glyph) = match t.status {
-                    TaskStatus::Open       => (Color::Gray,    "open", "⏳"),
-                    TaskStatus::InProgress => (Color::Yellow,  "wip ", "▶"),
-                    TaskStatus::Blocked    => (Color::Red,     "blkd", "⏸"),
+                // Run-state glyph: not-started / active / blocked / done.
+                // "Open" means filed but nothing has worked on it yet —
+                // reads as empty-circle, not hourglass (which implies
+                // work in flight). Running tasks get bold + a filled
+                // arrow so they visibly stand out.
+                let (status_color, status_label, run_glyph, glyph_bold) = match t.status {
+                    TaskStatus::Open       => (Color::DarkGray, "open", "◯", false),
+                    TaskStatus::InProgress => (Color::Green,    "wip ", "▶", true),
+                    TaskStatus::Blocked    => (Color::Red,      "blkd", "⏸", false),
                     TaskStatus::Closed     => {
                         let failed = t.close_reason.as_deref()
                             .map(|r| r.to_lowercase().contains("fail"))
                             .unwrap_or(false);
-                        if failed { (Color::Red, "fail", "✗") }
-                        else { (Color::DarkGray, "done", "✓") }
+                        if failed { (Color::Red, "fail", "✗", false) }
+                        else { (Color::DarkGray, "done", "✓", false) }
                     }
                 };
 
@@ -490,7 +491,12 @@ impl DagView {
                 ListItem::new(Line::from(vec![
                     Span::raw(indent),
                     Span::raw(connector),
-                    Span::styled(format!("{run_glyph} "), Style::default().fg(status_color)),
+                    Span::styled(format!("{run_glyph} "),
+                        if glyph_bold {
+                            Style::default().fg(status_color).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(status_color)
+                        }),
                     Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
                     Span::styled(status_label, Style::default().fg(status_color)),
                     Span::raw(" "),
@@ -498,7 +504,10 @@ impl DagView {
                     Span::raw(" "),
                     Span::styled(id, Style::default().fg(Color::DarkGray)),
                     Span::raw("  "),
-                    Span::raw(truncate(&t.title, 70)),
+                    Span::styled(truncate(&t.title, 70),
+                        if matches!(t.status, TaskStatus::InProgress) {
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                        } else { Style::default() }),
                     Span::styled(children_badge, Style::default().fg(Color::Cyan)),
                 ]))
             }
