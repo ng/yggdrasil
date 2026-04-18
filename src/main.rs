@@ -142,6 +142,19 @@ enum Commands {
         /// Find and digest the most recent transcript for this agent
         #[arg(long)]
         now: bool,
+        /// Called from the Stop hook — after digesting, mark the session
+        /// ended so the dashboard stops showing a ghost ×N badge.
+        #[arg(long)]
+        stop: bool,
+    },
+
+    /// Purge stale rows from locks / sessions / memories. Safe to cron.
+    Reap {
+        #[arg(long)] locks: bool,
+        #[arg(long)] sessions: bool,
+        #[arg(long)] memories: bool,
+        #[arg(long, default_value = "7")] older_than_days: i64,
+        #[arg(long)] dry_run: bool,
     },
 
     /// Output agent context as markdown (called by SessionStart and PreCompact hooks)
@@ -543,7 +556,7 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::logs_cmd::execute(&pool, follow, tail, agent.as_deref()).await?;
         }
-        Commands::Digest { agent, transcript, now } => {
+        Commands::Digest { agent, transcript, now, stop } => {
             let agent_name = agent
                 .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
                 .unwrap_or_else(|| {
@@ -566,6 +579,71 @@ async fn main() -> anyhow::Result<()> {
                 (None, false) => { eprintln!("pass --transcript <path> or --now"); return Ok(()); }
             };
             ygg::cli::digest::execute(&pool, &config, &agent_name, &path).await?;
+            // Mark the session ended when the Stop hook flow called us —
+            // PreCompact continues the same session, so only Stop should end.
+            if stop {
+                if let Ok(Some(a)) = ygg::models::agent::AgentRepo::new(&pool).get_by_name(&agent_name).await {
+                    if let Some(sid) = ygg::models::session::resolve_current_session(
+                        &pool, a.agent_id, None
+                    ).await {
+                        let _ = ygg::models::session::SessionRepo::new(&pool).end(sid).await;
+                    }
+                }
+            }
+        }
+        Commands::Reap { locks, sessions, memories, older_than_days, dry_run } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            // Default to everything when no specific flag is set.
+            let all = !(locks || sessions || memories);
+            let mut total: i64 = 0;
+
+            if all || locks {
+                let sql = "DELETE FROM locks WHERE expires_at < now() - ($1 || ' days')::interval";
+                let n = if dry_run {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*)::bigint FROM locks WHERE expires_at < now() - ($1 || ' days')::interval"
+                    ).bind(older_than_days.to_string()).fetch_one(&pool).await.unwrap_or(0)
+                } else {
+                    sqlx::query(sql).bind(older_than_days.to_string()).execute(&pool).await?.rows_affected() as i64
+                };
+                println!("locks:    {} {}", if dry_run { "would delete" } else { "deleted" }, n);
+                total += n;
+            }
+            if all || sessions {
+                // Close abandoned sessions (no ended_at but stale updated_at)
+                // before we delete. Leaves a digest trail intact.
+                let n_closed = if dry_run {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*)::bigint FROM sessions
+                          WHERE ended_at IS NULL AND updated_at < now() - ($1 || ' days')::interval"
+                    ).bind(older_than_days.to_string()).fetch_one(&pool).await.unwrap_or(0)
+                } else {
+                    sqlx::query(
+                        "UPDATE sessions SET ended_at = updated_at
+                          WHERE ended_at IS NULL AND updated_at < now() - ($1 || ' days')::interval"
+                    ).bind(older_than_days.to_string()).execute(&pool).await?.rows_affected() as i64
+                };
+                println!("sessions: {} {} abandoned (auto-closed)",
+                    if dry_run { "would close" } else { "closed" }, n_closed);
+                total += n_closed;
+            }
+            if all || memories {
+                let n = if dry_run {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*)::bigint FROM memories
+                          WHERE expires_at IS NOT NULL AND expires_at < now()"
+                    ).fetch_one(&pool).await.unwrap_or(0)
+                } else {
+                    sqlx::query(
+                        "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < now()"
+                    ).execute(&pool).await?.rows_affected() as i64
+                };
+                println!("memories: {} {} expired",
+                    if dry_run { "would delete" } else { "deleted" }, n);
+                total += n;
+            }
+            println!("total:    {}", total);
         }
         Commands::Prime { agent, transcript } => {
             let agent_name = agent

@@ -9,7 +9,7 @@ SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
 
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    ygg digest --agent "$AGENT" --transcript "$TRANSCRIPT" 2>/dev/null
+    ygg digest --agent "$AGENT" --transcript "$TRANSCRIPT" --stop 2>/dev/null
 fi
 
 exit 0
