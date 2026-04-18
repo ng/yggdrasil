@@ -36,6 +36,26 @@ ygg eval                                       # Retrieval effectiveness (CLI; p
 - `ygg memory create --scope repo|session|global` is the preferred way to persist notes; `ygg remember` still works.
 - Do NOT use `bd` / beads. This project has migrated to Yggdrasil.
 
+## Agent naming
+
+By default the agent name is the cwd basename (`yggdrasil`, `kb-chunking`).
+Override with `YGG_AGENT_NAME` to namespace personas or branches:
+
+```bash
+YGG_AGENT_NAME="yggdrasil:reviewer"   # role split
+YGG_AGENT_NAME="yggdrasil@feat-x"     # branch-scoped window
+```
+
+Retire an agent that's no longer in use without losing its history:
+
+```bash
+ygg agent list [--all]                         # --all includes archived
+ygg agent stale --older-than-days 14           # preview what reap would archive
+ygg agent archive <name>                       # hide from live views, keep history
+ygg agent unarchive <name>                     # restore
+ygg reap --agents --older-than-days 14 [--dry-run]   # bulk, cron-safe
+```
+
 ## Session Completion
 
 Work is not complete until `git push` succeeds. Release held locks, run quality gates, rebase, push, verify `git status` shows up-to-date.

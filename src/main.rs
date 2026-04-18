@@ -154,13 +154,22 @@ enum Commands {
         stop: bool,
     },
 
-    /// Purge stale rows from locks / sessions / memories. Safe to cron.
+    /// Purge stale rows from locks / sessions / memories / agents. Safe to cron.
     Reap {
         #[arg(long)] locks: bool,
         #[arg(long)] sessions: bool,
         #[arg(long)] memories: bool,
+        /// Archive (not delete) agents with no activity in the window.
+        /// Archived agents keep their history but disappear from live views.
+        #[arg(long)] agents: bool,
         #[arg(long, default_value = "7")] older_than_days: i64,
         #[arg(long)] dry_run: bool,
+    },
+
+    /// Manage agent identities (list / archive / unarchive).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
 
     /// Output agent context as markdown (called by SessionStart and PreCompact hooks)
@@ -286,6 +295,23 @@ enum Commands {
         /// Maximum number of entries to list
         #[arg(long, default_value = "20")]
         limit: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// List agents with last-activity age. By default hides archived.
+    List {
+        #[arg(long)] all: bool,
+    },
+    /// Archive an agent (hides from live views, keeps history).
+    Archive { name: String },
+    /// Restore a previously-archived agent.
+    Unarchive { name: String },
+    /// Show agents that would be archived by `ygg reap --agents` at the
+    /// given staleness threshold. Never mutates.
+    Stale {
+        #[arg(long, default_value = "14")] older_than_days: i64,
     },
 }
 
@@ -625,11 +651,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Reap { locks, sessions, memories, older_than_days, dry_run } => {
+        Commands::Reap { locks, sessions, memories, agents, older_than_days, dry_run } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             // Default to everything when no specific flag is set.
-            let all = !(locks || sessions || memories);
+            let all = !(locks || sessions || memories || agents);
             let mut total: i64 = 0;
 
             if all || locks {
@@ -677,7 +703,74 @@ async fn main() -> anyhow::Result<()> {
                     if dry_run { "would delete" } else { "deleted" }, n);
                 total += n;
             }
+            if all || agents {
+                // Archive-not-delete: keep history intact, just hide from
+                // live views. Staleness = no events + no sessions + no
+                // live locks in the window.
+                let repo = ygg::models::agent::AgentRepo::new(&pool);
+                let stale = repo.find_stale(older_than_days).await.unwrap_or_default();
+                let n = stale.len() as i64;
+                if !dry_run {
+                    for a in &stale {
+                        let _ = repo.archive(a.agent_id).await;
+                    }
+                }
+                println!("agents:   {} {} stale (no activity in {} days)",
+                    if dry_run { "would archive" } else { "archived" },
+                    n, older_than_days);
+                for a in stale.iter().take(5) {
+                    println!("  · {}  ({})", a.agent_name,
+                        chrono::Utc::now().signed_duration_since(a.updated_at).num_days());
+                }
+                total += n;
+            }
             println!("total:    {}", total);
+        }
+        Commands::Agent { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let repo = ygg::models::agent::AgentRepo::new(&pool);
+            match action {
+                AgentAction::List { all } => {
+                    let agents = if all { repo.list_all().await? } else { repo.list().await? };
+                    if agents.is_empty() {
+                        println!("no agents");
+                    } else {
+                        println!("{:<24} {:<12} {:<10} {}", "NAME", "STATE", "AGE", "");
+                        let now = chrono::Utc::now();
+                        for a in agents {
+                            let age_days = now.signed_duration_since(a.updated_at).num_days();
+                            let age = if age_days == 0 { format!("<1d") } else { format!("{age_days}d") };
+                            println!("{:<24} {:<12} {:<10}", a.agent_name, a.current_state, age);
+                        }
+                    }
+                }
+                AgentAction::Archive { name } => {
+                    let agent = repo.get_by_name(&name).await?
+                        .ok_or_else(|| anyhow::anyhow!("agent '{name}' not found"))?;
+                    repo.archive(agent.agent_id).await?;
+                    println!("archived '{name}'");
+                }
+                AgentAction::Unarchive { name } => {
+                    let agent = repo.get_by_name(&name).await?
+                        .ok_or_else(|| anyhow::anyhow!("agent '{name}' not found"))?;
+                    repo.unarchive(agent.agent_id).await?;
+                    println!("restored '{name}'");
+                }
+                AgentAction::Stale { older_than_days } => {
+                    let stale = repo.find_stale(older_than_days).await?;
+                    if stale.is_empty() {
+                        println!("no stale agents (threshold: {older_than_days}d)");
+                    } else {
+                        println!("{} stale agent(s) (no activity in {older_than_days}d):", stale.len());
+                        let now = chrono::Utc::now();
+                        for a in stale {
+                            let age = now.signed_duration_since(a.updated_at).num_days();
+                            println!("  · {:<24} idle {age}d", a.agent_name);
+                        }
+                    }
+                }
+            }
         }
         Commands::Prime { agent, transcript } => {
             let agent_name = agent

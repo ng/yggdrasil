@@ -235,7 +235,23 @@ impl<'a> AgentRepo<'a> {
     }
 
     /// List all agents.
+    /// List live agents only — the dashboard/statusline default.
     pub async fn list(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
+        sqlx::query_as::<_, AgentWorkflow>(
+            r#"
+            SELECT agent_id, agent_name, current_state, head_node_id,
+                   digest_id, context_tokens, metadata, created_at, updated_at
+            FROM agents
+            WHERE archived_at IS NULL
+            ORDER BY created_at
+            "#,
+        )
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// Include archived agents — for `ygg agent list --all` and audit paths.
+    pub async fn list_all(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
@@ -243,6 +259,52 @@ impl<'a> AgentRepo<'a> {
             FROM agents ORDER BY created_at
             "#,
         )
+        .fetch_all(self.pool)
+        .await
+    }
+
+    pub async fn archive(&self, agent_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE agents SET archived_at = now() WHERE agent_id = $1")
+            .bind(agent_id).execute(self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn unarchive(&self, agent_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE agents SET archived_at = NULL WHERE agent_id = $1")
+            .bind(agent_id).execute(self.pool).await?;
+        Ok(())
+    }
+
+    /// Return the number of stale live agents: no events, no sessions
+    /// started, in the last `days`. The result is how many SHOULD be
+    /// archived; caller decides to actually do it.
+    pub async fn find_stale(&self, days: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
+        sqlx::query_as::<_, AgentWorkflow>(
+            r#"
+            SELECT a.agent_id, a.agent_name, a.current_state, a.head_node_id,
+                   a.digest_id, a.context_tokens, a.metadata, a.created_at, a.updated_at
+            FROM agents a
+            WHERE a.archived_at IS NULL
+              AND a.updated_at < now() - ($1 || ' days')::interval
+              AND NOT EXISTS (
+                    SELECT 1 FROM events e
+                     WHERE e.agent_id = a.agent_id
+                       AND e.created_at >= now() - ($1 || ' days')::interval
+              )
+              AND NOT EXISTS (
+                    SELECT 1 FROM sessions s
+                     WHERE s.agent_id = a.agent_id
+                       AND COALESCE(s.ended_at, s.started_at)
+                            >= now() - ($1 || ' days')::interval
+              )
+              AND NOT EXISTS (
+                    SELECT 1 FROM locks l
+                     WHERE l.agent_id = a.agent_id AND l.expires_at > now()
+              )
+            ORDER BY a.updated_at
+            "#,
+        )
+        .bind(days.to_string())
         .fetch_all(self.pool)
         .await
     }
