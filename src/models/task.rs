@@ -442,6 +442,33 @@ impl<'a> TaskRepo<'a> {
         Ok(())
     }
 
+    pub async fn remove_label(&self, task_id: Uuid, label: &str) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "DELETE FROM task_labels WHERE task_id = $1 AND label = $2",
+        )
+        .bind(task_id).bind(label).execute(self.pool).await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Every distinct label across every task in a repo (or globally if None),
+    /// with usage count. Backs `ygg task label list-all` and label-picker UIs.
+    pub async fn all_labels(
+        &self,
+        repo_id: Option<Uuid>,
+    ) -> Result<Vec<(String, i64)>, sqlx::Error> {
+        sqlx::query_as::<_, (String, i64)>(
+            r#"SELECT tl.label, COUNT(*)::bigint
+               FROM task_labels tl
+               JOIN tasks t USING (task_id)
+               WHERE $1::UUID IS NULL OR t.repo_id = $1
+               GROUP BY tl.label
+               ORDER BY COUNT(*) DESC, tl.label"#,
+        )
+        .bind(repo_id)
+        .fetch_all(self.pool)
+        .await
+    }
+
     /// Adjust relevance by a delta; clamped to 0..100.
     pub async fn bump_relevance(&self, task_id: Uuid, delta: i32) -> Result<i32, sqlx::Error> {
         let new_val: i32 = sqlx::query_scalar(

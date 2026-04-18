@@ -201,7 +201,8 @@ pub async fn list(
     pool: &sqlx::PgPool,
     all_repos: bool,
     status: Option<&str>,
-    labels: &[String],
+    labels_and: &[String],
+    labels_any: &[String],
     json: bool,
 ) -> Result<(), anyhow::Error> {
     let repo_id = if all_repos {
@@ -222,21 +223,24 @@ pub async fn list(
         .list_multi(repo_id, if statuses.is_empty() { None } else { Some(&statuses) })
         .await?;
 
-    // Label filter — AND semantics across multiple labels (task must have
-    // all supplied labels). Applied in-memory since the set is already
-    // scoped to repo+status.
-    let filtered = if labels.is_empty() {
+    // Label filters. `--label a,b` = AND (task has ALL of a, b); `--label-any
+    // a,b` = OR (task has AT LEAST ONE). Applied in-memory since the set is
+    // already scoped to repo+status. Both filters can combine.
+    let filtered = if labels_and.is_empty() && labels_any.is_empty() {
         tasks
     } else {
-        let label_set: std::collections::HashSet<&str> =
-            labels.iter().map(|s| s.as_str()).collect();
+        let and_set: std::collections::HashSet<&str> =
+            labels_and.iter().map(|s| s.as_str()).collect();
+        let any_set: std::collections::HashSet<&str> =
+            labels_any.iter().map(|s| s.as_str()).collect();
         let task_repo = TaskRepo::new(pool);
         let mut keep = Vec::with_capacity(tasks.len());
         for t in tasks {
             let task_labels = task_repo.labels(t.task_id).await.unwrap_or_default();
-            if label_set.iter().all(|l| task_labels.iter().any(|tl| tl == l)) {
-                keep.push(t);
-            }
+            let and_ok = and_set.iter().all(|l| task_labels.iter().any(|tl| tl == l));
+            let any_ok = any_set.is_empty()
+                || any_set.iter().any(|l| task_labels.iter().any(|tl| tl == l));
+            if and_ok && any_ok { keep.push(t); }
         }
         keep
     };
@@ -464,10 +468,65 @@ pub async fn remove_dep(pool: &sqlx::PgPool, task_ref: &str, blocker_ref: &str) 
     Ok(())
 }
 
-pub async fn label(pool: &sqlx::PgPool, reference: &str, label: &str) -> Result<(), anyhow::Error> {
+pub async fn label_add(pool: &sqlx::PgPool, reference: &str, label: &str) -> Result<(), anyhow::Error> {
     let t = resolve_task(pool, reference).await?;
     TaskRepo::new(pool).add_label(t.task_id, label).await?;
     println!("{reference} + {label}");
+    Ok(())
+}
+
+pub async fn label_remove(pool: &sqlx::PgPool, reference: &str, label: &str) -> Result<(), anyhow::Error> {
+    let t = resolve_task(pool, reference).await?;
+    let n = TaskRepo::new(pool).remove_label(t.task_id, label).await?;
+    if n == 0 {
+        println!("{reference}: no such label '{label}'");
+    } else {
+        println!("{reference} − {label}");
+    }
+    Ok(())
+}
+
+pub async fn label_list(pool: &sqlx::PgPool, reference: &str, json: bool) -> Result<(), anyhow::Error> {
+    let t = resolve_task(pool, reference).await?;
+    let labels = TaskRepo::new(pool).labels(t.task_id).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ref": reference,
+            "labels": labels,
+        }))?);
+    } else if labels.is_empty() {
+        println!("{reference}: no labels");
+    } else {
+        println!("{reference}: {}", labels.join(", "));
+    }
+    Ok(())
+}
+
+pub async fn label_list_all(pool: &sqlx::PgPool, all_repos: bool, json: bool) -> Result<(), anyhow::Error> {
+    let repo_id = if all_repos {
+        None
+    } else {
+        Some(resolve_cwd_repo(pool).await?.repo_id)
+    };
+    let pairs = TaskRepo::new(pool).all_labels(repo_id).await?;
+    if json {
+        let rows: Vec<_> = pairs.iter().map(|(l, n)| serde_json::json!({
+            "label": l, "count": n,
+        })).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "count": pairs.len(),
+            "results": rows,
+        }))?);
+        return Ok(());
+    }
+    if pairs.is_empty() {
+        println!("No labels.");
+        return Ok(());
+    }
+    println!("{:<4}  {}", "N", "LABEL");
+    for (label, count) in &pairs {
+        println!("{count:<4}  {label}");
+    }
     Ok(())
 }
 

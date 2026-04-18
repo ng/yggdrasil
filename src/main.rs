@@ -472,8 +472,10 @@ enum TaskAction {
     List {
         #[arg(long)] all: bool,
         #[arg(short, long)] status: Option<String>,
-        /// Filter to tasks with this label (repeatable or comma-separated)
+        /// Filter to tasks with ALL of these labels (AND)
         #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
+        /// Filter to tasks with ANY of these labels (OR)
+        #[arg(long, value_delimiter = ',')] label_any: Vec<String>,
         /// Emit results as JSON array
         #[arg(long)] json: bool,
     },
@@ -533,10 +535,10 @@ enum TaskAction {
         task: String,
         blocker: String,
     },
-    /// Add a label to a task
+    /// Label management (add/remove/list/list-all)
     Label {
-        reference: String,
-        label: String,
+        #[command(subcommand)]
+        action: LabelAction,
     },
     /// Bump a task's relevance by a signed delta (clamped 0..100).
     /// Use when a task turns out to be more (or less) load-bearing than first filed.
@@ -558,6 +560,30 @@ enum TaskAction {
     Stats {
         #[arg(long)] all: bool,
         /// Emit stats as JSON
+        #[arg(long)] json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum LabelAction {
+    /// Attach a label to a task
+    Add {
+        reference: String,
+        label: String,
+    },
+    /// Remove a label from a task
+    Remove {
+        reference: String,
+        label: String,
+    },
+    /// List labels on a specific task
+    List {
+        reference: String,
+        #[arg(long)] json: bool,
+    },
+    /// List every label in the current repo (or --all repos) with usage counts
+    ListAll {
+        #[arg(long)] all: bool,
         #[arg(long)] json: bool,
     },
 }
@@ -939,8 +965,8 @@ async fn main() -> anyhow::Result<()> {
                         }).await?;
                     }
                 }
-                TaskAction::List { all, status, label, json } => {
-                    ygg::cli::task_cmd::list(&pool, all, status.as_deref(), &label, json).await?;
+                TaskAction::List { all, status, label, label_any, json } => {
+                    ygg::cli::task_cmd::list(&pool, all, status.as_deref(), &label, &label_any, json).await?;
                 }
                 TaskAction::Ready { json } => { ygg::cli::task_cmd::ready(&pool, json).await?; }
                 TaskAction::Blocked { json } => { ygg::cli::task_cmd::blocked(&pool, json).await?; }
@@ -976,9 +1002,20 @@ async fn main() -> anyhow::Result<()> {
                 TaskAction::Link { from, to, kind } => {
                     ygg::cli::task_cmd::link(&pool, &from, &to, &kind).await?;
                 }
-                TaskAction::Label { reference, label } => {
-                    ygg::cli::task_cmd::label(&pool, &reference, &label).await?;
-                }
+                TaskAction::Label { action } => match action {
+                    LabelAction::Add { reference, label } => {
+                        ygg::cli::task_cmd::label_add(&pool, &reference, &label).await?;
+                    }
+                    LabelAction::Remove { reference, label } => {
+                        ygg::cli::task_cmd::label_remove(&pool, &reference, &label).await?;
+                    }
+                    LabelAction::List { reference, json } => {
+                        ygg::cli::task_cmd::label_list(&pool, &reference, json).await?;
+                    }
+                    LabelAction::ListAll { all, json } => {
+                        ygg::cli::task_cmd::label_list_all(&pool, all, json).await?;
+                    }
+                },
                 TaskAction::Stats { all, json } => {
                     ygg::cli::task_cmd::stats(&pool, all, json).await?;
                 }
