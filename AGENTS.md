@@ -5,19 +5,25 @@ This project **is** Yggdrasil — a multi-agent coordination layer. We dogfood i
 ## Yggdrasil Coordination Quick Reference
 
 ```bash
-ygg task ready                              # Unblocked tasks in this repo
-ygg task create "title"                     # New task
-ygg task claim <ref>                        # Take a task
-ygg task close <ref>                        # Complete a task
-ygg remember "..."                          # Durable note; retriever can surface later
+ygg task ready                                 # Unblocked tasks in this repo
+ygg task list --status open,in_progress        # Comma-separated status filter
+ygg task create "title"                        # New task
+ygg task claim <ref>                           # Take a task
+ygg task close <ref>                           # Complete a task
 
-ygg status                                  # See all agents' state, locks, recent activity
-ygg lock acquire <resource-key>             # Lease a shared resource before editing
-ygg lock release <resource-key>             # Release when done
-ygg lock list                               # See outstanding locks
-ygg spawn --task "..."                      # Spawn a parallel agent in a new tmux window
-ygg interrupt take-over --agent <name>      # Take over / steer another agent
-ygg logs --follow                           # Live event stream
+ygg memory create "..." --scope repo           # First-class scoped note (global|repo|session)
+ygg memory search "<query>"                    # Semantic search over memories
+ygg memory pin <id>                            # Surface a memory first in retrieval
+ygg remember "..."                             # Back-compat alias — writes a directive node
+
+ygg status                                     # See all agents' state, locks, recent activity
+ygg lock acquire <resource-key>                # Lease a shared resource before editing
+ygg lock release <resource-key>                # Release when done
+ygg spawn --task "..."                         # Spawn a parallel agent in a new tmux window
+ygg logs --follow [--kind K] [--session SID]   # Live event stream (filterable)
+ygg rollup --days 7                            # Per-repo activity summary
+ygg reap --dry-run                             # Preview stale-row cleanup
+ygg eval                                       # Retrieval effectiveness (CLI; pane [8] in TUI)
 ```
 
 ### Rules
@@ -27,7 +33,7 @@ ygg logs --follow                           # Live event stream
 - Read `[ygg memory | ...]` hints injected above user prompts — they are real prior context.
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking. Intra-turn checklists can stay in a native TodoList.
-- Use `ygg remember "..."` for durable notes (scoped to the current repo).
+- `ygg memory create --scope repo|session|global` is the preferred way to persist notes; `ygg remember` still works.
 - Do NOT use `bd` / beads. This project has migrated to Yggdrasil.
 
 ## Session Completion

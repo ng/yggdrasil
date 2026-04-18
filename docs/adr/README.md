@@ -16,8 +16,12 @@ ADRs are append-only. Superseded decisions get a new ADR that references the old
 | 0006 | [Dogfood Yggdrasil; remove beads directives from this repo](0006-dogfood-drop-beads.md) | Accepted  |
 | 0007 | [tmux as the multi-agent display substrate](0007-tmux-as-substrate.md) | Accepted  |
 | 0008 | [One global database across repos; agents auto-keyed by pwd](0008-shared-db-across-repos.md) | Accepted (partially superseded by 0009) |
-| 0009 | [Repos and sessions as first-class dimensions](0009-repos-and-sessions-first-class.md) | Accepted |
+| 0009 | [Repos and sessions as first-class dimensions](0009-repos-and-sessions-first-class.md) | Accepted (partially superseded by 0013) |
 | 0010 | [Tasks: beads replacement inside Yggdrasil](0010-tasks-beads-replacement.md) | Accepted |
+| 0011 | [Relevance classifier for retrieval gating](0011-relevance-classifier.md) | Accepted |
+| 0012 | [Mechanical scoring as the primary retrieval precision mechanism](0012-mechanical-scoring.md) | Accepted |
+| 0013 | [Split agent identity from CC session state](0013-session-state-split.md) | Accepted |
+| 0014 | [First-class scoped memories](0014-scoped-memories.md) | Accepted |
 
 ## Writing a new ADR
 

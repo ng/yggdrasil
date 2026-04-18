@@ -109,12 +109,16 @@ From inside Claude Code:
 ```bash
 ygg status                     # see every agent + outstanding locks
 ygg task ready                 # show unblocked tasks in this repo
-ygg task create "fix migration order"     # create a task
+ygg task create "fix migration order"                         # create a task
+ygg task list --status open,in_progress                       # comma-separated filters
 ygg task claim yggdrasil-3     # take a task
-ygg remember "migrations must be backwards-compatible — blue/green deploy"
+ygg memory create "migrations must be backwards-compatible" --scope repo
+ygg memory search "deploy"                                    # semantic search over memories
+ygg rollup --days 7            # per-repo activity summary (markdown / text / json)
 ygg lock acquire src/db.rs     # before you edit a shared file
 ygg spawn --task "..."         # open a parallel agent in a new window
-ygg logs --follow              # live event stream (every hook fire, embedding call, digest)
+ygg logs --follow --kind agent_state_changed  # filter live event stream
+ygg reap --dry-run             # preview stale rows before cleanup
 ```
 
 ## Subcommand reference
@@ -137,8 +141,16 @@ ygg logs --follow              # live event stream (every hook fire, embedding c
 | `dashboard` | Launch the TUI dashboard directly.                                      |
 | `watcher`   | Background daemon — heartbeats, lock expiry, digest triggers.           |
 | `recover`   | Recover orphaned agents stuck in active states.                         |
-| `task`      | Task tracking scoped to the current repo (create / list / ready / claim / close / dep / ...). Replaces `bd`. |
-| `remember`  | Write a durable directive node (scoped to current repo) the similarity retriever surfaces later. |
+| `task`      | Task tracking scoped to the current repo (create / list / ready / claim / close / dep / ...). Replaces `bd`. `ygg task list --status` accepts comma-separated values. |
+| `memory`    | First-class scoped memories (global / repo / session). `ygg memory create / list / search / pin / unpin / expire / delete`. Search is semantic via pgvector. |
+| `remember`  | Back-compat wrapper — writes a directive node. Prefer `ygg memory create --scope repo` for new notes. |
+| `rollup`    | Per-repo activity summary over a time window (`--days N`). Output as text / markdown / json. |
+| `agent-tool`| Hook-driven: record the tool an agent is about to call (drives the dashboard State column). |
+| `reap`      | Purge stale locks / sessions / memories. `--dry-run` previews. Safe to cron. |
+| `trace`     | Per-turn pipeline inspection: embed → retrieve → score → emit → referenced. |
+| `eval`      | Retrieval effectiveness summary (hit rate, classifier decisions, cache hit %). Also a live TUI pane. |
+| `forget`    | Retroactive redaction — scrub a node or pattern from past history. |
+| `bar`       | Claude Code statusline generator (context pressure, cache rate, spend). |
 
 ## Project layout
 
