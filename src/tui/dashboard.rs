@@ -274,21 +274,23 @@ impl DashboardView {
             (ts, name, from, to, tool)
         }).collect();
 
-        // Workers = tasks currently in_progress + the agent assigned to them.
-        // A "worker" in click-to-do terms = a CC session spawned to execute
-        // a task; we approximate that by any task with status=in_progress
-        // and an assignee.
-        let worker_rows: Vec<(String, i32, String, Option<String>, chrono::DateTime<chrono::Utc>)> =
+        // Workers panel reads from the workers table now — actual
+        // spawned CC sessions, not the tasks.status proxy. ended_at IS
+        // NULL filters out terminated ones; the observer (yggdrasil-51)
+        // will eventually update state to completed/failed/abandoned.
+        let worker_rows: Vec<(String, i32, String, Option<String>, String, chrono::DateTime<chrono::Utc>)> =
             sqlx::query_as(
-                r#"SELECT r.task_prefix, t.seq, t.title, a.agent_name, t.updated_at
-                     FROM tasks t
+                r#"SELECT r.task_prefix, t.seq, t.title, a.agent_name,
+                          w.state::text, w.started_at
+                     FROM workers w
+                     JOIN tasks t ON t.task_id = w.task_id
                      JOIN repos r ON r.repo_id = t.repo_id
                      LEFT JOIN agents a ON a.agent_id = t.assignee
-                    WHERE t.status = 'in_progress'
-                    ORDER BY t.updated_at DESC
+                    WHERE w.ended_at IS NULL
+                    ORDER BY w.started_at DESC
                     LIMIT 10"#,
             ).fetch_all(pool).await.unwrap_or_default();
-        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, ts)| {
+        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, _state, ts)| {
             let task_ref = format!("{prefix}-{seq}");
             let agent_label = agent.unwrap_or_else(|| "unassigned".into());
             (task_ref, agent_label, title, ts)

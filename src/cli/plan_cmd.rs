@@ -422,6 +422,23 @@ pub async fn run_with_reporter(
     ));
     spawn_tmux(&window, &wt.path, &task, &repo)?;
 
+    // 5. Register the worker row so observer + reconciliation + Workers
+    // panel have something to track. Session association is best-effort:
+    // there's no cc_session_id yet (claude hasn't launched), so the
+    // hook-driven session resolution will fill session_id later when
+    // claude fires its SessionStart.
+    use crate::models::worker::WorkerRepo;
+    match WorkerRepo::new(pool).spawn(
+        task.task_id,
+        None,
+        "yggdrasil",
+        &window,
+        &wt.path.to_string_lossy(),
+    ).await {
+        Ok(w) => reporter(&format!("worker registered: {}", w.worker_id)),
+        Err(e) => reporter(&format!("warn: couldn't register worker row: {e}")),
+    }
+
     reporter(&format!("launched {} in tmux window '{window}'", task_ref_display(&repo.task_prefix, task.seq)));
     reporter("  attach: tmux attach -t yggdrasil");
     Ok(format!("launched {} (window: {window})", task_ref_display(&repo.task_prefix, task.seq)))
