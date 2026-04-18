@@ -184,8 +184,11 @@ impl App {
                     let agent = std::env::var("YGG_AGENT_NAME")
                         .ok()
                         .unwrap_or_else(|| self.agent_name.clone());
-                    match crate::cli::plan_cmd::run(pool, &task_ref, &agent, false).await {
-                        Ok(_) => self.dag.flash = format!("launched {task_ref} in tmux"),
+                    let silent = |_: &str| {};
+                    match crate::cli::plan_cmd::run_with_reporter(
+                        pool, &task_ref, &agent, false, &silent
+                    ).await {
+                        Ok(headline) => self.dag.flash = headline,
                         Err(e) => self.dag.flash = format!("run failed: {e}"),
                     }
                     let _ = self.dag.refresh(pool).await;
@@ -239,12 +242,16 @@ impl App {
                 ActiveView::MemGraph => self.memgraph.toggle_detail(),
                 ActiveView::Tasks => {
                     // Enter on the Tasks ready-list executes the selected
-                    // task via the same plan_cmd::run path as DAG's `r`.
+                    // task via plan_cmd::run_with_reporter — the reporter
+                    // swallows status so the TUI frame isn't corrupted.
                     if let Some(task_ref) = self.tasks.selected_task_ref() {
                         let agent = std::env::var("YGG_AGENT_NAME").ok()
                             .unwrap_or_else(|| self.agent_name.clone());
-                        match crate::cli::plan_cmd::run(pool, &task_ref, &agent, false).await {
-                            Ok(_) => self.tasks.set_flash(format!("launched {task_ref} in tmux")),
+                        let silent = |_: &str| {};
+                        match crate::cli::plan_cmd::run_with_reporter(
+                            pool, &task_ref, &agent, false, &silent
+                        ).await {
+                            Ok(headline) => self.tasks.set_flash(headline),
                             Err(e) => self.tasks.set_flash(format!("run failed: {e}")),
                         }
                         let _ = self.tasks.refresh(pool).await;

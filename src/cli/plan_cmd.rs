@@ -327,12 +327,31 @@ fn is_failed(task: &Task) -> bool {
             .unwrap_or(false)
 }
 
+/// Run the single-task path. When called from the TUI, every println!
+/// would bleed into the ratatui alternate-screen frame and corrupt the
+/// display. Route status through the `reporter` closure instead — the
+/// CLI entry passes a println-backed one; the TUI passes a capture-
+/// into-flash one. Returns (ok, last-line-of-status-for-flash).
 pub async fn run(
     pool: &sqlx::PgPool,
     task_ref: &str,
     agent_name: &str,
     dry_run: bool,
 ) -> Result<(), anyhow::Error> {
+    run_with_reporter(pool, task_ref, agent_name, dry_run, &|line: &str| {
+        println!("{line}");
+    }).await.map(|_| ())
+}
+
+/// Core logic — all status goes through the reporter closure. Returns
+/// the final headline string (for the TUI flash).
+pub async fn run_with_reporter(
+    pool: &sqlx::PgPool,
+    task_ref: &str,
+    agent_name: &str,
+    dry_run: bool,
+    reporter: &dyn Fn(&str),
+) -> Result<String, anyhow::Error> {
     let task = crate::cli::task_cmd::resolve_task_public(pool, task_ref).await?;
     let repo = RepoRepo::new(pool).get(task.repo_id).await?
         .ok_or_else(|| anyhow::anyhow!("repo vanished"))?;
@@ -344,27 +363,27 @@ pub async fn run(
         .filter(|d| d.status != TaskStatus::Closed)
         .collect();
     if !unresolved.is_empty() {
-        println!("{}-{}  has {} open blocker(s) — refusing to run.",
-            repo.task_prefix, task.seq, unresolved.len());
+        reporter(&format!("{}-{}  has {} open blocker(s) — refusing to run.",
+            repo.task_prefix, task.seq, unresolved.len()));
         for d in &unresolved {
-            println!("  · {}-{}  [{}]  {}", repo.task_prefix, d.seq, d.status, d.title);
+            reporter(&format!("  · {}-{}  [{}]  {}", repo.task_prefix, d.seq, d.status, d.title));
         }
-        println!("Close the blockers first, or use `ygg plan supervise` when it ships.");
-        return Ok(());
+        reporter("Close the blockers first, or use `ygg plan supervise`.");
+        return Ok(format!("blocked by {} open dep(s)", unresolved.len()));
     }
 
     if dry_run {
-        println!("DRY RUN:");
-        println!("  1. ensure worktree for {}-{}", repo.task_prefix, task.seq);
-        println!("  2. claim task (assignee = {agent_name}, status → in_progress)");
-        println!("  3. tmux new-window 'ygg-{}-{}' in the worktree", repo.task_prefix, task.seq);
-        println!("  4. launch `claude` in that window with a priming prompt");
-        return Ok(());
+        reporter("DRY RUN:");
+        reporter(&format!("  1. ensure worktree for {}-{}", repo.task_prefix, task.seq));
+        reporter(&format!("  2. claim task (assignee = {agent_name}, status → in_progress)"));
+        reporter(&format!("  3. tmux new-window in the worktree"));
+        reporter("  4. launch `claude` with a priming prompt");
+        return Ok("dry-run printed".to_string());
     }
 
     // 1. Worktree
     let wt = worktree::ensure(pool, task.task_id).await?;
-    println!("worktree: {}", wt.path.display());
+    reporter(&format!("worktree: {}", wt.path.display()));
 
     // 2. Claim the task
     let agent_id = sqlx::query_scalar::<_, Option<Uuid>>(
@@ -390,9 +409,9 @@ pub async fn run(
     ));
     spawn_tmux(&window, &wt.path, &task, &repo)?;
 
-    println!("launched {} in tmux window '{window}'", task_ref_display(&repo.task_prefix, task.seq));
-    println!("  attach: tmux attach -t yggdrasil");
-    Ok(())
+    reporter(&format!("launched {} in tmux window '{window}'", task_ref_display(&repo.task_prefix, task.seq)));
+    reporter("  attach: tmux attach -t yggdrasil");
+    Ok(format!("launched {} (window: {window})", task_ref_display(&repo.task_prefix, task.seq)))
 }
 
 /// tmux window names can't contain colons (they split target specs) or

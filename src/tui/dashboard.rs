@@ -534,13 +534,31 @@ impl DashboardView {
                 crate::models::agent::AgentState::Shutdown       => ("shutdown",  Color::DarkGray),
             };
             // For WaitingTool, append the tool name (e.g. "tool: Bash") from metadata
-            let state_label: String = if matches!(agent.current_state, crate::models::agent::AgentState::WaitingTool) {
+            let mut state_label: String = if matches!(agent.current_state, crate::models::agent::AgentState::WaitingTool) {
                 match agent.metadata.get("last_tool").and_then(|v| v.as_str()) {
                     Some(t) if !t.is_empty() => format!("{base_label}: {t}"),
                     _ => base_label.to_string(),
                 }
             } else {
                 base_label.to_string()
+            };
+            // Staleness: if the row says we're active but hasn't been
+            // updated in 10+ minutes, the CC session is probably dead.
+            // Visual-only — no mutation — dim color + "(stale)" suffix
+            // so a dead "tool: Bash" doesn't read identical to a live one.
+            let is_active_state = matches!(
+                agent.current_state,
+                crate::models::agent::AgentState::Executing
+                  | crate::models::agent::AgentState::WaitingTool
+                  | crate::models::agent::AgentState::Planning
+                  | crate::models::agent::AgentState::ContextFlush
+            );
+            let idle_mins = (Utc::now() - agent.updated_at).num_minutes();
+            let state_color = if is_active_state && idle_mins >= 10 {
+                state_label.push_str(" (stale)");
+                Color::DarkGray
+            } else {
+                state_color
             };
 
             // Pressure comes from the TRANSCRIPT file size, not our
