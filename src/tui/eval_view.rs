@@ -24,12 +24,21 @@ pub struct EvalView {
 
     pub embed_calls: i64,
     pub cache_hits: i64,
+    /// Mean latency (ms) of actual embedding calls in the window — used to
+    /// multiply cache_hits into wall-time savings.
+    pub avg_embed_ms: f64,
 
     pub nodes_written: i64,
     pub digests_written: i64,
     pub locks_acquired: i64,
     pub locks_released: i64,
     pub redactions: i64,
+
+    /// Lifetime counters — cheap to aggregate across the whole events table.
+    pub lifetime_cache_hits: i64,
+    pub lifetime_referenced: i64,
+    pub lifetime_redactions: i64,
+    pub lifetime_digests: i64,
 }
 
 impl EvalView {
@@ -39,9 +48,11 @@ impl EvalView {
             prompts: 0, hits: 0, avg_per_prompt: 0.0, referenced: 0,
             scoring_kept: 0, scoring_dropped: 0, drop_reasons: vec![],
             cls_kept: 0, cls_dropped: 0, cls_bypassed: 0,
-            embed_calls: 0, cache_hits: 0,
+            embed_calls: 0, cache_hits: 0, avg_embed_ms: 0.0,
             nodes_written: 0, digests_written: 0,
             locks_acquired: 0, locks_released: 0, redactions: 0,
+            lifetime_cache_hits: 0, lifetime_referenced: 0,
+            lifetime_redactions: 0, lifetime_digests: 0,
         }
     }
 
@@ -91,12 +102,28 @@ impl EvalView {
 
         self.embed_calls = count_where(pool, since, "event_kind::text = 'embedding_call'").await;
         self.cache_hits = count_where(pool, since, "event_kind::text = 'embedding_cache_hit'").await;
+        // Mean latency of actual embedding calls in the window — drives the
+        // wall-time-saved estimate for cache hits.
+        self.avg_embed_ms = sqlx::query_scalar::<_, Option<f64>>(
+            "SELECT AVG((payload->>'latency_ms')::float)
+               FROM events
+              WHERE event_kind::text = 'embedding_call'
+                AND payload->>'latency_ms' IS NOT NULL
+                AND created_at >= $1"
+        ).bind(since).fetch_one(pool).await.ok().flatten().unwrap_or(0.0);
 
         self.nodes_written = count_where(pool, since, "event_kind::text = 'node_written'").await;
         self.digests_written = count_where(pool, since, "event_kind::text = 'digest_written'").await;
         self.locks_acquired = count_where(pool, since, "event_kind::text = 'lock_acquired'").await;
         self.locks_released = count_where(pool, since, "event_kind::text = 'lock_released'").await;
         self.redactions = count_where(pool, since, "event_kind::text = 'redaction_applied'").await;
+
+        // Lifetime totals — every install persists events, so these are the
+        // "since install" numbers without needing a separate counter table.
+        self.lifetime_cache_hits = lifetime_count(pool, "embedding_cache_hit").await;
+        self.lifetime_referenced = lifetime_count(pool, "hit_referenced").await;
+        self.lifetime_redactions = lifetime_count(pool, "redaction_applied").await;
+        self.lifetime_digests    = lifetime_count(pool, "digest_written").await;
         Ok(())
     }
 
@@ -114,7 +141,8 @@ impl EvalView {
             .constraints([
                 Constraint::Length(8),   // retrieval
                 Constraint::Length(7),   // classifier + cache
-                Constraint::Length(6),   // activity
+                Constraint::Length(9),   // savings (window + lifetime)
+                Constraint::Length(5),   // activity
                 Constraint::Min(0),      // drop reasons
             ]).split(area);
 
@@ -188,18 +216,68 @@ impl EvalView {
         );
         frame.render_widget(para, chunks[1]);
 
-        let activity = vec![
-            Line::from(Span::styled("  Activity",
+        // ── Savings section ─────────────────────────────────────────────
+        // Cache hits × mean embedding latency gives us wall-time saved on
+        // Ollama round-trips. Referenced hits are the "context recall worked"
+        // number. Redactions are the "secret blocked" count (security, not
+        // cost). Each line pairs a plain number with a human-readable
+        // interpretation so the user sees WHAT they're getting.
+        let saved_ms = self.cache_hits as f64 * self.avg_embed_ms;
+        let saved_sec = saved_ms / 1000.0;
+        let saved_label = if saved_sec >= 60.0 {
+            format!("~{:.1} min wall-time", saved_sec / 60.0)
+        } else if saved_sec > 0.0 {
+            format!("~{saved_sec:.1} sec wall-time")
+        } else {
+            "(no cache hits yet)".to_string()
+        };
+
+        let ref_rate_life = if self.lifetime_cache_hits > 0 || self.lifetime_referenced > 0 {
+            format!(
+                "{} cached calls  ·  {} hits referenced  ·  {} secrets blocked  ·  {} digests preserved",
+                self.lifetime_cache_hits, self.lifetime_referenced,
+                self.lifetime_redactions, self.lifetime_digests,
+            )
+        } else {
+            "(no lifetime data yet)".to_string()
+        };
+
+        let savings = vec![
+            Line::from(Span::styled("  Estimated savings (this window)",
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
             Line::from(""),
-            line("nodes / digests written", &format!("{} / {}", self.nodes_written, self.digests_written)),
-            line("locks acquired / released", &format!("{} / {}", self.locks_acquired, self.locks_released)),
-            line("redactions applied",       &format!("{}", self.redactions)),
+            line("ollama calls avoided",
+                &format!("{}  ({saved_label})", self.cache_hits)),
+            line("context recall worked",
+                &format!("{} hits used by next turn (would have re-explained)", self.referenced)),
+            line("secrets blocked at write",
+                &format!("{}", self.redactions)),
+            Line::from(""),
+            Line::from(Span::styled("  Since install",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(ref_rate_life, Style::default().fg(Color::White)),
+            ]),
+        ];
+        let para = Paragraph::new(savings).block(
+            Block::default().borders(Borders::ALL).title(" What are you getting? ")
+        );
+        frame.render_widget(para, chunks[2]);
+
+        let activity = vec![
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("nodes {} / digests {} / locks {}/{} / redactions {}",
+                    self.nodes_written, self.digests_written,
+                    self.locks_acquired, self.locks_released, self.redactions),
+                    Style::default().fg(Color::Gray)),
+            ]),
         ];
         let para = Paragraph::new(activity).block(
             Block::default().borders(Borders::ALL).title(" Activity ")
         );
-        frame.render_widget(para, chunks[2]);
+        frame.render_widget(para, chunks[3]);
 
         // Drop reasons table
         let mut lines: Vec<Line> = vec![
@@ -225,7 +303,7 @@ impl EvalView {
         let para = Paragraph::new(lines).block(
             Block::default().borders(Borders::ALL).title(" Why did scoring drop things? ")
         );
-        frame.render_widget(para, chunks[3]);
+        frame.render_widget(para, chunks[4]);
     }
 }
 
@@ -234,6 +312,12 @@ async fn count_where(pool: &PgPool, since: chrono::DateTime<Utc>, predicate: &st
         "SELECT COUNT(*)::bigint FROM events WHERE {predicate} AND created_at >= $1"
     );
     sqlx::query_scalar::<_, i64>(&sql).bind(since).fetch_one(pool).await.unwrap_or(0)
+}
+
+async fn lifetime_count(pool: &PgPool, kind: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM events WHERE event_kind::text = $1"
+    ).bind(kind).fetch_one(pool).await.unwrap_or(0)
 }
 
 fn line(label: &str, value: &str) -> Line<'static> {
