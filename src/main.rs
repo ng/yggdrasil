@@ -407,6 +407,22 @@ enum TaskAction {
         reference: String,
         label: String,
     },
+    /// Bump a task's relevance by a signed delta (clamped 0..100).
+    /// Use when a task turns out to be more (or less) load-bearing than first filed.
+    Bump {
+        reference: String,
+        /// Integer delta (+5, -10, etc). Accepts bare numbers too.
+        #[arg(allow_hyphen_values = true)]
+        delta: i32,
+    },
+    /// Record a non-blocking relationship between two tasks
+    /// (see-also / superseded-by / duplicate-of / related).
+    Link {
+        from: String,
+        to: String,
+        #[arg(short, long, default_value = "see-also")]
+        kind: String,
+    },
     /// Count open/in_progress/blocked/closed
     Stats {
         #[arg(long)] all: bool,
@@ -726,6 +742,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TaskAction::Undep { task, blocker } => {
                     ygg::cli::task_cmd::remove_dep(&pool, &task, &blocker).await?;
+                }
+                TaskAction::Bump { reference, delta } => {
+                    ygg::cli::task_cmd::bump(&pool, &reference, delta).await?;
+                }
+                TaskAction::Link { from, to, kind } => {
+                    ygg::cli::task_cmd::link(&pool, &from, &to, &kind).await?;
                 }
                 TaskAction::Label { reference, label } => {
                     ygg::cli::task_cmd::label(&pool, &reference, &label).await?;

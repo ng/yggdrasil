@@ -201,7 +201,7 @@ pub async fn show(pool: &sqlx::PgPool, reference: &str) -> Result<(), anyhow::Er
     let labels = TaskRepo::new(pool).labels(t.task_id).await?;
     let deps = TaskRepo::new(pool).deps(t.task_id).await?;
 
-    println!("{}-{}  [{}]  P{}  {}", repo.task_prefix, t.seq, t.status, t.priority, t.kind);
+    println!("{}-{}  [{}]  P{}  rel={}  {}", repo.task_prefix, t.seq, t.status, t.priority, t.relevance, t.kind);
     println!();
     println!("  {}", t.title);
     if !t.description.is_empty() {
@@ -235,6 +235,24 @@ pub async fn show(pool: &sqlx::PgPool, reference: &str) -> Result<(), anyhow::Er
         for d in &deps {
             let indicator = if matches!(d.status, TaskStatus::Closed) { "✓" } else { "·" };
             println!("    {indicator} {}-{} [{}] {}", repo.task_prefix, d.seq, d.status, d.title);
+        }
+    }
+    let links = TaskRepo::new(pool).links(t.task_id).await?;
+    if !links.is_empty() {
+        println!();
+        println!("  Links:");
+        for (kind, target_id) in &links {
+            // Best-effort target title lookup.
+            let row: Option<(i32, Uuid, String)> = sqlx::query_as(
+                "SELECT t.seq, t.repo_id, t.title FROM tasks t WHERE t.task_id = $1"
+            ).bind(target_id).fetch_optional(pool).await?;
+            if let Some((seq, repo_id, title)) = row {
+                let prefix = RepoRepo::new(pool).get(repo_id).await?
+                    .map(|r| r.task_prefix).unwrap_or_else(|| "?".into());
+                println!("    [{kind}]  {prefix}-{seq}  {title}");
+            } else {
+                println!("    [{kind}]  {target_id}");
+            }
         }
     }
     if t.human_flag {
@@ -346,6 +364,33 @@ pub async fn label(pool: &sqlx::PgPool, reference: &str, label: &str) -> Result<
     let t = resolve_task(pool, reference).await?;
     TaskRepo::new(pool).add_label(t.task_id, label).await?;
     println!("{reference} + {label}");
+    Ok(())
+}
+
+pub async fn bump(pool: &sqlx::PgPool, reference: &str, delta: i32) -> Result<(), anyhow::Error> {
+    let t = resolve_task(pool, reference).await?;
+    let new_val = TaskRepo::new(pool).bump_relevance(t.task_id, delta).await?;
+    let sign = if delta >= 0 { "+" } else { "" };
+    println!("{reference} relevance {sign}{delta} → {new_val}");
+    Ok(())
+}
+
+pub async fn link(
+    pool: &sqlx::PgPool,
+    from_ref: &str,
+    to_ref: &str,
+    kind: &str,
+) -> Result<(), anyhow::Error> {
+    // Accept both the "see-also" and "see_also" spelling.
+    let normalized = kind.replace('-', "_");
+    let allowed = ["see_also", "superseded_by", "duplicate_of", "related"];
+    if !allowed.contains(&normalized.as_str()) {
+        anyhow::bail!("unknown link kind '{kind}' — try: {}", allowed.join(", "));
+    }
+    let a = resolve_task(pool, from_ref).await?;
+    let b = resolve_task(pool, to_ref).await?;
+    TaskRepo::new(pool).add_link(a.task_id, b.task_id, &normalized).await?;
+    println!("{from_ref}  --[{normalized}]-->  {to_ref}");
     Ok(())
 }
 

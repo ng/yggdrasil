@@ -92,6 +92,8 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
     pub close_reason: Option<String>,
+    #[sqlx(default)]
+    pub relevance: i32,
 }
 
 #[derive(Debug, Default)]
@@ -163,7 +165,7 @@ impl<'a> TaskRepo<'a> {
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                RETURNING task_id, repo_id, seq, title, description, acceptance, design, notes,
                          kind, status, priority, created_by, assignee, human_flag,
-                         created_at, updated_at, closed_at, close_reason"#,
+                         created_at, updated_at, closed_at, close_reason, relevance"#,
         )
         .bind(repo_id)
         .bind(seq)
@@ -206,7 +208,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
-                      created_at, updated_at, closed_at, close_reason
+                      created_at, updated_at, closed_at, close_reason, relevance
                FROM tasks WHERE task_id = $1"#,
         )
         .bind(task_id)
@@ -218,7 +220,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
-                      created_at, updated_at, closed_at, close_reason
+                      created_at, updated_at, closed_at, close_reason, relevance
                FROM tasks WHERE repo_id = $1 AND seq = $2"#,
         )
         .bind(repo_id)
@@ -248,7 +250,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
-                      created_at, updated_at, closed_at, close_reason
+                      created_at, updated_at, closed_at, close_reason, relevance
                FROM tasks
                WHERE ($1::UUID IS NULL OR repo_id = $1)
                  AND ($2::text[] IS NULL OR array_length($2, 1) IS NULL OR status::text = ANY($2))
@@ -267,7 +269,7 @@ impl<'a> TaskRepo<'a> {
             r#"
             SELECT t.task_id, t.repo_id, t.seq, t.title, t.description, t.acceptance, t.design, t.notes,
                    t.kind, t.status, t.priority, t.created_by, t.assignee, t.human_flag,
-                   t.created_at, t.updated_at, t.closed_at, t.close_reason
+                   t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance
             FROM tasks t
             WHERE t.repo_id = $1
               AND t.status IN ('open', 'in_progress')
@@ -289,7 +291,7 @@ impl<'a> TaskRepo<'a> {
             r#"
             SELECT DISTINCT t.task_id, t.repo_id, t.seq, t.title, t.description, t.acceptance, t.design, t.notes,
                    t.kind, t.status, t.priority, t.created_by, t.assignee, t.human_flag,
-                   t.created_at, t.updated_at, t.closed_at, t.close_reason
+                   t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance
             FROM tasks t
             JOIN task_deps d ON d.task_id = t.task_id
             JOIN tasks b ON b.task_id = d.blocker_id
@@ -440,6 +442,44 @@ impl<'a> TaskRepo<'a> {
         Ok(())
     }
 
+    /// Adjust relevance by a delta; clamped to 0..100.
+    pub async fn bump_relevance(&self, task_id: Uuid, delta: i32) -> Result<i32, sqlx::Error> {
+        let new_val: i32 = sqlx::query_scalar(
+            r#"UPDATE tasks
+                  SET relevance = GREATEST(0, LEAST(100, relevance + $2)),
+                      updated_at = now()
+                WHERE task_id = $1
+                RETURNING relevance"#,
+        )
+        .bind(task_id)
+        .bind(delta)
+        .fetch_one(self.pool)
+        .await?;
+        Ok(new_val)
+    }
+
+    pub async fn add_link(
+        &self,
+        task_id: Uuid,
+        target_id: Uuid,
+        kind: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO task_links (task_id, target_id, kind)
+             VALUES ($1, $2, $3::task_link_kind)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(task_id).bind(target_id).bind(kind)
+        .execute(self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn links(&self, task_id: Uuid) -> Result<Vec<(String, Uuid)>, sqlx::Error> {
+        sqlx::query_as::<_, (String, Uuid)>(
+            "SELECT kind::text, target_id FROM task_links WHERE task_id = $1 ORDER BY created_at"
+        ).bind(task_id).fetch_all(self.pool).await
+    }
+
     pub async fn labels(&self, task_id: Uuid) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar::<_, String>(
             "SELECT label FROM task_labels WHERE task_id = $1 ORDER BY label",
@@ -451,7 +491,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT t.task_id, t.repo_id, t.seq, t.title, t.description, t.acceptance, t.design, t.notes,
                       t.kind, t.status, t.priority, t.created_by, t.assignee, t.human_flag,
-                      t.created_at, t.updated_at, t.closed_at, t.close_reason
+                      t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance
                FROM task_deps d JOIN tasks t ON t.task_id = d.blocker_id
                WHERE d.task_id = $1
                ORDER BY t.seq"#,
