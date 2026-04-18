@@ -219,6 +219,10 @@ enum Commands {
         /// Filter to a specific agent
         #[arg(short, long)]
         agent: Option<String>,
+        /// Dump the full untruncated hit snippets so you can read exactly
+        /// what Yggdrasil prepended to each turn's context.
+        #[arg(long)]
+        full: bool,
     },
 
     /// Emit the single-line status for Claude Code's statusLine — reads the
@@ -776,10 +780,10 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::eval_cmd::execute(&pool, hours).await?;
         }
-        Commands::Trace { last, agent } => {
+        Commands::Trace { last, agent, full } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::trace_cmd::execute(&pool, last, agent.as_deref()).await?;
+            ygg::cli::trace_cmd::execute(&pool, last, agent.as_deref(), full).await?;
         }
         Commands::RecoveryTest { scenario, agent } => {
             let agent_name = agent

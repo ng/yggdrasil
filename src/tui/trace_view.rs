@@ -111,9 +111,12 @@ async fn build_trace_lines(pool: &PgPool, p: &TracePrompt) -> Vec<Line<'static>>
     ]));
     lines.push(Line::from(""));
 
-    // Pull events in the ±8s window around this prompt.
+    // Pull events in the prompt's turn: everything from this prompt until
+    // the next user prompt from the same agent (or 10 min, whichever first).
+    // hit_referenced fires at digest time which can be much later than the
+    // similarity_hit — include a wide window so we don't miss it.
     let lo = p.ts - chrono::Duration::seconds(1);
-    let hi = p.ts + chrono::Duration::seconds(8);
+    let hi = p.ts + chrono::Duration::hours(2);
     let events: Vec<(String, serde_json::Value)> = sqlx::query_as(
         "SELECT event_kind::text, payload FROM events
          WHERE agent_id = $1 AND created_at >= $2 AND created_at <= $3
@@ -125,7 +128,9 @@ async fn build_trace_lines(pool: &PgPool, p: &TracePrompt) -> Vec<Line<'static>>
     let mut retrieved = 0;
     let mut dropped = Vec::new();
     let mut hits = Vec::new();
-    let mut referenced = 0usize;
+    // Track which source_node_ids have been referenced by later turns so we
+    // can mark each hit individually, not just a total.
+    let mut referenced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (kind, payload) in &events {
         match kind.as_str() {
@@ -144,7 +149,11 @@ async fn build_trace_lines(pool: &PgPool, p: &TracePrompt) -> Vec<Line<'static>>
                 retrieved += 1;
                 hits.push(payload.clone());
             }
-            "hit_referenced" => { referenced += 1; }
+            "hit_referenced" => {
+                if let Some(sid) = payload.get("source_node_id").and_then(|v| v.as_str()) {
+                    referenced_ids.insert(sid.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -177,9 +186,11 @@ async fn build_trace_lines(pool: &PgPool, p: &TracePrompt) -> Vec<Line<'static>>
         ]));
     }
 
-    // emit
+    // emit — each hit gets its own referenced verdict so the user sees
+    // which specific injections the LLM actually used.
+    let mut ref_count = 0usize;
     lines.push(Line::from(vec![
-        Span::raw("└─ "),
+        Span::raw("├─ "),
         Span::styled("emit", Style::default().fg(Color::Green)),
         Span::raw(format!("      {} line(s) to agent", hits.len())),
     ]));
@@ -188,29 +199,68 @@ async fn build_trace_lines(pool: &PgPool, p: &TracePrompt) -> Vec<Line<'static>>
             .and_then(|v| v.as_f64()).unwrap_or(0.0);
         let src = h.get("source_agent").and_then(|v| v.as_str()).unwrap_or("?");
         let snip = h.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+        let source_id = h.get("source_node_id").and_then(|v| v.as_str()).unwrap_or("");
         let (label, color) = if score >= 0.6 { ("strong", Color::Green) }
                              else if score >= 0.3 { ("recall", Color::Blue) }
                              else { ("faint",  Color::DarkGray) };
+        let was_referenced = !source_id.is_empty() && referenced_ids.contains(source_id);
+        if was_referenced { ref_count += 1; }
+        let (verdict_glyph, verdict_color) = if was_referenced {
+            ("✓", Color::Green)
+        } else {
+            ("·", Color::DarkGray)
+        };
         lines.push(Line::from(vec![
-            Span::raw("     "),
+            Span::raw("│    "),
+            Span::styled(verdict_glyph, Style::default().fg(verdict_color).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
             Span::styled(label, Style::default().fg(color)),
             Span::raw(format!(" {score:.2}  from {src}  \"{}\"", truncate(snip, 50))),
         ]));
     }
 
-    if referenced > 0 {
-        lines.push(Line::from(""));
+    // referenced summary — the headline signal
+    lines.push(Line::from(""));
+    if hits.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(format!("✓ referenced: {referenced} (measured at digest time)"),
-                Style::default().fg(Color::Green)),
+            Span::styled("└─ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("referenced", Style::default().fg(Color::DarkGray)),
+            Span::raw("  no hits surfaced — nothing to reference"),
         ]));
-    } else if !hits.is_empty() {
-        lines.push(Line::from(""));
+    } else {
+        let rate = (ref_count as f64 / hits.len() as f64 * 100.0) as i64;
+        let (rate_color, note) = if ref_count == 0 && referenced_ids.is_empty() {
+            (Color::DarkGray, "  (digest hasn't scored this turn yet)".to_string())
+        } else if rate >= 50 {
+            (Color::Green, String::new())
+        } else if rate >= 20 {
+            (Color::Yellow, String::new())
+        } else {
+            (Color::DarkGray, String::new())
+        };
         lines.push(Line::from(vec![
-            Span::styled("· referenced: pending (digest hasn't scored this turn yet)",
-                Style::default().fg(Color::DarkGray)),
+            Span::styled("└─ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("referenced", Style::default().fg(Color::Cyan)),
+            Span::raw("  "),
+            Span::styled(
+                format!("{}/{} ({}%)", ref_count, hits.len(), rate),
+                Style::default().fg(rate_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(note, Style::default().fg(Color::DarkGray)),
         ]));
     }
+
+    // Verdict key so first-time users read the symbols correctly.
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("   key: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("✓", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(" next turn cited this hit  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("·", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        Span::styled(" surfaced but ignored  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("✗", Style::default().fg(Color::Red)),
+        Span::styled(" dropped by scorer", Style::default().fg(Color::DarkGray)),
+    ]));
 
     lines
 }

@@ -16,7 +16,7 @@ const BLUE:  &str = "\x1b[38;5;111m";
 const RED:   &str = "\x1b[38;5;203m";
 const GRAY:  &str = "\x1b[38;5;245m";
 
-pub async fn execute(pool: &sqlx::PgPool, last: i64, agent_name: Option<&str>) -> Result<(), anyhow::Error> {
+pub async fn execute(pool: &sqlx::PgPool, last: i64, agent_name: Option<&str>, full: bool) -> Result<(), anyhow::Error> {
     // Pull the most recent N user_message NodeWritten events for the agent.
     let prompts: Vec<(Uuid, Uuid, String, DateTime<Utc>, serde_json::Value)> = if let Some(name) = agent_name {
         sqlx::query_as(
@@ -49,7 +49,7 @@ pub async fn execute(pool: &sqlx::PgPool, last: i64, agent_name: Option<&str>) -
 
     // Render oldest-first for chronological reading.
     for (event_id, agent_id, agent_name, ts, payload) in prompts.into_iter().rev() {
-        render_turn(pool, event_id, agent_id, &agent_name, ts, &payload).await?;
+        render_turn(pool, event_id, agent_id, &agent_name, ts, &payload, full).await?;
         println!();
     }
     Ok(())
@@ -62,6 +62,7 @@ async fn render_turn(
     agent_name: &str,
     ts: DateTime<Utc>,
     node_payload: &serde_json::Value,
+    full: bool,
 ) -> Result<(), anyhow::Error> {
     let snippet = node_payload.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
     let tokens = node_payload.get("tokens").and_then(|t| t.as_i64()).unwrap_or(0);
@@ -74,10 +75,11 @@ async fn render_turn(
     println!("  {DIM}prompt:{RESET} \"{}\"  {DIM}(~{tokens}t){RESET}",
         truncate(snippet, 90));
 
-    // Events in the ±8s window around this turn — enough to capture the
-    // embed call, retrieval, scoring, classifier (if any), and similarity_hits.
+    // Events in a wide window around this turn. The first ~8s catches the
+    // retrieval pipeline; hit_referenced fires at digest time much later,
+    // so we stretch the upper bound to 2h to catch it.
     let lo = ts - chrono::Duration::seconds(1);
-    let hi = ts + chrono::Duration::seconds(8);
+    let hi = ts + chrono::Duration::hours(2);
     let events: Vec<(DateTime<Utc>, String, serde_json::Value)> = sqlx::query_as(
         r#"SELECT created_at, event_kind::text, payload
            FROM events
@@ -168,37 +170,61 @@ async fn render_turn(
     }).count());
     let _ = suppressed;
 
+    // Build a set of referenced source_node_ids so each emit line can be
+    // marked individually ("did the next turn actually use THIS hit?").
+    let mut referenced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in &referenced {
+        if let Some(sid) = r.get("source_node_id").and_then(|v| v.as_str()) {
+            referenced_ids.insert(sid.to_string());
+        }
+    }
+
+    let mut ref_count = 0usize;
     if hits.is_empty() {
-        println!("  └─ {DIM}emit      0 lines to agent{RESET}");
+        println!("  ├─ {DIM}emit      0 lines to agent{RESET}");
     } else {
-        println!("  └─ {GREEN}emit{RESET}      {} line(s) to agent{RESET}", hits.len());
+        println!("  ├─ {GREEN}emit{RESET}      {} line(s) to agent{RESET}", hits.len());
         for h in &hits {
             let score = h.get("total_score").or_else(|| h.get("similarity"))
                 .and_then(|v| v.as_f64()).unwrap_or(0.0);
             let src = h.get("source_agent").and_then(|v| v.as_str()).unwrap_or("?");
             let snip = h.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+            let source_id = h.get("source_node_id").and_then(|v| v.as_str()).unwrap_or("");
             let label = strength_label(score);
             let label_colored = match label {
                 "strong" => format!("{GREEN}{label}{RESET}"),
                 "recall" => format!("{BLUE}{label}{RESET}"),
                 _        => format!("{DIM}{label}{RESET}"),
             };
+            let was_referenced = !source_id.is_empty() && referenced_ids.contains(source_id);
+            if was_referenced { ref_count += 1; }
+            let verdict = if was_referenced {
+                format!("{GREEN}✓{RESET}")
+            } else {
+                format!("{DIM}·{RESET}")
+            };
+            let shown = if full { snip.to_string() } else { truncate(snip, 50) };
             println!(
-                "       {label_colored} {score:.2}  {DIM}from {src}{RESET}  \"{}\"",
-                truncate(snip, 50)
+                "  │    {verdict} {label_colored} {score:.2}  {DIM}from {src}{RESET}  \"{shown}\""
             );
         }
     }
 
-    // Referenced (shows up only after digest runs)
-    if !referenced.is_empty() {
-        println!("  {GREEN}✓ referenced{RESET} {DIM}(measured at digest time){RESET}");
-        for r in &referenced {
-            let overlap = r.get("overlap").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            println!("       overlap={overlap:.2}  {DIM}the assistant reused this memory{RESET}");
-        }
-    } else if !hits.is_empty() {
-        println!("  {DIM}· referenced: pending (digest hasn't scored this turn yet){RESET}");
+    // Headline verdict — the whole reason the user asked for this view.
+    if hits.is_empty() {
+        println!("  └─ {DIM}referenced  nothing surfaced to reference{RESET}");
+    } else {
+        let rate = (ref_count as f64 / hits.len() as f64 * 100.0) as i64;
+        let rate_colored = if ref_count == 0 && referenced_ids.is_empty() {
+            format!("{DIM}{ref_count}/{} ({rate}%)  (digest hasn't scored this turn yet){RESET}", hits.len())
+        } else if rate >= 50 {
+            format!("{GREEN}{BOLD}{ref_count}/{} ({rate}%){RESET}", hits.len())
+        } else if rate >= 20 {
+            format!("\x1b[38;5;221m{BOLD}{ref_count}/{} ({rate}%){RESET}", hits.len())
+        } else {
+            format!("{DIM}{ref_count}/{} ({rate}%){RESET}", hits.len())
+        };
+        println!("  └─ {CYAN}referenced{RESET}  {rate_colored}");
     }
 
     Ok(())
