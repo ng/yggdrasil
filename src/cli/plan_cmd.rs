@@ -395,6 +395,14 @@ pub async fn run_with_reporter(
         ).await;
     }
 
+    // 2b. Pre-trust the worktree path in ~/.claude.json so Claude Code
+    // doesn't show its workspace trust dialog. `--dangerously-skip-
+    // permissions` bypasses tool prompts but NOT the trust dialog — the
+    // trust state is persisted per-path in ~/.claude.json.projects.
+    if let Err(e) = pre_trust_claude_path(&wt.path) {
+        reporter(&format!("warn: couldn't pre-trust worktree: {e}"));
+    }
+
     // 3. tmux window + 4. launch claude. Window name encodes the agent +
     // persona + task ref so `tmux list-windows` reads like a status board:
     //   yggdrasil:reviewer·yggdrasil-43
@@ -412,6 +420,58 @@ pub async fn run_with_reporter(
     reporter(&format!("launched {} in tmux window '{window}'", task_ref_display(&repo.task_prefix, task.seq)));
     reporter("  attach: tmux attach -t yggdrasil");
     Ok(format!("launched {} (window: {window})", task_ref_display(&repo.task_prefix, task.seq)))
+}
+
+/// Pre-populate ~/.claude.json with `projects[<path>].hasTrustDialogAccepted
+/// = true` so a freshly-created worktree doesn't prompt. Reads the whole
+/// file, mutates the one key, writes back. Fast enough (file is ~200KB);
+/// atomic via rename.
+fn pre_trust_claude_path(path: &std::path::Path) -> Result<(), anyhow::Error> {
+    use std::io::Write;
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("HOME not set"))?;
+    let claude_json = std::path::PathBuf::from(&home).join(".claude.json");
+    if !claude_json.exists() {
+        // Fresh install — Claude will create it on first run. Don't pre-
+        // create because we'd have to invent every other key too.
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&claude_json)?;
+    let mut root: serde_json::Value = serde_json::from_str(&raw)?;
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_key = abs.to_string_lossy().to_string();
+
+    let projects = root.get_mut("projects")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("~/.claude.json has no 'projects' object"))?;
+
+    let entry = projects
+        .entry(path_key.clone())
+        .or_insert_with(|| serde_json::json!({
+            "allowedTools": [],
+            "mcpContextUris": [],
+            "mcpServers": {},
+            "enabledMcpjsonServers": [],
+            "disabledMcpjsonServers": [],
+            "hasTrustDialogAccepted": true,
+            "projectOnboardingSeenCount": 1,
+            "hasClaudeMdExternalIncludesApproved": false,
+            "hasClaudeMdExternalIncludesWarningShown": false,
+        }));
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
+    }
+
+    // Write via tempfile + rename for atomicity. Ownership/perms are
+    // preserved by rename on the same filesystem.
+    let tmp = claude_json.with_extension("json.ygg-tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(serde_json::to_string(&root)?.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &claude_json)?;
+    Ok(())
 }
 
 /// tmux window names can't contain colons (they split target specs) or
@@ -452,20 +512,29 @@ fn spawn_tmux(
         anyhow::bail!("tmux new-window failed for '{window}'");
     }
 
-    // Ship the priming prompt via stdin heredoc. `--dangerously-skip-
-    // permissions` avoids the first-run "do you trust this directory"
-    // prompt — we just created the worktree, we trust it. Override with
-    // YGG_CLAUDE_FLAGS if you want a different posture.
+    // Write the priming prompt to a temp file, then pipe it via stdin.
+    // Heredocs through `tmux send-keys` were fragile — the \n handling
+    // varies between shells and terminal emulators, and the workspace
+    // trust dialog would still appear because the flag wasn't making it
+    // through cleanly. File + redirect is unambiguous.
     let prime = prime_prompt(task, repo);
+    let prime_path = std::env::temp_dir().join(format!(
+        "ygg-prime-{}-{}.txt", repo.task_prefix, task.seq
+    ));
+    std::fs::write(&prime_path, &prime)
+        .map_err(|e| anyhow::anyhow!("write prime file: {e}"))?;
+
     let target = format!("{SESSION}:{window}");
     let flags = std::env::var("YGG_CLAUDE_FLAGS")
         .unwrap_or_else(|_| "--dangerously-skip-permissions".to_string());
+    // Cleanup the temp file once claude has consumed it. `; rm -f` keeps
+    // the session alive while ensuring the file gets removed.
+    let cmd = format!(
+        "claude {flags} < {path:?} ; rm -f {path:?}",
+        path = prime_path.to_string_lossy(),
+    );
     Command::new("tmux")
-        .args([
-            "send-keys", "-t", &target,
-            &format!("claude {flags} <<'YGG_EOF'\n{prime}\nYGG_EOF"),
-            "Enter",
-        ])
+        .args(["send-keys", "-t", &target, &cmd, "Enter"])
         .status()
         .map_err(|e| anyhow::anyhow!("tmux send-keys: {e}"))?;
 
