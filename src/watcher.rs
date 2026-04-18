@@ -47,15 +47,49 @@ impl Watcher {
         let reaped = self.reap_expired_locks().await?;
         let stale = self.flag_stale_agents().await?;
         let worker_updates = self.observe_workers().await.unwrap_or(0);
+        let delivery_updates = self.check_delivery().await.unwrap_or(0);
 
-        if reaped > 0 || stale > 0 || worker_updates > 0 {
+        if reaped > 0 || stale > 0 || worker_updates > 0 || delivery_updates > 0 {
             tracing::info!(
                 reaped_locks = reaped, stale_agents = stale,
-                worker_updates = worker_updates, "watcher tick"
+                worker_updates = worker_updates,
+                delivery_updates = delivery_updates, "watcher tick"
             );
         }
 
         Ok(())
+    }
+
+    /// For terminated workers whose delivery status we haven't checked
+    /// recently, run git/gh locally to find out if the branch is pushed,
+    /// merged, and whether a PR is open. Cheap — only runs on completed/
+    /// failed rows and throttled by delivery_checked_at.
+    async fn check_delivery(&self) -> Result<u64, anyhow::Error> {
+        let workers: Vec<Worker> = sqlx::query_as::<_, Worker>(
+            r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
+                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at
+                 FROM workers
+                WHERE state IN ('completed', 'failed')
+                  AND (branch_pushed = false OR branch_merged = false)
+                  AND (delivery_checked_at IS NULL
+                       OR delivery_checked_at < now() - interval '60 seconds')
+                ORDER BY ended_at DESC NULLS LAST
+                LIMIT 20"#,
+        ).fetch_all(&self.pool).await.unwrap_or_default();
+
+        let repo = WorkerRepo::new(&self.pool);
+        let mut n = 0u64;
+        for w in workers {
+            // Branch name follows the plan_cmd scheme: ygg/<prefix>-<seq>
+            let branch = derive_branch(&w.tmux_window);
+            let (pushed, merged, pr) = inspect_delivery(&w.worktree_path, branch.as_deref());
+            let _ = repo.set_delivery(w.worker_id, pushed, merged, pr.as_deref()).await;
+            if pushed != w.branch_pushed || merged != w.branch_merged {
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     /// Observer loop for click-to-do workers. Lists tmux windows in the
@@ -172,6 +206,58 @@ fn capture_pane(session: &str, window: &str) -> Option<String> {
 
 /// Classify the last ~200 lines of the pane into a WorkerState. Looks
 /// for Claude Code / Codex prompt markers first, then idle heuristics.
+/// Window names are "<agent>·<prefix>-<seq>·<uniq>". The branch is
+/// "ygg/<prefix>-<seq>" — slice out the middle segment.
+fn derive_branch(window: &str) -> Option<String> {
+    let parts: Vec<&str> = window.split('·').collect();
+    if parts.len() >= 2 {
+        Some(format!("ygg/{}", parts[1]))
+    } else { None }
+}
+
+/// Three-way delivery inspection. Any of these can fail silently —
+/// git may not have a remote, gh may not be installed, branch may
+/// have been deleted. Return conservative (false/false/None) on any
+/// error so we don't mis-report.
+fn inspect_delivery(
+    worktree: &str,
+    branch: Option<&str>,
+) -> (bool, bool, Option<String>) {
+    let Some(branch) = branch else { return (false, false, None); };
+    let wt = std::path::Path::new(worktree);
+    if !wt.exists() { return (false, false, None); }
+
+    // Pushed: `git rev-parse <branch>@{upstream}` succeeds + `git log
+    // origin/<branch>..<branch>` is empty.
+    let upstream_ok = Command::new("git").arg("-C").arg(wt)
+        .args(["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
+        .output().map(|o| o.status.success()).unwrap_or(false);
+    let pushed = upstream_ok && Command::new("git").arg("-C").arg(wt)
+        .args(["rev-list", "--count", &format!("origin/{branch}..{branch}")])
+        .output().ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim() == "0")
+        .unwrap_or(false);
+
+    // Merged: `git merge-base --is-ancestor <branch> origin/main` exit 0.
+    let merged = Command::new("git").arg("-C").arg(wt)
+        .args(["merge-base", "--is-ancestor", branch, "origin/main"])
+        .output().map(|o| o.status.success()).unwrap_or(false);
+
+    // PR via gh (optional). One-line JSON, first match.
+    let pr_url = Command::new("gh").arg("-C").arg(wt)
+        .args(["pr", "list", "--head", branch, "--json", "url", "--limit", "1"])
+        .output().ok()
+        .and_then(|o| {
+            if !o.status.success() { return None; }
+            let s = String::from_utf8_lossy(&o.stdout);
+            let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+            v.as_array()?.first()?.get("url")?.as_str().map(String::from)
+        });
+
+    (pushed, merged, pr_url)
+}
+
 fn classify_pane(pane: &str) -> WorkerState {
     // Trust-dialog / permission variants (shouldn't happen post pre-trust,
     // but cheap to detect if Claude changes its schema out from under us).

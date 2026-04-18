@@ -136,6 +136,9 @@ pub struct WorkerRow {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub tmux_session: String,
     pub tmux_window: String,
+    pub branch_pushed: bool,
+    pub branch_merged: bool,
+    pub pr_url: Option<String>,
 }
 
 impl DashboardView {
@@ -300,21 +303,24 @@ impl DashboardView {
 
         // Workers panel reads from the workers table. Observer
         // (yggdrasil-51) maintains state; we just show it.
-        let worker_rows: Vec<(String, i32, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, String, String)> =
+        let worker_rows: Vec<(String, i32, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, String, String, bool, bool, Option<String>)> =
             sqlx::query_as(
                 r#"SELECT r.task_prefix, t.seq, t.title,
                           a.agent_name, a.persona,
                           w.state::text, w.started_at,
-                          w.tmux_session, w.tmux_window
+                          w.tmux_session, w.tmux_window,
+                          w.branch_pushed, w.branch_merged, w.pr_url
                      FROM workers w
                      JOIN tasks t ON t.task_id = w.task_id
                      JOIN repos r ON r.repo_id = t.repo_id
                      LEFT JOIN agents a ON a.agent_id = t.assignee
                     WHERE w.ended_at IS NULL
-                    ORDER BY w.started_at DESC
-                    LIMIT 10"#,
+                       OR (w.ended_at > now() - interval '24 hours'
+                           AND (w.branch_pushed = false OR w.branch_merged = false))
+                    ORDER BY (w.ended_at IS NULL) DESC, w.started_at DESC
+                    LIMIT 15"#,
             ).fetch_all(pool).await.unwrap_or_default();
-        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, persona, state, ts, ts_sess, ts_win)| {
+        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, persona, state, ts, ts_sess, ts_win, pushed, merged, pr)| {
             WorkerRow {
                 task_ref: format!("{prefix}-{seq}"),
                 agent: agent.unwrap_or_else(|| "unassigned".into()),
@@ -324,6 +330,9 @@ impl DashboardView {
                 started_at: ts,
                 tmux_session: ts_sess,
                 tmux_window: ts_win,
+                branch_pushed: pushed,
+                branch_merged: merged,
+                pr_url: pr,
             }
         }).collect();
         if self.worker_sel >= self.workers.len() {
@@ -413,8 +422,10 @@ impl DashboardView {
                 Span::styled(format!("{:<12}",
                     w.persona.as_deref().map(|p| short_cell(p, 12)).unwrap_or_else(|| "—".into())),
                     Style::default().fg(Color::Magenta)),
-                Span::styled(format!("{:<16}", w.state),
+                Span::styled(format!("{:<10}", w.state),
                     Style::default().fg(c)),
+                Span::styled(format!("{:<10}", delivery_badge(w)),
+                    Style::default().fg(delivery_color(w))),
                 Span::styled(format!("{age:<6}"), Style::default().fg(Color::DarkGray)),
                 Span::raw(" "),
                 Span::styled(short_title(&w.title), title_style),
@@ -867,6 +878,25 @@ fn short_title(s: &str) -> String {
 fn short_cell(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() }
     else { s.chars().take(max.saturating_sub(1)).collect::<String>() + "…" }
+}
+
+fn delivery_badge(w: &WorkerRow) -> &'static str {
+    // Only meaningful for terminated workers.
+    let terminated = matches!(w.state.as_str(), "completed" | "failed" | "abandoned");
+    if !terminated { return ""; }
+    if w.branch_merged { "✓ merged" }
+    else if w.pr_url.is_some() { "⏺ pr-open" }
+    else if w.branch_pushed { "⬆ pushed" }
+    else { "⬆ unpushed" }
+}
+
+fn delivery_color(w: &WorkerRow) -> Color {
+    if w.branch_merged { Color::Green }
+    else if w.pr_url.is_some() { Color::Cyan }
+    else if w.branch_pushed { Color::Yellow }
+    else if matches!(w.state.as_str(), "completed" | "failed" | "abandoned") {
+        Color::Red
+    } else { Color::DarkGray }
 }
 
 fn worker_state_style(state: &str) -> (&'static str, Color) {

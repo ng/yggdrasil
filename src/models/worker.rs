@@ -47,6 +47,14 @@ pub struct Worker {
     pub last_seen_at:  DateTime<Utc>,
     pub ended_at:      Option<DateTime<Utc>>,
     pub exit_reason:   Option<String>,
+    #[sqlx(default)]
+    pub branch_pushed: bool,
+    #[sqlx(default)]
+    pub branch_merged: bool,
+    #[sqlx(default)]
+    pub pr_url: Option<String>,
+    #[sqlx(default)]
+    pub delivery_checked_at: Option<DateTime<Utc>>,
 }
 
 pub struct WorkerRepo<'a> {
@@ -73,7 +81,8 @@ impl<'a> WorkerRepo<'a> {
                 (task_id, session_id, tmux_session, tmux_window, worktree_path, state)
             VALUES ($1, $2, $3, $4, $5, 'spawned')
             RETURNING worker_id, task_id, session_id, tmux_session, tmux_window,
-                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason
+                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at
             "#,
         )
         .bind(task_id)
@@ -88,6 +97,33 @@ impl<'a> WorkerRepo<'a> {
     pub async fn touch(&self, worker_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE workers SET last_seen_at = now() WHERE worker_id = $1")
             .bind(worker_id).execute(self.pool).await?;
+        Ok(())
+    }
+
+    /// Record a delivery check: whether the branch is pushed, whether it
+    /// merged into the repo's main branch, and the PR url if found.
+    pub async fn set_delivery(
+        &self,
+        worker_id: Uuid,
+        branch_pushed: bool,
+        branch_merged: bool,
+        pr_url: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE workers
+               SET branch_pushed = $2,
+                   branch_merged = $3,
+                   pr_url        = COALESCE($4, pr_url),
+                   delivery_checked_at = now()
+             WHERE worker_id = $1
+            "#,
+        )
+        .bind(worker_id)
+        .bind(branch_pushed)
+        .bind(branch_merged)
+        .bind(pr_url)
+        .execute(self.pool).await?;
         Ok(())
     }
 
@@ -116,10 +152,30 @@ impl<'a> WorkerRepo<'a> {
 
     /// All workers whose tmux window should still exist. Used by the
     /// observer and the dashboard Workers panel.
+    /// Workers the dashboard should keep visible: alive OR recently ended
+    /// but undelivered (completed without push/merge). Lets the user see
+    /// "worker finished, branch still local" until they act on it.
+    pub async fn list_visible(&self) -> Result<Vec<Worker>, sqlx::Error> {
+        sqlx::query_as::<_, Worker>(
+            r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
+                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at
+                 FROM workers
+                WHERE ended_at IS NULL
+                   OR (ended_at > now() - interval '24 hours'
+                       AND (branch_pushed = false OR branch_merged = false))
+                ORDER BY (ended_at IS NULL) DESC, started_at DESC
+                LIMIT 15"#,
+        )
+        .fetch_all(self.pool)
+        .await
+    }
+
     pub async fn list_live(&self) -> Result<Vec<Worker>, sqlx::Error> {
         sqlx::query_as::<_, Worker>(
             r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
-                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason
+                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at
                  FROM workers
                 WHERE ended_at IS NULL
                 ORDER BY started_at DESC"#,
@@ -131,7 +187,8 @@ impl<'a> WorkerRepo<'a> {
     pub async fn get(&self, worker_id: Uuid) -> Result<Option<Worker>, sqlx::Error> {
         sqlx::query_as::<_, Worker>(
             r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
-                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason
+                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at
                  FROM workers WHERE worker_id = $1"#,
         )
         .bind(worker_id).fetch_optional(self.pool).await
