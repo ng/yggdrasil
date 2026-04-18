@@ -140,6 +140,10 @@ impl App {
             KeyCode::Char(' ') if self.active_view == ActiveView::MemGraph => {
                 self.memgraph.toggle_focus();
             }
+            KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
+                self.dashboard.toggle_session_scope();
+                let _ = self.dashboard.refresh(pool).await;
+            }
             KeyCode::Up => match self.active_view {
                 ActiveView::Dag => self.dag.scroll_up(),
                 ActiveView::Dashboard => self.dashboard.select_prev(),

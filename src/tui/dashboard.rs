@@ -103,6 +103,12 @@ pub struct DashboardView {
     /// Transcript-file-size pressure cache. Reading ~/.claude/projects on
     /// every 500ms render is expensive; cache per-agent for PRESSURE_TTL.
     pressure_cache: HashMap<String, (Instant, Option<i64>)>,
+
+    /// When on, pulse queries filter to the most-recent cc_session_id.
+    /// Toggled with `S` on the dashboard pane.
+    pub session_scoped: bool,
+    /// The session id the pulse is currently scoped to, populated on refresh.
+    pub current_session_id: Option<String>,
 }
 
 impl DashboardView {
@@ -116,8 +122,12 @@ impl DashboardView {
             per_agent_hourly: HashMap::new(),
             recent_transitions: Vec::new(),
             pressure_cache: HashMap::new(),
+            session_scoped: false,
+            current_session_id: None,
         }
     }
+
+    pub fn toggle_session_scope(&mut self) { self.session_scoped = !self.session_scoped; }
 
     fn cached_pressure(&mut self, agent_name: &str) -> Option<i64> {
         let now = Instant::now();
@@ -139,27 +149,64 @@ impl DashboardView {
         let lock_mgr = LockManager::new(pool, 300);
         self.locks = lock_mgr.list_all().await?;
 
-        // Pulse queries — single roundtrip for the small counters.
+        // When session-scoped, lock queries to the most-recent CC session
+        // that's emitted events in the last 6h. Avoids showing a freshly-
+        // closed session forever; stays sticky while one is active.
+        self.current_session_id = if self.session_scoped {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT cc_session_id FROM events
+                 WHERE cc_session_id IS NOT NULL
+                   AND created_at > now() - interval '6 hours'
+                 ORDER BY created_at DESC LIMIT 1"
+            ).fetch_optional(pool).await.ok().flatten().flatten()
+        } else { None };
+
+        // Pulse queries — single roundtrip for the small counters. When a
+        // session is in scope we replace the time window with a session
+        // match, so the numbers reflect "this session" instead of "last hour
+        // globally".
         let since_1h = Utc::now() - CDuration::hours(1);
         let since_24h = Utc::now() - CDuration::hours(24);
-        let (p1h, d1h, h1h): (i64, i64, i64) = sqlx::query_as(
-            r#"SELECT
-                 COUNT(*) FILTER (WHERE event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'digest_written'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
-               FROM events WHERE created_at >= $1"#
-        ).bind(since_1h).fetch_one(pool).await.unwrap_or((0, 0, 0));
+        let sid = self.current_session_id.clone();
+
+        let (p1h, d1h, h1h): (i64, i64, i64) = if let Some(sid) = sid.as_deref() {
+            sqlx::query_as(
+                r#"SELECT
+                     COUNT(*) FILTER (WHERE event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'digest_written'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
+                   FROM events WHERE cc_session_id = $1"#
+            ).bind(sid).fetch_one(pool).await.unwrap_or((0, 0, 0))
+        } else {
+            sqlx::query_as(
+                r#"SELECT
+                     COUNT(*) FILTER (WHERE event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'digest_written'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
+                   FROM events WHERE created_at >= $1"#
+            ).bind(since_1h).fetch_one(pool).await.unwrap_or((0, 0, 0))
+        };
         self.prompts_1h = p1h;
         self.digests_1h = d1h;
         self.hits_1h = h1h;
 
-        let (ch24, cc24, r24): (i64, i64, i64) = sqlx::query_as(
-            r#"SELECT
-                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'redaction_applied')
-               FROM events WHERE created_at >= $1"#
-        ).bind(since_24h).fetch_one(pool).await.unwrap_or((0, 0, 0));
+        let (ch24, cc24, r24): (i64, i64, i64) = if let Some(sid) = sid.as_deref() {
+            sqlx::query_as(
+                r#"SELECT
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'redaction_applied')
+                   FROM events WHERE cc_session_id = $1"#
+            ).bind(sid).fetch_one(pool).await.unwrap_or((0, 0, 0))
+        } else {
+            sqlx::query_as(
+                r#"SELECT
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'redaction_applied')
+                   FROM events WHERE created_at >= $1"#
+            ).bind(since_24h).fetch_one(pool).await.unwrap_or((0, 0, 0))
+        };
         self.cache_hits_24h = ch24;
         self.cache_total_24h = ch24 + cc24;
         self.redactions_24h = r24;
@@ -383,6 +430,12 @@ impl DashboardView {
             .filter(|a| a.current_state == crate::models::agent::AgentState::Executing)
             .count();
 
+        // Session-scope indicator lives in the labels — we re-use the same
+        // counter fields but relabel "last 1h / last 24h" to just "session"
+        // when scoped, so the numbers aren't misleading.
+        let counter_label = if self.current_session_id.is_some() { "session   " } else { "last 1h   " };
+        let totals_label  = if self.current_session_id.is_some() { "session   " } else { "last 24h  " };
+
         let lines: Vec<Line> = vec![
             Line::from(vec![
                 Span::styled("agents    ", Style::default().fg(Color::DarkGray)),
@@ -390,13 +443,13 @@ impl DashboardView {
                     Style::default().add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::styled("last 1h   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(counter_label, Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{} prompts · {} digests · {} recalls",
                     self.prompts_1h, self.digests_1h, self.hits_1h),
                     Style::default().add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::styled("last 24h  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(totals_label, Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("cache {}/{} ({}%) ",
                     self.cache_hits_24h, self.cache_total_24h, cache_rate),
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
@@ -406,8 +459,20 @@ impl DashboardView {
                     } else { Style::default().add_modifier(Modifier::BOLD) }),
             ]),
         ];
+        let title = match &self.current_session_id {
+            Some(sid) => {
+                let head: String = sid.chars().take(8).collect();
+                format!(" System pulse — session {head}…  (S=global) ")
+            }
+            None => {
+                let hint = if self.session_scoped {
+                    " — no recent session  (S=global) "
+                } else { "  (S=session) " };
+                format!(" System pulse{} ", hint)
+            }
+        };
         let pulse = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" System pulse "));
+            .block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(pulse, cols[1]);
     }
 
