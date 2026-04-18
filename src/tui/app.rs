@@ -76,10 +76,14 @@ impl App {
     }
 
     pub async fn handle_key(&mut self, pool: &PgPool, code: KeyCode, modifiers: KeyModifiers) {
-        // When the Query pane has focus for typing, most keys become input.
+        // Query pane is always in input mode while active, so typing
+        // characters goes to the input buffer. Esc or Tab/arrows leave;
+        // Ctrl-C quits. Enter runs the query.
         if self.query_focus {
             match code {
-                KeyCode::Esc => self.query_focus = false,
+                KeyCode::Esc => self.set_view(ActiveView::Dashboard),
+                KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
+                KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
                 KeyCode::Enter => {
                     let _ = self.query.run_query(pool).await;
                 }
@@ -103,21 +107,15 @@ impl App {
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
-            KeyCode::Char('1') => self.active_view = ActiveView::Dashboard,
-            KeyCode::Char('2') => self.active_view = ActiveView::Dag,
-            KeyCode::Char('3') => self.active_view = ActiveView::Tasks,
-            KeyCode::Char('4') => self.active_view = ActiveView::Trace,
-            KeyCode::Char('5') => {
-                self.active_view = ActiveView::Query;
-                self.query_focus = true;
-            }
-            KeyCode::Char('6') => self.active_view = ActiveView::Logs,
-            KeyCode::Char('7') => self.active_view = ActiveView::MemGraph,
+            KeyCode::Char('1') => self.set_view(ActiveView::Dashboard),
+            KeyCode::Char('2') => self.set_view(ActiveView::Dag),
+            KeyCode::Char('3') => self.set_view(ActiveView::Tasks),
+            KeyCode::Char('4') => self.set_view(ActiveView::Trace),
+            KeyCode::Char('5') => self.set_view(ActiveView::Query),
+            KeyCode::Char('6') => self.set_view(ActiveView::Logs),
+            KeyCode::Char('7') => self.set_view(ActiveView::MemGraph),
             KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
             KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
-            KeyCode::Char('i') if self.active_view == ActiveView::Query => {
-                self.query_focus = true;
-            }
             KeyCode::Char('f') if self.active_view == ActiveView::Logs => {
                 self.logs.cycle_filter();
             }
@@ -163,7 +161,7 @@ impl App {
                 ActiveView::Dashboard => {
                     if let Some(agent_name) = self.dashboard.selected_agent() {
                         self.dag.set_agent(agent_name);
-                        self.active_view = ActiveView::Dag;
+                        self.set_view(ActiveView::Dag);
                     }
                 }
                 ActiveView::Dag => self.dag.toggle_detail(),
@@ -180,8 +178,15 @@ impl App {
         }
     }
 
+    /// Change the active pane, keeping query_focus in sync. The Query pane
+    /// is always in input mode while active — anything else resets focus so
+    /// global keybindings work.
+    fn set_view(&mut self, v: ActiveView) {
+        self.active_view = v;
+        self.query_focus = v == ActiveView::Query;
+    }
     fn cycle_view_forward(&mut self) {
-        self.active_view = match self.active_view {
+        let next = match self.active_view {
             ActiveView::Dashboard => ActiveView::Dag,
             ActiveView::Dag => ActiveView::Tasks,
             ActiveView::Tasks => ActiveView::Trace,
@@ -190,9 +195,10 @@ impl App {
             ActiveView::Logs => ActiveView::MemGraph,
             ActiveView::MemGraph => ActiveView::Dashboard,
         };
+        self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
-        self.active_view = match self.active_view {
+        let prev = match self.active_view {
             ActiveView::Dashboard => ActiveView::MemGraph,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
@@ -201,6 +207,7 @@ impl App {
             ActiveView::Logs => ActiveView::Query,
             ActiveView::MemGraph => ActiveView::Logs,
         };
+        self.set_view(prev);
     }
 }
 
@@ -315,7 +322,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[5] Query",     app.active_view == ActiveView::Query),
                 tab("[6] Logs",      app.active_view == ActiveView::Logs),
                 tab("[7] Memgraph",  app.active_view == ActiveView::MemGraph),
-                Span::raw("  q=quit  ←→/tab=nav  Enter=detail  dag: s=sort a=agent f=focus c=clear  logs: f=filter  query: i"),
+                Span::raw("  q=quit  ←→/tab=nav  Enter=detail  dag: s=sort a=agent f=focus c=clear  logs: f=filter  query: type, Enter"),
             ];
             frame.render_widget(Line::from(titles), chunks[0]);
 
