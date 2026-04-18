@@ -146,16 +146,21 @@ impl Watcher {
         Ok(count)
     }
 
-    /// Flag agents whose updated_at is older than 2x TTL as potentially dead.
+    /// Auto-recover agents stuck in an active state with no recent
+    /// updates. Previously this transitioned to Error — too aggressive;
+    /// nothing was broken, just forgotten. Now lands in Idle with a
+    /// "stale-recovery" reason in the state-change event payload so the
+    /// dashboard transition timeline shows why it moved.
     async fn flag_stale_agents(&self) -> Result<u64, anyhow::Error> {
         let stale_threshold = (self.config.lock_ttl_secs * 2) as i64;
 
         let stale_agents: Vec<_> = sqlx::query_as::<_, crate::models::agent::AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
             FROM agents
-            WHERE current_state IN ('executing', 'waiting_tool', 'planning')
+            WHERE archived_at IS NULL
+              AND current_state IN ('executing', 'waiting_tool', 'planning', 'context_flush')
               AND updated_at < now() - make_interval(secs => $1)
             "#,
         )
@@ -170,11 +175,17 @@ impl Watcher {
             tracing::warn!(
                 agent = %agent.agent_name,
                 last_update = %agent.updated_at,
-                "flagging stale agent"
+                "auto-recovering stale agent"
             );
-            agent_repo
-                .transition(agent.agent_id, agent.current_state, AgentState::Error)
-                .await?;
+            // force_state bypasses the OCC transition check and emits
+            // an agent_state_changed event. No `tool` metadata so the
+            // dashboard won't mistake it for an in-flight tool call.
+            if let Err(e) = agent_repo
+                .force_state(agent.agent_id, AgentState::Idle, None)
+                .await
+            {
+                tracing::warn!(error = %e, "force_state failed during auto-recover");
+            }
             count += 1;
         }
 
