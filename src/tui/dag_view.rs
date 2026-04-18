@@ -45,6 +45,11 @@ pub struct DagView {
     pub detail_open: bool,
     pub sort: DagSort,
     pub agent_filter: AgentFilter,
+    add_active: bool,
+    add_buffer: String,
+    /// Short-lived status line shown under the title, e.g. "launched yggdrasil-43".
+    /// Cleared on the next refresh after a few ticks.
+    pub flash: String,
     /// When set, only this task and its descendants (via task_deps) render.
     pub subtree_focus: Option<Uuid>,
     /// Cached assignee list, populated each refresh: (agent_id, agent_name).
@@ -82,6 +87,9 @@ impl DagView {
             known_assignees: Vec::new(),
             focus_label: String::new(),
             loaded: false,
+            add_active: false,
+            add_buffer: String::new(),
+            flash: String::new(),
         }
     }
 
@@ -188,6 +196,32 @@ impl DagView {
             RenderRow::Task { task, prefix, .. } => Some((task, prefix.as_str())),
             _ => None,
         }
+    }
+
+    /// Public accessor for app.rs key handlers that need to dispatch by ref
+    /// (e.g. `r` launches `ygg plan run <ref>`).
+    pub fn selected_task_ref(&self) -> Option<String> {
+        self.selected_task().map(|(t, p)| format!("{p}-{}", t.seq))
+    }
+
+    /// Inline-input overlay state for 'n' (add child). When active, key
+    /// events flow into `add_buffer` and Enter commits a new task.
+    pub fn add_mode(&self) -> bool { self.add_active }
+    pub fn add_begin(&mut self) { self.add_active = true; self.add_buffer.clear(); }
+    pub fn add_cancel(&mut self) { self.add_active = false; self.add_buffer.clear(); }
+    pub fn add_push(&mut self, c: char) { self.add_buffer.push(c); }
+    pub fn add_pop(&mut self) { self.add_buffer.pop(); }
+    pub fn add_buffer(&self) -> &str { &self.add_buffer }
+
+    /// Returns (parent_ref_if_task, title). Caller feeds this into
+    /// plan_cmd::add — if parent is None, use a top-level create.
+    pub fn add_commit(&mut self) -> Option<(Option<String>, String)> {
+        let title = self.add_buffer.trim().to_string();
+        self.add_active = false;
+        self.add_buffer.clear();
+        if title.is_empty() { return None; }
+        let parent = self.selected_task_ref();
+        Some((parent, title))
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
@@ -423,11 +457,21 @@ impl DagView {
                     TaskKind::Task    => (Color::White,   "○"),
                 };
 
-                let (status_color, status_label) = match t.status {
-                    TaskStatus::Open        => (Color::Gray,    "open"),
-                    TaskStatus::InProgress  => (Color::Yellow,  "wip "),
-                    TaskStatus::Blocked     => (Color::Red,     "blkd"),
-                    TaskStatus::Closed      => (Color::DarkGray,"done"),
+                // Run-state glyph for click-to-do visibility: queued,
+                // running, blocked, done, failed. Failed is detected from
+                // close_reason containing "fail" so we don't need a new
+                // enum variant yet.
+                let (status_color, status_label, run_glyph) = match t.status {
+                    TaskStatus::Open       => (Color::Gray,    "open", "⏳"),
+                    TaskStatus::InProgress => (Color::Yellow,  "wip ", "▶"),
+                    TaskStatus::Blocked    => (Color::Red,     "blkd", "⏸"),
+                    TaskStatus::Closed     => {
+                        let failed = t.close_reason.as_deref()
+                            .map(|r| r.to_lowercase().contains("fail"))
+                            .unwrap_or(false);
+                        if failed { (Color::Red, "fail", "✗") }
+                        else { (Color::DarkGray, "done", "✓") }
+                    }
                 };
 
                 let prio_style = match t.priority {
@@ -446,6 +490,7 @@ impl DagView {
                 ListItem::new(Line::from(vec![
                     Span::raw(indent),
                     Span::raw(connector),
+                    Span::styled(format!("{run_glyph} "), Style::default().fg(status_color)),
                     Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
                     Span::styled(status_label, Style::default().fg(status_color)),
                     Span::raw(" "),
@@ -459,6 +504,10 @@ impl DagView {
             }
         }).collect();
 
+        let title = if !self.flash.is_empty() {
+            format!("{title}  ·  {}", self.flash)
+        } else { title };
+
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
@@ -470,7 +519,41 @@ impl DagView {
                 render_detail_overlay(frame, area, task, prefix);
             }
         }
+
+        // Inline-input overlay for 'n' (add child). Centered, small.
+        if self.add_active {
+            render_add_overlay(frame, area, &self.add_buffer,
+                self.selected_task_ref().as_deref());
+        }
     }
+}
+
+fn render_add_overlay(frame: &mut Frame, area: Rect, buffer: &str, parent: Option<&str>) {
+    let w = area.width.saturating_sub(8).min(80);
+    let h = 6u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect { x, y, width: w, height: h };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let hint = match parent {
+        Some(p) => format!(" add child of {p}  ·  Enter=create · Esc=cancel "),
+        None => " add new task at top level  ·  Enter=create · Esc=cancel ".to_string(),
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("▸ ", Style::default().fg(Color::Cyan)),
+            Span::styled(buffer.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]),
+    ];
+    let para = ratatui::widgets::Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL)
+            .title(hint)
+            .border_style(Style::default().fg(Color::Cyan)));
+    frame.render_widget(para, popup);
 }
 
 fn render_detail_overlay(frame: &mut Frame, area: Rect, task: &Task, prefix: &str) {

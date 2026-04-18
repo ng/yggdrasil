@@ -80,6 +80,43 @@ impl App {
     }
 
     pub async fn handle_key(&mut self, pool: &PgPool, code: KeyCode, modifiers: KeyModifiers) {
+        // DAG add-mode ('n' input overlay) captures most keys. Takes
+        // precedence over Query focus since they never overlap.
+        if self.active_view == ActiveView::Dag && self.dag.add_mode() {
+            match code {
+                KeyCode::Esc => self.dag.add_cancel(),
+                KeyCode::Backspace => self.dag.add_pop(),
+                KeyCode::Enter => {
+                    if let Some((parent, title)) = self.dag.add_commit() {
+                        let agent = std::env::var("YGG_AGENT_NAME").ok()
+                            .unwrap_or_else(|| self.agent_name.clone());
+                        let result = match parent {
+                            Some(p) => crate::cli::plan_cmd::add(
+                                pool, &p, &title, None, None, &[], &agent,
+                            ).await.map(|_| format!("added under {p}")),
+                            None => crate::cli::plan_cmd::create(
+                                pool, &title, None, &agent,
+                            ).await.map(|t| format!("created epic seq={}", t.seq)),
+                        };
+                        self.dag.flash = match result {
+                            Ok(msg) => msg,
+                            Err(e) => format!("add failed: {e}"),
+                        };
+                        let _ = self.dag.refresh(pool).await;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        self.should_quit = true;
+                    } else {
+                        self.dag.add_push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Query pane is always in input mode while active, so typing
         // characters goes to the input buffer. Esc or Tab/arrows leave;
         // Ctrl-C quits. Enter runs the query.
@@ -139,6 +176,25 @@ impl App {
             KeyCode::Char('c') if self.active_view == ActiveView::Dag => {
                 self.dag.clear_filters();
                 let _ = self.dag.refresh(pool).await;
+            }
+            KeyCode::Char('r') if self.active_view == ActiveView::Dag
+                && !self.dag.add_mode() =>
+            {
+                if let Some(task_ref) = self.dag.selected_task_ref() {
+                    let agent = std::env::var("YGG_AGENT_NAME")
+                        .ok()
+                        .unwrap_or_else(|| self.agent_name.clone());
+                    match crate::cli::plan_cmd::run(pool, &task_ref, &agent, false).await {
+                        Ok(_) => self.dag.flash = format!("launched {task_ref} in tmux"),
+                        Err(e) => self.dag.flash = format!("run failed: {e}"),
+                    }
+                    let _ = self.dag.refresh(pool).await;
+                }
+            }
+            KeyCode::Char('n') if self.active_view == ActiveView::Dag
+                && !self.dag.add_mode() =>
+            {
+                self.dag.add_begin();
             }
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
