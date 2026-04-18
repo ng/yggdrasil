@@ -134,6 +134,7 @@ pub struct WorkerRow {
     pub state: String,
     pub title: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
     pub tmux_session: String,
     pub tmux_window: String,
     pub branch_pushed: bool,
@@ -301,13 +302,20 @@ impl DashboardView {
             (ts, name, from, to, tool)
         }).collect();
 
+        // Piggyback a tmux-window check on every refresh. The external
+        // `ygg watch` observer does this too, but not everyone runs it —
+        // without this call, workers whose tmux window was killed stay
+        // "running" in the panel forever. Cheap: one list-windows per
+        // unique tmux session, one UPDATE per absent worker.
+        let _ = super::app::reconcile_workers(pool).await;
+
         // Workers panel reads from the workers table. Observer
         // (yggdrasil-51) maintains state; we just show it.
-        let worker_rows: Vec<(String, i32, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, String, String, bool, bool, Option<String>)> =
+        let worker_rows: Vec<(String, i32, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, String, String, bool, bool, Option<String>)> =
             sqlx::query_as(
                 r#"SELECT r.task_prefix, t.seq, t.title,
                           a.agent_name, a.persona,
-                          w.state::text, w.started_at,
+                          w.state::text, w.started_at, w.last_seen_at,
                           w.tmux_session, w.tmux_window,
                           w.branch_pushed, w.branch_merged, w.pr_url
                      FROM workers w
@@ -320,14 +328,15 @@ impl DashboardView {
                     ORDER BY (w.ended_at IS NULL) DESC, w.started_at DESC
                     LIMIT 15"#,
             ).fetch_all(pool).await.unwrap_or_default();
-        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, persona, state, ts, ts_sess, ts_win, pushed, merged, pr)| {
+        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, persona, state, started, last_seen, ts_sess, ts_win, pushed, merged, pr)| {
             WorkerRow {
                 task_ref: format!("{prefix}-{seq}"),
                 agent: agent.unwrap_or_else(|| "unassigned".into()),
                 persona,
                 state,
                 title,
-                started_at: ts,
+                started_at: started,
+                last_seen_at: last_seen,
                 tmux_session: ts_sess,
                 tmux_window: ts_win,
                 branch_pushed: pushed,
@@ -398,7 +407,13 @@ impl DashboardView {
         let now = Utc::now();
         let focused = self.focus == DashboardFocus::Workers;
         let lines: Vec<Line> = self.workers.iter().enumerate().map(|(i, w)| {
-            let age = humanize_duration((now - w.started_at).num_seconds().max(0));
+            // Age = seconds since last seen by the observer, NOT since spawn.
+            // Answers "is this still alive?" directly. Stale rows (>2m since
+            // last seen) dim to DarkGray so abandoned workers stand out even
+            // before the reconciler flips state.
+            let seen_secs = (now - w.last_seen_at).num_seconds().max(0);
+            let age = humanize_duration(seen_secs);
+            let age_color = if seen_secs > 120 { Color::DarkGray } else { Color::Gray };
             let (g, c) = worker_state_style(&w.state);
             let is_cursor = focused && i == self.worker_sel;
             let cursor = if is_cursor { "▸ " } else { "  " };
@@ -426,12 +441,12 @@ impl DashboardView {
                     Style::default().fg(c)),
                 Span::styled(format!("{:<10}", delivery_badge(w)),
                     Style::default().fg(delivery_color(w))),
-                Span::styled(format!("{age:<6}"), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{age:<6}"), Style::default().fg(age_color)),
                 Span::raw(" "),
                 Span::styled(short_title(&w.title), title_style),
             ])
         }).collect();
-        let title = format!(" Workers — {} running  ·  w=focus  ↑↓ scroll  Enter=attach ",
+        let title = format!(" Workers — {}  ·  age=since last seen  ·  w=focus  ↑↓  Enter=attach ",
             self.workers.len());
         let block = Block::default()
             .borders(Borders::ALL).title(title)
