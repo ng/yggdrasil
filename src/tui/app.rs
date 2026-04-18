@@ -299,7 +299,8 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),   // tab bar
+                    Constraint::Length(1),   // tab row
+                    Constraint::Length(1),   // context-sensitive help row
                     Constraint::Min(0),      // active pane
                     Constraint::Length(3),   // global status strip (3 recent events)
                 ])
@@ -314,7 +315,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 }
             };
 
-            let titles = vec![
+            let tabs = vec![
                 tab("[1] Dashboard", app.active_view == ActiveView::Dashboard),
                 tab("[2] DAG",       app.active_view == ActiveView::Dag),
                 tab("[3] Tasks",     app.active_view == ActiveView::Tasks),
@@ -322,18 +323,39 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[5] Query",     app.active_view == ActiveView::Query),
                 tab("[6] Logs",      app.active_view == ActiveView::Logs),
                 tab("[7] Memgraph",  app.active_view == ActiveView::MemGraph),
-                Span::raw("  q=quit  ←→/tab=nav  Enter=detail  dag: s=sort a=agent f=focus c=clear  logs: f=filter  query: type, Enter"),
             ];
-            frame.render_widget(Line::from(titles), chunks[0]);
+            frame.render_widget(Line::from(tabs), chunks[0]);
+
+            // Second row: global nav + pane-specific hints, styled dimly so
+            // the tabs above stay the primary wayfinding signal.
+            let nav_span = Span::styled(
+                "  q=quit  ←→/tab=nav  Enter=detail  ",
+                Style::default().fg(Color::DarkGray),
+            );
+            let pane_hint = match app.active_view {
+                ActiveView::Dashboard => "S=session-scope",
+                ActiveView::Dag => "s=sort  a=agent  f=focus  c=clear",
+                ActiveView::Tasks => "↑↓ select",
+                ActiveView::Trace => "↑↓ select",
+                ActiveView::Query => "type then Enter  ·  Esc=leave",
+                ActiveView::Logs => "f=filter  Enter=detail",
+                ActiveView::MemGraph => "↑↓ scroll  Enter=detail  Esc=close",
+            };
+            let hint_line = Line::from(vec![
+                nav_span,
+                Span::styled(pane_hint.to_string(),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            ]);
+            frame.render_widget(hint_line, chunks[1]);
 
             match app.active_view {
-                ActiveView::Dashboard => app.dashboard.render(frame, chunks[1]),
-                ActiveView::Dag       => app.dag.render(frame, chunks[1]),
-                ActiveView::Tasks     => app.tasks.render(frame, chunks[1]),
-                ActiveView::Trace     => app.trace.render(frame, chunks[1]),
-                ActiveView::Query     => app.query.render(frame, chunks[1]),
-                ActiveView::Logs      => app.logs.render(frame, chunks[1]),
-                ActiveView::MemGraph  => app.memgraph.render(frame, chunks[1]),
+                ActiveView::Dashboard => app.dashboard.render(frame, chunks[2]),
+                ActiveView::Dag       => app.dag.render(frame, chunks[2]),
+                ActiveView::Tasks     => app.tasks.render(frame, chunks[2]),
+                ActiveView::Trace     => app.trace.render(frame, chunks[2]),
+                ActiveView::Query     => app.query.render(frame, chunks[2]),
+                ActiveView::Logs      => app.logs.render(frame, chunks[2]),
+                ActiveView::MemGraph  => app.memgraph.render(frame, chunks[2]),
             }
 
             // Global status strip — 3 most recent events, always visible.
@@ -354,7 +376,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 .block(ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::TOP)
                     .title(" events "));
-            frame.render_widget(status, chunks[2]);
+            frame.render_widget(status, chunks[3]);
         })?;
 
         // 500ms poll for key input; refresh loop ticks every 500ms regardless.
