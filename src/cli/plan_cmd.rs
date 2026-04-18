@@ -378,7 +378,7 @@ pub async fn run_with_reporter(
         reporter("DRY RUN:");
         reporter(&format!("  1. ensure worktree for {}-{}", repo.task_prefix, task.seq));
         reporter(&format!("  2. claim task (assignee = {agent_name}, status → in_progress)"));
-        reporter(&format!("  3. tmux new-window in the worktree"));
+        reporter(&format!("  3. tmux new-session in the worktree"));
         reporter("  4. launch `claude` with a priming prompt");
         return Ok("dry-run printed".to_string());
     }
@@ -405,24 +405,22 @@ pub async fn run_with_reporter(
         reporter(&format!("warn: couldn't pre-trust worktree: {e}"));
     }
 
-    // 3. tmux window + 4. launch claude. Window name encodes the agent +
-    // persona + task ref so `tmux list-windows` reads like a status board:
-    //   yggdrasil:reviewer·yggdrasil-43
-    //   route-53·kb-chunking-7
+    // 3. tmux session + 4. launch claude. Session name encodes the agent +
+    // persona + task ref + short uniq suffix so `tmux ls` reads like a
+    // flat worker list and a second spawn of the same task doesn't collide:
+    //   ygg-reviewer·yggdrasil-43·a3c1
+    //   ygg-route53·kb-chunking-7·9f0e
     let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
     let agent_label = match persona.as_deref() {
         Some(p) => format!("{agent_name}:{p}"),
         None => agent_name.to_string(),
     };
-    // Append a short random suffix so a second spawn of the same task
-    // (e.g. accidental double-Enter in the TUI) doesn't collide with the
-    // existing tmux window name.
     let uniq: String = Uuid::new_v4().to_string().chars().take(4).collect();
-    let window = sanitize_tmux_name(&format!(
-        "{agent_label}·{}-{}·{uniq}",
+    let session = sanitize_tmux_name(&format!(
+        "ygg-{agent_label}·{}-{}·{uniq}",
         repo.task_prefix, task.seq
     ));
-    spawn_tmux(&window, &wt.path, &task, &repo)?;
+    spawn_tmux(&session, &wt.path, &task, &repo)?;
 
     // 5. Register the worker row so observer + reconciliation + Workers
     // panel have something to track. Session association is best-effort:
@@ -433,17 +431,17 @@ pub async fn run_with_reporter(
     match WorkerRepo::new(pool).spawn(
         task.task_id,
         None,
-        "yggdrasil",
-        &window,
+        &session,
+        "work",
         &wt.path.to_string_lossy(),
     ).await {
         Ok(w) => reporter(&format!("worker registered: {}", w.worker_id)),
         Err(e) => reporter(&format!("warn: couldn't register worker row: {e}")),
     }
 
-    reporter(&format!("launched {} in tmux window '{window}'", task_ref_display(&repo.task_prefix, task.seq)));
-    reporter("  attach: tmux attach -t yggdrasil");
-    Ok(format!("launched {} (window: {window})", task_ref_display(&repo.task_prefix, task.seq)))
+    reporter(&format!("launched {} in tmux session '{session}'", task_ref_display(&repo.task_prefix, task.seq)));
+    reporter(&format!("  attach: tmux attach -t {session}"));
+    Ok(format!("launched {} (session: {session})", task_ref_display(&repo.task_prefix, task.seq)))
 }
 
 /// Pre-populate ~/.claude.json with `projects[<path>].hasTrustDialogAccepted
@@ -514,26 +512,28 @@ fn task_ref_display(prefix: &str, seq: i32) -> String {
 }
 
 fn spawn_tmux(
-    window: &str,
+    session: &str,
     cwd: &std::path::Path,
     task: &Task,
     repo: &crate::models::repo::Repo,
 ) -> Result<(), anyhow::Error> {
-    const SESSION: &str = "yggdrasil";
-    // Ensure session exists; harmless if it does.
-    let _ = Command::new("tmux")
-        .args(["new-session", "-d", "-s", SESSION, "-n", "dashboard"])
-        .status();
-    // Create the window anchored to the worktree cwd.
+    // Each worker gets its own tmux SESSION (not a window under `yggdrasil`).
+    // Rationale: a session-per-worker matches the "each spawn is an
+    // independent agent" mental model — user detaches from the TUI and
+    // attaches to a specific worker cleanly (tmux switch-client -t <sess>),
+    // ctrl-b d detaches that worker alone, and `tmux ls` reads like a
+    // flat worker list. The dashboard's own `yggdrasil` session stays
+    // separate; this worker has no window in it.
+    const WINDOW: &str = "work";
     let status = Command::new("tmux")
         .args([
-            "new-window", "-t", SESSION, "-n", window,
+            "new-session", "-d", "-s", session, "-n", WINDOW,
             "-c", &cwd.to_string_lossy(),
         ])
         .status()
-        .map_err(|e| anyhow::anyhow!("tmux new-window: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("tmux new-session: {e}"))?;
     if !status.success() {
-        anyhow::bail!("tmux new-window failed for '{window}'");
+        anyhow::bail!("tmux new-session failed for '{session}'");
     }
 
     // Write the priming prompt to a temp file, then pipe it via stdin.
@@ -548,7 +548,7 @@ fn spawn_tmux(
     std::fs::write(&prime_path, &prime)
         .map_err(|e| anyhow::anyhow!("write prime file: {e}"))?;
 
-    let target = format!("{SESSION}:{window}");
+    let target = format!("{session}:{WINDOW}");
     let flags = std::env::var("YGG_CLAUDE_FLAGS")
         .unwrap_or_else(|_| "--dangerously-skip-permissions".to_string());
     // Cleanup the temp file once claude has consumed it. `; rm -f` keeps
