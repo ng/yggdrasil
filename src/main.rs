@@ -456,6 +456,8 @@ enum TaskAction {
         #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
         #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
         #[arg(short, long)] agent: Option<String>,
+        /// Link to an external issue tracker (gh-123, jira-PROJ-42, URL, etc.)
+        #[arg(long)] external_ref: Option<String>,
         /// Emit the created task(s) as JSON (for agent consumption)
         #[arg(long)] json: bool,
         /// Parse a markdown file into a task tree (H1=epic, H2=feature, H3/4=task).
@@ -517,6 +519,8 @@ enum TaskAction {
         #[arg(long, allow_hyphen_values = true)] acceptance: Option<String>,
         #[arg(long, allow_hyphen_values = true)] design: Option<String>,
         #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
+        /// Set the external ref. Pass empty string to clear.
+        #[arg(long)] external_ref: Option<String>,
         #[arg(short, long)] agent: Option<String>,
     },
     /// Claim a task (assignee + in_progress)
@@ -938,7 +942,7 @@ async fn main() -> anyhow::Result<()> {
                 })
             };
             match action {
-                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent, json, file, body_file, stdin } => {
+                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent, external_ref, json, file, body_file, stdin } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     // Mode dispatch — mutually exclusive.
                     if let Some(path) = file {
@@ -973,6 +977,7 @@ async fn main() -> anyhow::Result<()> {
                             notes: notes.as_deref(),
                             labels: &label,
                             agent_name: &agent_name,
+                            external_ref: external_ref.as_deref(),
                             json,
                         }).await?;
                     }
@@ -986,11 +991,14 @@ async fn main() -> anyhow::Result<()> {
                     ygg::cli::task_cmd::stale(&pool, days, all, status.as_deref(), json).await?;
                 }
                 TaskAction::Show { reference, json } => { ygg::cli::task_cmd::show(&pool, &reference, json).await?; }
-                TaskAction::Update { reference, title, description, priority, kind, acceptance, design, notes, agent } => {
+                TaskAction::Update { reference, title, description, priority, kind, acceptance, design, notes, external_ref, agent } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
+                    // Empty-string external_ref clears the column; None leaves it alone.
+                    let ext_update = external_ref.as_deref().map(|s| if s.is_empty() { None } else { Some(s) });
                     ygg::cli::task_cmd::update(&pool, &reference,
                         title.as_deref(), description.as_deref(), priority, kind.as_deref(),
                         acceptance.as_deref(), design.as_deref(), notes.as_deref(),
+                        ext_update,
                         &agent_name).await?;
                 }
                 TaskAction::Claim { reference, agent } => {

@@ -113,6 +113,7 @@ pub struct CreateOpts<'a> {
     pub notes: Option<&'a str>,
     pub labels: &'a [String],
     pub agent_name: &'a str,
+    pub external_ref: Option<&'a str>,
     /// Emit JSON to stdout instead of the human confirmation line.
     pub json: bool,
 }
@@ -169,6 +170,7 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
                 priority,
                 assignee: None,
                 labels,
+                external_ref: opts.external_ref,
             },
         )
         .await?;
@@ -364,6 +366,10 @@ pub async fn show(pool: &sqlx::PgPool, reference: &str, json: bool) -> Result<()
         println!();
         println!("  Labels: {}", labels.join(", "));
     }
+    if let Some(r) = t.external_ref.as_deref().filter(|s| !s.is_empty()) {
+        println!();
+        println!("  External: {r}");
+    }
     if !deps.is_empty() {
         println!();
         println!("  Depends on:");
@@ -407,6 +413,7 @@ pub async fn update(
     acceptance: Option<&str>,
     design: Option<&str>,
     notes: Option<&str>,
+    external_ref: Option<Option<&str>>,
     agent_name: &str,
 ) -> Result<(), anyhow::Error> {
     let t = resolve_task(pool, reference).await?;
@@ -418,7 +425,7 @@ pub async fn update(
 
     TaskRepo::new(pool).update(t.task_id, agent_id, TaskUpdate {
         title, description, acceptance, design, notes, kind, priority,
-        assignee: None, human_flag: None,
+        assignee: None, human_flag: None, external_ref,
     }).await?;
     println!("Updated {}", reference);
     Ok(())

@@ -39,6 +39,7 @@ pub async fn create(
         priority: 1,
         assignee: agent_id,
         labels: &[],
+        external_ref: None,
     }).await?;
     println!("Created plan {}-{}  {}", repo.task_prefix, created.seq, title);
     Ok(created)
@@ -76,6 +77,7 @@ pub async fn add(
         priority: 2,
         assignee: None,
         labels: &[],
+        external_ref: None,
     }).await?;
 
     // Wire the child under the epic and apply declared deps.

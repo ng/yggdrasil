@@ -94,6 +94,8 @@ pub struct Task {
     pub close_reason: Option<String>,
     #[sqlx(default)]
     pub relevance: i32,
+    #[sqlx(default)]
+    pub external_ref: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +109,7 @@ pub struct TaskCreate<'a> {
     pub priority: i16,
     pub assignee: Option<Uuid>,
     pub labels: &'a [String],
+    pub external_ref: Option<&'a str>,
 }
 
 impl Default for TaskKind {
@@ -124,6 +127,7 @@ pub struct TaskUpdate<'a> {
     pub priority: Option<i16>,
     pub assignee: Option<Option<Uuid>>, // Some(Some(id)) sets; Some(None) clears; None leaves alone
     pub human_flag: Option<bool>,
+    pub external_ref: Option<Option<&'a str>>, // Some(Some(s)) sets; Some(None) clears; None leaves alone
 }
 
 pub struct TaskRepo<'a> {
@@ -161,11 +165,11 @@ impl<'a> TaskRepo<'a> {
         let task: Task = sqlx::query_as::<_, Task>(
             r#"INSERT INTO tasks
                (repo_id, seq, title, description, acceptance, design, notes,
-                kind, priority, created_by, assignee)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                kind, priority, created_by, assignee, external_ref)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                RETURNING task_id, repo_id, seq, title, description, acceptance, design, notes,
                          kind, status, priority, created_by, assignee, human_flag,
-                         created_at, updated_at, closed_at, close_reason, relevance"#,
+                         created_at, updated_at, closed_at, close_reason, relevance, external_ref"#,
         )
         .bind(repo_id)
         .bind(seq)
@@ -178,6 +182,7 @@ impl<'a> TaskRepo<'a> {
         .bind(spec.priority)
         .bind(created_by)
         .bind(spec.assignee)
+        .bind(spec.external_ref)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -208,7 +213,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
-                      created_at, updated_at, closed_at, close_reason, relevance
+                      created_at, updated_at, closed_at, close_reason, relevance, external_ref
                FROM tasks WHERE task_id = $1"#,
         )
         .bind(task_id)
@@ -220,7 +225,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
-                      created_at, updated_at, closed_at, close_reason, relevance
+                      created_at, updated_at, closed_at, close_reason, relevance, external_ref
                FROM tasks WHERE repo_id = $1 AND seq = $2"#,
         )
         .bind(repo_id)
@@ -250,7 +255,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
-                      created_at, updated_at, closed_at, close_reason, relevance
+                      created_at, updated_at, closed_at, close_reason, relevance, external_ref
                FROM tasks
                WHERE ($1::UUID IS NULL OR repo_id = $1)
                  AND ($2::text[] IS NULL OR array_length($2, 1) IS NULL OR status::text = ANY($2))
@@ -269,7 +274,7 @@ impl<'a> TaskRepo<'a> {
             r#"
             SELECT t.task_id, t.repo_id, t.seq, t.title, t.description, t.acceptance, t.design, t.notes,
                    t.kind, t.status, t.priority, t.created_by, t.assignee, t.human_flag,
-                   t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance
+                   t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance, t.external_ref
             FROM tasks t
             WHERE t.repo_id = $1
               AND t.status IN ('open', 'in_progress')
@@ -299,7 +304,7 @@ impl<'a> TaskRepo<'a> {
             r#"
             SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                    kind, status, priority, created_by, assignee, human_flag,
-                   created_at, updated_at, closed_at, close_reason, relevance
+                   created_at, updated_at, closed_at, close_reason, relevance, external_ref
             FROM tasks
             WHERE ($1::UUID IS NULL OR repo_id = $1)
               AND status <> 'closed'
@@ -318,7 +323,7 @@ impl<'a> TaskRepo<'a> {
             r#"
             SELECT DISTINCT t.task_id, t.repo_id, t.seq, t.title, t.description, t.acceptance, t.design, t.notes,
                    t.kind, t.status, t.priority, t.created_by, t.assignee, t.human_flag,
-                   t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance
+                   t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance, t.external_ref
             FROM tasks t
             JOIN task_deps d ON d.task_id = t.task_id
             JOIN tasks b ON b.task_id = d.blocker_id
@@ -415,6 +420,11 @@ impl<'a> TaskRepo<'a> {
         }
         if let Some(v) = u.human_flag {
             sqlx::query("UPDATE tasks SET human_flag = $2, updated_at = now() WHERE task_id = $1")
+                .bind(task_id).bind(v).execute(&mut *tx).await?;
+        }
+        if let Some(v) = u.external_ref {
+            // Some(Some(s)) sets; Some(None) clears; None leaves alone.
+            sqlx::query("UPDATE tasks SET external_ref = $2, updated_at = now() WHERE task_id = $1")
                 .bind(task_id).bind(v).execute(&mut *tx).await?;
         }
 
@@ -545,7 +555,7 @@ impl<'a> TaskRepo<'a> {
         sqlx::query_as::<_, Task>(
             r#"SELECT t.task_id, t.repo_id, t.seq, t.title, t.description, t.acceptance, t.design, t.notes,
                       t.kind, t.status, t.priority, t.created_by, t.assignee, t.human_flag,
-                      t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance
+                      t.created_at, t.updated_at, t.closed_at, t.close_reason, t.relevance, t.external_ref
                FROM task_deps d JOIN tasks t ON t.task_id = d.blocker_id
                WHERE d.task_id = $1
                ORDER BY t.seq"#,
