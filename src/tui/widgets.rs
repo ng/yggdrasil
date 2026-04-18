@@ -29,7 +29,7 @@ pub fn kind_glyph(k: &TaskKind) -> (&'static str, Color) {
     match k {
         TaskKind::Epic    => ("◉", Color::Magenta),
         TaskKind::Feature => ("✚", Color::Cyan),
-        TaskKind::Bug     => ("✗", Color::Red),
+        TaskKind::Bug     => ("🐞", Color::Red),
         TaskKind::Chore   => ("·", Color::DarkGray),
         TaskKind::Task    => ("○", Color::White),
     }
@@ -54,7 +54,7 @@ pub fn title_style(status: &TaskStatus) -> Style {
 }
 
 /// Row cells for a task in table form (Tasks pane + future Workers pane).
-/// Returns the cells in order: [RUN, KIND, ID, P, TITLE].
+/// Returns the cells in order: [RUN, KIND, ID, P, TITLE, AGE].
 pub fn task_row_cells<'a>(t: &'a Task, prefix: &'a str) -> Vec<Cell<'a>> {
     let (run, run_color, run_bold) = run_state_glyph(t);
     let (kg, kc) = kind_glyph(&t.kind);
@@ -63,11 +63,24 @@ pub fn task_row_cells<'a>(t: &'a Task, prefix: &'a str) -> Vec<Cell<'a>> {
     } else {
         Style::default().fg(run_color)
     };
+    let age_secs = (chrono::Utc::now() - t.updated_at).num_seconds().max(0);
+    let age_style = if age_secs >= 7 * 86400 { Style::default().fg(Color::Yellow) }
+                    else if age_secs >= 86400 { Style::default().fg(Color::DarkGray) }
+                    else { Style::default().fg(Color::Gray) };
     vec![
         Cell::from(run).style(run_style),
         Cell::from(format!("{kg} {:?}", t.kind).to_lowercase()).style(Style::default().fg(kc)),
         Cell::from(format!("{prefix}-{}", t.seq)).style(Style::default().fg(Color::Gray)),
         Cell::from(format!("P{}", t.priority)).style(priority_style(t.priority)),
         Cell::from(t.title.clone()).style(title_style(&t.status)),
+        Cell::from(humanize_age(age_secs)).style(age_style),
     ]
+}
+
+fn humanize_age(secs: i64) -> String {
+    if secs < 60 { format!("{secs}s") }
+    else if secs < 3600 { format!("{}m", secs / 60) }
+    else if secs < 86400 { format!("{}h", secs / 3600) }
+    else if secs < 7 * 86400 { format!("{}d", secs / 86400) }
+    else { format!("{}w", secs / (7 * 86400)) }
 }

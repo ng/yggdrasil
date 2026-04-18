@@ -203,6 +203,22 @@ impl DagView {
         }
     }
 
+    /// task_id + display label ("yggdrasil-42") for the selected row, if any.
+    /// app.rs uses this for the backspace-delete confirm flow.
+    pub fn selected_task_id(&self) -> Option<(Uuid, String)> {
+        self.selected_task().map(|(t, p)| (t.task_id, format!("{p}-{}", t.seq)))
+    }
+
+    /// Arm delete confirmation for the currently selected task. Next key must
+    /// be `y` in handle_key; anything else cancels via `delete_cancel`.
+    pub fn delete_begin(&mut self) {
+        self.pending_delete = self.selected_task_id();
+    }
+    pub fn delete_cancel(&mut self) { self.pending_delete = None; }
+    pub fn take_pending_delete(&mut self) -> Option<Uuid> {
+        self.pending_delete.take().map(|(id, _)| id)
+    }
+
     /// Public accessor for app.rs key handlers that need to dispatch by ref
     /// (e.g. `r` launches `ygg plan run <ref>`).
     pub fn selected_task_ref(&self) -> Option<String> {
@@ -492,6 +508,15 @@ impl DagView {
                 } else { String::new() };
 
                 let id = format!("{}-{}", prefix, t.seq);
+                let age = humanize_age(t.updated_at);
+                // Older rows dim the age so the eye lands on fresh work first;
+                // a week+ gets a Yellow nudge so the "stale" case is obvious.
+                let age_style = {
+                    let secs = (chrono::Utc::now() - t.updated_at).num_seconds().max(0);
+                    if secs >= 7 * 86400 { Style::default().fg(Color::Yellow) }
+                    else if secs >= 86400 { Style::default().fg(Color::DarkGray) }
+                    else { Style::default().fg(Color::Gray) }
+                };
 
                 ListItem::new(Line::from(vec![
                     Span::raw(indent),
@@ -514,11 +539,14 @@ impl DagView {
                             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
                         } else { Style::default() }),
                     Span::styled(children_badge, Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("  {age}"), age_style),
                 ]))
             }
         }).collect();
 
-        let title = if !self.flash.is_empty() {
+        let title = if let Some((_, label)) = &self.pending_delete {
+            format!("{title}  ·  DELETE {label}? y / any=cancel")
+        } else if !self.flash.is_empty() {
             format!("{title}  ·  {}", self.flash)
         } else { title };
 
@@ -686,6 +714,15 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max { return s.to_string(); }
     let cut: String = s.chars().take(max).collect();
     format!("{cut}…")
+}
+
+fn humanize_age(ts: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (chrono::Utc::now() - ts).num_seconds().max(0);
+    if secs < 60 { format!("{secs}s") }
+    else if secs < 3600 { format!("{}m", secs / 60) }
+    else if secs < 86400 { format!("{}h", secs / 3600) }
+    else if secs < 7 * 86400 { format!("{}d", secs / 86400) }
+    else { format!("{}w", secs / (7 * 86400)) }
 }
 
 /// Painted while the first refresh is in flight. A tiny epic-with-three-children

@@ -28,13 +28,43 @@ pub struct TasksView {
     /// (before the initial query completes) reads as "nothing here" rather
     /// than "still fetching".
     pub loaded: bool,
+    /// Armed by Backspace; next key must be `y` to actually delete.
+    /// Carries the display label so the confirm prompt stays accurate
+    /// even if the selection moves.
+    pub pending_delete: Option<(Uuid, String)>,
 }
 
 impl TasksView {
     pub fn new() -> Self {
         let mut st = TableState::default();
         st.select(Some(0));
-        Self { rows: vec![], state: st, last_status: String::new(), loaded: false, flash: String::new(), detail_open: false }
+        Self {
+            rows: vec![],
+            state: st,
+            last_status: String::new(),
+            loaded: false,
+            flash: String::new(),
+            detail_open: false,
+            pending_delete: None,
+        }
+    }
+
+    /// task_id + display label ("yggdrasil-42") for the selected row, if any.
+    pub fn selected_task_id(&self) -> Option<(Uuid, String)> {
+        let i = self.state.selected()?;
+        match self.rows.get(i)? {
+            TaskRow::Task { prefix, task } =>
+                Some((task.task_id, format!("{prefix}-{}", task.seq))),
+            _ => None,
+        }
+    }
+
+    pub fn delete_begin(&mut self) {
+        self.pending_delete = self.selected_task_id();
+    }
+    pub fn delete_cancel(&mut self) { self.pending_delete = None; }
+    pub fn take_pending_delete(&mut self) -> Option<Uuid> {
+        self.pending_delete.take().map(|(id, _)| id)
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
@@ -156,8 +186,10 @@ impl TasksView {
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let base = format!(" Tasks ready ({} across all repos) ", self.rows.len());
-        let title = if self.flash.is_empty() { base }
-                    else { format!("{base} ·  {}", self.flash) };
+        let title = if let Some((_, label)) = &self.pending_delete {
+            format!("{base} ·  DELETE {label}? y / any=cancel")
+        } else if self.flash.is_empty() { base }
+          else { format!("{base} ·  {}", self.flash) };
 
         if !self.loaded {
             render_tasks_loading(frame, area, &title);
@@ -195,6 +227,7 @@ impl TasksView {
             Cell::from("ID").style(Style::default().fg(Color::Gray)),
             Cell::from("P").style(Style::default().fg(Color::Gray)),
             Cell::from("TITLE").style(Style::default().fg(Color::Gray)),
+            Cell::from("AGE").style(Style::default().fg(Color::Gray)),
         ]);
 
         let rows: Vec<Row> = self.rows.iter().map(|row| match row {
@@ -208,6 +241,7 @@ impl TasksView {
                     Cell::from(""),
                     Cell::from(format!("({count})"))
                         .style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(""),
                 ])
             }
             TaskRow::Task { prefix, task: t } => {
@@ -222,6 +256,7 @@ impl TasksView {
             Constraint::Length(16),  // ID
             Constraint::Length(4),   // P
             Constraint::Min(20),     // TITLE
+            Constraint::Length(5),   // AGE
         ])
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))

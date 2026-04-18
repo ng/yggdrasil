@@ -200,10 +200,57 @@ impl App {
             return;
         }
 
+        // Pending delete-confirm takes precedence — whatever the next key is,
+        // it either commits (`y`) or cancels. Ctrl-C still quits. Prevents a
+        // stray keystroke from firing a tab switch while the prompt is armed.
+        match self.active_view {
+            ActiveView::Dag if self.dag.pending_delete.is_some() => {
+                if matches!(code, KeyCode::Char(c) if c == 'y' || c == 'Y') {
+                    if let Some(id) = self.dag.take_pending_delete() {
+                        let label = id.to_string()[..8].to_string();
+                        match crate::models::task::TaskRepo::new(pool).delete(id).await {
+                            Ok(()) => self.dag.flash = format!("deleted {label}"),
+                            Err(e) => self.dag.flash = format!("delete failed: {e}"),
+                        }
+                        let _ = self.dag.refresh(pool).await;
+                    }
+                } else if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL)) {
+                    self.should_quit = true;
+                } else {
+                    self.dag.delete_cancel();
+                }
+                return;
+            }
+            ActiveView::Tasks if self.tasks.pending_delete.is_some() => {
+                if matches!(code, KeyCode::Char(c) if c == 'y' || c == 'Y') {
+                    if let Some(id) = self.tasks.take_pending_delete() {
+                        let label = id.to_string()[..8].to_string();
+                        match crate::models::task::TaskRepo::new(pool).delete(id).await {
+                            Ok(()) => self.tasks.set_flash(format!("deleted {label}")),
+                            Err(e) => self.tasks.set_flash(format!("delete failed: {e}")),
+                        }
+                        let _ = self.tasks.refresh(pool).await;
+                    }
+                } else if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL)) {
+                    self.should_quit = true;
+                } else {
+                    self.tasks.delete_cancel();
+                }
+                return;
+            }
+            _ => {}
+        }
+
         match code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
+            }
+            KeyCode::Backspace if self.active_view == ActiveView::Dag => {
+                self.dag.delete_begin();
+            }
+            KeyCode::Backspace if self.active_view == ActiveView::Tasks => {
+                self.tasks.delete_begin();
             }
             KeyCode::Char('1') => self.set_view(ActiveView::Dashboard),
             KeyCode::Char('2') => self.set_view(ActiveView::Dag),
@@ -439,8 +486,8 @@ impl App {
         );
         let pane_hint = match self.active_view {
             ActiveView::Dashboard => "S=session-scope",
-            ActiveView::Dag => "Enter=detail  r=run  n=add  s=sort  a=agent  f=focus  c=clear",
-            ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  r=run (worktree + CC session)",
+            ActiveView::Dag => "Enter=detail  r=run  n=add  ⌫=delete  s=sort  a=agent  f=focus  c=clear",
+            ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  r=run  ·  ⌫=delete",
             ActiveView::Trace => "↑↓ select",
             ActiveView::Query => "type then Enter  ·  Esc=leave",
             ActiveView::Logs => "f=filter  Enter=detail",
