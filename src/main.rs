@@ -245,6 +245,12 @@ enum Commands {
         action: WorktreeAction,
     },
 
+    /// Execute tasks with worktrees + CC sessions (click-to-do).
+    Plan {
+        #[command(subcommand)]
+        action: PlanAction,
+    },
+
     /// Retroactively scrub content from already-stored nodes. Use when a
     /// secret slipped past the write-time redactor. See ADR yggdrasil-18.
     Forget {
@@ -301,6 +307,31 @@ enum Commands {
         /// Maximum number of entries to list
         #[arg(long, default_value = "20")]
         limit: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlanAction {
+    /// Create a plan (epic) in the current repo.
+    Create {
+        title: String,
+        #[arg(short, long)] description: Option<String>,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Add a child task under a plan, optionally with dependencies.
+    Add {
+        epic: String,
+        title: String,
+        #[arg(short, long)] description: Option<String>,
+        #[arg(short, long)] kind: Option<String>,
+        #[arg(long, value_delimiter = ',')] deps: Vec<String>,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Execute a single task: worktree + claim + tmux + CC session.
+    Run {
+        task: String,
+        #[arg(long)] dry_run: bool,
+        #[arg(short, long)] agent: Option<String>,
     },
 }
 
@@ -922,6 +953,36 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::bar_cmd::execute(&pool).await?;
+        }
+        Commands::Plan { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let default_agent = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                std::env::current_dir().ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "ygg".to_string())
+            });
+            match action {
+                PlanAction::Create { title, description, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    let _ = ygg::cli::plan_cmd::create(
+                        &pool, &title, description.as_deref(), &agent_name,
+                    ).await?;
+                }
+                PlanAction::Add { epic, title, description, kind, deps, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    let _ = ygg::cli::plan_cmd::add(
+                        &pool, &epic, &title, description.as_deref(),
+                        kind.as_deref(), &deps, &agent_name,
+                    ).await?;
+                }
+                PlanAction::Run { task, dry_run, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::plan_cmd::run(
+                        &pool, &task, &agent_name, dry_run,
+                    ).await?;
+                }
+            }
         }
         Commands::Worktree { action } => {
             let config = ygg::config::AppConfig::from_env()?;

@@ -12,6 +12,7 @@ pub mod lock_cmd;
 pub mod memory_cmd;
 pub mod inject;
 pub mod observe;
+pub mod plan_cmd;
 pub mod prime;
 pub mod recover;
 pub mod recovery_cmd;

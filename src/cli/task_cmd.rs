@@ -41,6 +41,14 @@ async fn resolve_agent_id(
     Ok(agent_repo.get_by_name(agent_name).await?.map(|a| a.agent_id))
 }
 
+/// Public wrapper so plan_cmd can share the resolver without duplicating it.
+pub async fn resolve_task_public(
+    pool: &sqlx::PgPool,
+    reference: &str,
+) -> Result<Task, anyhow::Error> {
+    resolve_task(pool, reference).await
+}
+
 /// Parse a task reference: either a UUID, or a "<prefix>-NNN" string.
 async fn resolve_task(
     pool: &sqlx::PgPool,
