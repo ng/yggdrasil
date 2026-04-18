@@ -499,6 +499,16 @@ impl<'a> TaskRepo<'a> {
         .bind(task_id).fetch_all(self.pool).await
     }
 
+    /// Hard-delete a task. FK cascades handle task_deps, task_events,
+    /// task_relevance, and worker rows — no manual cleanup needed.
+    pub async fn delete(&self, task_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(task_id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn stats(&self, repo_id: Option<Uuid>) -> Result<TaskStats, sqlx::Error> {
         let row: (i64, i64, i64, i64) = sqlx::query_as(
             r#"SELECT

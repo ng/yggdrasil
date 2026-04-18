@@ -14,6 +14,7 @@ use super::dag_view::DagView;
 use super::eval_view::EvalView;
 use super::log_view::LogView;
 use super::memgraph_view::MemGraphView;
+use super::prompt_view::PromptView;
 use super::query_view::QueryView;
 use super::tasks_view::TasksView;
 use super::trace_view::TraceView;
@@ -28,6 +29,7 @@ pub enum ActiveView {
     Logs,
     MemGraph,
     Eval,
+    Prompt,
 }
 
 pub struct App {
@@ -41,6 +43,7 @@ pub struct App {
     pub logs: LogView,
     pub memgraph: MemGraphView,
     pub eval: EvalView,
+    pub prompt: PromptView,
     pub agent_name: String,
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
@@ -78,6 +81,7 @@ impl App {
             logs: LogView::new(),
             memgraph: MemGraphView::new(),
             eval: EvalView::new(),
+            prompt: PromptView::new(),
             agent_name,
             query_focus: false,
             status_tail: Vec::new(),
@@ -209,6 +213,7 @@ impl App {
             KeyCode::Char('6') => self.set_view(ActiveView::Logs),
             KeyCode::Char('7') => self.set_view(ActiveView::MemGraph),
             KeyCode::Char('8') => self.set_view(ActiveView::Eval),
+            KeyCode::Char('9') => self.set_view(ActiveView::Prompt),
             KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
             KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
             KeyCode::Char('f') if self.active_view == ActiveView::Logs => {
@@ -293,6 +298,7 @@ impl App {
                 ActiveView::Trace => self.trace.select_prev(),
                 ActiveView::Logs => self.logs.scroll_up(),
                 ActiveView::MemGraph => self.memgraph.scroll_up(),
+                ActiveView::Prompt => self.prompt.select_prev(),
                 _ => {}
             },
             KeyCode::Down => match self.active_view {
@@ -305,8 +311,15 @@ impl App {
                 ActiveView::Trace => self.trace.select_next(),
                 ActiveView::Logs => self.logs.scroll_down(),
                 ActiveView::MemGraph => self.memgraph.scroll_down(),
+                ActiveView::Prompt => self.prompt.select_next(),
                 _ => {}
             },
+            KeyCode::PageUp if self.active_view == ActiveView::Prompt => {
+                self.prompt.scroll_up();
+            }
+            KeyCode::PageDown if self.active_view == ActiveView::Prompt => {
+                self.prompt.scroll_down();
+            }
             KeyCode::Enter => match self.active_view {
                 ActiveView::Dashboard => match self.dashboard.focus {
                     super::dashboard::DashboardFocus::Workers => {
@@ -363,13 +376,14 @@ impl App {
             ActiveView::Query => ActiveView::Logs,
             ActiveView::Logs => ActiveView::MemGraph,
             ActiveView::MemGraph => ActiveView::Eval,
-            ActiveView::Eval => ActiveView::Dashboard,
+            ActiveView::Eval => ActiveView::Prompt,
+            ActiveView::Prompt => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::Eval,
+            ActiveView::Dashboard => ActiveView::Prompt,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
@@ -377,6 +391,7 @@ impl App {
             ActiveView::Logs => ActiveView::Query,
             ActiveView::MemGraph => ActiveView::Logs,
             ActiveView::Eval => ActiveView::MemGraph,
+            ActiveView::Prompt => ActiveView::Eval,
         };
         self.set_view(prev);
     }
@@ -414,6 +429,7 @@ impl App {
             tab("[6] Logs",      self.active_view == ActiveView::Logs),
             tab("[7] Memgraph",  self.active_view == ActiveView::MemGraph),
             tab("[8] Eval",      self.active_view == ActiveView::Eval),
+            tab("[9] Prompt",    self.active_view == ActiveView::Prompt),
         ];
         frame.render_widget(Line::from(tabs), chunks[0]);
 
@@ -430,6 +446,7 @@ impl App {
             ActiveView::Logs => "f=filter  Enter=detail",
             ActiveView::MemGraph => "↑↓ scroll  Enter=detail  Esc=close",
             ActiveView::Eval => "w=cycle window (1h/6h/24h/7d)",
+            ActiveView::Prompt => "↑↓ pins · PgUp/PgDn scroll MEMORY.md",
         };
         let hint_line = Line::from(vec![
             nav_span,
@@ -447,6 +464,7 @@ impl App {
             ActiveView::Logs      => self.logs.render(frame, chunks[2]),
             ActiveView::MemGraph  => self.memgraph.render(frame, chunks[2]),
             ActiveView::Eval      => self.eval.render(frame, chunks[2]),
+            ActiveView::Prompt    => self.prompt.render(frame, chunks[2]),
         }
 
         // Global status strip — two columns: events left, orchestration
@@ -674,6 +692,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 ActiveView::Logs    => { app.logs.refresh(pool).await?; }
                 ActiveView::MemGraph => { app.memgraph.refresh(pool).await?; }
                 ActiveView::Eval    => { app.eval.refresh(pool).await?; }
+                ActiveView::Prompt  => { app.prompt.refresh(pool).await?; }
                 _ => {}
             }
             last_refresh = Some(Instant::now());

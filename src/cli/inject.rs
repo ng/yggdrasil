@@ -391,30 +391,50 @@ pub async fn execute(
     }
 
     // ── scoped memories ───────────────────────────────────────────────────────
-    // Surface matching memories from the first-class memories table. Runs
-    // independent of node hits — pinned memories and narrow-scope notes
-    // should appear even when the node retriever wouldn't rank them in the
-    // top-k.
+    // Two passes: pinned memories go out unconditionally (the whole point of
+    // pinning is surviving similarity-retrieval's dropout + attention decay
+    // as context grows); then similarity-matched non-pinned memories fill in
+    // relevant-but-not-sticky context.
+    let repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool).await.ok()
+        .map(|r| r.repo_id);
+    let cc_sid = crate::models::event::cc_session_id();
+    let memory_repo = crate::models::memory::MemoryRepo::new(pool);
+
+    let pinned = memory_repo
+        .list_pinned_visible(repo_id, cc_sid.as_deref())
+        .await
+        .unwrap_or_default();
+    let mut pinned_ids: std::collections::HashSet<uuid::Uuid> =
+        std::collections::HashSet::new();
+    for m in &pinned {
+        pinned_ids.insert(m.memory_id);
+        let snip = if m.text.chars().count() > 200 {
+            m.text.chars().take(200).collect::<String>() + "…"
+        } else { m.text.clone() };
+        output.push(format!(
+            "[ygg memory | ★ pinned · {}] {}",
+            m.scope.as_str(), snip
+        ));
+    }
+
     if let Some(prompt) = prompt_text {
         let embedder = Embedder::default_ollama();
         if embedder.health_check().await {
             if let Ok(q) = embedder.embed(prompt).await {
-                let repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool).await.ok()
-                    .map(|r| r.repo_id);
-                let cc_sid = crate::models::event::cc_session_id();
-                let mems = crate::models::memory::MemoryRepo::new(pool)
+                let mems = memory_repo
                     .search(&q, repo_id, cc_sid.as_deref(), 3, 0.5)
                     .await
                     .unwrap_or_default();
                 for m in mems {
+                    // Pinned ones already emitted above — don't double-print.
+                    if pinned_ids.contains(&m.memory.memory_id) { continue; }
                     let sim = (m.similarity * 100.0) as u32;
-                    let pin = if m.memory.pinned { "★" } else { "·" };
                     let snip = if m.memory.text.chars().count() > 140 {
                         m.memory.text.chars().take(140).collect::<String>() + "…"
                     } else { m.memory.text.clone() };
                     output.push(format!(
-                        "[ygg memory | {} {} | sim={}%] {}",
-                        pin, m.memory.scope.as_str(), sim, snip
+                        "[ygg memory | · {} | sim={}%] {}",
+                        m.memory.scope.as_str(), sim, snip
                     ));
                 }
             }

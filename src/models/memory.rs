@@ -193,6 +193,54 @@ impl<'a> MemoryRepo<'a> {
         }).collect())
     }
 
+    /// All pinned memories visible in the current scope context. Used by the
+    /// prompt-submit hook to inject pinned directives unconditionally — the
+    /// similarity search misses them when they're semantically unrelated to
+    /// the current turn, which defeats the point of pinning.
+    pub async fn list_pinned_visible(
+        &self,
+        repo_id: Option<Uuid>,
+        cc_session_id: Option<&str>,
+    ) -> Result<Vec<Memory>, sqlx::Error> {
+        sqlx::query_as::<_, Memory>(
+            r#"
+            SELECT memory_id, scope, repo_id, cc_session_id, agent_id,
+                   agent_name, text, embedding, pinned, expires_at,
+                   created_at, updated_at
+            FROM memories
+            WHERE pinned = true
+              AND (expires_at IS NULL OR expires_at > now())
+              AND (
+                scope = 'global'
+                OR (scope = 'repo'    AND repo_id = $1)
+                OR (scope = 'session' AND cc_session_id = $2)
+              )
+            ORDER BY scope, created_at DESC
+            "#,
+        )
+        .bind(repo_id)
+        .bind(cc_session_id)
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// Every pinned memory, ignoring scope visibility. Used by the TUI
+    /// prompt inspector so users can see their entire pinboard at a glance,
+    /// not just what's visible from the current repo/session.
+    pub async fn list_all_pinned(&self) -> Result<Vec<Memory>, sqlx::Error> {
+        sqlx::query_as::<_, Memory>(
+            r#"SELECT memory_id, scope, repo_id, cc_session_id, agent_id,
+                      agent_name, text, embedding, pinned, expires_at,
+                      created_at, updated_at
+               FROM memories
+               WHERE pinned = true
+                 AND (expires_at IS NULL OR expires_at > now())
+               ORDER BY scope, created_at DESC"#,
+        )
+        .fetch_all(self.pool)
+        .await
+    }
+
     pub async fn set_pinned(&self, memory_id: Uuid, pinned: bool) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE memories SET pinned = $2, updated_at = now() WHERE memory_id = $1"

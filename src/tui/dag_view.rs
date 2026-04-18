@@ -62,6 +62,10 @@ pub struct DagView {
     /// empty-state — otherwise the first paint (before the initial query
     /// completes) reads as "nothing here" rather than "still fetching".
     pub loaded: bool,
+    /// Armed by Backspace; next key must be `y` to actually delete.
+    /// Stored with the display label so the confirm line stays accurate
+    /// even if the selection moves.
+    pub pending_delete: Option<(Uuid, String)>,
 }
 
 pub enum RenderRow {
@@ -90,6 +94,7 @@ impl DagView {
             add_active: false,
             add_buffer: String::new(),
             flash: String::new(),
+            pending_delete: None,
         }
     }
 
