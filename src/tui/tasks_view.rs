@@ -19,6 +19,7 @@ pub enum TaskRow {
 
 pub struct TasksView {
     pub flash: String,
+    pub detail_open: bool,
     pub rows: Vec<TaskRow>,
     pub state: TableState,
     pub last_status: String,
@@ -33,7 +34,7 @@ impl TasksView {
     pub fn new() -> Self {
         let mut st = TableState::default();
         st.select(Some(0));
-        Self { rows: vec![], state: st, last_status: String::new(), loaded: false, flash: String::new() }
+        Self { rows: vec![], state: st, last_status: String::new(), loaded: false, flash: String::new(), detail_open: false }
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
@@ -109,6 +110,21 @@ impl TasksView {
         match self.rows.get(i)? {
             TaskRow::Task { prefix, task } => Some(format!("{prefix}-{}", task.seq)),
             _ => None,
+        }
+    }
+
+    /// Selected task + its prefix (for the detail overlay).
+    pub fn selected_task(&self) -> Option<(&crate::models::task::Task, &str)> {
+        let i = self.state.selected()?;
+        match self.rows.get(i)? {
+            TaskRow::Task { prefix, task } => Some((task, prefix.as_str())),
+            _ => None,
+        }
+    }
+
+    pub fn toggle_detail(&mut self) {
+        if self.selected_task().is_some() {
+            self.detail_open = !self.detail_open;
         }
     }
 
@@ -212,6 +228,12 @@ impl TasksView {
         .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
 
         frame.render_stateful_widget(table, area, &mut self.state);
+
+        if self.detail_open {
+            if let Some((task, prefix)) = self.selected_task() {
+                crate::tui::dag_view::render_detail_overlay(frame, area, task, prefix);
+            }
+        }
     }
 }
 

@@ -565,7 +565,7 @@ fn render_add_overlay(frame: &mut Frame, area: Rect, buffer: &str, parent: Optio
     frame.render_widget(para, popup);
 }
 
-fn render_detail_overlay(frame: &mut Frame, area: Rect, task: &Task, prefix: &str) {
+pub fn render_detail_overlay(frame: &mut Frame, area: Rect, task: &Task, prefix: &str) {
     // Center a popup inside the pane area.
     let popup_w = area.width.saturating_sub(8).min(90);
     let popup_h = area.height.saturating_sub(4).min(24);
