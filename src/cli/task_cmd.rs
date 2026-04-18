@@ -159,12 +159,18 @@ pub async fn list(
     } else {
         Some(resolve_cwd_repo(pool).await?.repo_id)
     };
-    let status = status
-        .map(TaskStatus::from_str)
-        .transpose()
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    let tasks = TaskRepo::new(pool).list(repo_id, status).await?;
+    let statuses: Vec<TaskStatus> = match status {
+        None => vec![],
+        Some(s) => s.split(',')
+            .map(|piece| piece.trim())
+            .filter(|p| !p.is_empty())
+            .map(TaskStatus::from_str)
+            .collect::<Result<_, _>>()
+            .map_err(|e| anyhow::anyhow!(e))?,
+    };
+    let tasks = TaskRepo::new(pool)
+        .list_multi(repo_id, if statuses.is_empty() { None } else { Some(&statuses) })
+        .await?;
     print_task_table(pool, &tasks).await
 }
 

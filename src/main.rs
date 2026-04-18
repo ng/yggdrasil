@@ -126,6 +126,12 @@ enum Commands {
         /// Filter to a specific agent
         #[arg(short, long)]
         agent: Option<String>,
+        /// Filter to one or more event kinds (comma-separated)
+        #[arg(short, long)]
+        kind: Option<String>,
+        /// Filter to a specific CC session id
+        #[arg(long)]
+        session: Option<String>,
     },
 
     /// Digest a session transcript — extract corrections, write Digest node.
@@ -551,10 +557,18 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::status_cmd::execute(&pool, agent.as_deref()).await?;
         }
-        Commands::Logs { follow, tail, agent } => {
+        Commands::Logs { follow, tail, agent, kind, session } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::logs_cmd::execute(&pool, follow, tail, agent.as_deref()).await?;
+            let kinds: Vec<String> = kind
+                .map(|k| k.split(',').map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+            ygg::cli::logs_cmd::execute(
+                &pool, follow, tail, agent.as_deref(),
+                if kinds.is_empty() { None } else { Some(kinds) },
+                session.as_deref(),
+            ).await?;
         }
         Commands::Digest { agent, transcript, now, stop } => {
             let agent_name = agent

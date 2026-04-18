@@ -232,17 +232,30 @@ impl<'a> TaskRepo<'a> {
         repo_id: Option<Uuid>,
         status: Option<TaskStatus>,
     ) -> Result<Vec<Task>, sqlx::Error> {
+        self.list_multi(repo_id, status.map(|s| vec![s]).as_deref()).await
+    }
+
+    /// Filter by multiple statuses at once (`open,in_progress`). An empty or
+    /// None slice means "any status".
+    pub async fn list_multi(
+        &self,
+        repo_id: Option<Uuid>,
+        statuses: Option<&[TaskStatus]>,
+    ) -> Result<Vec<Task>, sqlx::Error> {
+        let status_strs: Vec<String> = statuses
+            .map(|s| s.iter().map(|st| st.to_string()).collect())
+            .unwrap_or_default();
         sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
                       created_at, updated_at, closed_at, close_reason
                FROM tasks
                WHERE ($1::UUID IS NULL OR repo_id = $1)
-                 AND ($2::task_status IS NULL OR status = $2)
+                 AND ($2::text[] IS NULL OR array_length($2, 1) IS NULL OR status::text = ANY($2))
                ORDER BY status, priority, seq"#,
         )
         .bind(repo_id)
-        .bind(status)
+        .bind(if status_strs.is_empty() { None } else { Some(status_strs) })
         .fetch_all(self.pool)
         .await
     }

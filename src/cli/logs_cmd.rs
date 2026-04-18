@@ -20,25 +20,26 @@ pub async fn execute(
     follow: bool,
     tail: i64,
     agent_name: Option<&str>,
+    kinds: Option<Vec<String>>,
+    cc_session_id: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let repo = EventRepo::new(pool);
-
+    let _ = EventRepo::new(pool); // reserved for back-compat paths
     let divider = format!("{DIM}{}{RESET}", "─".repeat(72));
 
-    // Print header
+    let header_suffix = {
+        let mut parts = Vec::new();
+        if let Some(n) = agent_name { parts.push(format!("agent={n}")); }
+        if let Some(ks) = &kinds { parts.push(format!("kind={}", ks.join(","))); }
+        if let Some(s) = cc_session_id { parts.push(format!("session={s}")); }
+        if parts.is_empty() { String::new() } else { format!("  {DIM}{}{RESET}", parts.join(" · ")) }
+    };
     println!("{divider}");
-    println!(
-        "  {BOLD}ygg event stream{RESET}{}",
-        agent_name.map(|n| format!("  {DIM}agent={n}{RESET}")).unwrap_or_default()
-    );
+    println!("  {BOLD}ygg event stream{RESET}{header_suffix}");
     println!("{divider}");
 
-    // Show recent history first
-    let mut recent = repo.list_recent(tail, agent_name).await?;
-    recent.reverse(); // oldest first
-    for event in &recent {
-        print_event(event);
-    }
+    let mut recent = filtered_recent(pool, tail, agent_name, kinds.as_deref(), cc_session_id).await?;
+    recent.reverse();
+    for event in &recent { print_event(event); }
 
     if !follow {
         println!("{DIM}  (use --follow to stream live){RESET}");
@@ -47,20 +48,68 @@ pub async fn execute(
 
     println!("{DIM}  streaming… (ctrl-c to exit){RESET}");
 
-    let mut cursor: DateTime<Utc> = recent
-        .last()
-        .map(|e| e.created_at)
-        .unwrap_or_else(Utc::now);
-
+    let mut cursor: DateTime<Utc> = recent.last().map(|e| e.created_at).unwrap_or_else(Utc::now);
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let new_events = repo.list_since(cursor, agent_name, 50).await?;
+        let new_events = filtered_since(pool, cursor, agent_name, kinds.as_deref(), cc_session_id, 50).await?;
         for event in &new_events {
             print_event(event);
             cursor = event.created_at;
         }
     }
+}
+
+async fn filtered_recent(
+    pool: &PgPool,
+    tail: i64,
+    agent_name: Option<&str>,
+    kinds: Option<&[String]>,
+    cc_session_id: Option<&str>,
+) -> Result<Vec<Event>, anyhow::Error> {
+    let kinds_owned: Vec<String> = kinds.map(|k| k.to_vec()).unwrap_or_default();
+    let rows: Vec<Event> = sqlx::query_as::<_, Event>(
+        r#"SELECT id, event_kind, agent_id, agent_name, payload, created_at
+             FROM events
+            WHERE ($1::text IS NULL OR agent_name = $1)
+              AND ($2::text[] IS NULL OR array_length($2, 1) IS NULL OR event_kind::text = ANY($2))
+              AND ($3::text IS NULL OR cc_session_id = $3)
+            ORDER BY created_at DESC
+            LIMIT $4"#,
+    )
+    .bind(agent_name)
+    .bind(if kinds_owned.is_empty() { None } else { Some(kinds_owned.clone()) })
+    .bind(cc_session_id)
+    .bind(tail)
+    .fetch_all(pool).await?;
+    Ok(rows)
+}
+
+async fn filtered_since(
+    pool: &PgPool,
+    since: DateTime<Utc>,
+    agent_name: Option<&str>,
+    kinds: Option<&[String]>,
+    cc_session_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<Event>, anyhow::Error> {
+    let kinds_owned: Vec<String> = kinds.map(|k| k.to_vec()).unwrap_or_default();
+    let rows: Vec<Event> = sqlx::query_as::<_, Event>(
+        r#"SELECT id, event_kind, agent_id, agent_name, payload, created_at
+             FROM events
+            WHERE created_at > $1
+              AND ($2::text IS NULL OR agent_name = $2)
+              AND ($3::text[] IS NULL OR array_length($3, 1) IS NULL OR event_kind::text = ANY($3))
+              AND ($4::text IS NULL OR cc_session_id = $4)
+            ORDER BY created_at ASC
+            LIMIT $5"#,
+    )
+    .bind(since)
+    .bind(agent_name)
+    .bind(if kinds_owned.is_empty() { None } else { Some(kinds_owned.clone()) })
+    .bind(cc_session_id)
+    .bind(limit)
+    .fetch_all(pool).await?;
+    Ok(rows)
 }
 
 /// Render one event as a single line. We deliberately avoid column
