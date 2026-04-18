@@ -46,15 +46,45 @@ async fn resolve_task(
     pool: &sqlx::PgPool,
     reference: &str,
 ) -> Result<Task, anyhow::Error> {
+    // Full UUID is always a fast path.
     if let Ok(uuid) = Uuid::parse_str(reference) {
         let t = TaskRepo::new(pool).get(uuid).await?
             .ok_or_else(|| anyhow::anyhow!("task {uuid} not found"))?;
         return Ok(t);
     }
 
+    // Short-UUID shorthand — prefix match on task_id::text. Accepted forms:
+    //   baddbb20          (bare hex, ≥6 chars)
+    //   ygg-baddbb20      (namespaced)
+    // Ambiguous prefixes error out with the candidate count so the user
+    // knows to paste more of the UUID.
+    let hex_candidate = reference.strip_prefix("ygg-").unwrap_or(reference);
+    if hex_candidate.len() >= 6
+        && hex_candidate.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        let matches: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT task_id FROM tasks WHERE task_id::text LIKE $1 LIMIT 5"
+        )
+        .bind(format!("{hex_candidate}%"))
+        .fetch_all(pool).await?;
+        match matches.len() {
+            0 => {} // fall through to prefix-seq resolver
+            1 => {
+                let t = TaskRepo::new(pool).get(matches[0]).await?
+                    .ok_or_else(|| anyhow::anyhow!("task vanished"))?;
+                return Ok(t);
+            }
+            n => anyhow::bail!(
+                "ambiguous short-UUID '{reference}' ({n} matches) — paste more characters"
+            ),
+        }
+    }
+
     // <prefix>-<seq>
     let (prefix, seq_str) = reference.rsplit_once('-')
-        .ok_or_else(|| anyhow::anyhow!("expected <prefix>-<seq> or UUID, got {reference}"))?;
+        .ok_or_else(|| anyhow::anyhow!(
+            "expected UUID, ygg-<shortuuid>, or <prefix>-<seq>, got {reference}"
+        ))?;
     let seq: i32 = seq_str.parse()
         .map_err(|_| anyhow::anyhow!("sequence must be an integer: {seq_str}"))?;
 
@@ -201,7 +231,9 @@ pub async fn show(pool: &sqlx::PgPool, reference: &str) -> Result<(), anyhow::Er
     let labels = TaskRepo::new(pool).labels(t.task_id).await?;
     let deps = TaskRepo::new(pool).deps(t.task_id).await?;
 
-    println!("{}-{}  [{}]  P{}  rel={}  {}", repo.task_prefix, t.seq, t.status, t.priority, t.relevance, t.kind);
+    let short_uuid = &t.task_id.to_string()[..8];
+    println!("{}-{}  [{}]  P{}  rel={}  {}  (ygg-{short_uuid})",
+        repo.task_prefix, t.seq, t.status, t.priority, t.relevance, t.kind);
     println!();
     println!("  {}", t.title);
     if !t.description.is_empty() {
