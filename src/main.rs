@@ -459,6 +459,8 @@ enum TaskAction {
     List {
         #[arg(long)] all: bool,
         #[arg(short, long)] status: Option<String>,
+        /// Filter to tasks with this label (repeatable or comma-separated)
+        #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
     },
     /// Show tasks with no unsatisfied blockers
     Ready,
@@ -885,8 +887,8 @@ async fn main() -> anyhow::Result<()> {
                         agent_name: &agent_name,
                     }).await?;
                 }
-                TaskAction::List { all, status } => {
-                    ygg::cli::task_cmd::list(&pool, all, status.as_deref()).await?;
+                TaskAction::List { all, status, label } => {
+                    ygg::cli::task_cmd::list(&pool, all, status.as_deref(), &label).await?;
                 }
                 TaskAction::Ready => { ygg::cli::task_cmd::ready(&pool).await?; }
                 TaskAction::Blocked => { ygg::cli::task_cmd::blocked(&pool).await?; }

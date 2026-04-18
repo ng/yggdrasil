@@ -98,6 +98,9 @@ pub struct DashboardView {
     prompts_hourly: Vec<u64>,                 // global, last 24h, oldest→newest
     per_agent_hourly: HashMap<Uuid, [u64; 24]>, // per agent, last 24h
     recent_transitions: Vec<(chrono::DateTime<chrono::Utc>, String, String, String, Option<String>)>,
+    /// Live workers — tasks currently in_progress with who owns them.
+    /// (task_ref, agent_label, title, updated_at)
+    workers: Vec<(String, String, String, chrono::DateTime<chrono::Utc>)>,
     // (ts, agent_name, from_state, to_state, tool)
 
     /// Transcript-file-size pressure cache. Reading ~/.claude/projects on
@@ -123,6 +126,7 @@ impl DashboardView {
             prompts_hourly: vec![0; 24],
             per_agent_hourly: HashMap::new(),
             recent_transitions: Vec::new(),
+            workers: Vec::new(),
             pressure_cache: HashMap::new(),
             session_scoped: false,
             current_session_id: None,
@@ -270,6 +274,26 @@ impl DashboardView {
             (ts, name, from, to, tool)
         }).collect();
 
+        // Workers = tasks currently in_progress + the agent assigned to them.
+        // A "worker" in click-to-do terms = a CC session spawned to execute
+        // a task; we approximate that by any task with status=in_progress
+        // and an assignee.
+        let worker_rows: Vec<(String, i32, String, Option<String>, chrono::DateTime<chrono::Utc>)> =
+            sqlx::query_as(
+                r#"SELECT r.task_prefix, t.seq, t.title, a.agent_name, t.updated_at
+                     FROM tasks t
+                     JOIN repos r ON r.repo_id = t.repo_id
+                     LEFT JOIN agents a ON a.agent_id = t.assignee
+                    WHERE t.status = 'in_progress'
+                    ORDER BY t.updated_at DESC
+                    LIMIT 10"#,
+            ).fetch_all(pool).await.unwrap_or_default();
+        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, ts)| {
+            let task_ref = format!("{prefix}-{seq}");
+            let agent_label = agent.unwrap_or_else(|| "unassigned".into());
+            (task_ref, agent_label, title, ts)
+        }).collect();
+
         Ok(())
     }
 
@@ -300,16 +324,51 @@ impl DashboardView {
                 Constraint::Length(3),  // alerts
                 Constraint::Length(6),  // system pulse
                 Constraint::Min(8),     // agents
+                Constraint::Length(6),  // workers (click-to-do spawns)
                 Constraint::Length(7),  // state transitions
-                Constraint::Length(10), // locks
+                Constraint::Length(9),  // locks (trimmed 1 row for workers)
             ])
             .split(area);
 
         self.render_alerts(frame, chunks[0]);
         self.render_pulse(frame, chunks[1]);
         self.render_agents_table(frame, chunks[2]);
-        self.render_transitions(frame, chunks[3]);
-        self.render_locks_table(frame, chunks[4]);
+        self.render_workers(frame, chunks[3]);
+        self.render_transitions(frame, chunks[4]);
+        self.render_locks_table(frame, chunks[5]);
+    }
+
+    fn render_workers(&self, frame: &mut Frame, area: Rect) {
+        if self.workers.is_empty() {
+            let para = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  · no workers running — spawn one with `r` on DAG or Enter on Tasks",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]).block(Block::default().borders(Borders::ALL).title(" Workers "));
+            frame.render_widget(para, area);
+            return;
+        }
+        let now = Utc::now();
+        let lines: Vec<Line> = self.workers.iter().map(|(task_ref, agent, title, ts)| {
+            let age = humanize_duration((now - *ts).num_seconds().max(0));
+            Line::from(vec![
+                Span::styled("  ▶ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(task_ref.clone(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw("  "),
+                Span::styled(format!("{agent:<18}"), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{age:<6}"), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::raw(short_title(title)),
+            ])
+        }).collect();
+        let title = format!(" Workers — {} running  ·  attach: tmux attach -t yggdrasil ",
+            self.workers.len());
+        let para = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(title));
+        frame.render_widget(para, area);
     }
 
     fn render_transitions(&self, frame: &mut Frame, area: Rect) {
@@ -716,6 +775,11 @@ fn text_sparkline(series: &[u64], max: u64) -> String {
             BARS[step]
         }
     }).collect()
+}
+
+fn short_title(s: &str) -> String {
+    if s.chars().count() <= 60 { s.to_string() }
+    else { s.chars().take(60).collect::<String>() + "…" }
 }
 
 fn humanize_duration(secs: i64) -> String {

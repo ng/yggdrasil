@@ -174,6 +174,8 @@ impl TasksView {
         }
 
         let header = Row::new(vec![
+            Cell::from(""),  // run-state glyph column
+            Cell::from("KIND").style(Style::default().fg(Color::Gray)),
             Cell::from("ID").style(Style::default().fg(Color::Gray)),
             Cell::from("P").style(Style::default().fg(Color::Gray)),
             Cell::from("TITLE").style(Style::default().fg(Color::Gray)),
@@ -183,27 +185,27 @@ impl TasksView {
             TaskRow::Header { kind, count } => {
                 let (color, glyph) = kind_style(kind);
                 Row::new(vec![
+                    Cell::from(""),
                     Cell::from(format!("{glyph} {}", pluralize_kind(kind)))
                         .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Cell::from(""),
                     Cell::from(""),
                     Cell::from(format!("({count})"))
                         .style(Style::default().fg(Color::DarkGray)),
                 ])
             }
             TaskRow::Task { prefix, task: t } => {
-                Row::new(vec![
-                    Cell::from(format!("  {}-{}", prefix, t.seq))
-                        .style(Style::default().fg(Color::Gray)),
-                    Cell::from(format!("P{}", t.priority)).style(prio_style(t.priority)),
-                    Cell::from(t.title.clone()),
-                ])
+                // Single source of truth for run/kind/priority/title styling.
+                Row::new(crate::tui::widgets::task_row_cells(t, prefix))
             }
         }).collect();
 
         let table = Table::new(rows, [
-            Constraint::Length(20),
-            Constraint::Length(3),
-            Constraint::Min(20),
+            Constraint::Length(3),   // run-state glyph
+            Constraint::Length(14),  // KIND
+            Constraint::Length(16),  // ID
+            Constraint::Length(4),   // P
+            Constraint::Min(20),     // TITLE
         ])
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))

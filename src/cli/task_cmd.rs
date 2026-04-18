@@ -191,6 +191,7 @@ pub async fn list(
     pool: &sqlx::PgPool,
     all_repos: bool,
     status: Option<&str>,
+    labels: &[String],
 ) -> Result<(), anyhow::Error> {
     let repo_id = if all_repos {
         None
@@ -209,7 +210,26 @@ pub async fn list(
     let tasks = TaskRepo::new(pool)
         .list_multi(repo_id, if statuses.is_empty() { None } else { Some(&statuses) })
         .await?;
-    print_task_table(pool, &tasks).await
+
+    // Label filter — AND semantics across multiple labels (task must have
+    // all supplied labels). Applied in-memory since the set is already
+    // scoped to repo+status.
+    let filtered = if labels.is_empty() {
+        tasks
+    } else {
+        let label_set: std::collections::HashSet<&str> =
+            labels.iter().map(|s| s.as_str()).collect();
+        let task_repo = TaskRepo::new(pool);
+        let mut keep = Vec::with_capacity(tasks.len());
+        for t in tasks {
+            let task_labels = task_repo.labels(t.task_id).await.unwrap_or_default();
+            if label_set.iter().all(|l| task_labels.iter().any(|tl| tl == l)) {
+                keep.push(t);
+            }
+        }
+        keep
+    };
+    print_task_table(pool, &filtered).await
 }
 
 pub async fn ready(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
