@@ -1,18 +1,17 @@
 //! Memgraph pane — memory similarity explorer.
 //!
-//! Top half: recent high-signal nodes (directive, digest, user_message) with
-//! glyph + agent + age + snippet.
-//! Bottom half: top-8 cosine neighbors of the focus node with similarity %.
-//! Arrow keys move the cursor within the active section; Tab toggles the
-//! cursor between top (list) and bottom (neighbors); Enter re-centers the
-//! graph on the selected neighbor. The vectors we already store do the work
-//! — no similarity edges are persisted, every centering triggers a fresh
-//! k-NN query against the HNSW index.
+//! Top half: recent high-signal nodes (directive / digest / user_message)
+//! with KIND, AGENT, AGE, SNIPPET columns. Cursor moves through this list
+//! with arrow keys; Neighbors live-follow the highlighted row.
+//! Bottom half: top-8 cosine neighbors of whatever's highlighted above,
+//! with SIM bar, DIST, KIND, AGENT, AGE, SNIPPET. Informational — no
+//! cursor. Enter on a Recent row opens a detail overlay with full text.
+//! Esc closes the overlay.
 
 use chrono::{DateTime, Utc};
 use pgvector::Vector;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use sqlx::{PgPool, Row as SqlxRow};
 use uuid::Uuid;
 
@@ -23,6 +22,7 @@ pub struct MemNode {
     pub agent_name: String,
     pub created_at: DateTime<Utc>,
     pub snippet: String,
+    pub full_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -35,87 +35,55 @@ pub struct Neighbor {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(PartialEq, Clone, Copy)]
-pub enum Focus { Recent, Neighbors }
-
 pub struct MemGraphView {
     pub recent: Vec<MemNode>,
     pub recent_state: TableState,
     pub neighbors: Vec<Neighbor>,
-    pub neighbor_state: TableState,
-    pub focus_id: Option<Uuid>,
-    pub focus_label: String,
-    pub active: Focus,
     pub last_status: String,
+    pub detail_open: bool,
+    /// Which recent row's neighbors are currently loaded. Tracks the cursor
+    /// so we don't re-query on every render tick — only when it moved.
+    loaded_for: Option<Uuid>,
 }
 
 impl MemGraphView {
     pub fn new() -> Self {
-        let mut s = TableState::default(); s.select(Some(0));
+        let mut s = TableState::default();
+        s.select(Some(0));
         Self {
-            recent: vec![], recent_state: s,
-            neighbors: vec![], neighbor_state: TableState::default(),
-            focus_id: None, focus_label: String::new(),
-            active: Focus::Recent,
+            recent: vec![],
+            recent_state: s,
+            neighbors: vec![],
             last_status: String::new(),
+            detail_open: false,
+            loaded_for: None,
         }
     }
 
     pub fn scroll_up(&mut self) {
-        let (list_len, state) = match self.active {
-            Focus::Recent => (self.recent.len(), &mut self.recent_state),
-            Focus::Neighbors => (self.neighbors.len(), &mut self.neighbor_state),
-        };
-        if list_len == 0 { return; }
-        let i = state.selected().unwrap_or(0);
-        state.select(Some(if i == 0 { list_len - 1 } else { i - 1 }));
+        if self.recent.is_empty() { return; }
+        let i = self.recent_state.selected().unwrap_or(0);
+        let n = self.recent.len();
+        self.recent_state.select(Some(if i == 0 { n - 1 } else { i - 1 }));
     }
 
     pub fn scroll_down(&mut self) {
-        let (list_len, state) = match self.active {
-            Focus::Recent => (self.recent.len(), &mut self.recent_state),
-            Focus::Neighbors => (self.neighbors.len(), &mut self.neighbor_state),
-        };
-        if list_len == 0 { return; }
-        let i = state.selected().unwrap_or(0);
-        state.select(Some((i + 1) % list_len));
+        if self.recent.is_empty() { return; }
+        let i = self.recent_state.selected().unwrap_or(0);
+        self.recent_state.select(Some((i + 1) % self.recent.len()));
     }
 
-    pub fn toggle_focus(&mut self) {
-        self.active = match self.active {
-            Focus::Recent => Focus::Neighbors,
-            Focus::Neighbors => Focus::Recent,
-        };
-        if self.active == Focus::Neighbors && self.neighbor_state.selected().is_none() && !self.neighbors.is_empty() {
-            self.neighbor_state.select(Some(0));
-        }
+    pub fn toggle_detail(&mut self) {
+        if self.recent.is_empty() { return; }
+        self.detail_open = !self.detail_open;
     }
 
-    /// Enter — re-center on whatever is currently selected.
-    pub async fn recenter(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
-        let new_focus_id = match self.active {
-            Focus::Recent => self.recent_state.selected()
-                .and_then(|i| self.recent.get(i))
-                .map(|n| (n.id, short(&n.snippet, 60))),
-            Focus::Neighbors => self.neighbor_state.selected()
-                .and_then(|i| self.neighbors.get(i))
-                .map(|n| (n.id, short(&n.snippet, 60))),
-        };
-        if let Some((id, label)) = new_focus_id {
-            self.focus_id = Some(id);
-            self.focus_label = label;
-            self.refresh_neighbors(pool).await;
-            self.active = Focus::Neighbors;
-            if !self.neighbors.is_empty() {
-                self.neighbor_state.select(Some(0));
-            }
-        }
-        Ok(())
+    fn selected_node(&self) -> Option<&MemNode> {
+        let i = self.recent_state.selected()?;
+        self.recent.get(i)
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
-        // Recent high-signal nodes across all agents — embedded only, since
-        // we'll want to query their neighborhoods.
         let rows = sqlx::query(
             r#"
             SELECT n.id, n.kind::text AS kind, n.created_at, n.content,
@@ -131,12 +99,15 @@ impl MemGraphView {
 
         self.recent = rows.into_iter().map(|r| {
             let content: serde_json::Value = r.try_get("content").unwrap_or(serde_json::Value::Null);
+            let full_text = extract_full_text(&content);
+            let snippet = full_text.replace('\n', " ");
             MemNode {
                 id: r.get("id"),
                 kind: r.get("kind"),
                 agent_name: r.get("agent_name"),
                 created_at: r.get("created_at"),
-                snippet: extract_snippet(&content),
+                snippet,
+                full_text,
             }
         }).collect();
 
@@ -146,37 +117,33 @@ impl MemGraphView {
             self.last_status.clear();
         }
 
-        // Default focus to newest if nothing is set.
-        if self.focus_id.is_none() {
-            if let Some(first) = self.recent.first() {
-                self.focus_id = Some(first.id);
-                self.focus_label = short(&first.snippet, 60);
-                self.refresh_neighbors(pool).await;
+        // Pin the cursor inside the list if it ran off.
+        if let Some(i) = self.recent_state.selected() {
+            if i >= self.recent.len() {
+                self.recent_state.select(if self.recent.is_empty() { None } else { Some(self.recent.len() - 1) });
+            }
+        }
+
+        // Refresh neighbors for the currently highlighted row if that row
+        // changed since the last tick. Cheap — single HNSW query.
+        let target = self.selected_node().map(|n| n.id);
+        if target != self.loaded_for {
+            self.loaded_for = target;
+            if let Some(id) = target {
+                self.refresh_neighbors(pool, id).await;
+            } else {
+                self.neighbors.clear();
             }
         }
         Ok(())
     }
 
-    async fn refresh_neighbors(&mut self, pool: &PgPool) {
-        let Some(focus_id) = self.focus_id else { return; };
-
-        // Pull the focus node's embedding, then find its 8 nearest neighbors
-        // (excluding itself) across the whole cloud.
-        let focus_row = sqlx::query("SELECT embedding FROM nodes WHERE id = $1")
-            .bind(focus_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-        let Some(row) = focus_row else {
-            self.neighbors.clear();
-            return;
-        };
+    async fn refresh_neighbors(&mut self, pool: &PgPool, for_id: Uuid) {
+        let row = sqlx::query("SELECT embedding FROM nodes WHERE id = $1")
+            .bind(for_id).fetch_optional(pool).await.ok().flatten();
+        let Some(row) = row else { self.neighbors.clear(); return; };
         let embedding: Option<Vector> = row.try_get("embedding").ok();
-        let Some(embedding) = embedding else {
-            self.neighbors.clear();
-            return;
-        };
+        let Some(embedding) = embedding else { self.neighbors.clear(); return; };
 
         let rows = sqlx::query(
             r#"
@@ -192,10 +159,8 @@ impl MemGraphView {
             "#
         )
         .bind(&embedding)
-        .bind(focus_id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        .bind(for_id)
+        .fetch_all(pool).await.unwrap_or_default();
 
         self.neighbors = rows.into_iter().map(|r| {
             let content: serde_json::Value = r.try_get("content").unwrap_or(serde_json::Value::Null);
@@ -212,19 +177,24 @@ impl MemGraphView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        // Three rows: stats strip / recent list / neighbors.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),          // stats strip
-                Constraint::Percentage(50),     // recent
-                Constraint::Percentage(50),     // neighbors
+                Constraint::Length(3),
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
             ])
             .split(area);
 
         self.render_stats(frame, chunks[0]);
         self.render_recent(frame, chunks[1]);
         self.render_neighbors(frame, chunks[2]);
+
+        if self.detail_open {
+            if let Some(n) = self.selected_node().cloned() {
+                render_detail_overlay(frame, area, &n);
+            }
+        }
     }
 
     fn render_stats(&self, frame: &mut Frame, area: Rect) {
@@ -237,21 +207,13 @@ impl MemGraphView {
             (mn, mx, mean)
         } else { (0.0, 0.0, 0.0) };
 
-        let active_label = match self.active {
-            Focus::Recent => "recent",
-            Focus::Neighbors => "neighbors",
-        };
-
-        let focus_line = if self.focus_id.is_some() {
-            format!("focus: {}", short(&self.focus_label, 70))
-        } else {
-            "focus: (none — Enter on a node to recenter)".to_string()
+        let focus_line = match self.selected_node() {
+            Some(n) => format!("cursor: {}", short(&n.snippet, 70)),
+            None => "cursor: (empty list)".to_string(),
         };
 
         let line1 = Line::from(vec![
-            Span::styled("  active: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(active_label, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("  ·  space=switch  ·  Enter=recenter  ·  Esc=back to recent",
+            Span::styled("  ↑↓ scroll  ·  Enter=detail  ·  Esc=close",
                 Style::default().fg(Color::DarkGray)),
         ]);
         let line2 = if neighbor_count > 0 {
@@ -260,7 +222,7 @@ impl MemGraphView {
                 Span::styled(format!("neighbors: {neighbor_count}  "),
                     Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("sim min {:.0}% / mean {:.0}% / max {:.0}%",
-                    min_sim*100.0, mean_sim*100.0, max_sim*100.0),
+                    min_sim * 100.0, mean_sim * 100.0, max_sim * 100.0),
                     Style::default().fg(Color::Green)),
             ])
         } else {
@@ -272,30 +234,18 @@ impl MemGraphView {
         frame.render_widget(para, area);
     }
 
-    /// Esc — return to recent pane without recentering.
-    pub fn back_to_recent(&mut self) {
-        self.active = Focus::Recent;
-    }
-
     fn render_recent(&mut self, frame: &mut Frame, area: Rect) {
         if self.recent.is_empty() {
-            let msg = if self.last_status.is_empty() {
-                "loading…".to_string()
-            } else { self.last_status.clone() };
+            let msg = if self.last_status.is_empty() { "loading…".to_string() } else { self.last_status.clone() };
             let para = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(
-                    format!("  {msg}"),
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ]).block(Block::default().borders(Borders::ALL)
-                .title(" Recent high-signal nodes — Tab to switch panes · Enter to recenter "));
+                Line::from(Span::styled(format!("  {msg}"), Style::default().fg(Color::DarkGray))),
+            ]).block(Block::default().borders(Borders::ALL).title(" Recent high-signal nodes "));
             frame.render_widget(para, area);
             return;
         }
 
         let header = Row::new(vec![
-            Cell::from("").style(Style::default().fg(Color::DarkGray)),
             Cell::from("KIND").style(Style::default().fg(Color::Gray)),
             Cell::from("AGENT").style(Style::default().fg(Color::Gray)),
             Cell::from("AGE").style(Style::default().fg(Color::Gray)),
@@ -304,10 +254,7 @@ impl MemGraphView {
         let rows: Vec<Row> = self.recent.iter().map(|n| {
             let (glyph, color) = kind_style(&n.kind);
             let age = humanize_since(n.created_at);
-            let is_focus = Some(n.id) == self.focus_id;
-            let marker = if is_focus { "◎" } else { " " };
             Row::new(vec![
-                Cell::from(marker).style(Style::default().fg(Color::Magenta)),
                 Cell::from(format!("{glyph} {}", n.kind)).style(Style::default().fg(color)),
                 Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
                 Cell::from(age).style(Style::default().fg(Color::DarkGray)),
@@ -315,13 +262,8 @@ impl MemGraphView {
             ])
         }).collect();
 
-        let title = format!(" Recent high-signal nodes ({}){} ",
-            self.recent.len(),
-            if self.active == Focus::Recent { " · [active] Enter=recenter" }
-            else { " · space=switch" });
-
+        let title = format!(" Recent high-signal nodes ({}) · Enter=detail ", self.recent.len());
         let table = Table::new(rows, [
-            Constraint::Length(2),
             Constraint::Length(16),
             Constraint::Length(18),
             Constraint::Length(6),
@@ -330,34 +272,28 @@ impl MemGraphView {
         .header(header)
         .block(Block::default().borders(Borders::ALL)
             .title(title)
-            .border_style(if self.active == Focus::Recent {
-                Style::default().fg(Color::Cyan)
-            } else { Style::default().fg(Color::DarkGray) }))
+            .border_style(Style::default().fg(Color::Cyan)))
         .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
         frame.render_stateful_widget(table, area, &mut self.recent_state);
     }
 
-    fn render_neighbors(&mut self, frame: &mut Frame, area: Rect) {
-        let focus_summary = if self.focus_id.is_some() {
-            format!(" focus: {} ", short(&self.focus_label, 60))
-        } else {
-            " no focus yet — select a node above, press Enter ".to_string()
+    fn render_neighbors(&self, frame: &mut Frame, area: Rect) {
+        let focus_summary = match self.selected_node() {
+            Some(n) => format!("neighbors of: {}", short(&n.snippet, 70)),
+            None => "no row highlighted".to_string(),
         };
 
         if self.neighbors.is_empty() {
-            let msg: &str = if self.focus_id.is_some() {
+            let msg = if self.selected_node().is_some() {
                 "no neighbors found — node may lack an embedding"
             } else {
-                "select a node above and press Enter to recenter"
+                "highlight a row above"
             };
             let para = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(
-                    format!("  {msg}"),
-                    Style::default().fg(Color::DarkGray),
-                )),
+                Line::from(Span::styled(format!("  {msg}"), Style::default().fg(Color::DarkGray))),
             ]).block(Block::default().borders(Borders::ALL)
-                .title(format!(" Neighbors · {} ", focus_summary)));
+                .title(format!(" {focus_summary} ")));
             frame.render_widget(para, area);
             return;
         }
@@ -393,27 +329,55 @@ impl MemGraphView {
             ])
         }).collect();
 
-        let title = format!(" Neighbors · {}{} ", focus_summary,
-            if self.active == Focus::Neighbors { " · [active] Enter=recenter · Esc=back" }
-            else { "" });
-
+        let title = format!(" {focus_summary} ");
         let table = Table::new(rows, [
-            Constraint::Length(18),   // bar + %
-            Constraint::Length(6),    // distance
-            Constraint::Length(18),   // kind
-            Constraint::Length(18),   // agent
-            Constraint::Length(6),    // age
-            Constraint::Min(20),      // snippet
+            Constraint::Length(18),
+            Constraint::Length(6),
+            Constraint::Length(18),
+            Constraint::Length(18),
+            Constraint::Length(6),
+            Constraint::Min(20),
         ])
         .header(header)
-        .block(Block::default().borders(Borders::ALL)
-            .title(title)
-            .border_style(if self.active == Focus::Neighbors {
-                Style::default().fg(Color::Cyan)
-            } else { Style::default().fg(Color::DarkGray) }))
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
-        frame.render_stateful_widget(table, area, &mut self.neighbor_state);
+        .block(Block::default().borders(Borders::ALL).title(title)
+            .border_style(Style::default().fg(Color::DarkGray)));
+        frame.render_widget(table, area);
     }
+}
+
+fn render_detail_overlay(frame: &mut Frame, area: Rect, node: &MemNode) {
+    let popup_w = area.width.saturating_sub(8).min(110);
+    let popup_h = area.height.saturating_sub(4).min(32);
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect { x, y, width: popup_w, height: popup_h };
+
+    frame.render_widget(Clear, popup);
+
+    let (glyph, color) = kind_style(&node.kind);
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(format!(" {glyph} {} ", node.kind),
+                Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(node.agent_name.clone(), Style::default().fg(Color::Cyan)),
+            Span::raw("  "),
+            Span::styled(humanize_since(node.created_at), Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(node.id.to_string()[..8].to_string(), Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+    ];
+    for l in node.full_text.lines() {
+        lines.push(Line::from(l.to_string()));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" detail — Enter/Esc to close ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(para, popup);
 }
 
 fn kind_style(kind: &str) -> (&'static str, Color) {
@@ -431,13 +395,11 @@ fn kind_style(kind: &str) -> (&'static str, Color) {
 }
 
 fn extract_snippet(content: &serde_json::Value) -> String {
-    // Try common shapes in priority order.
     for key in ["snippet", "text", "summary", "prompt", "body", "message"] {
         if let Some(s) = content.get(key).and_then(|v| v.as_str()) {
             if !s.is_empty() { return s.replace('\n', " "); }
         }
     }
-    // Fall back to any string value in the object.
     if let Some(obj) = content.as_object() {
         for (_, v) in obj {
             if let Some(s) = v.as_str() {
@@ -446,6 +408,23 @@ fn extract_snippet(content: &serde_json::Value) -> String {
         }
     }
     content.to_string()
+}
+
+/// Like extract_snippet, but preserve newlines for the detail overlay.
+fn extract_full_text(content: &serde_json::Value) -> String {
+    for key in ["text", "summary", "prompt", "body", "message", "snippet"] {
+        if let Some(s) = content.get(key).and_then(|v| v.as_str()) {
+            if !s.is_empty() { return s.to_string(); }
+        }
+    }
+    if let Some(obj) = content.as_object() {
+        for (_, v) in obj {
+            if let Some(s) = v.as_str() {
+                if !s.is_empty() { return s.to_string(); }
+            }
+        }
+    }
+    serde_json::to_string_pretty(content).unwrap_or_else(|_| content.to_string())
 }
 
 fn short(s: &str, max: usize) -> String {

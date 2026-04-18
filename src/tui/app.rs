@@ -137,9 +137,6 @@ impl App {
                 self.dag.clear_filters();
                 let _ = self.dag.refresh(pool).await;
             }
-            KeyCode::Char(' ') if self.active_view == ActiveView::MemGraph => {
-                self.memgraph.toggle_focus();
-            }
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
@@ -171,12 +168,12 @@ impl App {
                 }
                 ActiveView::Dag => self.dag.toggle_detail(),
                 ActiveView::Logs => self.logs.toggle_detail(),
-                ActiveView::MemGraph => { let _ = self.memgraph.recenter(pool).await; }
+                ActiveView::MemGraph => self.memgraph.toggle_detail(),
                 _ => {}
             },
             KeyCode::Esc => match self.active_view {
                 ActiveView::Dag if self.dag.detail_open => self.dag.detail_open = false,
-                ActiveView::MemGraph => self.memgraph.back_to_recent(),
+                ActiveView::MemGraph if self.memgraph.detail_open => self.memgraph.detail_open = false,
                 _ => {}
             },
             _ => {}
@@ -318,7 +315,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[5] Query",     app.active_view == ActiveView::Query),
                 tab("[6] Logs",      app.active_view == ActiveView::Logs),
                 tab("[7] Memgraph",  app.active_view == ActiveView::MemGraph),
-                Span::raw("  q=quit  ←→/tab=nav  Enter=detail/recenter  dag: s=sort a=agent f=focus c=clear  mem: space  logs: f=filter  query: i"),
+                Span::raw("  q=quit  ←→/tab=nav  Enter=detail  dag: s=sort a=agent f=focus c=clear  logs: f=filter  query: i"),
             ];
             frame.render_widget(Line::from(titles), chunks[0]);
 

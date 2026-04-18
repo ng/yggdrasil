@@ -109,6 +109,8 @@ pub struct DashboardView {
     pub session_scoped: bool,
     /// The session id the pulse is currently scoped to, populated on refresh.
     pub current_session_id: Option<String>,
+    /// Live session count per agent, refreshed with the rest of the state.
+    pub live_sessions_by_agent: HashMap<Uuid, i64>,
 }
 
 impl DashboardView {
@@ -124,6 +126,7 @@ impl DashboardView {
             pressure_cache: HashMap::new(),
             session_scoped: false,
             current_session_id: None,
+            live_sessions_by_agent: HashMap::new(),
         }
     }
 
@@ -148,6 +151,12 @@ impl DashboardView {
 
         let lock_mgr = LockManager::new(pool, 300);
         self.locks = lock_mgr.list_all().await?;
+
+        // Live session counts per agent — surfaces when one identity has
+        // multiple concurrent CC sessions racing on the same state.
+        self.live_sessions_by_agent = crate::models::session::SessionRepo::new(pool)
+            .live_counts().await.unwrap_or_default()
+            .into_iter().collect();
 
         // When session-scoped, lock queries to the most-recent CC session
         // that's emitted events in the last 6h. Avoids showing a freshly-
@@ -554,8 +563,15 @@ impl DashboardView {
                 .map(|s| text_sparkline(s, global_max))
                 .unwrap_or_else(|| "        ".to_string());
 
+            // Attach a "×N" badge when an agent has >1 live CC session —
+            // means multiple windows are racing on the same identity.
+            let live = self.live_sessions_by_agent.get(&agent.agent_id).copied().unwrap_or(0);
+            let name_cell = if live > 1 {
+                format!("{}  ×{}", agent.agent_name, live)
+            } else { agent.agent_name.clone() };
+
             Row::new(vec![
-                Cell::from(agent.agent_name.clone()),
+                Cell::from(name_cell),
                 Cell::from(state_label).style(Style::default().fg(state_color)),
                 Cell::from(pressure_bar).style(Style::default().fg(pressure_color)),
                 Cell::from(sparkline).style(Style::default().fg(Color::Cyan)),

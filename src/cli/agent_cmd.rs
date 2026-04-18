@@ -5,6 +5,7 @@
 //! guess the current state.
 
 use crate::models::agent::{AgentRepo, AgentState};
+use crate::models::session::{resolve_current_session, SessionRepo};
 use tracing::{debug, warn};
 
 pub async fn set_tool(
@@ -17,6 +18,17 @@ pub async fn set_tool(
         debug!("agent set-tool: '{agent_name}' not registered — skipping");
         return Ok(());
     };
+
+    // Per-session state is the source of truth; agents.current_state is kept
+    // in sync as a convenience for single-session display.
+    let session_id = resolve_current_session(pool, agent.agent_id, None).await;
+    if let Some(sid) = session_id {
+        if let Err(e) = SessionRepo::new(pool)
+            .force_state(sid, AgentState::WaitingTool, Some(tool)).await
+        {
+            warn!("agent set-tool: session force_state failed: {e}");
+        }
+    }
     if let Err(e) = repo.force_state(agent.agent_id, AgentState::WaitingTool, Some(tool)).await {
         warn!("agent set-tool: force_state failed: {e}");
     }

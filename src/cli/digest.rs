@@ -201,7 +201,17 @@ pub async fn execute(
     }
 
     // Digest runs at Stop (session ended) and PreCompact (about to compact).
-    // Either way the agent is no longer actively working — land in Idle.
+    // Per-session state lands in Idle; agents row mirrors for display.
+    let session_id = crate::models::session::resolve_current_session(
+        pool, agent.agent_id, None
+    ).await;
+    if let Some(sid) = session_id {
+        if let Err(e) = crate::models::session::SessionRepo::new(pool)
+            .force_state(sid, AgentState::Idle, None).await
+        {
+            warn!("digest: session force_state failed: {e}");
+        }
+    }
     if let Err(e) = agent_repo.force_state(agent.agent_id, AgentState::Idle, None).await {
         warn!("digest: force_state failed: {e}");
     }

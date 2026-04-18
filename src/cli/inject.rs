@@ -40,7 +40,18 @@ pub async fn execute(
     );
 
     // Mark the agent as actively working now that a user prompt has landed.
-    // This is fire-and-forget: a stale state is worse than a missing update.
+    // Per-session row is the truth; agents row is maintained for single-
+    // session display. Fire-and-forget: stale state is worse than missing.
+    let session_id = crate::models::session::resolve_current_session(
+        pool, agent.agent_id, None
+    ).await;
+    if let Some(sid) = session_id {
+        if let Err(e) = crate::models::session::SessionRepo::new(pool)
+            .force_state(sid, AgentState::Executing, None).await
+        {
+            warn!("inject: session force_state failed: {e}");
+        }
+    }
     if let Err(e) = agent_repo.force_state(agent.agent_id, AgentState::Executing, None).await {
         warn!("inject: force_state failed: {e}");
     }
