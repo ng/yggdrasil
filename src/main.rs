@@ -333,6 +333,15 @@ enum PlanAction {
         #[arg(long)] dry_run: bool,
         #[arg(short, long)] agent: Option<String>,
     },
+    /// Supervise an epic: walk deps, spawn CC sessions for ready tasks,
+    /// poll for status changes, exit when no open tasks remain.
+    Supervise {
+        epic: String,
+        #[arg(short, long, default_value = "1")] parallelism: usize,
+        #[arg(long)] dry_run: bool,
+        #[arg(long, default_value = "5")] poll_secs: u64,
+        #[arg(short, long)] agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -980,6 +989,12 @@ async fn main() -> anyhow::Result<()> {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     ygg::cli::plan_cmd::run(
                         &pool, &task, &agent_name, dry_run,
+                    ).await?;
+                }
+                PlanAction::Supervise { epic, parallelism, dry_run, poll_secs, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::plan_cmd::supervise(
+                        &pool, &epic, &agent_name, parallelism.max(1), dry_run, poll_secs,
                     ).await?;
                 }
             }
