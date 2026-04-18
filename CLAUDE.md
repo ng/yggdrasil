@@ -39,6 +39,19 @@ ygg logs --follow                           # Live event stream
 - **Durable notes** — `ygg remember "..."` writes a directive node the similarity retriever will surface in future sessions (scoped to the current repo when detectable). Prefer this over scratch `.md` files.
 - **Do NOT** use `bd` / beads. This project uses `ygg task` / `ygg remember` instead.
 
+## Terse for AI-tracking fields
+
+When writing content that only agents consume — `ygg task create`
+titles/descriptions/acceptance/design/notes, `ygg remember`, `ygg memory
+create` — be terse. Drop filler (really/just/basically/actually/very).
+Drop articles (`a`/`an`/`the`) when meaning survives. Prefer one sentence
+per field where content allows. **Preserve verbatim**: identifiers
+(snake_case, CamelCase), paths, commands, numbers, URLs, and modal
+keywords (always/never/must/should/cannot/don't/may/shall).
+
+Does **NOT** apply to commit messages, PR descriptions, code comments,
+or chat responses — those are human-facing and full fidelity is correct.
+
 ## Session Completion
 
 Work is NOT complete until `git push` succeeds.

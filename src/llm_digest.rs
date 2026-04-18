@@ -76,8 +76,10 @@ impl LlmDigester {
 not a meta-description like 'the user corrected X'\",\n\
                \"open_threads\": [\"up to 3 specific unresolved questions or follow-ups\"]\n\
              }}\n\
-             Use concrete nouns from the transcript. If there is nothing specific to say, \
-return an empty summary and we will fall back to heuristic extraction.\n\n\
+             Use concrete nouns from the transcript. Be terse — drop filler, hedges, and \
+articles where meaning survives. Preserve every identifier, path, command, env var, \
+and number verbatim. If there is nothing specific to say, return an empty summary \
+and we will fall back to heuristic extraction.\n\n\
              Transcript:\n{transcript}\n\nJSON:"
         );
 
