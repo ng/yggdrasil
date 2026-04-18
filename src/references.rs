@@ -94,6 +94,17 @@ fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     if union == 0 { 0.0 } else { inter as f64 / union as f64 }
 }
 
+/// Containment (overlap coefficient) — the fraction of the SNIPPET's tokens
+/// that appear in the response. This is the right metric for "did the LLM
+/// absorb this context?" because responses are much longer than snippets;
+/// symmetric Jaccard is dominated by the response length and can't clear
+/// any sensible threshold even when the response clearly uses the snippet.
+fn containment(snippet: &HashSet<String>, response: &HashSet<String>) -> f64 {
+    if snippet.is_empty() || response.is_empty() { return 0.0; }
+    let inter = snippet.intersection(response).count();
+    inter as f64 / snippet.len() as f64
+}
+
 /// Pair similarity_hit events for this agent/session window with the next
 /// assistant turn in the transcript. For each pair, score overlap. If the
 /// score exceeds the threshold, emit a hit_referenced event.
@@ -106,8 +117,12 @@ pub async fn score_references(
     agent_name: &str,
     transcript_path: &str,
 ) -> Result<ReferenceReport, anyhow::Error> {
+    // Containment-based threshold: 0.4 = "at least 40% of the snippet's
+    // content-words appear in the assistant response". Calibrated against
+    // manual review: literal reuse hits ~0.8+, paraphrase ~0.4-0.6, noise
+    // under 0.3. Old 0.12 Jaccard threshold was unreachable in practice.
     let threshold: f64 = std::env::var("YGG_REFERENCE_THRESHOLD")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(0.12);
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0.4);
 
     let turns = parse_transcript_turns(transcript_path);
     if turns.is_empty() {
@@ -164,7 +179,7 @@ pub async fn score_references(
 
         let hit_tokens = tokenize(snippet);
         let resp_tokens = tokenize(&assistant.text);
-        let overlap = jaccard(&hit_tokens, &resp_tokens);
+        let overlap = containment(&hit_tokens, &resp_tokens);
         report.scored += 1;
 
         if overlap >= threshold {
@@ -178,7 +193,7 @@ pub async fn score_references(
                     "similarity_hit_event_id": hit_id,
                     "source_node_id": source_id,
                     "overlap": overlap,
-                    "method": "jaccard",
+                    "method": "containment",
                     "threshold": threshold,
                 }),
             ).await;
@@ -220,5 +235,30 @@ mod tests {
         let a = tokenize("cat dog fish");
         let b = tokenize("rocket planet star");
         assert_eq!(jaccard(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn containment_catches_absorbed_snippet_in_long_response() {
+        // The failure mode that drove the switch: every snippet word lands
+        // in a much longer response. Jaccard ≈ 0.02 (fails); containment =
+        // 1.0 (passes). This is the "did the LLM use this context?" case.
+        let snippet = tokenize("sqlx migration ordering");
+        let response = tokenize(
+            "I checked the migration files and the sqlx runner applies them \
+             in filename ordering. The ordering convention is lexicographic; \
+             please don't rename existing migration files or the sequence \
+             drifts for other developers who already ran them."
+        );
+        let c = containment(&snippet, &response);
+        assert!(c >= 0.9, "expected near-full containment, got {c}");
+        let j = jaccard(&snippet, &response);
+        assert!(j < 0.2, "jaccard should be much lower than containment here, got {j}");
+    }
+
+    #[test]
+    fn containment_still_rejects_noise() {
+        let snippet = tokenize("database migration ordering");
+        let response = tokenize("the user asked about coffee and the weather");
+        assert!(containment(&snippet, &response) < 0.1);
     }
 }
