@@ -137,6 +137,37 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         ));
     }
 
+    // Referenced ratio — the headline "is this actually helping?" number.
+    // Pulls hit_referenced / similarity_hit over the same window the recalls
+    // segment uses so the two numbers line up. Session-scoped when we have
+    // a session_id (matches the cache segment's behavior above).
+    let (refd, emitted): (i64, i64) = if let Some(sid) = session_id.as_deref() {
+        sqlx::query_as(
+            r#"SELECT
+                 COUNT(*) FILTER (WHERE event_kind::text = 'hit_referenced'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
+               FROM events WHERE cc_session_id = $1"#,
+        ).bind(sid).fetch_one(pool).await.unwrap_or((0, 0))
+    } else {
+        sqlx::query_as(
+            r#"SELECT
+                 COUNT(*) FILTER (WHERE event_kind::text = 'hit_referenced' AND created_at >= $1),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit' AND created_at >= $1)
+               FROM events"#,
+        ).bind(now_minus_24).fetch_one(pool).await.unwrap_or((0, 0))
+    };
+    if emitted > 0 {
+        let rate = (refd as f64 / emitted as f64 * 100.0) as i64;
+        // Threshold colors — mirror the eval pane so the same ratio tells
+        // the same story in both places.
+        let color = if rate >= 40 { GREEN }
+                    else if rate >= 20 { YELL }
+                    else { DIM };
+        segments.push(format!(
+            "{DIM}ygg recall{RESET} {color}{refd}/{emitted} ({rate}%){RESET}"
+        ));
+    }
+
     println!("{}", segments.join(" · "));
     Ok(())
 }
