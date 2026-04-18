@@ -443,6 +443,8 @@ enum LockAction {
 enum TaskAction {
     /// Create a new task in the current repo
     Create {
+        /// Title (required unless --file/--stdin/--body-file is used)
+        #[arg(default_value = "")]
         title: String,
         // allow_hyphen_values so "-- item" / "* foo" etc. don't get silently
         // interpreted as new flags (yggdrasil-21).
@@ -454,8 +456,17 @@ enum TaskAction {
         #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
         #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
         #[arg(short, long)] agent: Option<String>,
-        /// Emit the created task as JSON (for agent consumption)
+        /// Emit the created task(s) as JSON (for agent consumption)
         #[arg(long)] json: bool,
+        /// Parse a markdown file into a task tree (H1=epic, H2=feature, H3/4=task).
+        /// Body under each header becomes the description. Parent→child dep edges
+        /// are auto-linked so `ygg task ready` surfaces leaves first.
+        #[arg(short = 'f', long, value_name = "FILE")] file: Option<std::path::PathBuf>,
+        /// Read the description body from a file (single-task mode). Useful when
+        /// agents write long specs and shell-escaping gets painful.
+        #[arg(long, value_name = "FILE")] body_file: Option<std::path::PathBuf>,
+        /// Read the description body from stdin (single-task mode).
+        #[arg(long)] stdin: bool,
     },
     /// List tasks (defaults to current repo; pass --all for every repo)
     List {
@@ -889,20 +900,44 @@ async fn main() -> anyhow::Result<()> {
                 })
             };
             match action {
-                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent, json } => {
+                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent, json, file, body_file, stdin } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
-                    ygg::cli::task_cmd::create(&pool, ygg::cli::task_cmd::CreateOpts {
-                        title: &title,
-                        description: description.as_deref(),
-                        kind: kind.as_deref(),
-                        priority,
-                        acceptance: acceptance.as_deref(),
-                        design: design.as_deref(),
-                        notes: notes.as_deref(),
-                        labels: &label,
-                        agent_name: &agent_name,
-                        json,
-                    }).await?;
+                    // Mode dispatch — mutually exclusive.
+                    if let Some(path) = file {
+                        if !title.is_empty() {
+                            anyhow::bail!("--file and a positional title are mutually exclusive");
+                        }
+                        ygg::cli::task_cmd::create_from_markdown(
+                            &pool, &path, &agent_name, json,
+                        ).await?;
+                    } else {
+                        // Single-task mode. Body precedence: --stdin > --body-file > --description.
+                        let body: Option<String> = if stdin {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            std::io::stdin().read_to_string(&mut buf)?;
+                            Some(buf)
+                        } else if let Some(p) = body_file {
+                            Some(std::fs::read_to_string(&p)?)
+                        } else {
+                            description
+                        };
+                        if title.is_empty() {
+                            anyhow::bail!("title is required unless --file is used");
+                        }
+                        ygg::cli::task_cmd::create(&pool, ygg::cli::task_cmd::CreateOpts {
+                            title: &title,
+                            description: body.as_deref(),
+                            kind: kind.as_deref(),
+                            priority,
+                            acceptance: acceptance.as_deref(),
+                            design: design.as_deref(),
+                            notes: notes.as_deref(),
+                            labels: &label,
+                            agent_name: &agent_name,
+                            json,
+                        }).await?;
+                    }
                 }
                 TaskAction::List { all, status, label, json } => {
                     ygg::cli::task_cmd::list(&pool, all, status.as_deref(), &label, json).await?;

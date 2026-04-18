@@ -516,6 +516,156 @@ pub async fn stats(pool: &sqlx::PgPool, all_repos: bool, json: bool) -> Result<(
     Ok(())
 }
 
+/// Parse a markdown file into a task tree.
+///
+/// Header level → kind: H1 = Epic, H2 = Feature, H3/H4 = Task.
+/// Body text between a header and the next header of any level becomes that
+/// task's description. Parent→child dep edges are inserted so
+/// `ygg task ready` surfaces the leaves and the parent rolls up on close.
+pub async fn create_from_markdown(
+    pool: &sqlx::PgPool,
+    path: &std::path::Path,
+    agent_name: &str,
+    json: bool,
+) -> Result<(), anyhow::Error> {
+    let repo = resolve_cwd_repo(pool).await?;
+    let created_by = resolve_agent_id(pool, agent_name).await?;
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+
+    let parsed = parse_markdown_tasks(&source);
+    if parsed.is_empty() {
+        anyhow::bail!("no H1–H4 headers found in {}", path.display());
+    }
+
+    // Walk parsed list, tracking the most recent task_id at each level.
+    // parent for level N = most recent task at level < N (typically N-1).
+    let mut stack: [Option<Uuid>; 5] = [None; 5];  // index 1..=4 used
+    let mut created: Vec<(String, Task)> = Vec::with_capacity(parsed.len());
+    let task_repo = TaskRepo::new(pool);
+    let event_repo = EventRepo::new(pool);
+
+    for p in &parsed {
+        let kind = match p.level {
+            1 => TaskKind::Epic,
+            2 => TaskKind::Feature,
+            _ => TaskKind::Task,
+        };
+        // Priority defaults to 2 (medium) for bulk imports — users override
+        // per-task later. A blanket auto-classifier call per task would add
+        // Ollama latency × N.
+        let task = task_repo.create(
+            repo.repo_id,
+            created_by,
+            TaskCreate {
+                title: &p.title,
+                description: &p.body,
+                kind,
+                priority: 2,
+                ..Default::default()
+            },
+        ).await?;
+
+        // Link to parent: parent-task depends on child-task so the parent
+        // stays blocked until all children close (rollup semantics).
+        let lvl = p.level as usize;
+        for parent_lvl in (1..lvl).rev() {
+            if let Some(parent_id) = stack[parent_lvl] {
+                task_repo.add_dep(parent_id, task.task_id).await.ok();
+                break;
+            }
+        }
+
+        stack[lvl] = Some(task.task_id);
+        // Clear any deeper levels so orphaned stacks don't misparent.
+        for deeper in (lvl + 1)..=4 { stack[deeper] = None; }
+
+        let task_ref = format!("{}-{}", repo.task_prefix, task.seq);
+        let _ = event_repo.emit(
+            EventKind::TaskCreated,
+            agent_name,
+            created_by,
+            serde_json::json!({
+                "ref": task_ref,
+                "title": task.title,
+                "kind": task.kind.to_string(),
+                "source": "markdown",
+            }),
+        ).await;
+        created.push((task_ref, task));
+    }
+
+    if json {
+        let out: Vec<_> = created.iter().map(|(r, t)| serde_json::json!({
+            "ref": r,
+            "task": t,
+        })).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "count": created.len(),
+            "source": path.display().to_string(),
+            "results": out,
+        }))?);
+    } else {
+        println!("Parsed {} task(s) from {}", created.len(), path.display());
+        for (r, t) in &created {
+            let indent = "  ".repeat(match t.kind {
+                TaskKind::Epic => 0,
+                TaskKind::Feature => 1,
+                _ => 2,
+            });
+            println!("  {indent}{r}  {}", t.title);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ParsedHeader<'a> {
+    level: u8,
+    title: String,
+    body: String,
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+/// Minimal markdown-headers parser: `#{1,4}\s+Title`, body is everything
+/// between a header and the next header. No pulldown-cmark dep — we don't
+/// care about inline markdown, just the section structure.
+fn parse_markdown_tasks(source: &str) -> Vec<ParsedHeader<'_>> {
+    let mut out: Vec<ParsedHeader> = Vec::new();
+    let mut current: Option<ParsedHeader> = None;
+    let mut body_buf = String::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let hash_count = trimmed.chars().take_while(|c| *c == '#').count();
+        let is_header = hash_count >= 1 && hash_count <= 4
+            && trimmed.chars().nth(hash_count) == Some(' ');
+
+        if is_header {
+            if let Some(mut prev) = current.take() {
+                prev.body = body_buf.trim().to_string();
+                body_buf.clear();
+                out.push(prev);
+            }
+            let title = trimmed[hash_count + 1..].trim().to_string();
+            current = Some(ParsedHeader {
+                level: hash_count as u8,
+                title,
+                body: String::new(),
+                _phantom: std::marker::PhantomData,
+            });
+        } else if current.is_some() {
+            body_buf.push_str(line);
+            body_buf.push('\n');
+        }
+    }
+    if let Some(mut prev) = current.take() {
+        prev.body = body_buf.trim().to_string();
+        out.push(prev);
+    }
+    out
+}
+
 /// JSON emit path shared by list/ready/blocked. Wraps each task with its
 /// repo-qualified ref so downstream agents don't have to look up prefixes.
 async fn emit_tasks_json(pool: &sqlx::PgPool, tasks: &[Task]) -> Result<(), anyhow::Error> {
