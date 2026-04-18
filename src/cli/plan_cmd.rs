@@ -376,14 +376,34 @@ pub async fn run(
         ).await;
     }
 
-    // 3. tmux window + 4. launch claude. Uses the same tmux session the
-    // rest of ygg spawn/up use, window name encodes the task ref.
-    let window = format!("run-{}-{}", repo.task_prefix, task.seq);
+    // 3. tmux window + 4. launch claude. Window name encodes the agent +
+    // persona + task ref so `tmux list-windows` reads like a status board:
+    //   yggdrasil:reviewer·yggdrasil-43
+    //   route-53·kb-chunking-7
+    let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
+    let agent_label = match persona.as_deref() {
+        Some(p) => format!("{agent_name}:{p}"),
+        None => agent_name.to_string(),
+    };
+    let window = sanitize_tmux_name(&format!(
+        "{agent_label}·{}-{}", repo.task_prefix, task.seq
+    ));
     spawn_tmux(&window, &wt.path, &task, &repo)?;
 
     println!("launched {} in tmux window '{window}'", task_ref_display(&repo.task_prefix, task.seq));
     println!("  attach: tmux attach -t yggdrasil");
     Ok(())
+}
+
+/// tmux window names can't contain colons (they split target specs) or
+/// whitespace. We keep "·" as a visual separator but replace colons from
+/// the persona with "-".
+fn sanitize_tmux_name(s: &str) -> String {
+    s.chars().map(|c| match c {
+        ':' => '-',
+        ' ' | '\t' | '\n' => '_',
+        _ => c,
+    }).collect()
 }
 
 fn task_ref_display(prefix: &str, seq: i32) -> String {
@@ -413,15 +433,18 @@ fn spawn_tmux(
         anyhow::bail!("tmux new-window failed for '{window}'");
     }
 
-    // Ship the priming prompt to Claude Code via a one-shot file. Claude
-    // reads it from stdin; cleaner than pasting through tmux send-keys
-    // which can mangle long content.
+    // Ship the priming prompt via stdin heredoc. `--dangerously-skip-
+    // permissions` avoids the first-run "do you trust this directory"
+    // prompt — we just created the worktree, we trust it. Override with
+    // YGG_CLAUDE_FLAGS if you want a different posture.
     let prime = prime_prompt(task, repo);
     let target = format!("{SESSION}:{window}");
+    let flags = std::env::var("YGG_CLAUDE_FLAGS")
+        .unwrap_or_else(|_| "--dangerously-skip-permissions".to_string());
     Command::new("tmux")
         .args([
             "send-keys", "-t", &target,
-            &format!("claude <<'YGG_EOF'\n{prime}\nYGG_EOF"),
+            &format!("claude {flags} <<'YGG_EOF'\n{prime}\nYGG_EOF"),
             "Enter",
         ])
         .status()
