@@ -41,10 +41,16 @@ pub struct LlmDigester {
 }
 
 impl LlmDigester {
+    /// Opt-in via `YGG_LLM_DIGEST=on` (also accepts `1` / `true`). Default
+    /// is OFF because small local models mangle identifier-heavy code
+    /// summaries (prior evidence: kind_boost → KIND_BOSTON) and digests
+    /// persist into the retriever corpus — silent corruption compounds.
+    /// When disabled, `ygg digest` falls back to deterministic heuristic
+    /// extraction (correction regex, headline from first user turn).
     pub fn from_env() -> Self {
-        let enabled = !matches!(
+        let enabled = matches!(
             std::env::var("YGG_LLM_DIGEST").ok().as_deref(),
-            Some("off" | "0" | "false")
+            Some("on" | "1" | "true")
         );
         let base_url = std::env::var("OLLAMA_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:11434".into());

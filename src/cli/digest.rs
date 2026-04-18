@@ -43,12 +43,15 @@ pub async fn execute(
     let heuristic_reinforcements = extract_reinforcements(&entries);
     let files_touched = extract_files_touched(&entries);
 
-    // LLM digest (yggdrasil-4). Asks Ollama ONLY for summary + open_threads
-    // — the two fields where a narrative model earns its keep. Corrections
-    // and reinforcements stay on the heuristic path; pattern-matching on
-    // "no/stop/actually/..." is deterministic and doesn't produce the
-    // generic placeholder garbage ("what the user corrected") that a 1B
-    // model emits when asked for structured judgments.
+    // LLM digest (yggdrasil-4) — OPT-IN via YGG_LLM_DIGEST=on (yggdrasil-74).
+    // Default off: small local models mangle identifier-heavy code
+    // summaries and digests persist into the retriever corpus, so silent
+    // corruption compounds across sessions. When enabled, Ollama fills
+    // ONLY summary + open_threads; corrections/reinforcements stay on the
+    // deterministic heuristic path (pattern-matching "no/stop/actually…"
+    // doesn't produce the placeholder garbage a 1B model emits for
+    // structured judgments). When disabled, summary falls back to
+    // build_summary() from event headlines; open_threads is empty.
     let turn_pairs: Vec<(String, String)> = entries.iter()
         .map(|t| (t.role.clone(), t.text.clone()))
         .collect();
