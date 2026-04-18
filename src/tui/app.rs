@@ -237,6 +237,19 @@ impl App {
                 ActiveView::Dag => self.dag.toggle_detail(),
                 ActiveView::Logs => self.logs.toggle_detail(),
                 ActiveView::MemGraph => self.memgraph.toggle_detail(),
+                ActiveView::Tasks => {
+                    // Enter on the Tasks ready-list executes the selected
+                    // task via the same plan_cmd::run path as DAG's `r`.
+                    if let Some(task_ref) = self.tasks.selected_task_ref() {
+                        let agent = std::env::var("YGG_AGENT_NAME").ok()
+                            .unwrap_or_else(|| self.agent_name.clone());
+                        match crate::cli::plan_cmd::run(pool, &task_ref, &agent, false).await {
+                            Ok(_) => self.tasks.set_flash(format!("launched {task_ref} in tmux")),
+                            Err(e) => self.tasks.set_flash(format!("run failed: {e}")),
+                        }
+                        let _ = self.tasks.refresh(pool).await;
+                    }
+                }
                 _ => {}
             },
             KeyCode::Esc => match self.active_view {
@@ -325,7 +338,7 @@ impl App {
         let pane_hint = match self.active_view {
             ActiveView::Dashboard => "S=session-scope",
             ActiveView::Dag => "s=sort  a=agent  f=focus  c=clear",
-            ActiveView::Tasks => "↑↓ select",
+            ActiveView::Tasks => "↑↓ select  ·  Enter=run (worktree + CC session)",
             ActiveView::Trace => "↑↓ select",
             ActiveView::Query => "type then Enter  ·  Esc=leave",
             ActiveView::Logs => "f=filter  Enter=detail",

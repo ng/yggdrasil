@@ -18,6 +18,7 @@ pub enum TaskRow {
 }
 
 pub struct TasksView {
+    pub flash: String,
     pub rows: Vec<TaskRow>,
     pub state: TableState,
     pub last_status: String,
@@ -32,7 +33,7 @@ impl TasksView {
     pub fn new() -> Self {
         let mut st = TableState::default();
         st.select(Some(0));
-        Self { rows: vec![], state: st, last_status: String::new(), loaded: false }
+        Self { rows: vec![], state: st, last_status: String::new(), loaded: false, flash: String::new() }
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
@@ -102,6 +103,18 @@ impl TasksView {
         Ok(())
     }
 
+    /// Task ref ("yggdrasil-43") of the selected row, if it's a task row.
+    pub fn selected_task_ref(&self) -> Option<String> {
+        let i = self.state.selected()?;
+        match self.rows.get(i)? {
+            TaskRow::Task { prefix, task } => Some(format!("{prefix}-{}", task.seq)),
+            _ => None,
+        }
+    }
+
+    /// Short-lived status line shown in the title after a run/add keystroke.
+    pub fn set_flash(&mut self, msg: impl Into<String>) { self.flash = msg.into(); }
+
     pub fn select_prev(&mut self) {
         let Some(target) = self.neighbor_task_row(-1) else { return; };
         self.state.select(Some(target));
@@ -126,7 +139,9 @@ impl TasksView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(" Tasks ready ({} across all repos) ", self.rows.len());
+        let base = format!(" Tasks ready ({} across all repos) ", self.rows.len());
+        let title = if self.flash.is_empty() { base }
+                    else { format!("{base} ·  {}", self.flash) };
 
         if !self.loaded {
             render_tasks_loading(frame, area, &title);
