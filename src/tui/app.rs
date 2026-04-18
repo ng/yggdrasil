@@ -123,8 +123,11 @@ impl App {
         self.ops_stats.live_sessions = sessions;
         self.ops_stats.db_ms = db_start.elapsed().as_millis() as u64;
 
+        // Tight 150ms timeout — local Ollama answers in <20ms when
+        // running; 150ms is plenty to catch "it's alive" without
+        // stalling the refresh if it's down.
         self.ops_stats.ollama_ok = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
+            std::time::Duration::from_millis(150),
             reqwest_ping(),
         ).await.unwrap_or(false);
     }
@@ -638,28 +641,45 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
 
     let mut app = App::new(agent_name);
 
+    // Decouple refresh from input. Previously every keypress triggered
+    // a full DB+Ollama refresh cascade (~hundreds of ms) before the
+    // next draw — arrow keys felt laggy. Now we refresh on a timer
+    // (every 2s) while key polling at a short interval stays snappy.
+    // Targeted per-action refreshes (e.g. after 'r' runs) still fire
+    // from handle_key directly.
+    use std::time::Instant;
+    let refresh_interval = std::time::Duration::from_secs(2);
+    let poll_interval = std::time::Duration::from_millis(50);
+    let mut last_refresh: Option<Instant> = None;
+
     loop {
-        // Draw first so each view can paint its own "loading" state for the
-        // duration of the refresh below — otherwise the UI freezes on the
-        // previous frame while the DB query blocks. Cost: rendered data is
-        // one 500ms tick behind, which matches the refresh cadence anyway.
+        // Draw every tick so input stays snappy and each view's own
+        // "loading" state is visible until its first refresh lands.
         terminal.draw(|frame| app.draw(frame))?;
 
-        // Refresh dashboard (cheap) + the global status tail; refresh the active view too.
-        app.dashboard.refresh(pool).await?;
-        app.refresh_status_tail(pool).await;
-        match app.active_view {
-            ActiveView::Dag     => { app.dag.refresh(pool).await?; }
-            ActiveView::Tasks   => { app.tasks.refresh(pool).await?; }
-            ActiveView::Trace   => { app.trace.refresh(pool).await?; }
-            ActiveView::Logs    => { app.logs.refresh(pool).await?; }
-            ActiveView::MemGraph => { app.memgraph.refresh(pool).await?; }
-            ActiveView::Eval    => { app.eval.refresh(pool).await?; }
-            _ => {}
+        // Refresh on a coarser timer — every keypress refreshing the DB
+        // made arrow keys laggy. Targeted per-action refreshes still fire
+        // from handle_key directly.
+        let need_refresh = last_refresh
+            .map(|t| t.elapsed() >= refresh_interval)
+            .unwrap_or(true);
+
+        if need_refresh {
+            app.dashboard.refresh(pool).await?;
+            app.refresh_status_tail(pool).await;
+            match app.active_view {
+                ActiveView::Dag     => { app.dag.refresh(pool).await?; }
+                ActiveView::Tasks   => { app.tasks.refresh(pool).await?; }
+                ActiveView::Trace   => { app.trace.refresh(pool).await?; }
+                ActiveView::Logs    => { app.logs.refresh(pool).await?; }
+                ActiveView::MemGraph => { app.memgraph.refresh(pool).await?; }
+                ActiveView::Eval    => { app.eval.refresh(pool).await?; }
+                _ => {}
+            }
+            last_refresh = Some(Instant::now());
         }
 
-        // 500ms poll for key input; refresh loop ticks every 500ms regardless.
-        if event::poll(Duration::from_millis(500))? {
+        if event::poll(poll_interval)? {
             if let Event::Key(key) = event::read()? {
                 app.handle_key(pool, key.code, key.modifiers).await;
             }
