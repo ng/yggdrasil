@@ -45,6 +45,20 @@ pub struct App {
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
     pub status_tail: Vec<(String, String, String)>, // (hh:mm:ss, kind, one-line detail)
+    /// Right-hand-side orchestration stats (filled each refresh tick).
+    pub ops_stats: OpsStats,
+}
+
+/// Lightweight orchestration snapshot rendered on the right side of the
+/// global status strip. Cheap queries — every 500ms tick is fine.
+#[derive(Default, Clone)]
+pub struct OpsStats {
+    pub agents_alive: i64,     // != idle and updated in last 10m
+    pub agents_stuck: i64,     // active-state but updated > 10m ago
+    pub tasks_running: i64,    // tasks.status = in_progress
+    pub live_sessions: i64,    // sessions.ended_at IS NULL
+    pub ollama_ok: bool,
+    pub db_ms: u64,            // round-trip ping
 }
 
 impl App {
@@ -63,6 +77,7 @@ impl App {
             agent_name,
             query_focus: false,
             status_tail: Vec::new(),
+            ops_stats: OpsStats::default(),
         }
     }
 
@@ -77,6 +92,36 @@ impl App {
             let ts = t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
             (ts, k, short_status_detail(&p))
         }).collect();
+
+        // Orchestration snapshot. One roundtrip: agents live/stuck, tasks
+        // running, sessions live. Ollama health is a bounded HTTP ping so
+        // it can't block the tick.
+        let db_start = std::time::Instant::now();
+        let (alive, stuck, running, sessions): (i64, i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+              (SELECT COUNT(*) FROM agents
+                WHERE archived_at IS NULL
+                  AND current_state <> 'idle'
+                  AND updated_at >= now() - interval '10 minutes'),
+              (SELECT COUNT(*) FROM agents
+                WHERE archived_at IS NULL
+                  AND current_state IN ('executing','waiting_tool','planning','context_flush')
+                  AND updated_at <  now() - interval '10 minutes'),
+              (SELECT COUNT(*) FROM tasks WHERE status = 'in_progress'),
+              (SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL)
+            "#,
+        ).fetch_one(pool).await.unwrap_or((0, 0, 0, 0));
+        self.ops_stats.agents_alive = alive;
+        self.ops_stats.agents_stuck = stuck;
+        self.ops_stats.tasks_running = running;
+        self.ops_stats.live_sessions = sessions;
+        self.ops_stats.db_ms = db_start.elapsed().as_millis() as u64;
+
+        self.ops_stats.ollama_ok = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            reqwest_ping(),
+        ).await.unwrap_or(false);
     }
 
     pub async fn handle_key(&mut self, pool: &PgPool, code: KeyCode, modifiers: KeyModifiers) {
@@ -370,7 +415,14 @@ impl App {
             ActiveView::Eval      => self.eval.render(frame, chunks[2]),
         }
 
-        let lines: Vec<Line> = self.status_tail.iter().map(|(ts, kind, detail)| {
+        // Global status strip — two columns: events left, orchestration
+        // stats right. Right panel is a compact "is anything live" signal.
+        let strip = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(40), Constraint::Length(34)])
+            .split(chunks[3]);
+
+        let event_lines: Vec<Line> = self.status_tail.iter().map(|(ts, kind, detail)| {
             let (glyph, color) = event_glyph(kind);
             Line::from(vec![
                 Span::styled(ts.clone(), Style::default().fg(Color::DarkGray)),
@@ -381,11 +433,51 @@ impl App {
                 Span::styled(detail.clone(), Style::default().fg(Color::Gray)),
             ])
         }).collect();
-        let status = ratatui::widgets::Paragraph::new(lines)
+        let events_panel = ratatui::widgets::Paragraph::new(event_lines)
             .block(ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::TOP)
                 .title(" events "));
-        frame.render_widget(status, chunks[3]);
+        frame.render_widget(events_panel, strip[0]);
+
+        let s = &self.ops_stats;
+        let ollama_style = if s.ollama_ok {
+            Style::default().fg(Color::Green)
+        } else { Style::default().fg(Color::Red) };
+        let stuck_line = if s.agents_stuck > 0 {
+            Line::from(vec![
+                Span::styled("  ⚠ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{} stuck", s.agents_stuck),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("  ⚡ ollama ",
+                    Style::default().fg(Color::DarkGray)),
+                Span::styled(if s.ollama_ok { "up" } else { "down" }, ollama_style),
+                Span::styled(format!("  db {}ms", s.db_ms),
+                    Style::default().fg(Color::DarkGray)),
+            ])
+        };
+        let stats_lines = vec![
+            Line::from(vec![
+                Span::styled("  ● ", Style::default().fg(Color::Green)),
+                Span::styled(format!("{} live", s.agents_alive),
+                    Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" / {} sessions", s.live_sessions),
+                    Style::default().fg(Color::DarkGray)),
+            ]),
+            Line::from(vec![
+                Span::styled("  ▶ ", Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{} tasks running", s.tasks_running),
+                    Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            stuck_line,
+        ];
+        let stats_panel = ratatui::widgets::Paragraph::new(stats_lines)
+            .block(ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::TOP)
+                .title(" orchestration "));
+        frame.render_widget(stats_panel, strip[1]);
     }
 }
 
@@ -411,6 +503,13 @@ fn event_glyph(kind: &str) -> (&'static str, Color) {
         "agent_state_changed"  => ("↪", Color::Blue),
         _                      => ("·", Color::Gray),
     }
+}
+
+async fn reqwest_ping() -> bool {
+    let base = std::env::var("OLLAMA_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:11434".into());
+    let url = format!("{}/api/tags", base.trim_end_matches('/'));
+    reqwest::get(url).await.map(|r| r.status().is_success()).unwrap_or(false)
 }
 
 fn short_status_detail(p: &serde_json::Value) -> String {
