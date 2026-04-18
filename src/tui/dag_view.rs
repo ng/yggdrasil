@@ -52,6 +52,11 @@ pub struct DagView {
     pub known_assignees: Vec<(Uuid, String)>,
     /// Display label for the subtree focus, shown in the title while active.
     pub focus_label: String,
+    /// Flipped true once `refresh` has executed at least once. Until then the
+    /// render path shows a themed loading view instead of the "no tasks"
+    /// empty-state — otherwise the first paint (before the initial query
+    /// completes) reads as "nothing here" rather than "still fetching".
+    pub loaded: bool,
 }
 
 pub enum RenderRow {
@@ -76,6 +81,7 @@ impl DagView {
             subtree_focus: None,
             known_assignees: Vec::new(),
             focus_label: String::new(),
+            loaded: false,
         }
     }
 
@@ -191,6 +197,7 @@ impl DagView {
         // in-repo quick view.
         self.repo_name.clear();
         self.last_status.clear();
+        self.loaded = true;
 
         let repos = RepoRepo::new(pool).list().await.unwrap_or_default();
 
@@ -364,6 +371,11 @@ impl DagView {
             self.rows.iter().filter(|r| matches!(r, RenderRow::Task { .. })).count(),
             self.sort.label(),
             self.filter_description());
+
+        if !self.loaded {
+            render_dag_loading(frame, area, &title);
+            return;
+        }
 
         if self.rows.is_empty() {
             let lines: Vec<Line> = vec![
@@ -577,5 +589,48 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max { return s.to_string(); }
     let cut: String = s.chars().take(max).collect();
     format!("{cut}…")
+}
+
+/// Painted while the first refresh is in flight. A tiny epic-with-three-children
+/// ASCII DAG makes it obvious what's being fetched.
+fn render_dag_loading(frame: &mut Frame, area: Rect, title: &str) {
+    let dim  = Style::default().fg(Color::DarkGray);
+    let epic = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let feat = Style::default().fg(Color::Cyan);
+    let tsk  = Style::default().fg(Color::White);
+    let chr  = Style::default().fg(Color::DarkGray);
+    let hint = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+
+    let art: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled("╭─────╮", dim)),
+        Line::from(vec![
+            Span::styled("│  ", dim),
+            Span::styled("◉", epic),
+            Span::styled("  │", dim),
+        ]),
+        Line::from(Span::styled("╰──┬──╯", dim)),
+        Line::from(Span::styled("   │", dim)),
+        Line::from(Span::styled("┌──┼──┐", dim)),
+        Line::from(Span::styled("│  │  │", dim)),
+        Line::from(vec![
+            Span::styled("", dim),
+            Span::styled("✚", feat),
+            Span::styled("  ", dim),
+            Span::styled("○", tsk),
+            Span::styled("  ", dim),
+            Span::styled("·", chr),
+        ]),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled("growing the task graph…", hint)),
+    ];
+
+    let block = Block::default().borders(Borders::ALL).title(title.to_string());
+    let para = ratatui::widgets::Paragraph::new(art)
+        .block(block)
+        .alignment(Alignment::Center);
+    frame.render_widget(para, area);
 }
 

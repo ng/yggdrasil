@@ -21,17 +21,23 @@ pub struct TasksView {
     pub rows: Vec<TaskRow>,
     pub state: TableState,
     pub last_status: String,
+    /// Flipped true once `refresh` has executed at least once. Until then the
+    /// render path shows a themed loading view — otherwise the first paint
+    /// (before the initial query completes) reads as "nothing here" rather
+    /// than "still fetching".
+    pub loaded: bool,
 }
 
 impl TasksView {
     pub fn new() -> Self {
         let mut st = TableState::default();
         st.select(Some(0));
-        Self { rows: vec![], state: st, last_status: String::new() }
+        Self { rows: vec![], state: st, last_status: String::new(), loaded: false }
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
         self.last_status.clear();
+        self.loaded = true;
         let repos = RepoRepo::new(pool).list().await.unwrap_or_default();
         let prefix_by_repo: HashMap<Uuid, String> = repos.iter()
             .map(|r| (r.repo_id, r.task_prefix.clone())).collect();
@@ -121,6 +127,11 @@ impl TasksView {
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let title = format!(" Tasks ready ({} across all repos) ", self.rows.len());
+
+        if !self.loaded {
+            render_tasks_loading(frame, area, &title);
+            return;
+        }
 
         if self.rows.is_empty() {
             let lines = vec![
@@ -224,4 +235,38 @@ fn pluralize_kind(k: &TaskKind) -> &'static str {
         TaskKind::Task => "TASKS",
         TaskKind::Chore => "CHORES",
     }
+}
+
+/// Painted while the first refresh is in flight. A horizontal row of kind
+/// glyphs hints at the "tasks grouped by kind" layout that's coming.
+fn render_tasks_loading(frame: &mut Frame, area: Rect, title: &str) {
+    let hint = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+    let sep  = Style::default().fg(Color::DarkGray);
+
+    let row: Vec<Span> = vec![
+        Span::styled("◉",  Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled("   ·   ", sep),
+        Span::styled("✚",  Style::default().fg(Color::Cyan)),
+        Span::styled("   ·   ", sep),
+        Span::styled("🐞", Style::default().fg(Color::Red)),
+        Span::styled("   ·   ", sep),
+        Span::styled("○",  Style::default().fg(Color::White)),
+        Span::styled("   ·   ", sep),
+        Span::styled("·",  Style::default().fg(Color::DarkGray)),
+    ];
+
+    let art: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(""),
+        Line::from(row),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled("gathering ready work…", hint)),
+    ];
+
+    let block = Block::default().borders(Borders::ALL).title(title.to_string());
+    let para = Paragraph::new(art)
+        .block(block)
+        .alignment(Alignment::Center);
+    frame.render_widget(para, area);
 }
