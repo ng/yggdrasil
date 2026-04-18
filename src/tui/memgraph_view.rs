@@ -12,8 +12,8 @@
 use chrono::{DateTime, Utc};
 use pgvector::Vector;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use sqlx::{PgPool, Row};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use sqlx::{PgPool, Row as SqlxRow};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -40,9 +40,9 @@ pub enum Focus { Recent, Neighbors }
 
 pub struct MemGraphView {
     pub recent: Vec<MemNode>,
-    pub recent_state: ListState,
+    pub recent_state: TableState,
     pub neighbors: Vec<Neighbor>,
-    pub neighbor_state: ListState,
+    pub neighbor_state: TableState,
     pub focus_id: Option<Uuid>,
     pub focus_label: String,
     pub active: Focus,
@@ -51,10 +51,10 @@ pub struct MemGraphView {
 
 impl MemGraphView {
     pub fn new() -> Self {
-        let mut s = ListState::default(); s.select(Some(0));
+        let mut s = TableState::default(); s.select(Some(0));
         Self {
             recent: vec![], recent_state: s,
-            neighbors: vec![], neighbor_state: ListState::default(),
+            neighbors: vec![], neighbor_state: TableState::default(),
             focus_id: None, focus_label: String::new(),
             active: Focus::Recent,
             last_status: String::new(),
@@ -294,36 +294,47 @@ impl MemGraphView {
             return;
         }
 
-        let items: Vec<ListItem> = self.recent.iter().map(|n| {
+        let header = Row::new(vec![
+            Cell::from("").style(Style::default().fg(Color::DarkGray)),
+            Cell::from("KIND").style(Style::default().fg(Color::Gray)),
+            Cell::from("AGENT").style(Style::default().fg(Color::Gray)),
+            Cell::from("AGE").style(Style::default().fg(Color::Gray)),
+            Cell::from("SNIPPET").style(Style::default().fg(Color::Gray)),
+        ]);
+        let rows: Vec<Row> = self.recent.iter().map(|n| {
             let (glyph, color) = kind_style(&n.kind);
             let age = humanize_since(n.created_at);
             let is_focus = Some(n.id) == self.focus_id;
-            let focus_marker = if is_focus { "◎ " } else { "  " };
-            ListItem::new(Line::from(vec![
-                Span::styled(focus_marker.to_string(), Style::default().fg(Color::Magenta)),
-                Span::styled(format!("{glyph} "), Style::default().fg(color)),
-                Span::styled(format!("{:<10}", n.kind), Style::default().fg(color)),
-                Span::styled(format!(" {:<12}", short(&n.agent_name, 12)),
-                    Style::default().fg(Color::Cyan)),
-                Span::styled(format!(" {:<6}", age), Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::raw(short(&n.snippet, 70)),
-            ]))
+            let marker = if is_focus { "◎" } else { " " };
+            Row::new(vec![
+                Cell::from(marker).style(Style::default().fg(Color::Magenta)),
+                Cell::from(format!("{glyph} {}", n.kind)).style(Style::default().fg(color)),
+                Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
+                Cell::from(age).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(short(&n.snippet, 120)),
+            ])
         }).collect();
 
         let title = format!(" Recent high-signal nodes ({}){} ",
             self.recent.len(),
-            if self.active == Focus::Recent { " · [active] Tab=switch · Enter=recenter" }
-            else { " · Tab=switch" });
+            if self.active == Focus::Recent { " · [active] Enter=recenter" }
+            else { " · space=switch" });
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL)
-                .title(title)
-                .border_style(if self.active == Focus::Recent {
-                    Style::default().fg(Color::Cyan)
-                } else { Style::default().fg(Color::DarkGray) }))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
-        frame.render_stateful_widget(list, area, &mut self.recent_state);
+        let table = Table::new(rows, [
+            Constraint::Length(2),
+            Constraint::Length(16),
+            Constraint::Length(18),
+            Constraint::Length(6),
+            Constraint::Min(20),
+        ])
+        .header(header)
+        .block(Block::default().borders(Borders::ALL)
+            .title(title)
+            .border_style(if self.active == Focus::Recent {
+                Style::default().fg(Color::Cyan)
+            } else { Style::default().fg(Color::DarkGray) }))
+        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        frame.render_stateful_widget(table, area, &mut self.recent_state);
     }
 
     fn render_neighbors(&mut self, frame: &mut Frame, area: Rect) {
@@ -351,11 +362,20 @@ impl MemGraphView {
             return;
         }
 
-        let items: Vec<ListItem> = self.neighbors.iter().map(|n| {
+        let header = Row::new(vec![
+            Cell::from("SIM").style(Style::default().fg(Color::Gray)),
+            Cell::from("DIST").style(Style::default().fg(Color::Gray)),
+            Cell::from("KIND").style(Style::default().fg(Color::Gray)),
+            Cell::from("AGENT").style(Style::default().fg(Color::Gray)),
+            Cell::from("AGE").style(Style::default().fg(Color::Gray)),
+            Cell::from("SNIPPET").style(Style::default().fg(Color::Gray)),
+        ]);
+        let rows: Vec<Row> = self.neighbors.iter().map(|n| {
             let (glyph, color) = kind_style(&n.kind);
             let sim_pct = (n.similarity * 100.0) as u32;
+            let distance = 1.0 - n.similarity;
             let bar_blocks = (sim_pct / 10).min(10) as usize;
-            let bar = format!("{}{}",
+            let bar = format!("{}{}  {sim_pct:>3}%",
                 "█".repeat(bar_blocks),
                 "░".repeat(10 - bar_blocks));
             let sim_color = if sim_pct >= 80 { Color::Green }
@@ -363,35 +383,36 @@ impl MemGraphView {
                             else if sim_pct >= 40 { Color::Yellow }
                             else { Color::DarkGray };
             let age = humanize_since(n.created_at);
-
-            ListItem::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format!("{bar} "), Style::default().fg(sim_color)),
-                Span::styled(format!("{sim_pct:>3}%"),
-                    Style::default().fg(sim_color).add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled(format!("{glyph} "), Style::default().fg(color)),
-                Span::styled(format!("{:<10}", n.kind), Style::default().fg(color)),
-                Span::styled(format!(" {:<12}", short(&n.agent_name, 12)),
-                    Style::default().fg(Color::Cyan)),
-                Span::styled(format!(" {:<6}", age), Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::raw(short(&n.snippet, 60)),
-            ]))
+            Row::new(vec![
+                Cell::from(bar).style(Style::default().fg(sim_color)),
+                Cell::from(format!("{:.3}", distance)).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(format!("{glyph} {}", n.kind)).style(Style::default().fg(color)),
+                Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
+                Cell::from(age).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(short(&n.snippet, 120)),
+            ])
         }).collect();
 
         let title = format!(" Neighbors · {}{} ", focus_summary,
-            if self.active == Focus::Neighbors { " · [active] Enter=recenter" }
+            if self.active == Focus::Neighbors { " · [active] Enter=recenter · Esc=back" }
             else { "" });
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL)
-                .title(title)
-                .border_style(if self.active == Focus::Neighbors {
-                    Style::default().fg(Color::Cyan)
-                } else { Style::default().fg(Color::DarkGray) }))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
-        frame.render_stateful_widget(list, area, &mut self.neighbor_state);
+        let table = Table::new(rows, [
+            Constraint::Length(18),   // bar + %
+            Constraint::Length(6),    // distance
+            Constraint::Length(18),   // kind
+            Constraint::Length(18),   // agent
+            Constraint::Length(6),    // age
+            Constraint::Min(20),      // snippet
+        ])
+        .header(header)
+        .block(Block::default().borders(Borders::ALL)
+            .title(title)
+            .border_style(if self.active == Focus::Neighbors {
+                Style::default().fg(Color::Cyan)
+            } else { Style::default().fg(Color::DarkGray) }))
+        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        frame.render_stateful_widget(table, area, &mut self.neighbor_state);
     }
 }
 

@@ -10,10 +10,15 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::repo::RepoRepo;
-use crate::models::task::{Task, TaskRepo, TaskStatus};
+use crate::models::task::{Task, TaskKind, TaskRepo, TaskStatus};
+
+pub enum TaskRow {
+    Header { kind: TaskKind, count: usize },
+    Task { prefix: String, task: Task },
+}
 
 pub struct TasksView {
-    pub rows: Vec<(String, Task)>, // (prefix, task)
+    pub rows: Vec<TaskRow>,
     pub state: TableState,
     pub last_status: String,
 }
@@ -58,8 +63,27 @@ impl TasksView {
                 Some((p, t))
             })
             .collect();
-        ready.sort_by_key(|(_p, t)| (t.priority, t.seq));
-        self.rows = ready;
+        // Group by kind (epic, feature, bug, task, chore); within each group
+        // sort by priority then seq.
+        ready.sort_by_key(|(_p, t)| (kind_order(&t.kind), t.priority, t.seq));
+
+        // Walk the sorted list and emit a header row whenever the kind changes.
+        let mut grouped: Vec<TaskRow> = Vec::new();
+        let mut it = ready.into_iter().peekable();
+        while let Some((prefix, task)) = it.next() {
+            let kind = task.kind.clone();
+            let mut bucket: Vec<(String, Task)> = vec![(prefix, task)];
+            while let Some((_, peek)) = it.peek() {
+                if peek.kind == kind {
+                    if let Some(next) = it.next() { bucket.push(next); }
+                } else { break; }
+            }
+            grouped.push(TaskRow::Header { kind, count: bucket.len() });
+            for (p, t) in bucket {
+                grouped.push(TaskRow::Task { prefix: p, task: t });
+            }
+        }
+        self.rows = grouped;
 
         if self.rows.is_empty() {
             self.last_status = format!(
@@ -73,15 +97,26 @@ impl TasksView {
     }
 
     pub fn select_prev(&mut self) {
-        if self.rows.is_empty() { return; }
-        let i = self.state.selected().unwrap_or(0);
-        self.state.select(Some(if i == 0 { self.rows.len() - 1 } else { i - 1 }));
+        let Some(target) = self.neighbor_task_row(-1) else { return; };
+        self.state.select(Some(target));
     }
 
     pub fn select_next(&mut self) {
-        if self.rows.is_empty() { return; }
-        let i = self.state.selected().unwrap_or(0);
-        self.state.select(Some((i + 1) % self.rows.len()));
+        let Some(target) = self.neighbor_task_row(1) else { return; };
+        self.state.select(Some(target));
+    }
+
+    /// Walk the row list in `dir` (±1), skipping headers. Wraps around.
+    fn neighbor_task_row(&self, dir: isize) -> Option<usize> {
+        if self.rows.is_empty() { return None; }
+        let len = self.rows.len();
+        let start = self.state.selected().unwrap_or(0);
+        let mut i = start;
+        for _ in 0..len {
+            i = ((i as isize + dir).rem_euclid(len as isize)) as usize;
+            if matches!(self.rows[i], TaskRow::Task { .. }) { return Some(i); }
+        }
+        None
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -115,25 +150,33 @@ impl TasksView {
         let header = Row::new(vec![
             Cell::from("ID").style(Style::default().fg(Color::Gray)),
             Cell::from("P").style(Style::default().fg(Color::Gray)),
-            Cell::from("KIND").style(Style::default().fg(Color::Gray)),
             Cell::from("TITLE").style(Style::default().fg(Color::Gray)),
         ]);
 
-        let rows: Vec<Row> = self.rows.iter().map(|(prefix, t)| {
-            let id = format!("{}-{}", prefix, t.seq);
-            Row::new(vec![
-                Cell::from(id),
-                Cell::from(format!("P{}", t.priority))
-                    .style(prio_style(t.priority)),
-                Cell::from(t.kind.to_string()).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(t.title.clone()),
-            ])
+        let rows: Vec<Row> = self.rows.iter().map(|row| match row {
+            TaskRow::Header { kind, count } => {
+                let (color, glyph) = kind_style(kind);
+                Row::new(vec![
+                    Cell::from(format!("{glyph} {}", pluralize_kind(kind)))
+                        .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Cell::from(""),
+                    Cell::from(format!("({count})"))
+                        .style(Style::default().fg(Color::DarkGray)),
+                ])
+            }
+            TaskRow::Task { prefix, task: t } => {
+                Row::new(vec![
+                    Cell::from(format!("  {}-{}", prefix, t.seq))
+                        .style(Style::default().fg(Color::Gray)),
+                    Cell::from(format!("P{}", t.priority)).style(prio_style(t.priority)),
+                    Cell::from(t.title.clone()),
+                ])
+            }
         }).collect();
 
         let table = Table::new(rows, [
-            Constraint::Length(16),
+            Constraint::Length(20),
             Constraint::Length(3),
-            Constraint::Length(10),
             Constraint::Min(20),
         ])
         .header(header)
@@ -150,5 +193,35 @@ fn prio_style(p: i16) -> Style {
         1 => Style::default().fg(Color::Yellow),
         2 => Style::default().fg(Color::White),
         _ => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn kind_order(k: &TaskKind) -> u8 {
+    match k {
+        TaskKind::Epic => 0,
+        TaskKind::Feature => 1,
+        TaskKind::Bug => 2,
+        TaskKind::Task => 3,
+        TaskKind::Chore => 4,
+    }
+}
+
+fn kind_style(k: &TaskKind) -> (Color, &'static str) {
+    match k {
+        TaskKind::Epic => (Color::Magenta, "◉"),
+        TaskKind::Feature => (Color::Cyan, "✚"),
+        TaskKind::Bug => (Color::Red, "✗"),
+        TaskKind::Task => (Color::White, "○"),
+        TaskKind::Chore => (Color::DarkGray, "·"),
+    }
+}
+
+fn pluralize_kind(k: &TaskKind) -> &'static str {
+    match k {
+        TaskKind::Epic => "EPICS",
+        TaskKind::Feature => "FEATURES",
+        TaskKind::Bug => "BUGS",
+        TaskKind::Task => "TASKS",
+        TaskKind::Chore => "CHORES",
     }
 }
