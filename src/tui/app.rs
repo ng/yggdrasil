@@ -11,6 +11,7 @@ use crate::config::AppConfig;
 
 use super::dashboard::DashboardView;
 use super::dag_view::DagView;
+use super::eval_view::EvalView;
 use super::log_view::LogView;
 use super::memgraph_view::MemGraphView;
 use super::query_view::QueryView;
@@ -26,6 +27,7 @@ pub enum ActiveView {
     Query,
     Logs,
     MemGraph,
+    Eval,
 }
 
 pub struct App {
@@ -38,6 +40,7 @@ pub struct App {
     pub query: QueryView,
     pub logs: LogView,
     pub memgraph: MemGraphView,
+    pub eval: EvalView,
     pub agent_name: String,
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
@@ -56,6 +59,7 @@ impl App {
             query: QueryView::new(),
             logs: LogView::new(),
             memgraph: MemGraphView::new(),
+            eval: EvalView::new(),
             agent_name,
             query_focus: false,
             status_tail: Vec::new(),
@@ -114,6 +118,7 @@ impl App {
             KeyCode::Char('5') => self.set_view(ActiveView::Query),
             KeyCode::Char('6') => self.set_view(ActiveView::Logs),
             KeyCode::Char('7') => self.set_view(ActiveView::MemGraph),
+            KeyCode::Char('8') => self.set_view(ActiveView::Eval),
             KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
             KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
             KeyCode::Char('f') if self.active_view == ActiveView::Logs => {
@@ -138,6 +143,10 @@ impl App {
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
+            }
+            KeyCode::Char('w') if self.active_view == ActiveView::Eval => {
+                self.eval.cycle_window();
+                let _ = self.eval.refresh(pool).await;
             }
             KeyCode::Up => match self.active_view {
                 ActiveView::Dag => self.dag.scroll_up(),
@@ -193,19 +202,21 @@ impl App {
             ActiveView::Trace => ActiveView::Query,
             ActiveView::Query => ActiveView::Logs,
             ActiveView::Logs => ActiveView::MemGraph,
-            ActiveView::MemGraph => ActiveView::Dashboard,
+            ActiveView::MemGraph => ActiveView::Eval,
+            ActiveView::Eval => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::MemGraph,
+            ActiveView::Dashboard => ActiveView::Eval,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
             ActiveView::Query => ActiveView::Trace,
             ActiveView::Logs => ActiveView::Query,
             ActiveView::MemGraph => ActiveView::Logs,
+            ActiveView::Eval => ActiveView::MemGraph,
         };
         self.set_view(prev);
     }
@@ -291,6 +302,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
             ActiveView::Trace   => { app.trace.refresh(pool).await?; }
             ActiveView::Logs    => { app.logs.refresh(pool).await?; }
             ActiveView::MemGraph => { app.memgraph.refresh(pool).await?; }
+            ActiveView::Eval    => { app.eval.refresh(pool).await?; }
             _ => {}
         }
 
@@ -323,6 +335,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[5] Query",     app.active_view == ActiveView::Query),
                 tab("[6] Logs",      app.active_view == ActiveView::Logs),
                 tab("[7] Memgraph",  app.active_view == ActiveView::MemGraph),
+                tab("[8] Eval",      app.active_view == ActiveView::Eval),
             ];
             frame.render_widget(Line::from(tabs), chunks[0]);
 
@@ -340,6 +353,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 ActiveView::Query => "type then Enter  ·  Esc=leave",
                 ActiveView::Logs => "f=filter  Enter=detail",
                 ActiveView::MemGraph => "↑↓ scroll  Enter=detail  Esc=close",
+                ActiveView::Eval => "w=cycle window (1h/6h/24h/7d)",
             };
             let hint_line = Line::from(vec![
                 nav_span,
@@ -356,6 +370,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 ActiveView::Query     => app.query.render(frame, chunks[2]),
                 ActiveView::Logs      => app.logs.render(frame, chunks[2]),
                 ActiveView::MemGraph  => app.memgraph.render(frame, chunks[2]),
+                ActiveView::Eval      => app.eval.render(frame, chunks[2]),
             }
 
             // Global status strip — 3 most recent events, always visible.

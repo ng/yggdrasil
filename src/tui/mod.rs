@@ -1,6 +1,7 @@
 pub mod app;
 pub mod dag_view;
 pub mod dashboard;
+pub mod eval_view;
 pub mod log_view;
 pub mod memgraph_view;
 pub mod query_view;
