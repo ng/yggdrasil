@@ -157,17 +157,33 @@ pub async fn supervise(
 
         let open_count = tasks.iter().filter(|t| t.status != TaskStatus::Closed).count();
         let running_count = tasks.iter().filter(|t| t.status == TaskStatus::InProgress).count();
-        let closed_count = tasks.iter().filter(|t| t.status == TaskStatus::Closed).count();
+        let closed_count = tasks.iter().filter(|t| t.status == TaskStatus::Closed && !is_failed(t)).count();
+        let failed_count = tasks.iter().filter(|t| is_failed(t)).count();
 
         if open_count == 0 {
-            println!("All tasks closed ({}/{}) — epic {epic_ref} done.",
-                closed_count, all_descendants.len());
+            if failed_count > 0 {
+                println!("Epic {epic_ref} finished with {failed_count} failure(s): {} closed / {} total.",
+                    closed_count, all_descendants.len());
+            } else {
+                println!("All tasks closed ({}/{}) — epic {epic_ref} done.",
+                    closed_count, all_descendants.len());
+            }
             return Ok(());
         }
 
-        // Find ready tasks: status=Open AND all blockers closed.
-        let id_to_status: std::collections::HashMap<Uuid, TaskStatus> =
-            tasks.iter().map(|t| (t.task_id, t.status.clone())).collect();
+        if is_paused(epic.task_id) {
+            println!("[{}] paused — use `ygg plan resume {epic_ref}` to continue",
+                timestamp());
+            if dry_run { return Ok(()); } // don't infinite-loop in dry-run
+            tokio::time::sleep(std::time::Duration::from_secs(poll_secs)).await;
+            continue;
+        }
+
+        // Find ready tasks: status=Open AND all blockers successfully
+        // Closed (a failed blocker does NOT unblock downstream — downstream
+        // waits for the human to retry or intervene).
+        let id_to_status: std::collections::HashMap<Uuid, (TaskStatus, bool)> =
+            tasks.iter().map(|t| (t.task_id, (t.status.clone(), is_failed(t)))).collect();
         let task_repo = TaskRepo::new(pool);
         let capacity = parallelism.saturating_sub(running_count);
         if capacity == 0 {
@@ -180,8 +196,12 @@ pub async fn supervise(
                 if t.status != TaskStatus::Open { continue; }
                 let deps = task_repo.deps(t.task_id).await?;
                 let blockers_clear = deps.iter().all(|d| {
-                    id_to_status.get(&d.task_id).map(|s| *s == TaskStatus::Closed)
-                        .unwrap_or(true)  // blocker outside the epic → treat as satisfied
+                    match id_to_status.get(&d.task_id) {
+                        Some((TaskStatus::Closed, false)) => true,
+                        Some((TaskStatus::Closed, true)) => false, // failed blocker
+                        Some(_) => false,                           // still open/running/blocked
+                        None => true,                               // outside the epic
+                    }
                 });
                 if !blockers_clear { continue; }
 
@@ -211,6 +231,100 @@ pub async fn supervise(
 
 fn timestamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// File-based pause flag. No schema change needed, file absent = running.
+/// Path: $XDG_STATE_HOME/ygg/plans/<task_id>.paused (or ~/.local/state).
+fn pause_flag_path(task_id: Uuid) -> Result<std::path::PathBuf, anyhow::Error> {
+    let base = if let Ok(x) = std::env::var("XDG_STATE_HOME") {
+        if !x.is_empty() { std::path::PathBuf::from(x) } else {
+            std::path::PathBuf::from(std::env::var("HOME")?).join(".local/state")
+        }
+    } else {
+        std::path::PathBuf::from(std::env::var("HOME")?).join(".local/state")
+    };
+    Ok(base.join("ygg/plans").join(format!("{task_id}.paused")))
+}
+
+pub async fn pause(pool: &sqlx::PgPool, epic_ref: &str) -> Result<(), anyhow::Error> {
+    let epic = crate::cli::task_cmd::resolve_task_public(pool, epic_ref).await?;
+    let path = pause_flag_path(epic.task_id)?;
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    std::fs::write(&path, format!("paused at {}", chrono::Utc::now()))?;
+    println!("paused {epic_ref} — supervisor will stop spawning new tasks");
+    println!("resume: ygg plan resume {epic_ref}");
+    Ok(())
+}
+
+pub async fn resume(pool: &sqlx::PgPool, epic_ref: &str) -> Result<(), anyhow::Error> {
+    let epic = crate::cli::task_cmd::resolve_task_public(pool, epic_ref).await?;
+    let path = pause_flag_path(epic.task_id)?;
+    let _ = std::fs::remove_file(&path);
+    println!("resumed {epic_ref}");
+    Ok(())
+}
+
+fn is_paused(task_id: Uuid) -> bool {
+    pause_flag_path(task_id).map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Abort: tear down in-progress descendants. Removes worktrees (policy:
+/// archive, so the branch remains for inspection), sets status back to
+/// open, releases locks held by the agent associated with the supervise.
+pub async fn abort(
+    pool: &sqlx::PgPool,
+    epic_ref: &str,
+    agent_name: &str,
+) -> Result<(), anyhow::Error> {
+    let epic = crate::cli::task_cmd::resolve_task_public(pool, epic_ref).await?;
+    let ids = descendants(pool, epic.task_id).await?;
+    let tasks: Vec<Task> = sqlx::query_as::<_, Task>(
+        r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
+                  kind, status, priority, created_by, assignee, human_flag,
+                  created_at, updated_at, closed_at, close_reason, relevance
+           FROM tasks WHERE task_id = ANY($1) AND status = 'in_progress'"#,
+    ).bind(&ids).fetch_all(pool).await?;
+
+    println!("aborting {} in-progress task(s) under {epic_ref}", tasks.len());
+    for t in &tasks {
+        let repo = RepoRepo::new(pool).get(t.repo_id).await?
+            .ok_or_else(|| anyhow::anyhow!("repo vanished"))?;
+        let r = format!("{}-{}", repo.task_prefix, t.seq);
+        println!("  · {r}  dropping worktree (policy=archive) + reverting to open");
+        let _ = crate::worktree::teardown(
+            pool, t.task_id, crate::worktree::TeardownPolicy::Archive, true,
+        ).await;
+        let _ = TaskRepo::new(pool).set_status(
+            t.task_id, TaskStatus::Open, None, None,
+        ).await;
+    }
+
+    // Mark paused so supervisor doesn't immediately re-spawn on next run.
+    let _ = std::fs::create_dir_all(pause_flag_path(epic.task_id)?.parent().unwrap());
+    let _ = std::fs::write(pause_flag_path(epic.task_id)?,
+        format!("aborted at {}", chrono::Utc::now()));
+
+    println!("releasing locks held by agent '{agent_name}'…");
+    let lock_mgr = crate::lock::LockManager::new(pool, 300);
+    let locks = lock_mgr.list_all().await.unwrap_or_default();
+    let agent_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT agent_id FROM agents WHERE agent_name = $1"
+    ).bind(agent_name).fetch_optional(pool).await?.flatten();
+    if let Some(aid) = agent_id {
+        for l in locks.iter().filter(|l| l.agent_id == aid) {
+            let _ = lock_mgr.release(&l.resource_key, aid).await;
+        }
+    }
+    println!("done. To resume after investigating: ygg plan resume {epic_ref}");
+    Ok(())
+}
+
+/// Did a task fail? close_reason contains "fail" is the cheap heuristic.
+fn is_failed(task: &Task) -> bool {
+    task.status == TaskStatus::Closed
+        && task.close_reason.as_deref()
+            .map(|r| r.to_lowercase().contains("fail"))
+            .unwrap_or(false)
 }
 
 pub async fn run(

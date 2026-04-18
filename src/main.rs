@@ -342,6 +342,16 @@ enum PlanAction {
         #[arg(long, default_value = "5")] poll_secs: u64,
         #[arg(short, long)] agent: Option<String>,
     },
+    /// Pause an epic's supervisor — no new tasks spawn until resumed.
+    Pause { epic: String },
+    /// Resume a paused epic.
+    Resume { epic: String },
+    /// Abort: tear down in-progress descendants (archive worktrees,
+    /// revert to open) and pause the epic. Recoverable.
+    Abort {
+        epic: String,
+        #[arg(short, long)] agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -996,6 +1006,16 @@ async fn main() -> anyhow::Result<()> {
                     ygg::cli::plan_cmd::supervise(
                         &pool, &epic, &agent_name, parallelism.max(1), dry_run, poll_secs,
                     ).await?;
+                }
+                PlanAction::Pause { epic } => {
+                    ygg::cli::plan_cmd::pause(&pool, &epic).await?;
+                }
+                PlanAction::Resume { epic } => {
+                    ygg::cli::plan_cmd::resume(&pool, &epic).await?;
+                }
+                PlanAction::Abort { epic, agent } => {
+                    let agent_name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::plan_cmd::abort(&pool, &epic, &agent_name).await?;
                 }
             }
         }
