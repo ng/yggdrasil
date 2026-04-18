@@ -125,6 +125,18 @@ impl App {
                 self.dag.cycle_sort();
                 let _ = self.dag.refresh(pool).await;
             }
+            KeyCode::Char('a') if self.active_view == ActiveView::Dag => {
+                self.dag.cycle_agent_filter();
+                let _ = self.dag.refresh(pool).await;
+            }
+            KeyCode::Char('f') if self.active_view == ActiveView::Dag => {
+                self.dag.toggle_subtree_focus();
+                let _ = self.dag.refresh(pool).await;
+            }
+            KeyCode::Char('c') if self.active_view == ActiveView::Dag => {
+                self.dag.clear_filters();
+                let _ = self.dag.refresh(pool).await;
+            }
             KeyCode::Char(' ') if self.active_view == ActiveView::MemGraph => {
                 self.memgraph.toggle_focus();
             }
@@ -302,7 +314,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 tab("[5] Query",     app.active_view == ActiveView::Query),
                 tab("[6] Logs",      app.active_view == ActiveView::Logs),
                 tab("[7] Memgraph",  app.active_view == ActiveView::MemGraph),
-                Span::raw("  q=quit  ←→/tab=nav  Enter=detail/recenter  s=sort(dag)  space=switch(mem)  f=filter(logs)  i=input(query)"),
+                Span::raw("  q=quit  ←→/tab=nav  Enter=detail/recenter  dag: s=sort a=agent f=focus c=clear  mem: space  logs: f=filter  query: i"),
             ];
             frame.render_widget(Line::from(titles), chunks[0]);
 

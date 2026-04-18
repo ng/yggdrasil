@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::models::agent::AgentRepo;
 use crate::models::repo::{Repo, RepoRepo};
 use crate::models::task::{Task, TaskKind, TaskRepo, TaskStatus};
 
@@ -25,6 +26,14 @@ impl DagSort {
     }
 }
 
+/// Assignee filter. Cycles `All → each known assignee → Unassigned → All`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentFilter {
+    All,
+    Specific(Uuid),
+    Unassigned,
+}
+
 pub struct DagView {
     pub rows: Vec<RenderRow>,
     pub state: ListState,
@@ -35,6 +44,14 @@ pub struct DagView {
     pub last_status: String,
     pub detail_open: bool,
     pub sort: DagSort,
+    pub agent_filter: AgentFilter,
+    /// When set, only this task and its descendants (via task_deps) render.
+    pub subtree_focus: Option<Uuid>,
+    /// Cached assignee list, populated each refresh: (agent_id, agent_name).
+    /// Drives the `a` cycle without a DB hit per keypress.
+    pub known_assignees: Vec<(Uuid, String)>,
+    /// Display label for the subtree focus, shown in the title while active.
+    pub focus_label: String,
 }
 
 pub enum RenderRow {
@@ -52,8 +69,14 @@ impl DagView {
     pub fn new() -> Self {
         let mut st = ListState::default();
         st.select(Some(0));
-        Self { rows: vec![], state: st, repo_name: String::new(),
-            last_status: String::new(), detail_open: false, sort: DagSort::Priority }
+        Self {
+            rows: vec![], state: st, repo_name: String::new(),
+            last_status: String::new(), detail_open: false, sort: DagSort::Priority,
+            agent_filter: AgentFilter::All,
+            subtree_focus: None,
+            known_assignees: Vec::new(),
+            focus_label: String::new(),
+        }
     }
 
     // Kept for compatibility with existing app.rs entry — a no-op here
@@ -74,6 +97,73 @@ impl DagView {
 
     pub fn cycle_sort(&mut self) {
         self.sort = self.sort.next();
+    }
+
+    /// Cycle `All → assignee1 → ... → assigneeN → Unassigned → All`. Assignees
+    /// come from the last refresh's `known_assignees` list.
+    pub fn cycle_agent_filter(&mut self) {
+        self.agent_filter = match &self.agent_filter {
+            AgentFilter::All => {
+                if let Some((id, _)) = self.known_assignees.first() {
+                    AgentFilter::Specific(*id)
+                } else {
+                    AgentFilter::Unassigned
+                }
+            }
+            AgentFilter::Specific(cur) => {
+                let idx = self.known_assignees.iter().position(|(id, _)| id == cur);
+                match idx {
+                    Some(i) if i + 1 < self.known_assignees.len() =>
+                        AgentFilter::Specific(self.known_assignees[i + 1].0),
+                    _ => AgentFilter::Unassigned,
+                }
+            }
+            AgentFilter::Unassigned => AgentFilter::All,
+        };
+    }
+
+    /// Toggle subtree-focus on the currently selected task. Second press on
+    /// the same row clears focus; pressing on a different row replaces it.
+    pub fn toggle_subtree_focus(&mut self) {
+        let Some((task, prefix)) = self.selected_task() else { return; };
+        let label = format!("{}-{} {}", prefix, task.seq,
+            task.title.chars().take(40).collect::<String>());
+        match self.subtree_focus {
+            Some(id) if id == task.task_id => {
+                self.subtree_focus = None;
+                self.focus_label.clear();
+            }
+            _ => {
+                self.subtree_focus = Some(task.task_id);
+                self.focus_label = label;
+            }
+        }
+    }
+
+    pub fn clear_filters(&mut self) {
+        self.subtree_focus = None;
+        self.focus_label.clear();
+        self.agent_filter = AgentFilter::All;
+    }
+
+    /// One-line summary of active filters, for title/empty-state display.
+    pub fn filter_description(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        match &self.agent_filter {
+            AgentFilter::All => {}
+            AgentFilter::Specific(id) => {
+                let name = self.known_assignees.iter()
+                    .find(|(a, _)| a == id)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| id.to_string()[..8].to_string());
+                parts.push(format!("agent={name}"));
+            }
+            AgentFilter::Unassigned => parts.push("agent=unassigned".into()),
+        }
+        if !self.focus_label.is_empty() {
+            parts.push(format!("focus={}", self.focus_label));
+        }
+        if parts.is_empty() { String::new() } else { format!("  ·  {}", parts.join("  ·  ")) }
     }
 
     /// Toggle the detail overlay for the selected task row. Does nothing for
@@ -105,16 +195,81 @@ impl DagView {
         let repos = RepoRepo::new(pool).list().await.unwrap_or_default();
 
         // All open tasks across every repo, keyed by repo_id.
-        let all_open: Vec<Task> = TaskRepo::new(pool).list(None, None).await
+        let unfiltered_open: Vec<Task> = TaskRepo::new(pool).list(None, None).await
             .unwrap_or_default()
             .into_iter()
             .filter(|t| t.status != TaskStatus::Closed)
             .collect();
 
-        if all_open.is_empty() {
+        if unfiltered_open.is_empty() {
             self.rows.clear();
+            self.known_assignees.clear();
             self.last_status = format!(
                 "no open tasks in any of {} registered repo(s)", repos.len()
+            );
+            self.state.select(None);
+            return Ok(());
+        }
+
+        // Gather assignee names so `a` can cycle through them. We query
+        // AgentRepo once per refresh — cheap, and the list can change.
+        let mut assignee_ids: HashSet<Uuid> = HashSet::new();
+        for t in &unfiltered_open {
+            if let Some(a) = t.assignee { assignee_ids.insert(a); }
+        }
+        let all_agents = AgentRepo::new(pool).list().await.unwrap_or_default();
+        let mut assignees: Vec<(Uuid, String)> = all_agents.into_iter()
+            .filter(|a| assignee_ids.contains(&a.agent_id))
+            .map(|a| (a.agent_id, a.agent_name))
+            .collect();
+        assignees.sort_by(|a, b| a.1.cmp(&b.1));
+        self.known_assignees = assignees;
+
+        // Preload all dep edges once — need them both for filtering (subtree
+        // descendants) and rendering (children badges). Do this BEFORE the
+        // assignee/subtree filter so descendants are computed from the full
+        // graph, not a post-filter subset.
+        let every_id: Vec<Uuid> = unfiltered_open.iter().map(|t| t.task_id).collect();
+        let edges_all: Vec<(Uuid, Uuid)> = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT task_id, blocker_id FROM task_deps
+             WHERE task_id = ANY($1) OR blocker_id = ANY($1)"
+        )
+        .bind(&every_id)
+        .fetch_all(pool).await.unwrap_or_default();
+
+        // Apply filters. Subtree focus comes first — it restricts the
+        // universe of visible task_ids, then agent filter narrows further.
+        let mut allowed: Option<HashSet<Uuid>> = None;
+        if let Some(root) = self.subtree_focus {
+            let mut descendants: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+            for (t, b) in &edges_all {
+                descendants.entry(*b).or_default().push(*t);
+            }
+            let mut keep: HashSet<Uuid> = HashSet::new();
+            let mut frontier = vec![root];
+            while let Some(id) = frontier.pop() {
+                if !keep.insert(id) { continue; }
+                if let Some(children) = descendants.get(&id) {
+                    frontier.extend(children.iter().copied());
+                }
+            }
+            allowed = Some(keep);
+        }
+
+        let all_open: Vec<Task> = unfiltered_open.into_iter()
+            .filter(|t| match &self.agent_filter {
+                AgentFilter::All => true,
+                AgentFilter::Specific(a) => t.assignee == Some(*a),
+                AgentFilter::Unassigned => t.assignee.is_none(),
+            })
+            .filter(|t| allowed.as_ref().map(|s| s.contains(&t.task_id)).unwrap_or(true))
+            .collect();
+
+        if all_open.is_empty() {
+            self.rows.clear();
+            let filter_desc = self.filter_description();
+            self.last_status = format!(
+                "no tasks match the current filters{}", filter_desc
             );
             self.state.select(None);
             return Ok(());
@@ -126,17 +281,10 @@ impl DagView {
             by_repo.entry(t.repo_id).or_default().push(t);
         }
 
-        // Preload all dep edges for all open tasks in one query.
-        let every_id: Vec<Uuid> = by_repo.values().flat_map(|v| v.iter().map(|t| t.task_id)).collect();
-        let edges: Vec<(Uuid, Uuid)> = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "SELECT task_id, blocker_id FROM task_deps
-             WHERE task_id = ANY($1) OR blocker_id = ANY($1)"
-        )
-        .bind(&every_id)
-        .fetch_all(pool).await.unwrap_or_default();
+        // Build the forward/backward edge maps from the preloaded edges.
         let mut children_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
         let mut blockers_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        for (t, b) in &edges {
+        for (t, b) in &edges_all {
             children_of.entry(*b).or_default().push(*t);
             blockers_of.entry(*t).or_default().push(*b);
         }
@@ -158,14 +306,18 @@ impl DagView {
 
             let by_id: BTreeMap<Uuid, &Task> = tasks.iter().map(|t| (t.task_id, t)).collect();
 
-            let mut roots: Vec<&Task> = tasks.iter()
-                .filter(|t| {
+            // When a subtree is focused, only THAT task is a root in its
+            // repo — everything else is either a descendant or filtered out.
+            let mut roots: Vec<&Task> = if let Some(focus) = self.subtree_focus {
+                tasks.iter().filter(|t| t.task_id == focus).collect()
+            } else {
+                tasks.iter().filter(|t| {
                     let no_blockers = blockers_of.get(&t.task_id)
                         .map(|bs| bs.iter().all(|b| !by_id.contains_key(b)))
                         .unwrap_or(true);
                     matches!(t.kind, TaskKind::Epic) || no_blockers
-                })
-                .collect();
+                }).collect()
+            };
             sort_tasks(&mut roots, self.sort);
 
             let mut visited: HashSet<Uuid> = HashSet::new();
@@ -202,9 +354,10 @@ impl DagView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(" Task graph — {} open across all repos  ·  sort: {}  (s to cycle) ",
+        let title = format!(" Task graph — {} open across all repos  ·  sort: {}  (s=sort · a=agent · f=focus · c=clear){} ",
             self.rows.iter().filter(|r| matches!(r, RenderRow::Task { .. })).count(),
-            self.sort.label());
+            self.sort.label(),
+            self.filter_description());
 
         if self.rows.is_empty() {
             let lines: Vec<Line> = vec![
