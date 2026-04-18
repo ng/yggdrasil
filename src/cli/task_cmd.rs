@@ -113,6 +113,8 @@ pub struct CreateOpts<'a> {
     pub notes: Option<&'a str>,
     pub labels: &'a [String],
     pub agent_name: &'a str,
+    /// Emit JSON to stdout instead of the human confirmation line.
+    pub json: bool,
 }
 
 pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), anyhow::Error> {
@@ -171,19 +173,27 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
         )
         .await?;
 
+    let task_ref = format!("{}-{}", repo.task_prefix, task.seq);
     let _ = EventRepo::new(pool).emit(
         EventKind::TaskCreated,
         opts.agent_name,
         created_by,
         serde_json::json!({
-            "ref": format!("{}-{}", repo.task_prefix, task.seq),
+            "ref": task_ref.clone(),
             "title": task.title,
             "kind": task.kind.to_string(),
             "priority": task.priority,
         }),
     ).await;
 
-    println!("Created {}-{}  {}", repo.task_prefix, task.seq, task.title);
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ref": task_ref,
+            "task": task,
+        }))?);
+    } else {
+        println!("Created {}  {}", task_ref, task.title);
+    }
     Ok(())
 }
 
@@ -192,6 +202,7 @@ pub async fn list(
     all_repos: bool,
     status: Option<&str>,
     labels: &[String],
+    json: bool,
 ) -> Result<(), anyhow::Error> {
     let repo_id = if all_repos {
         None
@@ -229,12 +240,19 @@ pub async fn list(
         }
         keep
     };
-    print_task_table(pool, &filtered).await
+    if json {
+        emit_tasks_json(pool, &filtered).await
+    } else {
+        print_task_table(pool, &filtered).await
+    }
 }
 
-pub async fn ready(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
+pub async fn ready(pool: &sqlx::PgPool, json: bool) -> Result<(), anyhow::Error> {
     let repo = resolve_cwd_repo(pool).await?;
     let tasks = TaskRepo::new(pool).ready(repo.repo_id).await?;
+    if json {
+        return emit_tasks_json(pool, &tasks).await;
+    }
     if tasks.is_empty() {
         println!("No ready tasks in {}.", repo.name);
         return Ok(());
@@ -242,9 +260,12 @@ pub async fn ready(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     print_task_table(pool, &tasks).await
 }
 
-pub async fn blocked(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
+pub async fn blocked(pool: &sqlx::PgPool, json: bool) -> Result<(), anyhow::Error> {
     let repo = resolve_cwd_repo(pool).await?;
     let tasks = TaskRepo::new(pool).blocked(repo.repo_id).await?;
+    if json {
+        return emit_tasks_json(pool, &tasks).await;
+    }
     if tasks.is_empty() {
         println!("No blocked tasks in {}.", repo.name);
         return Ok(());
@@ -252,12 +273,35 @@ pub async fn blocked(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     print_task_table(pool, &tasks).await
 }
 
-pub async fn show(pool: &sqlx::PgPool, reference: &str) -> Result<(), anyhow::Error> {
+pub async fn show(pool: &sqlx::PgPool, reference: &str, json: bool) -> Result<(), anyhow::Error> {
     let t = resolve_task(pool, reference).await?;
     let repo = RepoRepo::new(pool).get(t.repo_id).await?
         .ok_or_else(|| anyhow::anyhow!("repo vanished"))?;
     let labels = TaskRepo::new(pool).labels(t.task_id).await?;
     let deps = TaskRepo::new(pool).deps(t.task_id).await?;
+
+    if json {
+        let links = TaskRepo::new(pool).links(t.task_id).await?;
+        let deps_json: Vec<_> = deps.iter().map(|d| serde_json::json!({
+            "ref": format!("{}-{}", repo.task_prefix, d.seq),
+            "task_id": d.task_id,
+            "title": d.title,
+            "status": d.status.to_string(),
+        })).collect();
+        let links_json: Vec<_> = links.iter().map(|(k, id)| serde_json::json!({
+            "kind": k,
+            "target_id": id,
+        })).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ref": format!("{}-{}", repo.task_prefix, t.seq),
+            "repo": repo.name,
+            "task": t,
+            "labels": labels,
+            "deps": deps_json,
+            "links": links_json,
+        }))?);
+        return Ok(());
+    }
 
     let short_uuid = &t.task_id.to_string()[..8];
     println!("{}-{}  [{}]  P{}  rel={}  {}  (ygg-{short_uuid})",
@@ -454,17 +498,47 @@ pub async fn link(
     Ok(())
 }
 
-pub async fn stats(pool: &sqlx::PgPool, all_repos: bool) -> Result<(), anyhow::Error> {
+pub async fn stats(pool: &sqlx::PgPool, all_repos: bool, json: bool) -> Result<(), anyhow::Error> {
     let repo_id = if all_repos {
         None
     } else {
         Some(resolve_cwd_repo(pool).await?.repo_id)
     };
     let s = TaskRepo::new(pool).stats(repo_id).await?;
-    println!(
-        "open: {}    in_progress: {}    blocked: {}    closed: {}",
-        s.open, s.in_progress, s.blocked, s.closed
-    );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s)?);
+    } else {
+        println!(
+            "open: {}    in_progress: {}    blocked: {}    closed: {}",
+            s.open, s.in_progress, s.blocked, s.closed
+        );
+    }
+    Ok(())
+}
+
+/// JSON emit path shared by list/ready/blocked. Wraps each task with its
+/// repo-qualified ref so downstream agents don't have to look up prefixes.
+async fn emit_tasks_json(pool: &sqlx::PgPool, tasks: &[Task]) -> Result<(), anyhow::Error> {
+    let repo_repo = RepoRepo::new(pool);
+    let mut prefixes: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+    for t in tasks {
+        if !prefixes.contains_key(&t.repo_id) {
+            if let Some(r) = repo_repo.get(t.repo_id).await? {
+                prefixes.insert(t.repo_id, r.task_prefix);
+            }
+        }
+    }
+    let out: Vec<serde_json::Value> = tasks.iter().map(|t| {
+        let prefix = prefixes.get(&t.repo_id).cloned().unwrap_or_default();
+        serde_json::json!({
+            "ref": format!("{prefix}-{}", t.seq),
+            "task": t,
+        })
+    }).collect();
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "count": tasks.len(),
+        "results": out,
+    }))?);
     Ok(())
 }
 

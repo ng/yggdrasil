@@ -454,6 +454,8 @@ enum TaskAction {
         #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
         #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
         #[arg(short, long)] agent: Option<String>,
+        /// Emit the created task as JSON (for agent consumption)
+        #[arg(long)] json: bool,
     },
     /// List tasks (defaults to current repo; pass --all for every repo)
     List {
@@ -461,13 +463,25 @@ enum TaskAction {
         #[arg(short, long)] status: Option<String>,
         /// Filter to tasks with this label (repeatable or comma-separated)
         #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
+        /// Emit results as JSON array
+        #[arg(long)] json: bool,
     },
     /// Show tasks with no unsatisfied blockers
-    Ready,
+    Ready {
+        /// Emit results as JSON array
+        #[arg(long)] json: bool,
+    },
     /// Show tasks blocked by another open task
-    Blocked,
+    Blocked {
+        /// Emit results as JSON array
+        #[arg(long)] json: bool,
+    },
     /// Show a task by "<prefix>-<seq>" or UUID
-    Show { reference: String },
+    Show {
+        reference: String,
+        /// Emit the task as JSON (includes labels, deps, links)
+        #[arg(long)] json: bool,
+    },
     /// Update task fields
     Update {
         reference: String,
@@ -532,6 +546,8 @@ enum TaskAction {
     /// Count open/in_progress/blocked/closed
     Stats {
         #[arg(long)] all: bool,
+        /// Emit stats as JSON
+        #[arg(long)] json: bool,
     },
 }
 
@@ -873,7 +889,7 @@ async fn main() -> anyhow::Result<()> {
                 })
             };
             match action {
-                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent } => {
+                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent, json } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     ygg::cli::task_cmd::create(&pool, ygg::cli::task_cmd::CreateOpts {
                         title: &title,
@@ -885,14 +901,15 @@ async fn main() -> anyhow::Result<()> {
                         notes: notes.as_deref(),
                         labels: &label,
                         agent_name: &agent_name,
+                        json,
                     }).await?;
                 }
-                TaskAction::List { all, status, label } => {
-                    ygg::cli::task_cmd::list(&pool, all, status.as_deref(), &label).await?;
+                TaskAction::List { all, status, label, json } => {
+                    ygg::cli::task_cmd::list(&pool, all, status.as_deref(), &label, json).await?;
                 }
-                TaskAction::Ready => { ygg::cli::task_cmd::ready(&pool).await?; }
-                TaskAction::Blocked => { ygg::cli::task_cmd::blocked(&pool).await?; }
-                TaskAction::Show { reference } => { ygg::cli::task_cmd::show(&pool, &reference).await?; }
+                TaskAction::Ready { json } => { ygg::cli::task_cmd::ready(&pool, json).await?; }
+                TaskAction::Blocked { json } => { ygg::cli::task_cmd::blocked(&pool, json).await?; }
+                TaskAction::Show { reference, json } => { ygg::cli::task_cmd::show(&pool, &reference, json).await?; }
                 TaskAction::Update { reference, title, description, priority, kind, acceptance, design, notes, agent } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     ygg::cli::task_cmd::update(&pool, &reference,
@@ -927,8 +944,8 @@ async fn main() -> anyhow::Result<()> {
                 TaskAction::Label { reference, label } => {
                     ygg::cli::task_cmd::label(&pool, &reference, &label).await?;
                 }
-                TaskAction::Stats { all } => {
-                    ygg::cli::task_cmd::stats(&pool, all).await?;
+                TaskAction::Stats { all, json } => {
+                    ygg::cli::task_cmd::stats(&pool, all, json).await?;
                 }
             }
         }
