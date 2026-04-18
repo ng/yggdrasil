@@ -471,6 +471,75 @@ impl<'a> TaskRepo<'a> {
         Ok(())
     }
 
+    pub async fn set_embedding(
+        &self,
+        task_id: Uuid,
+        embedding: &pgvector::Vector,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE tasks SET embedding = $2 WHERE task_id = $1")
+            .bind(task_id).bind(embedding)
+            .execute(self.pool).await?;
+        Ok(())
+    }
+
+    /// Find probable duplicate pairs: tasks whose embedding cosine is below
+    /// `max_distance` (lower = more similar; 0.0 = identical). Returns pairs
+    /// `(older, newer, similarity)` deduplicated so each pair appears once.
+    /// Scoped to `repo_id`, or global when None.
+    pub async fn find_dupes(
+        &self,
+        repo_id: Option<Uuid>,
+        max_distance: f64,
+        limit: i64,
+    ) -> Result<Vec<(Task, Task, f64)>, sqlx::Error> {
+        // SELF JOIN with a.created_at < b.created_at gives each pair once.
+        // Fetch only (a_id, b_id, distance) then hydrate Task rows — avoids
+        // sqlx's FromRow tuple arity limit.
+        let id_rows: Vec<(Uuid, Uuid, f64)> = sqlx::query_as(
+            r#"
+            SELECT a.task_id, b.task_id, (a.embedding <=> b.embedding)::float8
+            FROM tasks a
+            JOIN tasks b
+              ON a.task_id <> b.task_id
+             AND a.created_at < b.created_at
+             AND a.embedding IS NOT NULL
+             AND b.embedding IS NOT NULL
+             AND ($1::UUID IS NULL OR (a.repo_id = $1 AND b.repo_id = $1))
+             AND (a.embedding <=> b.embedding) < $2
+             AND a.status <> 'closed' AND b.status <> 'closed'
+            ORDER BY (a.embedding <=> b.embedding) ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(repo_id)
+        .bind(max_distance)
+        .bind(limit)
+        .fetch_all(self.pool)
+        .await?;
+
+        if id_rows.is_empty() { return Ok(Vec::new()); }
+        let mut all_ids: Vec<Uuid> = Vec::with_capacity(id_rows.len() * 2);
+        for (a, b, _) in &id_rows { all_ids.push(*a); all_ids.push(*b); }
+        let tasks: Vec<Task> = sqlx::query_as::<_, Task>(
+            r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
+                      kind, status, priority, created_by, assignee, human_flag,
+                      created_at, updated_at, closed_at, close_reason, relevance, external_ref
+               FROM tasks
+               WHERE task_id = ANY($1)"#,
+        )
+        .bind(&all_ids)
+        .fetch_all(self.pool)
+        .await?;
+        let by_id: std::collections::HashMap<Uuid, Task> =
+            tasks.into_iter().map(|t| (t.task_id, t)).collect();
+
+        Ok(id_rows.into_iter().filter_map(|(a_id, b_id, dist)| {
+            let a = by_id.get(&a_id)?.clone();
+            let b = by_id.get(&b_id)?.clone();
+            Some((a, b, (1.0 - dist).clamp(0.0, 1.0)))
+        }).collect())
+    }
+
     pub async fn add_label(&self, task_id: Uuid, label: &str) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO task_labels (task_id, label) VALUES ($1, $2) ON CONFLICT DO NOTHING",

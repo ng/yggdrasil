@@ -491,6 +491,19 @@ enum TaskAction {
         /// Emit results as JSON array
         #[arg(long)] json: bool,
     },
+    /// Surface probable duplicate task pairs via pgvector cosine on the
+    /// title+description embedding stored at create time.
+    Dupes {
+        /// Scan every repo (default: current repo only)
+        #[arg(long)] all: bool,
+        /// Minimum cosine similarity (0.0–1.0). Default 0.85 — high enough
+        /// to keep false positives down, low enough to catch reworded dupes.
+        #[arg(long, default_value_t = 0.85)] min_similarity: f64,
+        /// Max pairs to return
+        #[arg(long, default_value_t = 20)] limit: i64,
+        /// Emit results as JSON array
+        #[arg(long)] json: bool,
+    },
     /// Surface tasks that haven't been touched recently — useful for
     /// triage of abandoned in_progress claims.
     Stale {
@@ -989,6 +1002,9 @@ async fn main() -> anyhow::Result<()> {
                 TaskAction::Blocked { json } => { ygg::cli::task_cmd::blocked(&pool, json).await?; }
                 TaskAction::Stale { days, all, status, json } => {
                     ygg::cli::task_cmd::stale(&pool, days, all, status.as_deref(), json).await?;
+                }
+                TaskAction::Dupes { all, min_similarity, limit, json } => {
+                    ygg::cli::task_cmd::dupes(&pool, all, min_similarity, limit, json).await?;
                 }
                 TaskAction::Show { reference, json } => { ygg::cli::task_cmd::show(&pool, &reference, json).await?; }
                 TaskAction::Update { reference, title, description, priority, kind, acceptance, design, notes, external_ref, agent } => {

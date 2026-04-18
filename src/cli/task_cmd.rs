@@ -175,6 +175,11 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
         )
         .await?;
 
+    // Best-effort embedding for dupe-detection. Title + description carries
+    // most of the task's semantic identity; acceptance/design/notes are
+    // noisy and skew the vector toward implementation detail.
+    embed_task_best_effort(pool, task.task_id, opts.title, opts.description.unwrap_or("")).await;
+
     let task_ref = format!("{}-{}", repo.task_prefix, task.seq);
     let _ = EventRepo::new(pool).emit(
         EventKind::TaskCreated,
@@ -658,6 +663,7 @@ pub async fn create_from_markdown(
                 ..Default::default()
             },
         ).await?;
+        embed_task_best_effort(pool, task.task_id, &p.title, &p.body).await;
 
         // Link to parent: parent-task depends on child-task so the parent
         // stays blocked until all children close (rollup semantics).
@@ -757,6 +763,114 @@ fn parse_markdown_tasks(source: &str) -> Vec<ParsedHeader<'_>> {
         out.push(prev);
     }
     out
+}
+
+/// Embed a task's title+description via Ollama and persist the vector.
+/// Best-effort: Ollama unreachable or an embed error is silently swallowed.
+/// Skipped entirely when title+description fits in fewer than ~5 chars —
+/// no point embedding "test" or "" and bloating the HNSW index.
+async fn embed_task_best_effort(
+    pool: &sqlx::PgPool,
+    task_id: Uuid,
+    title: &str,
+    description: &str,
+) {
+    let source = if description.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n{description}")
+    };
+    if source.trim().chars().count() < 5 { return; }
+    // Truncate to the embedder's token ceiling (all-minilm caps at 256 tokens,
+    // ~1500 chars is well under).
+    let source = if source.len() > 1500 { &source[..1500] } else { &source };
+
+    let embedder = crate::embed::Embedder::default_ollama();
+    if !embedder.health_check().await { return; }
+    if let Ok(v) = embedder.embed(source).await {
+        let _ = TaskRepo::new(pool).set_embedding(task_id, &v).await;
+    }
+}
+
+pub async fn dupes(
+    pool: &sqlx::PgPool,
+    all_repos: bool,
+    min_similarity: f64,
+    limit: i64,
+    json: bool,
+) -> Result<(), anyhow::Error> {
+    let repo_id = if all_repos {
+        None
+    } else {
+        Some(resolve_cwd_repo(pool).await?.repo_id)
+    };
+    let max_distance = (1.0 - min_similarity).clamp(0.0, 1.0);
+    let pairs = TaskRepo::new(pool)
+        .find_dupes(repo_id, max_distance, limit)
+        .await?;
+
+    if json {
+        let repo_repo = RepoRepo::new(pool);
+        let mut prefixes: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+        for (a, b, _) in &pairs {
+            for id in [a.repo_id, b.repo_id] {
+                if !prefixes.contains_key(&id) {
+                    if let Some(r) = repo_repo.get(id).await? {
+                        prefixes.insert(id, r.task_prefix);
+                    }
+                }
+            }
+        }
+        let out: Vec<_> = pairs.iter().map(|(a, b, sim)| {
+            let pa = prefixes.get(&a.repo_id).cloned().unwrap_or_default();
+            let pb = prefixes.get(&b.repo_id).cloned().unwrap_or_default();
+            serde_json::json!({
+                "similarity": sim,
+                "a": { "ref": format!("{pa}-{}", a.seq), "title": a.title },
+                "b": { "ref": format!("{pb}-{}", b.seq), "title": b.title },
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "count": pairs.len(),
+            "min_similarity": min_similarity,
+            "results": out,
+        }))?);
+        return Ok(());
+    }
+
+    if pairs.is_empty() {
+        println!("No probable duplicates above {:.0}% similarity.", min_similarity * 100.0);
+        println!("(If tasks were created before this migration, re-run with `ygg task admin reembed` — TODO.)");
+        return Ok(());
+    }
+    let repo_repo = RepoRepo::new(pool);
+    let mut prefixes: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+    for (a, b, _) in &pairs {
+        for id in [a.repo_id, b.repo_id] {
+            if !prefixes.contains_key(&id) {
+                if let Some(r) = repo_repo.get(id).await? {
+                    prefixes.insert(id, r.task_prefix);
+                }
+            }
+        }
+    }
+    println!("{} probable duplicate pair(s):", pairs.len());
+    for (a, b, sim) in &pairs {
+        let pa = prefixes.get(&a.repo_id).cloned().unwrap_or_default();
+        let pb = prefixes.get(&b.repo_id).cloned().unwrap_or_default();
+        println!(
+            "  {:>3.0}%  {pa}-{}  ↔  {pb}-{}",
+            sim * 100.0, a.seq, b.seq
+        );
+        println!("         {}", truncate_cli(&a.title, 70));
+        println!("         {}", truncate_cli(&b.title, 70));
+    }
+    Ok(())
+}
+
+fn truncate_cli(s: &str, max: usize) -> String {
+    if s.chars().count() <= max { return s.to_string(); }
+    s.chars().take(max).collect::<String>() + "…"
 }
 
 /// JSON emit path shared by list/ready/blocked. Wraps each task with its
