@@ -210,7 +210,7 @@ fn kind_style(k: &TaskKind) -> (Color, &'static str) {
     match k {
         TaskKind::Epic => (Color::Magenta, "◉"),
         TaskKind::Feature => (Color::Cyan, "✚"),
-        TaskKind::Bug => (Color::Red, "✗"),
+        TaskKind::Bug => (Color::Red, "🐞"),
         TaskKind::Task => (Color::White, "○"),
         TaskKind::Chore => (Color::DarkGray, "·"),
     }

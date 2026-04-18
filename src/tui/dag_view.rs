@@ -406,7 +406,7 @@ impl DagView {
                 let (kind_color, kind_glyph) = match t.kind {
                     TaskKind::Epic    => (Color::Magenta, "◉"),
                     TaskKind::Feature => (Color::Cyan,    "✚"),
-                    TaskKind::Bug     => (Color::Red,     "✗"),
+                    TaskKind::Bug     => (Color::Red,     "🐞"),
                     TaskKind::Chore   => (Color::DarkGray,"·"),
                     TaskKind::Task    => (Color::White,   "○"),
                 };
