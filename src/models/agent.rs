@@ -44,6 +44,20 @@ pub struct AgentWorkflow {
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub persona: Option<String>,
+}
+
+impl AgentWorkflow {
+    /// Display key — `name` when persona is unset, `name:persona` otherwise.
+    /// Use when rendering to humans; prefer `(agent_name, persona)` for
+    /// lookups and joins.
+    pub fn display_name(&self) -> String {
+        match &self.persona {
+            Some(p) if !p.is_empty() => format!("{}:{p}", self.agent_name),
+            _ => self.agent_name.clone(),
+        }
+    }
 }
 
 pub struct AgentRepo<'a> {
@@ -55,18 +69,29 @@ impl<'a> AgentRepo<'a> {
         Self { pool }
     }
 
-    /// Register a new agent or return existing one by name.
+    /// Register a new agent or return existing one by (name, persona).
+    /// The compound key means the same cwd can host multiple personas.
     pub async fn register(&self, name: &str) -> Result<AgentWorkflow, sqlx::Error> {
+        self.register_with_persona(name, None).await
+    }
+
+    pub async fn register_with_persona(
+        &self,
+        name: &str,
+        persona: Option<&str>,
+    ) -> Result<AgentWorkflow, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            INSERT INTO agents (agent_name)
-            VALUES ($1)
-            ON CONFLICT (agent_name) DO UPDATE SET updated_at = now()
+            INSERT INTO agents (agent_name, persona)
+            VALUES ($1, $2)
+            ON CONFLICT (agent_name, COALESCE(persona, ''))
+              DO UPDATE SET updated_at = now()
             RETURNING agent_id, agent_name, current_state, head_node_id,
-                      digest_id, context_tokens, metadata, created_at, updated_at
+                      digest_id, context_tokens, metadata, created_at, updated_at, persona
             "#,
         )
         .bind(name)
+        .bind(persona)
         .fetch_one(self.pool)
         .await
     }
@@ -84,7 +109,7 @@ impl<'a> AgentRepo<'a> {
             SET current_state = $3::agent_state, updated_at = now()
             WHERE agent_id = $1 AND current_state = $2::agent_state
             RETURNING agent_id, agent_name, current_state, head_node_id,
-                      digest_id, context_tokens, metadata, created_at, updated_at
+                      digest_id, context_tokens, metadata, created_at, updated_at, persona
             "#,
         )
         .bind(agent_id)
@@ -211,7 +236,7 @@ impl<'a> AgentRepo<'a> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
             FROM agents WHERE agent_id = $1
             "#,
         )
@@ -221,15 +246,40 @@ impl<'a> AgentRepo<'a> {
     }
 
     /// Get agent by name.
+    /// Lookup by bare agent_name. When multiple personas share the name,
+    /// returns the one with NULL persona if it exists, else the most
+    /// recently updated. Callers that care about persona should use
+    /// `get_by_name_persona`.
     pub async fn get_by_name(&self, name: &str) -> Result<Option<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
             FROM agents WHERE agent_name = $1
+            ORDER BY (persona IS NOT NULL), updated_at DESC
+            LIMIT 1
             "#,
         )
         .bind(name)
+        .fetch_optional(self.pool)
+        .await
+    }
+
+    pub async fn get_by_name_persona(
+        &self,
+        name: &str,
+        persona: Option<&str>,
+    ) -> Result<Option<AgentWorkflow>, sqlx::Error> {
+        sqlx::query_as::<_, AgentWorkflow>(
+            r#"
+            SELECT agent_id, agent_name, current_state, head_node_id,
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            FROM agents
+            WHERE agent_name = $1 AND COALESCE(persona, '') = COALESCE($2, '')
+            "#,
+        )
+        .bind(name)
+        .bind(persona)
         .fetch_optional(self.pool)
         .await
     }
@@ -240,7 +290,7 @@ impl<'a> AgentRepo<'a> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
             FROM agents
             WHERE archived_at IS NULL
             ORDER BY created_at
@@ -255,7 +305,7 @@ impl<'a> AgentRepo<'a> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
             FROM agents ORDER BY created_at
             "#,
         )
@@ -316,7 +366,7 @@ impl<'a> AgentRepo<'a> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
             FROM agents
             WHERE current_state IN ('executing', 'waiting_tool', 'planning', 'context_flush')
               AND updated_at < now() - make_interval(secs => $1)

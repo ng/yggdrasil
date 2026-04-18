@@ -565,10 +565,16 @@ impl DashboardView {
 
             // Attach a "×N" badge when an agent has >1 live CC session —
             // means multiple windows are racing on the same identity.
+            // Persona, when set, appears as " :role" so you can tell two
+            // personas of the same repo apart at a glance.
             let live = self.live_sessions_by_agent.get(&agent.agent_id).copied().unwrap_or(0);
+            let base = match &agent.persona {
+                Some(p) if !p.is_empty() => format!("{} :{p}", agent.agent_name),
+                _ => agent.agent_name.clone(),
+            };
             let name_cell = if live > 1 {
-                format!("{}  ×{}", agent.agent_name, live)
-            } else { agent.agent_name.clone() };
+                format!("{base}  ×{live}")
+            } else { base };
 
             Row::new(vec![
                 Cell::from(name_cell),

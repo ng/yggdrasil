@@ -736,12 +736,14 @@ async fn main() -> anyhow::Result<()> {
                     if agents.is_empty() {
                         println!("no agents");
                     } else {
-                        println!("{:<24} {:<12} {:<10} {}", "NAME", "STATE", "AGE", "");
+                        println!("{:<24} {:<12} {:<10} {:<10}", "NAME", "PERSONA", "STATE", "AGE");
                         let now = chrono::Utc::now();
                         for a in agents {
                             let age_days = now.signed_duration_since(a.updated_at).num_days();
-                            let age = if age_days == 0 { format!("<1d") } else { format!("{age_days}d") };
-                            println!("{:<24} {:<12} {:<10}", a.agent_name, a.current_state, age);
+                            let age = if age_days == 0 { "<1d".to_string() } else { format!("{age_days}d") };
+                            let persona = a.persona.as_deref().unwrap_or("—");
+                            println!("{:<24} {:<12} {:<10} {:<10}",
+                                a.agent_name, persona, a.current_state, age);
                         }
                     }
                 }

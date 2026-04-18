@@ -14,9 +14,15 @@ pub async fn set_tool(
     tool: &str,
 ) -> Result<(), anyhow::Error> {
     let repo = AgentRepo::new(pool);
-    let Some(agent) = repo.get_by_name(agent_name).await? else {
-        debug!("agent set-tool: '{agent_name}' not registered — skipping");
-        return Ok(());
+    let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
+    // Auto-register on first tool-touch so a hook-driven persona row exists
+    // even when the user never ran `ygg prime` explicitly for that persona.
+    let agent = match repo.get_by_name_persona(agent_name, persona.as_deref()).await? {
+        Some(a) => a,
+        None => {
+            debug!("agent set-tool: minting new row for ({agent_name}, {persona:?})");
+            repo.register_with_persona(agent_name, persona.as_deref()).await?
+        }
     };
 
     // Per-session state is the source of truth; agents.current_state is kept

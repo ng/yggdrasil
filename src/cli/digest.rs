@@ -21,7 +21,8 @@ pub async fn execute(
     let node_repo = NodeRepo::new(pool);
     let event_repo = EventRepo::new(pool);
 
-    let agent = match agent_repo.get_by_name(agent_name).await? {
+    let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
+    let agent = match agent_repo.get_by_name_persona(agent_name, persona.as_deref()).await? {
         Some(a) => a,
         None => {
             debug!("digest: agent '{}' not found — skipping", agent_name);

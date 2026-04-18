@@ -51,8 +51,11 @@ async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<
     let config = AppConfig::from_env()?;
     let pool = db::create_pool(&config.database_url).await?;
     let agent_repo = AgentRepo::new(&pool);
-    // Register (or touch) this agent so it exists in the DB.
-    let agent = agent_repo.register(agent_name).await?;
+    // Register (or touch) this agent so it exists in the DB. Persona from
+    // $YGG_AGENT_PERSONA forms a compound key with agent_name — same cwd,
+    // different role = different agent row.
+    let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
+    let agent = agent_repo.register_with_persona(agent_name, persona.as_deref()).await?;
 
     // Fire-and-forget classifier warm-up so the first inject doesn't
     // eat a cold-start penalty. Only does anything if YGG_CLASSIFIER=on.
