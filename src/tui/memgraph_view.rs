@@ -15,6 +15,12 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use sqlx::{PgPool, Row as SqlxRow};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemSource {
+    Node,
+    Memory { pinned: bool, scope: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct MemNode {
     pub id: Uuid,
@@ -23,6 +29,7 @@ pub struct MemNode {
     pub created_at: DateTime<Utc>,
     pub snippet: String,
     pub full_text: String,
+    pub source: MemSource,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +91,8 @@ impl MemGraphView {
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
-        let rows = sqlx::query(
+        // Nodes (transcript-level memory).
+        let node_rows = sqlx::query(
             r#"
             SELECT n.id, n.kind::text AS kind, n.created_at, n.content,
                    COALESCE(a.agent_name, '') AS agent_name
@@ -97,7 +105,7 @@ impl MemGraphView {
             "#
         ).fetch_all(pool).await.unwrap_or_default();
 
-        self.recent = rows.into_iter().map(|r| {
+        let mut combined: Vec<MemNode> = node_rows.into_iter().map(|r| {
             let content: serde_json::Value = r.try_get("content").unwrap_or(serde_json::Value::Null);
             let full_text = extract_full_text(&content);
             let snippet = full_text.replace('\n', " ");
@@ -108,8 +116,46 @@ impl MemGraphView {
                 created_at: r.get("created_at"),
                 snippet,
                 full_text,
+                source: MemSource::Node,
             }
         }).collect();
+
+        // Memories (first-class scoped notes). Surface them alongside nodes.
+        let mem_rows = sqlx::query(
+            r#"
+            SELECT memory_id, scope::text AS scope, created_at, text, agent_name, pinned
+            FROM memories
+            WHERE embedding IS NOT NULL
+              AND (expires_at IS NULL OR expires_at > now())
+            ORDER BY pinned DESC, created_at DESC
+            LIMIT 40
+            "#
+        ).fetch_all(pool).await.unwrap_or_default();
+
+        for r in mem_rows {
+            let text: String = r.get("text");
+            let scope: String = r.get("scope");
+            let pinned: bool = r.get("pinned");
+            let snippet = text.replace('\n', " ");
+            combined.push(MemNode {
+                id: r.get("memory_id"),
+                kind: "memory".to_string(),
+                agent_name: r.get("agent_name"),
+                created_at: r.get("created_at"),
+                snippet,
+                full_text: text,
+                source: MemSource::Memory { pinned, scope },
+            });
+        }
+
+        // Merge order: pinned memories first, then everything by created_at DESC.
+        combined.sort_by(|a, b| {
+            let a_pin = matches!(&a.source, MemSource::Memory { pinned: true, .. });
+            let b_pin = matches!(&b.source, MemSource::Memory { pinned: true, .. });
+            b_pin.cmp(&a_pin).then(b.created_at.cmp(&a.created_at))
+        });
+        combined.truncate(40);
+        self.recent = combined;
 
         if self.recent.is_empty() {
             self.last_status = "no embedded nodes yet — write directives or run sessions".into();
@@ -139,22 +185,44 @@ impl MemGraphView {
     }
 
     async fn refresh_neighbors(&mut self, pool: &PgPool, for_id: Uuid) {
-        let row = sqlx::query("SELECT embedding FROM nodes WHERE id = $1")
-            .bind(for_id).fetch_optional(pool).await.ok().flatten();
-        let Some(row) = row else { self.neighbors.clear(); return; };
-        let embedding: Option<Vector> = row.try_get("embedding").ok();
+        // The focus id could live in either nodes or memories — try both.
+        let embedding: Option<Vector> = {
+            let node = sqlx::query("SELECT embedding FROM nodes WHERE id = $1")
+                .bind(for_id).fetch_optional(pool).await.ok().flatten();
+            if let Some(r) = node {
+                r.try_get("embedding").ok()
+            } else {
+                sqlx::query("SELECT embedding FROM memories WHERE memory_id = $1")
+                    .bind(for_id).fetch_optional(pool).await.ok().flatten()
+                    .and_then(|r| r.try_get("embedding").ok())
+            }
+        };
         let Some(embedding) = embedding else { self.neighbors.clear(); return; };
 
+        // Union neighbors from nodes + memories. Postgres sorts the whole
+        // set by distance; we take the top 8 across both sources.
         let rows = sqlx::query(
             r#"
-            SELECT n.id, n.kind::text AS kind, n.created_at, n.content,
-                   COALESCE(a.agent_name, '') AS agent_name,
-                   (n.embedding <=> $1)::float8 AS distance
-            FROM nodes n
-            LEFT JOIN agents a ON a.agent_id = n.agent_id
-            WHERE n.embedding IS NOT NULL
-              AND n.id <> $2
-            ORDER BY n.embedding <=> $1
+            (
+              SELECT n.id AS id, n.kind::text AS kind, n.created_at,
+                     n.content::text AS content_text,
+                     COALESCE(a.agent_name, '') AS agent_name,
+                     (n.embedding <=> $1)::float8 AS distance
+              FROM nodes n
+              LEFT JOIN agents a ON a.agent_id = n.agent_id
+              WHERE n.embedding IS NOT NULL AND n.id <> $2
+            )
+            UNION ALL
+            (
+              SELECT memory_id AS id, 'memory'::text AS kind, created_at,
+                     text AS content_text,
+                     agent_name,
+                     (embedding <=> $1)::float8 AS distance
+              FROM memories
+              WHERE embedding IS NOT NULL AND memory_id <> $2
+                AND (expires_at IS NULL OR expires_at > now())
+            )
+            ORDER BY distance
             LIMIT 8
             "#
         )
@@ -163,14 +231,24 @@ impl MemGraphView {
         .fetch_all(pool).await.unwrap_or_default();
 
         self.neighbors = rows.into_iter().map(|r| {
-            let content: serde_json::Value = r.try_get("content").unwrap_or(serde_json::Value::Null);
+            let kind: String = r.get("kind");
+            let content_text: String = r.try_get("content_text").unwrap_or_default();
             let distance: f64 = r.try_get("distance").unwrap_or(1.0);
+            let snippet = if kind == "memory" {
+                content_text.replace('\n', " ")
+            } else {
+                // Nodes store content as JSON; pull the most useful field.
+                serde_json::from_str::<serde_json::Value>(&content_text)
+                    .ok()
+                    .map(|v| extract_snippet(&v))
+                    .unwrap_or(content_text)
+            };
             Neighbor {
                 id: r.get("id"),
-                kind: r.get("kind"),
+                kind,
                 agent_name: r.get("agent_name"),
                 similarity: (1.0 - distance).clamp(0.0, 1.0),
-                snippet: extract_snippet(&content),
+                snippet,
                 created_at: r.get("created_at"),
             }
         }).collect();
@@ -252,17 +330,32 @@ impl MemGraphView {
             Cell::from("SNIPPET").style(Style::default().fg(Color::Gray)),
         ]);
         let rows: Vec<Row> = self.recent.iter().map(|n| {
-            let (glyph, color) = kind_style(&n.kind);
+            let (glyph, color, label) = match &n.source {
+                MemSource::Memory { pinned: true, scope } =>
+                    ("★", Color::Yellow, format!("memory:{scope}")),
+                MemSource::Memory { pinned: false, scope } =>
+                    ("♦", Color::Blue,   format!("memory:{scope}")),
+                MemSource::Node => {
+                    let (g, c) = kind_style(&n.kind);
+                    (g, c, n.kind.clone())
+                }
+            };
             let age = humanize_since(n.created_at);
             Row::new(vec![
-                Cell::from(format!("{glyph} {}", n.kind)).style(Style::default().fg(color)),
+                Cell::from(format!("{glyph} {}", label)).style(Style::default().fg(color)),
                 Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
                 Cell::from(age).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(short(&n.snippet, 120)),
             ])
         }).collect();
 
-        let title = format!(" Recent high-signal nodes ({}) · Enter=detail ", self.recent.len());
+        let mem_count = self.recent.iter()
+            .filter(|n| matches!(n.source, MemSource::Memory { .. })).count();
+        let node_count = self.recent.len() - mem_count;
+        let title = format!(
+            " Recent: {} nodes + {} memories  ·  Enter=detail ",
+            node_count, mem_count
+        );
         let table = Table::new(rows, [
             Constraint::Length(16),
             Constraint::Length(18),
