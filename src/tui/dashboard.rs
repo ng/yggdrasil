@@ -98,10 +98,14 @@ pub struct DashboardView {
     prompts_hourly: Vec<u64>,                 // global, last 24h, oldest→newest
     per_agent_hourly: HashMap<Uuid, [u64; 24]>, // per agent, last 24h
     recent_transitions: Vec<(chrono::DateTime<chrono::Utc>, String, String, String, Option<String>)>,
-    /// Live workers — tasks currently in_progress with who owns them.
-    /// (task_ref, agent_label, title, updated_at)
-    workers: Vec<(String, String, String, chrono::DateTime<chrono::Utc>)>,
-    // (ts, agent_name, from_state, to_state, tool)
+    /// Live workers. Separate agent / persona / state so the panel can
+    /// render them as proper columns instead of one squashed label.
+    /// (task_ref, agent, persona, state_glyph, state_color, title, started_at, tmux_window)
+    workers: Vec<WorkerRow>,
+    /// Cursor position in the Workers panel — used by the Enter-to-attach
+    /// keybind. Only moves when Workers has focus (see DashboardFocus).
+    pub worker_sel: usize,
+    pub focus: DashboardFocus,
 
     /// Transcript-file-size pressure cache. Reading ~/.claude/projects on
     /// every 500ms render is expensive; cache per-agent for PRESSURE_TTL.
@@ -116,6 +120,24 @@ pub struct DashboardView {
     pub live_sessions_by_agent: HashMap<Uuid, i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DashboardFocus {
+    Agents,
+    Workers,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerRow {
+    pub task_ref: String,
+    pub agent: String,
+    pub persona: Option<String>,
+    pub state: String,
+    pub title: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub tmux_session: String,
+    pub tmux_window: String,
+}
+
 impl DashboardView {
     pub fn new() -> Self {
         Self {
@@ -127,6 +149,8 @@ impl DashboardView {
             per_agent_hourly: HashMap::new(),
             recent_transitions: Vec::new(),
             workers: Vec::new(),
+            worker_sel: 0,
+            focus: DashboardFocus::Agents,
             pressure_cache: HashMap::new(),
             session_scoped: false,
             current_session_id: None,
@@ -274,14 +298,14 @@ impl DashboardView {
             (ts, name, from, to, tool)
         }).collect();
 
-        // Workers panel reads from the workers table now — actual
-        // spawned CC sessions, not the tasks.status proxy. ended_at IS
-        // NULL filters out terminated ones; the observer (yggdrasil-51)
-        // will eventually update state to completed/failed/abandoned.
-        let worker_rows: Vec<(String, i32, String, Option<String>, String, chrono::DateTime<chrono::Utc>)> =
+        // Workers panel reads from the workers table. Observer
+        // (yggdrasil-51) maintains state; we just show it.
+        let worker_rows: Vec<(String, i32, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, String, String)> =
             sqlx::query_as(
-                r#"SELECT r.task_prefix, t.seq, t.title, a.agent_name,
-                          w.state::text, w.started_at
+                r#"SELECT r.task_prefix, t.seq, t.title,
+                          a.agent_name, a.persona,
+                          w.state::text, w.started_at,
+                          w.tmux_session, w.tmux_window
                      FROM workers w
                      JOIN tasks t ON t.task_id = w.task_id
                      JOIN repos r ON r.repo_id = t.repo_id
@@ -290,11 +314,21 @@ impl DashboardView {
                     ORDER BY w.started_at DESC
                     LIMIT 10"#,
             ).fetch_all(pool).await.unwrap_or_default();
-        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, _state, ts)| {
-            let task_ref = format!("{prefix}-{seq}");
-            let agent_label = agent.unwrap_or_else(|| "unassigned".into());
-            (task_ref, agent_label, title, ts)
+        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, persona, state, ts, ts_sess, ts_win)| {
+            WorkerRow {
+                task_ref: format!("{prefix}-{seq}"),
+                agent: agent.unwrap_or_else(|| "unassigned".into()),
+                persona,
+                state,
+                title,
+                started_at: ts,
+                tmux_session: ts_sess,
+                tmux_window: ts_win,
+            }
         }).collect();
+        if self.worker_sel >= self.workers.len() {
+            self.worker_sel = self.workers.len().saturating_sub(1);
+        }
 
         Ok(())
     }
@@ -353,24 +387,70 @@ impl DashboardView {
             return;
         }
         let now = Utc::now();
-        let lines: Vec<Line> = self.workers.iter().map(|(task_ref, agent, title, ts)| {
-            let age = humanize_duration((now - *ts).num_seconds().max(0));
+        let focused = self.focus == DashboardFocus::Workers;
+        let lines: Vec<Line> = self.workers.iter().enumerate().map(|(i, w)| {
+            let age = humanize_duration((now - w.started_at).num_seconds().max(0));
+            let (g, c) = worker_state_style(&w.state);
+            let is_cursor = focused && i == self.worker_sel;
+            let cursor = if is_cursor { "▸ " } else { "  " };
+            // needs_attention rows highlight with a yellow background so
+            // they catch the eye even at the edge of your vision.
+            let needs_attn = w.state == "needs_attention";
+            let title_style = if needs_attn {
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else if is_cursor {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
             Line::from(vec![
-                Span::styled("  ▶ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled(task_ref.clone(),
+                Span::styled(cursor, Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{g} "), Style::default().fg(c).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<16}", w.task_ref),
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled(format!("{agent:<18}"), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{:<16}", short_cell(&w.agent, 16)),
+                    Style::default().fg(Color::White)),
+                Span::styled(format!("{:<12}",
+                    w.persona.as_deref().map(|p| short_cell(p, 12)).unwrap_or_else(|| "—".into())),
+                    Style::default().fg(Color::Magenta)),
+                Span::styled(format!("{:<16}", w.state),
+                    Style::default().fg(c)),
                 Span::styled(format!("{age:<6}"), Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::raw(short_title(title)),
+                Span::raw(" "),
+                Span::styled(short_title(&w.title), title_style),
             ])
         }).collect();
-        let title = format!(" Workers — {} running  ·  attach: tmux attach -t yggdrasil ",
+        let title = format!(" Workers — {} running  ·  w=focus  ↑↓ scroll  Enter=attach ",
             self.workers.len());
-        let para = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title));
+        let block = Block::default()
+            .borders(Borders::ALL).title(title)
+            .border_style(if focused {
+                Style::default().fg(Color::Cyan)
+            } else { Style::default() });
+        let para = Paragraph::new(lines).block(block);
         frame.render_widget(para, area);
+    }
+
+    pub fn workers_focus(&mut self) {
+        self.focus = DashboardFocus::Workers;
+        if self.worker_sel >= self.workers.len() {
+            self.worker_sel = 0;
+        }
+    }
+    pub fn agents_focus(&mut self) { self.focus = DashboardFocus::Agents; }
+
+    pub fn worker_up(&mut self) {
+        if self.workers.is_empty() { return; }
+        self.worker_sel = if self.worker_sel == 0 {
+            self.workers.len() - 1
+        } else { self.worker_sel - 1 };
+    }
+    pub fn worker_down(&mut self) {
+        if self.workers.is_empty() { return; }
+        self.worker_sel = (self.worker_sel + 1) % self.workers.len();
+    }
+    pub fn selected_worker(&self) -> Option<&WorkerRow> {
+        self.workers.get(self.worker_sel)
     }
 
     fn render_transitions(&self, frame: &mut Frame, area: Rect) {
@@ -782,6 +862,24 @@ fn text_sparkline(series: &[u64], max: u64) -> String {
 fn short_title(s: &str) -> String {
     if s.chars().count() <= 60 { s.to_string() }
     else { s.chars().take(60).collect::<String>() + "…" }
+}
+
+fn short_cell(s: &str, max: usize) -> String {
+    if s.chars().count() <= max { s.to_string() }
+    else { s.chars().take(max.saturating_sub(1)).collect::<String>() + "…" }
+}
+
+fn worker_state_style(state: &str) -> (&'static str, Color) {
+    match state {
+        "spawned"         => ("◌", Color::DarkGray),
+        "running"         => ("▶", Color::Green),
+        "idle"            => ("•", Color::Gray),
+        "needs_attention" => ("⚠", Color::Yellow),
+        "completed"       => ("✓", Color::DarkGray),
+        "failed"          => ("✗", Color::Red),
+        "abandoned"       => ("⊘", Color::DarkGray),
+        _                 => ("?", Color::Gray),
+    }
 }
 
 fn humanize_duration(secs: i64) -> String {

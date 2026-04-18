@@ -47,6 +47,10 @@ pub struct App {
     pub status_tail: Vec<(String, String, String)>, // (hh:mm:ss, kind, one-line detail)
     /// Right-hand-side orchestration stats (filled each refresh tick).
     pub ops_stats: OpsStats,
+    /// When Enter on the Workers panel fires, we defer the actual tmux
+    /// attach until after ratatui's alternate-screen teardown to avoid
+    /// a half-mode-switched terminal. Set here, read in `run` post-loop.
+    pub attach_pending: Option<(String, String)>,  // (session, window)
 }
 
 /// Lightweight orchestration snapshot rendered on the right side of the
@@ -78,6 +82,7 @@ impl App {
             query_focus: false,
             status_tail: Vec::new(),
             ops_stats: OpsStats::default(),
+            attach_pending: None,
         }
     }
 
@@ -248,13 +253,24 @@ impl App {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
             }
+            KeyCode::Char('w') if self.active_view == ActiveView::Dashboard => {
+                // Toggle focus between agents + workers panel. Whatever's
+                // focused gets arrow-key + Enter attention.
+                match self.dashboard.focus {
+                    super::dashboard::DashboardFocus::Agents => self.dashboard.workers_focus(),
+                    super::dashboard::DashboardFocus::Workers => self.dashboard.agents_focus(),
+                }
+            }
             KeyCode::Char('w') if self.active_view == ActiveView::Eval => {
                 self.eval.cycle_window();
                 let _ = self.eval.refresh(pool).await;
             }
             KeyCode::Up => match self.active_view {
                 ActiveView::Dag => self.dag.scroll_up(),
-                ActiveView::Dashboard => self.dashboard.select_prev(),
+                ActiveView::Dashboard => match self.dashboard.focus {
+                    super::dashboard::DashboardFocus::Agents => self.dashboard.select_prev(),
+                    super::dashboard::DashboardFocus::Workers => self.dashboard.worker_up(),
+                },
                 ActiveView::Tasks => self.tasks.select_prev(),
                 ActiveView::Trace => self.trace.select_prev(),
                 ActiveView::Logs => self.logs.scroll_up(),
@@ -263,7 +279,10 @@ impl App {
             },
             KeyCode::Down => match self.active_view {
                 ActiveView::Dag => self.dag.scroll_down(),
-                ActiveView::Dashboard => self.dashboard.select_next(),
+                ActiveView::Dashboard => match self.dashboard.focus {
+                    super::dashboard::DashboardFocus::Agents => self.dashboard.select_next(),
+                    super::dashboard::DashboardFocus::Workers => self.dashboard.worker_down(),
+                },
                 ActiveView::Tasks => self.tasks.select_next(),
                 ActiveView::Trace => self.trace.select_next(),
                 ActiveView::Logs => self.logs.scroll_down(),
@@ -271,17 +290,29 @@ impl App {
                 _ => {}
             },
             KeyCode::Enter => match self.active_view {
-                ActiveView::Dashboard => {
-                    // Jump to DAG with the owner filter pre-set to the
-                    // agent whose row was selected. Without this, DAG just
-                    // showed the cross-repo view regardless of the click.
-                    if let Some(agent) = self.dashboard.selected_agent_full().cloned() {
-                        self.dag.agent_filter =
-                            super::dag_view::AgentFilter::Specific(agent.agent_id);
-                        let _ = self.dag.refresh(pool).await;
-                        self.set_view(ActiveView::Dag);
+                ActiveView::Dashboard => match self.dashboard.focus {
+                    super::dashboard::DashboardFocus::Workers => {
+                        // Attach to the selected worker's tmux window.
+                        // Actual tmux exec runs after we tear down ratatui
+                        // in the outer `run` loop — writing to a pending
+                        // slot avoids half-mode-switched terminals.
+                        if let Some(w) = self.dashboard.selected_worker().cloned() {
+                            self.attach_pending =
+                                Some((w.tmux_session, w.tmux_window));
+                            self.should_quit = true;
+                        }
                     }
-                }
+                    super::dashboard::DashboardFocus::Agents => {
+                        // Jump to DAG with the owner filter pre-set to the
+                        // agent whose row was selected.
+                        if let Some(agent) = self.dashboard.selected_agent_full().cloned() {
+                            self.dag.agent_filter =
+                                super::dag_view::AgentFilter::Specific(agent.agent_id);
+                            let _ = self.dag.refresh(pool).await;
+                            self.set_view(ActiveView::Dag);
+                        }
+                    }
+                },
                 ActiveView::Dag => self.dag.toggle_detail(),
                 ActiveView::Logs => self.logs.toggle_detail(),
                 ActiveView::MemGraph => self.memgraph.toggle_detail(),
@@ -505,6 +536,48 @@ fn event_glyph(kind: &str) -> (&'static str, Color) {
     }
 }
 
+/// Boot reconciliation. Cross-check the workers table against live tmux
+/// windows; abandon any row whose window is gone. Called once at TUI
+/// startup and also cheap to call from anywhere else (idempotent).
+pub async fn reconcile_workers(pool: &PgPool) -> Result<(), anyhow::Error> {
+    use crate::models::worker::{WorkerRepo, WorkerState};
+    use std::collections::{HashMap, HashSet};
+    let workers = WorkerRepo::new(pool).list_live().await.unwrap_or_default();
+    if workers.is_empty() { return Ok(()); }
+
+    let mut by_session: HashMap<String, HashSet<String>> = HashMap::new();
+    for w in &workers {
+        by_session.entry(w.tmux_session.clone()).or_default();
+    }
+    for session in by_session.keys().cloned().collect::<Vec<_>>() {
+        let out = std::process::Command::new("tmux")
+            .args(["list-windows", "-t", &session, "-F", "#{window_name}"])
+            .output();
+        let set = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines().map(|s| s.trim().to_string()).collect(),
+            _ => HashSet::new(),  // session missing → treat all as gone
+        };
+        by_session.insert(session, set);
+    }
+
+    let repo = WorkerRepo::new(pool);
+    let mut n = 0;
+    for w in workers {
+        let live = by_session.get(&w.tmux_session)
+            .map(|set| set.contains(&w.tmux_window)).unwrap_or(false);
+        if !live {
+            let _ = repo.set_state(
+                w.worker_id, WorkerState::Abandoned,
+                Some("reconciled at TUI start — window absent"),
+            ).await;
+            n += 1;
+        }
+    }
+    if n > 0 { tracing::info!(reconciled = n, "worker boot reconciliation"); }
+    Ok(())
+}
+
 async fn reqwest_ping() -> bool {
     let base = std::env::var("OLLAMA_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:11434".into());
@@ -556,6 +629,13 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
             .unwrap_or_else(|| "ygg".to_string())
     });
 
+    // Boot reconciliation (yggdrasil-53). Any worker row marked live
+    // whose tmux window is absent gets flipped to abandoned so the
+    // dashboard reflects reality after a machine restart.
+    if let Err(e) = reconcile_workers(pool).await {
+        tracing::warn!(error = %e, "worker reconciliation on TUI start failed");
+    }
+
     let mut app = App::new(agent_name);
 
     loop {
@@ -591,5 +671,26 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
     terminal::disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    // Honor a deferred tmux attach from Workers-panel Enter. If we're
+    // already inside tmux, switch-client; otherwise, exec attach so
+    // the ygg-tui process is replaced by tmux.
+    if let Some((session, window)) = app.attach_pending {
+        let target = format!("{session}:{window}");
+        if std::env::var("TMUX").is_ok() {
+            let _ = std::process::Command::new("tmux")
+                .args(["switch-client", "-t", &target])
+                .status();
+        } else {
+            // exec replaces the current process — ratatui is done, so
+            // hand the terminal over to tmux cleanly.
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new("tmux")
+                .args(["attach", "-t", &session, ";", "select-window", "-t", &target])
+                .exec();
+            // exec returns only on failure; print and continue.
+            eprintln!("tmux attach failed: {err}");
+        }
+    }
     Ok(())
 }
