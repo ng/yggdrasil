@@ -239,6 +239,12 @@ enum Commands {
     /// cache hit rate, recalls/24h.
     Bar,
 
+    /// Manage task worktrees (click-to-do).
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeAction,
+    },
+
     /// Retroactively scrub content from already-stored nodes. Use when a
     /// secret slipped past the write-time redactor. See ADR yggdrasil-18.
     Forget {
@@ -296,6 +302,24 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum WorktreeAction {
+    /// Create (or return existing) worktree for a task.
+    Ensure { task: String },
+    /// Tear down a task's worktree.
+    Rm {
+        task: String,
+        /// Policy: keep / archive / delete (default: archive)
+        #[arg(long, default_value = "archive")]
+        policy: String,
+        /// Force removal even with uncommitted changes.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the on-disk root + existing worktrees for this host.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -898,6 +922,61 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::bar_cmd::execute(&pool).await?;
+        }
+        Commands::Worktree { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            // Mirrors the task-cmd resolver so `ygg worktree ensure ygg-abcd`
+            // or `yggdrasil-42` both work.
+            async fn resolve_id(pool: &sqlx::PgPool, r: &str) -> Result<uuid::Uuid, anyhow::Error> {
+                if let Ok(u) = uuid::Uuid::parse_str(r) { return Ok(u); }
+                let hex = r.strip_prefix("ygg-").unwrap_or(r);
+                if hex.len() >= 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let m: Vec<uuid::Uuid> = sqlx::query_scalar(
+                        "SELECT task_id FROM tasks WHERE task_id::text LIKE $1 LIMIT 5"
+                    ).bind(format!("{hex}%")).fetch_all(pool).await?;
+                    match m.len() {
+                        0 => {}
+                        1 => return Ok(m[0]),
+                        n => anyhow::bail!("ambiguous '{r}' ({n} matches)"),
+                    }
+                }
+                let (prefix, seq) = r.rsplit_once('-').ok_or_else(
+                    || anyhow::anyhow!("expected <prefix>-<seq> or ygg-<hex>"))?;
+                let seq: i32 = seq.parse().map_err(|_| anyhow::anyhow!("bad seq: {seq}"))?;
+                let repo = ygg::models::repo::RepoRepo::new(pool).get_by_prefix(prefix).await?
+                    .ok_or_else(|| anyhow::anyhow!("no repo '{prefix}'"))?;
+                let t = ygg::models::task::TaskRepo::new(pool).get_by_ref(repo.repo_id, seq).await?
+                    .ok_or_else(|| anyhow::anyhow!("no task {r}"))?;
+                Ok(t.task_id)
+            }
+            match action {
+                WorktreeAction::Ensure { task } => {
+                    let id = resolve_id(&pool, &task).await?;
+                    let wt = ygg::worktree::ensure(&pool, id).await?;
+                    println!("{} → {}", wt.task_ref, wt.path.display());
+                    println!("branch: {}", wt.branch);
+                    println!("base:   {}", wt.base_path.display());
+                }
+                WorktreeAction::Rm { task, policy, force } => {
+                    let id = resolve_id(&pool, &task).await?;
+                    let policy = ygg::worktree::parse_policy(&policy)?;
+                    ygg::worktree::teardown(&pool, id, policy, force).await?;
+                    println!("removed worktree for {task} ({policy:?})");
+                }
+                WorktreeAction::List => {
+                    let root = ygg::worktree::worktree_root()?;
+                    println!("root: {}", root.display());
+                    if !root.exists() {
+                        println!("(no worktrees created yet)");
+                    } else {
+                        for entry in std::fs::read_dir(&root)? {
+                            let entry = entry?;
+                            println!("  {}", entry.file_name().to_string_lossy());
+                        }
+                    }
+                }
+            }
         }
         Commands::Forget { node, pattern, redact_all } => {
             let config = ygg::config::AppConfig::from_env()?;

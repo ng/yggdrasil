@@ -24,6 +24,7 @@ pub mod status;
 pub mod tmux;
 pub mod tui;
 pub mod watcher;
+pub mod worktree;
 
 use sqlx::PgPool;
 use uuid::Uuid;
