@@ -88,8 +88,121 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
     println!("    task status changes ............. {task_status}");
     println!("    remembered directives ........... {remembered}");
 
+    // ── Hit quality ──────────────────────────────────────────────────────
+    // Ranks source_node_ids by "surfaced vs referenced". Shows the worst
+    // offenders (repeatedly emitted but never used — candidates for
+    // forget/demote) and best performers (high reference rate). Point is
+    // actionable data, not another aggregate.
+    println!();
+    println!("  {CYAN}Hit quality{RESET}  {DIM}(per source_node_id in window){RESET}");
+
+    let quality = hit_quality(pool, since, 5).await?;
+    if quality.is_empty() {
+        println!("    {DIM}(no similarity_hit events yet in this window){RESET}");
+    } else {
+        println!("    {DIM}worst (surfaced ≥2, never referenced):{RESET}");
+        let worst: Vec<_> = quality.iter().filter(|q| q.referenced == 0 && q.emitted >= 2).take(5).collect();
+        if worst.is_empty() {
+            println!("      {DIM}(none — every frequently-surfaced hit got referenced at least once){RESET}");
+        } else {
+            for q in worst {
+                println!(
+                    "      {}× surfaced / 0 ref   {DIM}from {}{RESET}  \"{}\"",
+                    q.emitted, q.source_agent, truncate(&q.snippet, 60)
+                );
+            }
+        }
+        println!();
+        println!("    {DIM}best (highest referenced rate, minimum 2 surfaces):{RESET}");
+        let best: Vec<_> = quality.iter()
+            .filter(|q| q.emitted >= 2 && q.referenced > 0)
+            .take(5)
+            .collect();
+        if best.is_empty() {
+            println!("      {DIM}(none — no hit has been referenced yet, or digest hasn't run){RESET}");
+        } else {
+            for q in best {
+                let rate = (q.referenced as f64 / q.emitted as f64 * 100.0) as i64;
+                println!(
+                    "      {}/{} ({}%)   {DIM}from {}{RESET}  \"{}\"",
+                    q.referenced, q.emitted, rate, q.source_agent, truncate(&q.snippet, 60)
+                );
+            }
+        }
+    }
+
     println!();
     Ok(())
+}
+
+#[derive(Debug)]
+struct HitQualityRow {
+    source_agent: String,
+    emitted: i64,
+    referenced: i64,
+    snippet: String,
+}
+
+/// Aggregate similarity_hit / hit_referenced pairs by source_node_id. The
+/// referenced side fires at digest time and may land outside `since`; we
+/// count it regardless so old emits still credit their late references.
+async fn hit_quality(
+    pool: &sqlx::PgPool,
+    since: DateTime<Utc>,
+    _limit: i64,
+) -> Result<Vec<HitQualityRow>, anyhow::Error> {
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        r#"
+        WITH emits AS (
+            SELECT DISTINCT ON ((payload->>'source_node_id'))
+                   (payload->>'source_node_id') AS sid,
+                   COALESCE(payload->>'source_agent', '?') AS src_agent,
+                   COALESCE(payload->>'snippet', '') AS snip,
+                   created_at
+              FROM events
+             WHERE event_kind::text = 'similarity_hit'
+               AND created_at >= $1
+               AND payload->>'source_node_id' IS NOT NULL
+             ORDER BY (payload->>'source_node_id'), created_at DESC
+        ),
+        emit_counts AS (
+            SELECT (payload->>'source_node_id') AS sid, COUNT(*) AS n_emit
+              FROM events
+             WHERE event_kind::text = 'similarity_hit'
+               AND created_at >= $1
+               AND payload->>'source_node_id' IS NOT NULL
+             GROUP BY sid
+        ),
+        refs AS (
+            SELECT (payload->>'source_node_id') AS sid, COUNT(*) AS n_ref
+              FROM events
+             WHERE event_kind::text = 'hit_referenced'
+               AND payload->>'source_node_id' IS NOT NULL
+             GROUP BY sid
+        )
+        SELECT e.src_agent, e.snip, ec.n_emit, COALESCE(r.n_ref, 0)
+          FROM emits e
+          JOIN emit_counts ec ON ec.sid = e.sid
+          LEFT JOIN refs r ON r.sid = e.sid
+         ORDER BY ec.n_emit DESC, r.n_ref DESC NULLS LAST
+         LIMIT 200
+        "#,
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|(src, snip, emit, refd)| HitQualityRow {
+        source_agent: src,
+        emitted: emit,
+        referenced: refd,
+        snippet: snip,
+    }).collect())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max { return s.to_string(); }
+    s.chars().take(max).collect::<String>() + "…"
 }
 
 async fn count_events(pool: &sqlx::PgPool, since: DateTime<Utc>, kind: &str) -> Result<i64, anyhow::Error> {
