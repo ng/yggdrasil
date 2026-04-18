@@ -156,9 +156,9 @@ impl DagView {
                     .find(|(a, _)| a == id)
                     .map(|(_, n)| n.clone())
                     .unwrap_or_else(|| id.to_string()[..8].to_string());
-                parts.push(format!("agent={name}"));
+                parts.push(format!("owner={name}"));
             }
-            AgentFilter::Unassigned => parts.push("agent=unassigned".into()),
+            AgentFilter::Unassigned => parts.push("owner=none".into()),
         }
         if !self.focus_label.is_empty() {
             parts.push(format!("focus={}", self.focus_label));
@@ -211,15 +211,18 @@ impl DagView {
             return Ok(());
         }
 
-        // Gather assignee names so `a` can cycle through them. We query
-        // AgentRepo once per refresh — cheap, and the list can change.
-        let mut assignee_ids: HashSet<Uuid> = HashSet::new();
+        // "Owner" for filter purposes = assignee if set, else created_by.
+        // Without this fallback almost every task registers as unassigned
+        // because `ygg task create` doesn't set an assignee, so the `a`
+        // cycle was effectively dead.
+        let mut owner_ids: HashSet<Uuid> = HashSet::new();
         for t in &unfiltered_open {
-            if let Some(a) = t.assignee { assignee_ids.insert(a); }
+            let owner = t.assignee.or(t.created_by);
+            if let Some(id) = owner { owner_ids.insert(id); }
         }
         let all_agents = AgentRepo::new(pool).list().await.unwrap_or_default();
         let mut assignees: Vec<(Uuid, String)> = all_agents.into_iter()
-            .filter(|a| assignee_ids.contains(&a.agent_id))
+            .filter(|a| owner_ids.contains(&a.agent_id))
             .map(|a| (a.agent_id, a.agent_name))
             .collect();
         assignees.sort_by(|a, b| a.1.cmp(&b.1));
@@ -257,10 +260,13 @@ impl DagView {
         }
 
         let all_open: Vec<Task> = unfiltered_open.into_iter()
-            .filter(|t| match &self.agent_filter {
-                AgentFilter::All => true,
-                AgentFilter::Specific(a) => t.assignee == Some(*a),
-                AgentFilter::Unassigned => t.assignee.is_none(),
+            .filter(|t| {
+                let owner = t.assignee.or(t.created_by);
+                match &self.agent_filter {
+                    AgentFilter::All => true,
+                    AgentFilter::Specific(a) => owner == Some(*a),
+                    AgentFilter::Unassigned => owner.is_none(),
+                }
             })
             .filter(|t| allowed.as_ref().map(|s| s.contains(&t.task_id)).unwrap_or(true))
             .collect();
