@@ -168,8 +168,13 @@ impl App {
             },
             KeyCode::Enter => match self.active_view {
                 ActiveView::Dashboard => {
-                    if let Some(agent_name) = self.dashboard.selected_agent() {
-                        self.dag.set_agent(agent_name);
+                    // Jump to DAG with the owner filter pre-set to the
+                    // agent whose row was selected. Without this, DAG just
+                    // showed the cross-repo view regardless of the click.
+                    if let Some(agent) = self.dashboard.selected_agent_full().cloned() {
+                        self.dag.agent_filter =
+                            super::dag_view::AgentFilter::Specific(agent.agent_id);
+                        let _ = self.dag.refresh(pool).await;
                         self.set_view(ActiveView::Dag);
                     }
                 }

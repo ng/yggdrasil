@@ -287,6 +287,11 @@ impl DashboardView {
         self.agents.get(self.selected).map(|a| a.agent_name.clone())
     }
 
+    /// Full selected-agent record (needed to set DAG filter by agent_id).
+    pub fn selected_agent_full(&self) -> Option<&AgentWorkflow> {
+        self.agents.get(self.selected)
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         // Layout: alerts · pulse · agents (stretch) · transitions · locks
         let chunks = Layout::default()
