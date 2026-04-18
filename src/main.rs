@@ -222,6 +222,19 @@ enum Commands {
         redact_all: bool,
     },
 
+    /// Per-repo activity rollup over a recent window (default: last 7 days).
+    Rollup {
+        /// Number of days to look back.
+        #[arg(short, long, default_value = "7")]
+        days: i64,
+        /// Restrict to a single repo by task prefix.
+        #[arg(short, long)]
+        repo: Option<String>,
+        /// Output format: text, markdown, or json.
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
     /// Manage scoped, embedded memories (global / repo / session)
     Memory {
         #[command(subcommand)]
@@ -691,6 +704,16 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("pass --node <uuid>, --pattern <substring>, or --redact-all");
                 }
             }
+        }
+        Commands::Rollup { days, repo, format } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let fmt = match format.as_str() {
+                "text" | "txt" => ygg::cli::rollup_cmd::Format::Text,
+                "json" => ygg::cli::rollup_cmd::Format::Json,
+                _ => ygg::cli::rollup_cmd::Format::Markdown,
+            };
+            ygg::cli::rollup_cmd::execute(&pool, days, repo.as_deref(), fmt).await?;
         }
         Commands::Memory { action } => {
             let config = ygg::config::AppConfig::from_env()?;

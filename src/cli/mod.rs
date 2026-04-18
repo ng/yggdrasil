@@ -16,6 +16,7 @@ pub mod prime;
 pub mod recover;
 pub mod recovery_cmd;
 pub mod remember;
+pub mod rollup_cmd;
 pub mod run;
 pub mod spawn;
 pub mod status_cmd;
