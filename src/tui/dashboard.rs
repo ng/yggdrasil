@@ -118,6 +118,15 @@ pub struct DashboardView {
     pub current_session_id: Option<String>,
     /// Live session count per agent, refreshed with the rest of the state.
     pub live_sessions_by_agent: HashMap<Uuid, i64>,
+
+    /// Corpus totals for the system-pulse DB line. Refreshed every tick —
+    /// cheap COUNTs on indexed tables. Memories omitted intentionally: the
+    /// pivot (ADR 0015 Phase 2) migrates them to CLAUDE.md files anyway.
+    pub db_nodes: i64,
+    pub db_tasks_open: i64,
+    pub db_tasks_total: i64,
+    pub db_learnings: i64,
+    pub db_locks_active: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -159,6 +168,8 @@ impl DashboardView {
             session_scoped: false,
             current_session_id: None,
             live_sessions_by_agent: HashMap::new(),
+            db_nodes: 0, db_tasks_open: 0, db_tasks_total: 0,
+            db_learnings: 0, db_locks_active: 0,
         }
     }
 
@@ -251,6 +262,27 @@ impl DashboardView {
         self.cache_hits_24h = ch24;
         self.cache_total_24h = ch24 + cc24;
         self.redactions_24h = r24;
+
+        // DB corpus totals for the pulse footer line. Single roundtrip —
+        // cheap at current scale (all target tables indexed). locks_active
+        // excludes expired rows since a held lock is ttl-bound, not just a
+        // row existence.
+        let (nodes, tasks_open, tasks_total, learnings, locks_active): (
+            i64, i64, i64, i64, i64,
+        ) = sqlx::query_as(
+            r#"SELECT
+                 (SELECT COUNT(*) FROM nodes),
+                 (SELECT COUNT(*) FROM tasks WHERE status <> 'closed'),
+                 (SELECT COUNT(*) FROM tasks),
+                 (SELECT COUNT(*) FROM learnings),
+                 (SELECT COUNT(*) FROM locks WHERE expires_at > now())"#,
+        )
+        .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0));
+        self.db_nodes = nodes;
+        self.db_tasks_open = tasks_open;
+        self.db_tasks_total = tasks_total;
+        self.db_learnings = learnings;
+        self.db_locks_active = locks_active;
 
         // Prompts per hour sparkline, 24h — global across agents.
         let sparkline: Vec<(i32, i64)> = sqlx::query_as(
@@ -664,6 +696,24 @@ impl DashboardView {
                     if self.redactions_24h > 0 {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     } else { Style::default().add_modifier(Modifier::BOLD) }),
+            ]),
+            // DB corpus totals — size of the tracked state, not activity.
+            // Updates every refresh tick. Post-pivot (ADR 0015), nodes +
+            // memories fields will naturally drop to 0 and the line shrinks.
+            Line::from(vec![
+                Span::styled("db        ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} tasks ", self.db_tasks_total),
+                    Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(format!("({} open) ", self.db_tasks_open),
+                    Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("· {} learnings ", self.db_learnings),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("· {} nodes ", self.db_nodes),
+                    Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("· {} locks", self.db_locks_active),
+                    if self.db_locks_active > 0 {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else { Style::default().fg(Color::DarkGray) }),
             ]),
         ];
         let title = match &self.current_session_id {
