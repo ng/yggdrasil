@@ -11,6 +11,7 @@ const GREEN: &str = "\x1b[38;5;114m";
 const CYAN:  &str = "\x1b[38;5;81m";
 const YELL:  &str = "\x1b[38;5;221m";
 const ORANG: &str = "\x1b[38;5;208m";
+const MAG:   &str = "\x1b[38;5;171m";
 
 pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyhow::Error> {
     let since: DateTime<Utc> = Utc::now() - Duration::hours(window_hours);
@@ -87,6 +88,30 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
     println!("    tasks created ................... {task_created}");
     println!("    task status changes ............. {task_status}");
     println!("    remembered directives ........... {remembered}");
+
+    // ── Learnings ────────────────────────────────────────────────────────
+    // Scoped CodeRabbit-style rules. Fired == applied_count incremented
+    // when the hook surfaces a learning whose scope matches the task's
+    // file set (yggdrasil-82, not yet shipped). `fired` will read 0 until
+    // then; `new` and `total` land as soon as `ygg learn create` runs.
+    let (learnings_total, learnings_new, learnings_fired_total): (i64, i64, i64) = sqlx::query_as(
+        r#"SELECT
+             COUNT(*)::bigint,
+             COUNT(*) FILTER (WHERE created_at >= $1)::bigint,
+             COALESCE(SUM(applied_count), 0)::bigint
+           FROM learnings"#,
+    )
+    .bind(since)
+    .fetch_one(pool).await.unwrap_or((0, 0, 0));
+    println!();
+    println!("  {MAG}Learnings{RESET}");
+    println!("    captured in window .............. {learnings_new}");
+    println!("    total in db ..................... {learnings_total}");
+    if learnings_fired_total > 0 {
+        println!("    cumulative applications ......... {GREEN}{learnings_fired_total}{RESET}");
+    } else if learnings_total > 0 {
+        println!("    cumulative applications ......... {DIM}0 (hook integration pending — yggdrasil-82){RESET}");
+    }
 
     // ── Hit quality ──────────────────────────────────────────────────────
     // Ranks source_node_ids by "surfaced vs referenced". Shows the worst
