@@ -406,6 +406,17 @@ impl DashboardView {
         }
         let now = Utc::now();
         let focused = self.focus == DashboardFocus::Workers;
+        // Count rows that likely need attention — explicit needs_attention
+        // OR idle-for-too-long (claude finished, awaiting operator). The
+        // watcher's classify_pane only catches permission/trust dialogs;
+        // "task complete, cursor parked at the prompt" looks identical to
+        // "just paused mid-thought" from a pane capture, so we lean on the
+        // last_seen_at age as a proxy.
+        const IDLE_ATTN_SECS: i64 = 60;
+        let needs_attn_count = self.workers.iter().filter(|w| {
+            let stale = (now - w.last_seen_at).num_seconds().max(0) > IDLE_ATTN_SECS;
+            w.state == "needs_attention" || (w.state == "idle" && stale)
+        }).count();
         let lines: Vec<Line> = self.workers.iter().enumerate().map(|(i, w)| {
             // Age = seconds since last seen by the observer, NOT since spawn.
             // Answers "is this still alive?" directly. Stale rows (>2m since
@@ -417,9 +428,12 @@ impl DashboardView {
             let (g, c) = worker_state_style(&w.state);
             let is_cursor = focused && i == self.worker_sel;
             let cursor = if is_cursor { "▸ " } else { "  " };
-            // needs_attention rows highlight with a yellow background so
-            // they catch the eye even at the edge of your vision.
-            let needs_attn = w.state == "needs_attention";
+            // Attention treatment fires on: (1) explicit needs_attention,
+            // (2) idle + last_seen older than IDLE_ATTN_SECS. Case 2 is the
+            // "task complete, awaiting operator" signal the classifier
+            // can't distinguish from pane content alone.
+            let idle_stale = w.state == "idle" && seen_secs > IDLE_ATTN_SECS;
+            let needs_attn = w.state == "needs_attention" || idle_stale;
             let title_style = if needs_attn {
                 Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else if is_cursor {
@@ -427,6 +441,14 @@ impl DashboardView {
             } else {
                 Style::default()
             };
+            // When the state is ambiguous (idle-stale), surface the reason
+            // in the state cell itself so the operator sees WHY it's yellow.
+            let state_label = if idle_stale {
+                format!("idle {age}")
+            } else {
+                w.state.clone()
+            };
+            let state_color = if needs_attn { Color::Yellow } else { c };
             Line::from(vec![
                 Span::styled(cursor, Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{g} "), Style::default().fg(c).add_modifier(Modifier::BOLD)),
@@ -437,8 +459,9 @@ impl DashboardView {
                 Span::styled(format!("{:<12}",
                     w.persona.as_deref().map(|p| short_cell(p, 12)).unwrap_or_else(|| "—".into())),
                     Style::default().fg(Color::Magenta)),
-                Span::styled(format!("{:<10}", w.state),
-                    Style::default().fg(c)),
+                Span::styled(format!("{:<10}", short_cell(&state_label, 10)),
+                    Style::default().fg(state_color)
+                        .add_modifier(if needs_attn { Modifier::BOLD } else { Modifier::empty() })),
                 Span::styled(format!("{:<10}", delivery_badge(w)),
                     Style::default().fg(delivery_color(w))),
                 Span::styled(format!("{age:<6}"), Style::default().fg(age_color)),
@@ -446,7 +469,10 @@ impl DashboardView {
                 Span::styled(short_title(&w.title), title_style),
             ])
         }).collect();
-        let title = format!(" Workers — {}  ·  age=since last seen  ·  w=focus  ↑↓  Enter=attach ",
+        let attn_suffix = if needs_attn_count > 0 {
+            format!("  ·  ⚠ {needs_attn_count} need attention")
+        } else { String::new() };
+        let title = format!(" Workers — {}{attn_suffix}  ·  age=since last seen  ·  w=focus  ↑↓  Enter=attach ",
             self.workers.len());
         let block = Block::default()
             .borders(Borders::ALL).title(title)
