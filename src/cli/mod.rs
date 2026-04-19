@@ -9,6 +9,7 @@ pub mod init_project;
 pub mod logs_cmd;
 pub mod interrupt_cmd;
 pub mod lock_cmd;
+pub mod learning_cmd;
 pub mod memory_cmd;
 pub mod inject;
 pub mod observe;

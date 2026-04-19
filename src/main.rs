@@ -285,6 +285,14 @@ enum Commands {
         action: MemoryAction,
     },
 
+    /// Scoped learnings — CodeRabbit-style rule capture + deterministic match.
+    /// Retrieval is SQL predicates on (repo, file_glob, rule_id), not vector
+    /// similarity. See ADR 0015.
+    Learn {
+        #[command(subcommand)]
+        action: LearnAction,
+    },
+
     /// Record that the agent is about to invoke a tool — PreToolUse hook.
     AgentTool {
         /// Tool name (Bash, Edit, Read, …)
@@ -414,6 +422,39 @@ enum MemoryAction {
     /// Expire a memory after N seconds (useful for temporary scratch)
     Expire { id: String, seconds: i64 },
     /// Delete a memory permanently
+    Delete { id: String },
+}
+
+#[derive(Subcommand)]
+enum LearnAction {
+    /// Capture a new learning. Defaults to current repo scope.
+    Create {
+        /// The learning text
+        text: String,
+        /// Apply to every repo, not just the current one
+        #[arg(long)] global: bool,
+        /// File-glob this learning applies to (e.g. "terraform/*.tf")
+        #[arg(long)] file_glob: Option<String>,
+        /// External rule id (e.g. "CKV_AWS_337", "clippy::too_many_lines")
+        #[arg(long)] rule_id: Option<String>,
+        /// Freeform provenance: PR link, commit hash, quote
+        #[arg(long)] context: Option<String>,
+        #[arg(short, long)] agent: Option<String>,
+        #[arg(long)] json: bool,
+    },
+    /// List learnings whose scope matches the given filters. No filters = all
+    /// learnings visible from the current repo. Deterministic SQL match, not
+    /// similarity search.
+    List {
+        /// A file path to test against each learning's file_glob
+        #[arg(long)] file: Option<String>,
+        /// Exact rule_id match
+        #[arg(long)] rule_id: Option<String>,
+        /// Scan every repo (default: current repo + global)
+        #[arg(long)] all: bool,
+        #[arg(long)] json: bool,
+    },
+    /// Delete a learning by id (full UUID or short prefix not supported yet)
     Delete { id: String },
 }
 
@@ -1286,6 +1327,35 @@ async fn main() -> anyhow::Result<()> {
                 MemoryAction::Delete { id } => {
                     let uuid = parse_id(&pool, &id).await?;
                     ygg::cli::memory_cmd::delete(&pool, uuid).await?;
+                }
+            }
+        }
+        Commands::Learn { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let agent_name_default = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                std::env::current_dir().ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "ygg".to_string())
+            });
+            match action {
+                LearnAction::Create { text, global, file_glob, rule_id, context, agent, json } => {
+                    let agent_name = agent.unwrap_or_else(agent_name_default);
+                    ygg::cli::learning_cmd::create(
+                        &pool, &text, global,
+                        file_glob.as_deref(), rule_id.as_deref(), context.as_deref(),
+                        &agent_name, json,
+                    ).await?;
+                }
+                LearnAction::List { file, rule_id, all, json } => {
+                    ygg::cli::learning_cmd::list(
+                        &pool, file.as_deref(), rule_id.as_deref(), all, json,
+                    ).await?;
+                }
+                LearnAction::Delete { id } => {
+                    let uuid = uuid::Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
+                    ygg::cli::learning_cmd::delete(&pool, uuid).await?;
                 }
             }
         }
