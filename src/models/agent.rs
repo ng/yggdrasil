@@ -329,6 +329,32 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
+    /// Return live agents whose most-recent worker has a worktree_path
+    /// populated, filtered to those older than `min_idle_secs`. The caller
+    /// checks the filesystem; SQL only gives us the candidates. Returns
+    /// `(agent_id, agent_name, worktree_path)`.
+    pub async fn list_orphan_candidates(
+        &self,
+        min_idle_secs: i64,
+    ) -> Result<Vec<(Uuid, String, String)>, sqlx::Error> {
+        sqlx::query_as::<_, (Uuid, String, String)>(
+            r#"
+            SELECT DISTINCT ON (a.agent_id)
+                   a.agent_id, a.agent_name, w.worktree_path
+            FROM agents a
+            JOIN tasks t   ON t.assignee = a.agent_id
+            JOIN workers w ON w.task_id = t.task_id
+            WHERE a.archived_at IS NULL
+              AND w.worktree_path <> ''
+              AND a.updated_at < now() - make_interval(secs => $1)
+            ORDER BY a.agent_id, w.started_at DESC
+            "#,
+        )
+        .bind(min_idle_secs)
+        .fetch_all(self.pool)
+        .await
+    }
+
     pub async fn unarchive(&self, agent_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE agents SET archived_at = NULL WHERE agent_id = $1")
             .bind(agent_id).execute(self.pool).await?;

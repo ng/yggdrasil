@@ -136,6 +136,11 @@ pub struct DashboardView {
     /// rename-failed). Rendered under the agents table; cleared on next
     /// action.
     pub flash: Option<String>,
+
+    /// Throttle for the orphan auto-archiver. Skips the sweep unless at
+    /// least `YGG_AUTO_ARCHIVE_INTERVAL_SECS` have passed since the last
+    /// run (default 300s).
+    orphan_last_check: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -180,6 +185,56 @@ impl DashboardView {
             db_nodes: 0, db_tasks_open: 0, db_tasks_total: 0,
             db_learnings: 0, db_locks_active: 0,
             rename: None, flash: None,
+            orphan_last_check: None,
+        }
+    }
+
+    /// Sweep for orphaned agents and archive them. An agent is orphaned
+    /// when its most-recent worker's worktree_path no longer exists on
+    /// disk and it hasn't been updated for `YGG_AUTO_ARCHIVE_STALE_SECS`
+    /// (default 3600s). Runs at most once per `YGG_AUTO_ARCHIVE_INTERVAL_SECS`
+    /// (default 300s). Flashes a status note per archival so the action
+    /// is visible in the panel title.
+    ///
+    /// Disabled by setting `YGG_AUTO_ARCHIVE_ORPHANS=0`.
+    async fn sweep_orphans(&mut self, pool: &PgPool) {
+        let enabled = std::env::var("YGG_AUTO_ARCHIVE_ORPHANS")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")))
+            .unwrap_or(true);
+        if !enabled { return; }
+
+        let interval = std::env::var("YGG_AUTO_ARCHIVE_INTERVAL_SECS")
+            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);
+        let now = Instant::now();
+        if let Some(last) = self.orphan_last_check {
+            if now.duration_since(last).as_secs() < interval { return; }
+        }
+        self.orphan_last_check = Some(now);
+
+        let stale_secs = std::env::var("YGG_AUTO_ARCHIVE_STALE_SECS")
+            .ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
+
+        let candidates = match AgentRepo::new(pool)
+            .list_orphan_candidates(stale_secs).await
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let repo = AgentRepo::new(pool);
+        let mut archived: Vec<String> = Vec::new();
+        for (agent_id, agent_name, worktree_path) in candidates {
+            if !std::path::Path::new(&worktree_path).exists() {
+                if repo.archive(agent_id).await.is_ok() {
+                    archived.push(agent_name);
+                }
+            }
+        }
+        if !archived.is_empty() {
+            self.flash = Some(format!(
+                "auto-archived {} orphan(s): {}",
+                archived.len(),
+                archived.join(", ")
+            ));
         }
     }
 
@@ -258,6 +313,10 @@ impl DashboardView {
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
+        // Throttled orphan sweep — runs before the list query so any just-
+        // archived agents disappear on this same tick.
+        self.sweep_orphans(pool).await;
+
         let agent_repo = AgentRepo::new(pool);
         self.agents = agent_repo.list().await?;
         self.agent_name_by_id = self.agents.iter()

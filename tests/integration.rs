@@ -260,6 +260,53 @@ async fn test_crash_recovery() {
 }
 
 #[tokio::test]
+async fn test_orphan_candidates_filter_by_idle() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-orphan-fresh', 'test-orphan-stale')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE name = 'test-orphan-repo'")
+        .execute(&pool).await.unwrap();
+
+    let fresh = agent_repo.register("test-orphan-fresh").await.unwrap();
+    let stale = agent_repo.register("test-orphan-stale").await.unwrap();
+
+    // Back-date the stale agent so it crosses the idle threshold.
+    sqlx::query("UPDATE agents SET updated_at = now() - interval '2 hours' WHERE agent_id = $1")
+        .bind(stale.agent_id).execute(&pool).await.unwrap();
+
+    // Minimal fixture: repo + task per agent + worker with a bogus path.
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (name, task_prefix) VALUES ('test-orphan-repo', 'test-orphan-repo') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1) ON CONFLICT DO NOTHING")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    for (aid, seq) in [(fresh.agent_id, 1), (stale.agent_id, 2)] {
+        let task: (uuid::Uuid,) = sqlx::query_as(
+            "INSERT INTO tasks (repo_id, seq, title, kind, assignee) VALUES ($1, $2, 'fixture', 'task', $3) RETURNING task_id"
+        ).bind(repo.0).bind(seq).bind(aid).fetch_one(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workers (task_id, tmux_session, tmux_window, worktree_path) VALUES ($1, 's', 'w', '/tmp/ygg-test-nonexistent-worktree')"
+        ).bind(task.0).execute(&pool).await.unwrap();
+    }
+
+    // At a 1-hour idle threshold, only the stale agent should be returned.
+    let cands = agent_repo.list_orphan_candidates(3600).await.unwrap();
+    assert!(cands.iter().any(|(id, _, _)| *id == stale.agent_id),
+        "stale agent should be a candidate at 1h threshold");
+    assert!(!cands.iter().any(|(id, _, _)| *id == fresh.agent_id),
+        "fresh agent should NOT be a candidate at 1h threshold");
+
+    // Cleanup (cascades wipe tasks + workers).
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-orphan-fresh', 'test-orphan-stale')")
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_agent_rename() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
