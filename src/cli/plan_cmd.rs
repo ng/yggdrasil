@@ -420,7 +420,7 @@ pub async fn run_with_reporter(
         "ygg-{agent_label}·{}-{}·{uniq}",
         repo.task_prefix, task.seq
     ));
-    spawn_tmux(&session, &wt.path, &task, &repo)?;
+    spawn_tmux(&session, &wt.path, &task, &repo, agent_name)?;
 
     // 5. Register the worker row so observer + reconciliation + Workers
     // panel have something to track. Session association is best-effort:
@@ -496,6 +496,12 @@ fn pre_trust_claude_path(path: &std::path::Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Single-quote a shell argument. Agent names are slugs, but guard against
+/// the occasional `:` (persona) or odd char slipping through.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// tmux window names can't contain colons (they split target specs) or
 /// whitespace. We keep "·" as a visual separator but replace colons from
 /// the persona with "-".
@@ -516,6 +522,7 @@ fn spawn_tmux(
     cwd: &std::path::Path,
     task: &Task,
     repo: &crate::models::repo::Repo,
+    agent_name: &str,
 ) -> Result<(), anyhow::Error> {
     // Each worker gets its own tmux SESSION (not a window under `yggdrasil`).
     // Rationale: a session-per-worker matches the "each spawn is an
@@ -553,8 +560,12 @@ fn spawn_tmux(
         .unwrap_or_else(|_| "--dangerously-skip-permissions".to_string());
     // Cleanup the temp file once claude has consumed it. `; rm -f` keeps
     // the session alive while ensuring the file gets removed.
+    // Tag the spawn so the Stop-hook enforcer (`ygg stop-check`) knows
+    // this is a managed worker and can block the Claude session from
+    // ending while the task or branch are still pending.
     let cmd = format!(
-        "claude {flags} < {path:?} ; rm -f {path:?}",
+        "YGG_SPAWNED=1 YGG_AGENT_NAME={agent} claude {flags} < {path:?} ; rm -f {path:?}",
+        agent = shell_single_quote(agent_name),
         path = prime_path.to_string_lossy(),
     );
     Command::new("tmux")

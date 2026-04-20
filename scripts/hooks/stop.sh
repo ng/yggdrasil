@@ -12,4 +12,9 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     ygg digest --agent "$AGENT" --transcript "$TRANSCRIPT" --stop 2>/dev/null
 fi
 
+# Spawned-worker enforcement: blocks session end if the claimed task is still
+# in_progress, the worktree has uncommitted changes, or commits are unpushed.
+# Silent on the primary interactive session. `YGG_STOP_CHECK=0` disables.
+ygg stop-check --agent "$AGENT" 2>/dev/null
+
 exit 0

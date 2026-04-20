@@ -22,6 +22,7 @@ pub mod rollup_cmd;
 pub mod run;
 pub mod spawn;
 pub mod status_cmd;
+pub mod stop_check;
 pub mod task_cmd;
 pub mod trace_cmd;
 pub mod watcher_cmd;

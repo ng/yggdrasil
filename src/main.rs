@@ -154,6 +154,16 @@ enum Commands {
         stop: bool,
     },
 
+    /// Stop-hook enforcement: block spawned-worker session end when work
+    /// is unfinished (claimed task still open, uncommitted changes, or
+    /// unpushed commits). Emits Claude Code decision:block JSON on stdout
+    /// when it wants to block; silent otherwise. Safe on non-worker sessions.
+    StopCheck {
+        /// Agent name (defaults to YGG_AGENT_NAME env var or current directory name)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+
     /// Purge stale rows from locks / sessions / memories / agents. Safe to cron.
     Reap {
         #[arg(long)] locks: bool,
@@ -849,6 +859,19 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Commands::StopCheck { agent } => {
+            let agent_name = agent
+                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                });
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            ygg::cli::stop_check::execute(&pool, &agent_name).await?;
         }
         Commands::Reap { locks, sessions, memories, agents, older_than_days, dry_run } => {
             let config = ygg::config::AppConfig::from_env()?;
