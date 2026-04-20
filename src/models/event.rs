@@ -23,6 +23,7 @@ pub enum EventKind {
     RedactionApplied,
     HitReferenced,
     AgentStateChanged,
+    Message,
 }
 
 impl EventKind {
@@ -45,6 +46,7 @@ impl EventKind {
             Self::RedactionApplied => "redacted",
             Self::HitReferenced => "referenced",
             Self::AgentStateChanged => "agent_state",
+            Self::Message => "message",
         }
     }
 }

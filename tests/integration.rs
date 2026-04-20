@@ -260,6 +260,49 @@ async fn test_crash_recovery() {
 }
 
 #[tokio::test]
+async fn test_msg_send_inbox_mark_read() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+
+    sqlx::query("DELETE FROM events WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
+        .execute(&pool).await.unwrap();
+
+    agent_repo.register("test-msg-sender").await.unwrap();
+    agent_repo.register("test-msg-recipient").await.unwrap();
+
+    // Send two messages; inbox returns both; mark_read drains.
+    ygg::cli::msg_cmd::send(&pool, "test-msg-sender", "test-msg-recipient", "hello 1", false).await.unwrap();
+    ygg::cli::msg_cmd::send(&pool, "test-msg-sender", "test-msg-recipient", "hello 2", false).await.unwrap();
+
+    let unread = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", false).await.unwrap();
+    assert_eq!(unread.len(), 2);
+    assert_eq!(unread[0].body, "hello 1");
+    assert_eq!(unread[1].body, "hello 2");
+    assert_eq!(unread[0].from_agent_name, "test-msg-sender");
+
+    ygg::cli::msg_cmd::mark_read(&pool, "test-msg-recipient").await.unwrap();
+    let post = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", false).await.unwrap();
+    assert!(post.is_empty(), "inbox empty after mark_read");
+
+    // But --all should still return both.
+    let all = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", true).await.unwrap();
+    assert_eq!(all.len(), 2);
+
+    // Missing recipient errors.
+    let err = ygg::cli::msg_cmd::send(&pool, "test-msg-sender", "does-not-exist", "x", false).await;
+    assert!(err.is_err());
+
+    // Cleanup
+    sqlx::query("DELETE FROM events WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_lock_release_all_for_agent() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();

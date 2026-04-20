@@ -22,3 +22,11 @@ fi
 if [ -n "$DIRECTIVES" ]; then
     echo "$DIRECTIVES"
 fi
+
+# Inject any unread agent-to-agent messages (ygg msg) and advance the cursor
+# so the same batch doesn't resurface. Silent on empty inbox or error.
+MSGS=$(ygg msg inbox --agent "$AGENT" 2>/dev/null) || true
+if [ -n "$MSGS" ] && [ "$MSGS" != "inbox empty" ]; then
+    echo "$MSGS"
+    ygg msg mark-read --agent "$AGENT" >/dev/null 2>&1 || true
+fi

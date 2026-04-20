@@ -164,6 +164,15 @@ enum Commands {
         agent: Option<String>,
     },
 
+    /// Agent-to-agent messaging on the events bus. Message events have a
+    /// recipient_agent_id; each agent carries a cursor; inbox = unread
+    /// messages since that cursor. The prompt-submit hook auto-injects
+    /// inbox content at the top of the recipient's next turn.
+    Msg {
+        #[command(subcommand)]
+        action: MsgAction,
+    },
+
     /// Purge stale rows from locks / sessions / memories / agents. Safe to cron.
     Reap {
         #[arg(long)] locks: bool,
@@ -388,6 +397,30 @@ enum WorktreeAction {
     },
     /// Show the on-disk root + existing worktrees for this host.
     List,
+}
+
+#[derive(Subcommand)]
+enum MsgAction {
+    /// Send a message to another agent. Writes an event on the bus;
+    /// recipient's next user turn sees it via prompt-submit injection.
+    /// `--push` additionally interrupts the recipient via tmux send-keys
+    /// for instant delivery (may disrupt a mid-thought turn).
+    Send {
+        #[arg(long)] to: String,
+        #[arg(long)] from: Option<String>,
+        #[arg(long)] push: bool,
+        body: Vec<String>,
+    },
+    /// Show unread messages for this agent. `--all` ignores the cursor.
+    Inbox {
+        #[arg(short, long)] agent: Option<String>,
+        #[arg(long)] all: bool,
+    },
+    /// Advance the cursor so inbox is empty until the next message arrives.
+    /// Called by the prompt-submit hook after injection.
+    MarkRead {
+        #[arg(short, long)] agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -874,6 +907,34 @@ async fn main() -> anyhow::Result<()> {
                     // expiry. Silent on error (DB contention is fine to skip).
                     let lock_mgr = ygg::lock::LockManager::new(&pool, config.lock_ttl_secs);
                     let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
+                }
+            }
+        }
+        Commands::Msg { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let default_agent = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                std::env::current_dir().ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "ygg".to_string())
+            });
+            match action {
+                MsgAction::Send { to, from, push, body } => {
+                    let from_name = from.unwrap_or_else(default_agent);
+                    let joined = body.join(" ");
+                    if joined.trim().is_empty() {
+                        anyhow::bail!("empty body — pass the message as trailing args");
+                    }
+                    ygg::cli::msg_cmd::send(&pool, &from_name, &to, &joined, push).await?;
+                }
+                MsgAction::Inbox { agent, all } => {
+                    let name = agent.unwrap_or_else(default_agent);
+                    let msgs = ygg::cli::msg_cmd::inbox(&pool, &name, all).await?;
+                    ygg::cli::msg_cmd::print_inbox(&msgs);
+                }
+                MsgAction::MarkRead { agent } => {
+                    let name = agent.unwrap_or_else(default_agent);
+                    ygg::cli::msg_cmd::mark_read(&pool, &name).await?;
                 }
             }
         }

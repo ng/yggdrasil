@@ -151,6 +151,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::RedactionApplied => (RED,   "✂"),
         EventKind::HitReferenced    => (GREEN, "✓"),
         EventKind::AgentStateChanged => (BLUE, "↪"),
+        EventKind::Message           => (CYAN,  "✉"),
     }
 }
 
@@ -279,6 +280,10 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let tool = p["tool"].as_str();
             let suffix = tool.map(|t| format!(" {DIM}({t}){RESET}")).unwrap_or_default();
             format!("{BLUE}{from}{RESET} → {to}{suffix}")
+        }
+        EventKind::Message => {
+            let body = p["body"].as_str().unwrap_or("");
+            format!("{CYAN}msg{RESET}  {}", truncate(body, 60))
         }
     }
 }

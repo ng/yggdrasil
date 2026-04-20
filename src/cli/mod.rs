@@ -11,6 +11,7 @@ pub mod interrupt_cmd;
 pub mod lock_cmd;
 pub mod learning_cmd;
 pub mod memory_cmd;
+pub mod msg_cmd;
 pub mod inject;
 pub mod observe;
 pub mod plan_cmd;
