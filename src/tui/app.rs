@@ -12,6 +12,7 @@ use crate::config::AppConfig;
 use super::dashboard::DashboardView;
 use super::dag_view::DagView;
 use super::eval_view::EvalView;
+use super::locks_view::LocksView;
 use super::log_view::LogView;
 use super::memgraph_view::MemGraphView;
 use super::prompt_view::PromptView;
@@ -30,6 +31,7 @@ pub enum ActiveView {
     MemGraph,
     Eval,
     Prompt,
+    Locks,
 }
 
 pub struct App {
@@ -44,6 +46,7 @@ pub struct App {
     pub memgraph: MemGraphView,
     pub eval: EvalView,
     pub prompt: PromptView,
+    pub locks: LocksView,
     pub agent_name: String,
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
@@ -82,6 +85,7 @@ impl App {
             memgraph: MemGraphView::new(),
             eval: EvalView::new(),
             prompt: PromptView::new(),
+            locks: LocksView::new(),
             agent_name,
             query_focus: false,
             status_tail: Vec::new(),
@@ -281,6 +285,7 @@ impl App {
             KeyCode::Char('7') => self.set_view(ActiveView::MemGraph),
             KeyCode::Char('8') => self.set_view(ActiveView::Eval),
             KeyCode::Char('9') => self.set_view(ActiveView::Prompt),
+            KeyCode::Char('0') => self.set_view(ActiveView::Locks),
             KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
             KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
             KeyCode::Char('f') if self.active_view == ActiveView::Logs => {
@@ -365,6 +370,11 @@ impl App {
                 self.eval.cycle_window();
                 let _ = self.eval.refresh(pool).await;
             }
+            KeyCode::Char('r') if self.active_view == ActiveView::Locks => {
+                let cfg = AppConfig::from_env().ok();
+                let ttl = cfg.as_ref().map(|c| c.lock_ttl_secs).unwrap_or(300);
+                self.locks.release_selected(pool, ttl).await;
+            }
             KeyCode::Up => match self.active_view {
                 ActiveView::Dag => self.dag.scroll_up(),
                 ActiveView::Dashboard => match self.dashboard.focus {
@@ -376,6 +386,7 @@ impl App {
                 ActiveView::Logs => self.logs.scroll_up(),
                 ActiveView::MemGraph => self.memgraph.scroll_up(),
                 ActiveView::Prompt => self.prompt.select_prev(),
+                ActiveView::Locks => self.locks.select_prev(),
                 _ => {}
             },
             KeyCode::Down => match self.active_view {
@@ -389,6 +400,7 @@ impl App {
                 ActiveView::Logs => self.logs.scroll_down(),
                 ActiveView::MemGraph => self.memgraph.scroll_down(),
                 ActiveView::Prompt => self.prompt.select_next(),
+                ActiveView::Locks => self.locks.select_next(),
                 _ => {}
             },
             KeyCode::PageUp if self.active_view == ActiveView::Prompt => {
@@ -454,13 +466,14 @@ impl App {
             ActiveView::Logs => ActiveView::MemGraph,
             ActiveView::MemGraph => ActiveView::Eval,
             ActiveView::Eval => ActiveView::Prompt,
-            ActiveView::Prompt => ActiveView::Dashboard,
+            ActiveView::Prompt => ActiveView::Locks,
+            ActiveView::Locks => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::Prompt,
+            ActiveView::Dashboard => ActiveView::Locks,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
@@ -469,6 +482,7 @@ impl App {
             ActiveView::MemGraph => ActiveView::Logs,
             ActiveView::Eval => ActiveView::MemGraph,
             ActiveView::Prompt => ActiveView::Eval,
+            ActiveView::Locks => ActiveView::Prompt,
         };
         self.set_view(prev);
     }
@@ -507,6 +521,7 @@ impl App {
             tab("[7] Memgraph",  self.active_view == ActiveView::MemGraph),
             tab("[8] Eval",      self.active_view == ActiveView::Eval),
             tab("[9] Prompt",    self.active_view == ActiveView::Prompt),
+            tab("[0] Locks",     self.active_view == ActiveView::Locks),
         ];
         frame.render_widget(Line::from(tabs), chunks[0]);
 
@@ -524,6 +539,7 @@ impl App {
             ActiveView::MemGraph => "↑↓ scroll  Enter=detail  Esc=close",
             ActiveView::Eval => "w=cycle window (1h/6h/24h/7d)",
             ActiveView::Prompt => "↑↓ pins · PgUp/PgDn scroll MEMORY.md",
+            ActiveView::Locks => "↑↓ select  ·  r=release",
         };
         let hint_line = Line::from(vec![
             nav_span,
@@ -542,6 +558,7 @@ impl App {
             ActiveView::MemGraph  => self.memgraph.render(frame, chunks[2]),
             ActiveView::Eval      => self.eval.render(frame, chunks[2]),
             ActiveView::Prompt    => self.prompt.render(frame, chunks[2]),
+            ActiveView::Locks     => self.locks.render(frame, chunks[2]),
         }
 
         // Global status strip — two columns: events left, orchestration
@@ -714,7 +731,7 @@ fn short_status_detail(p: &serde_json::Value) -> String {
 }
 
 /// Run the TUI event loop.
-pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error> {
+pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -770,6 +787,7 @@ pub async fn run(pool: &PgPool, _config: &AppConfig) -> Result<(), anyhow::Error
                 ActiveView::MemGraph => { app.memgraph.refresh(pool).await?; }
                 ActiveView::Eval    => { app.eval.refresh(pool).await?; }
                 ActiveView::Prompt  => { app.prompt.refresh(pool).await?; }
+                ActiveView::Locks   => { app.locks.refresh(pool, config.lock_ttl_secs).await?; }
                 _ => {}
             }
             last_refresh = Some(Instant::now());

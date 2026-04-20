@@ -36,25 +36,50 @@ pub async fn release(pool: &sqlx::PgPool, config: &AppConfig, resource: &str, ag
     Ok(())
 }
 
-/// Handle `ygg lock list`
-pub async fn list(pool: &sqlx::PgPool, config: &AppConfig) -> Result<(), anyhow::Error> {
+/// Handle `ygg lock list` (and `--stale`)
+pub async fn list(
+    pool: &sqlx::PgPool,
+    config: &AppConfig,
+    stale_only: bool,
+    stale_secs: i64,
+) -> Result<(), anyhow::Error> {
     let lock_mgr = LockManager::new(pool, config.lock_ttl_secs);
-    let locks = lock_mgr.list_all().await?;
+    let mut locks = lock_mgr.list_all().await?;
+
+    if stale_only {
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stale_secs);
+        locks.retain(|l| l.acquired_at < cutoff);
+    }
 
     if locks.is_empty() {
-        println!("No active locks.");
+        if stale_only {
+            println!("No stale locks (held > {stale_secs}s).");
+        } else {
+            println!("No active locks.");
+        }
         return Ok(());
     }
 
-    println!("{:<30} {:<38} {:<20}", "RESOURCE", "AGENT", "EXPIRES");
+    // Resolve agent names inline so the output is scriptable without
+    // round-tripping through UUIDs.
+    let agent_repo = AgentRepo::new(pool);
+    let now = chrono::Utc::now();
+    println!("{:<30} {:<20} {:<10} {:<10}", "RESOURCE", "AGENT", "HELD_FOR", "TTL");
     for lock in &locks {
+        let agent = agent_repo.get(lock.agent_id).await.ok().flatten()
+            .map(|a| a.agent_name)
+            .unwrap_or_else(|| format!("{}…", &lock.agent_id.to_string()[..8]));
+        let held = (now - lock.acquired_at).num_seconds().max(0);
+        let ttl = (lock.expires_at - now).num_seconds().max(0);
         println!(
-            "{:<30} {:<38} {:<20}",
+            "{:<30} {:<20} {:<10} {:<10}",
             lock.resource_key,
-            lock.agent_id,
-            lock.expires_at.format("%H:%M:%S"),
+            agent,
+            format!("{held}s"),
+            format!("{ttl}s"),
         );
     }
-    println!("\n{} lock(s) active.", locks.len());
+    println!("\n{} lock(s){}.", locks.len(),
+        if stale_only { format!(" held > {stale_secs}s") } else { String::new() });
     Ok(())
 }

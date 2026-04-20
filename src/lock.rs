@@ -143,4 +143,15 @@ impl<'a> LockManager<'a> {
         .fetch_all(self.pool)
         .await
     }
+
+    /// Release every lock held by an agent. Called by the Stop hook so a
+    /// worker's leases don't linger after its session ends. Returns count
+    /// released.
+    pub async fn release_all_for_agent(&self, agent_id: Uuid) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM locks WHERE agent_id = $1")
+            .bind(agent_id)
+            .execute(self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
 }

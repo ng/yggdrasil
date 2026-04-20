@@ -260,6 +260,37 @@ async fn test_crash_recovery() {
 }
 
 #[tokio::test]
+async fn test_lock_release_all_for_agent() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-lock-stop-a', 'test-lock-stop-b')")
+        .execute(&pool).await.unwrap();
+
+    let a = agent_repo.register("test-lock-stop-a").await.unwrap();
+    let b = agent_repo.register("test-lock-stop-b").await.unwrap();
+
+    let lock_mgr = ygg::lock::LockManager::new(&pool, 300);
+    lock_mgr.acquire("test-res-a-1", a.agent_id).await.unwrap();
+    lock_mgr.acquire("test-res-a-2", a.agent_id).await.unwrap();
+    lock_mgr.acquire("test-res-b-1", b.agent_id).await.unwrap();
+
+    let released = lock_mgr.release_all_for_agent(a.agent_id).await.unwrap();
+    assert_eq!(released, 2, "should release both locks for agent a");
+
+    let a_after = lock_mgr.list_agent_locks(a.agent_id).await.unwrap();
+    assert!(a_after.is_empty(), "agent a should hold no locks");
+    let b_after = lock_mgr.list_agent_locks(b.agent_id).await.unwrap();
+    assert_eq!(b_after.len(), 1, "agent b's lock must not be touched");
+
+    // Cleanup
+    let _ = lock_mgr.release_all_for_agent(b.agent_id).await;
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-lock-stop-a', 'test-lock-stop-b')")
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_orphan_candidates_filter_by_idle() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();

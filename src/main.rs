@@ -492,8 +492,13 @@ enum LockAction {
         #[arg(short, long)]
         agent: String,
     },
-    /// List all active locks
-    List,
+    /// List all active locks. Pass --stale to restrict to locks held
+    /// longer than `secs` (default 600 = 10 min) — useful for triaging
+    /// abandoned leases.
+    List {
+        #[arg(long)] stale: bool,
+        #[arg(long, default_value = "600")] stale_secs: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -796,8 +801,8 @@ async fn main() -> anyhow::Result<()> {
                 LockAction::Release { resource, agent } => {
                     ygg::cli::lock_cmd::release(&pool, &config, &resource, &agent).await?;
                 }
-                LockAction::List => {
-                    ygg::cli::lock_cmd::list(&pool, &config).await?;
+                LockAction::List { stale, stale_secs } => {
+                    ygg::cli::lock_cmd::list(&pool, &config, stale, stale_secs).await?;
                 }
             }
         }
@@ -863,6 +868,12 @@ async fn main() -> anyhow::Result<()> {
                     ).await {
                         let _ = ygg::models::session::SessionRepo::new(&pool).end(sid).await;
                     }
+                    // Release every lock this agent still holds — they were
+                    // leases on shared resources, not persistent claims, and
+                    // a dead session shouldn't keep others waiting for TTL
+                    // expiry. Silent on error (DB contention is fine to skip).
+                    let lock_mgr = ygg::lock::LockManager::new(&pool, config.lock_ttl_secs);
+                    let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
                 }
             }
         }

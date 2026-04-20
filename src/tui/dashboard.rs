@@ -543,7 +543,7 @@ impl DashboardView {
                 Constraint::Min(8),     // agents
                 Constraint::Length(6),  // workers (click-to-do spawns)
                 Constraint::Length(7),  // state transitions
-                Constraint::Length(9),  // locks (trimmed 1 row for workers)
+                Constraint::Length(4),  // locks summary (detail on [0] Locks tab)
             ])
             .split(area);
 
@@ -1006,57 +1006,51 @@ impl DashboardView {
     }
 
     fn render_locks_table(&self, frame: &mut Frame, area: Rect) {
-        let header = Row::new(vec![
-            Cell::from("RESOURCE").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Cell::from("HELD BY"),
-            Cell::from("HELD FOR"),
-            Cell::from("TTL"),
-        ]).height(1);
-
+        // Summary-only — detailed view lives on the Locks tab ([0]). The
+        // dashboard surfaces (a) total live, (b) stale (>30m held), (c) the
+        // longest-held single lock so a stuck resource is still obvious.
         let now = Utc::now();
-        // Drop expired — that's stale state, not a signal to act on. Sort the
-        // rest by held-for DESC so the "who's stuck?" entries rise to the top.
-        let mut live: Vec<&crate::lock::ResourceLock> = self.locks.iter()
+        let live: Vec<&crate::lock::ResourceLock> = self.locks.iter()
             .filter(|l| (l.expires_at - now).num_seconds() > 0)
             .collect();
-        live.sort_by_key(|l| std::cmp::Reverse((now - l.acquired_at).num_seconds()));
+        let total = live.len();
+        let stale = live.iter()
+            .filter(|l| (now - l.acquired_at).num_seconds() > 1800)
+            .count();
+        let oldest = live.iter()
+            .max_by_key(|l| (now - l.acquired_at).num_seconds())
+            .map(|l| {
+                let held = humanize_duration((now - l.acquired_at).num_seconds().max(0));
+                let agent = self.agent_name_by_id.get(&l.agent_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}…", &l.agent_id.to_string()[..8]));
+                format!("{held} by {agent} on {}", short_resource(&l.resource_key))
+            });
 
-        let rows: Vec<Row> = live.iter().map(|l| {
-            let resource = short_resource(&l.resource_key);
-            let agent = self.agent_name_by_id.get(&l.agent_id)
-                .cloned()
-                .unwrap_or_else(|| format!("{}…", &l.agent_id.to_string()[..8]));
-            let held_secs = (now - l.acquired_at).num_seconds().max(0);
-            let held = humanize_duration(held_secs);
-            // Color-code held-for: >30m = yellow (possibly stuck), >2h = red
-            let held_color = if held_secs > 7200 { Color::Red }
-                             else if held_secs > 1800 { Color::Yellow }
-                             else { Color::DarkGray };
-
-            let ttl_secs = (l.expires_at - now).num_seconds();
-            let ttl_color = if ttl_secs < 60 { Color::Yellow }
-                            else if ttl_secs < 300 { Color::Yellow }
-                            else { Color::Green };
-
-            Row::new(vec![
-                Cell::from(resource),
-                Cell::from(agent).style(Style::default().fg(Color::Cyan)),
-                Cell::from(held).style(Style::default().fg(held_color)),
-                Cell::from(humanize_duration(ttl_secs)).style(Style::default().fg(ttl_color)),
-            ])
-        }).collect();
-
-        let title = format!(" Locks — {} live (sorted by longest held) ", live.len());
-        let table = Table::new(rows, [
-            Constraint::Percentage(45),
-            Constraint::Percentage(20),
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-        ])
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title));
-
-        frame.render_widget(table, area);
+        let stale_color = if stale > 0 { Color::Yellow } else { Color::Green };
+        let lines = vec![
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{total}"), Style::default().fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)),
+                Span::styled(" live  ·  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{stale}"), Style::default().fg(stale_color)
+                    .add_modifier(Modifier::BOLD)),
+                Span::styled(" stale (>30m)  ·  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("[0] Locks for detail",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            ]),
+            match oldest {
+                Some(s) => Line::from(vec![
+                    Span::styled("  longest: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(s, Style::default().fg(Color::Gray)),
+                ]),
+                None => Line::from(""),
+            },
+        ];
+        let para = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Locks "));
+        frame.render_widget(para, area);
     }
 }
 
