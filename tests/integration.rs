@@ -258,3 +258,36 @@ async fn test_crash_recovery() {
     sqlx::query("DELETE FROM agents WHERE agent_name = 'test-crash-recovery'")
         .execute(&pool).await.unwrap();
 }
+
+#[tokio::test]
+async fn test_agent_rename() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+
+    // Clean up any leftovers from a prior failed run.
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-rename-src', 'test-rename-dst', 'test-rename-collision')")
+        .execute(&pool).await.unwrap();
+
+    let src = agent_repo.register("test-rename-src").await.unwrap();
+    let other = agent_repo.register("test-rename-collision").await.unwrap();
+
+    // Happy path: rename succeeds, id preserved, lookup by new name works,
+    // old name is gone.
+    agent_repo.rename(src.agent_id, "test-rename-dst").await.unwrap();
+    let found = agent_repo.get_by_name("test-rename-dst").await.unwrap();
+    assert!(found.is_some(), "agent lookup by new name should succeed");
+    assert_eq!(found.unwrap().agent_id, src.agent_id, "agent_id must be preserved");
+    let gone = agent_repo.get_by_name("test-rename-src").await.unwrap();
+    assert!(gone.is_none(), "old name should no longer resolve");
+
+    // Collision path: renaming another agent into an occupied (name, persona)
+    // slot must error with a unique-violation (SQLSTATE 23505).
+    let err = agent_repo.rename(other.agent_id, "test-rename-dst").await.unwrap_err();
+    let code = err.as_database_error().and_then(|d| d.code().map(|c| c.to_string()));
+    assert_eq!(code.as_deref(), Some("23505"), "collision should be unique_violation");
+
+    // Cleanup
+    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-rename-src', 'test-rename-dst', 'test-rename-collision')")
+        .execute(&pool).await.unwrap();
+}

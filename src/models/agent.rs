@@ -319,6 +319,16 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
+    /// Rename an agent. Preserves persona and agent_id so joined rows
+    /// (events, nodes, sessions) stay linked. Caller should check for
+    /// collision on the compound key (agent_name, persona); the DB will
+    /// reject otherwise via the agents_name_persona_uk index.
+    pub async fn rename(&self, agent_id: Uuid, new_name: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE agents SET agent_name = $2, updated_at = now() WHERE agent_id = $1")
+            .bind(agent_id).bind(new_name).execute(self.pool).await?;
+        Ok(())
+    }
+
     pub async fn unarchive(&self, agent_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE agents SET archived_at = NULL WHERE agent_id = $1")
             .bind(agent_id).execute(self.pool).await?;

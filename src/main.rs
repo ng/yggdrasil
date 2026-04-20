@@ -400,6 +400,12 @@ enum AgentAction {
     Archive { name: String },
     /// Restore a previously-archived agent.
     Unarchive { name: String },
+    /// Rename an agent. Preserves agent_id so events/nodes/sessions stay linked.
+    /// Rejects if the new name already exists under the same persona.
+    Rename {
+        old: String,
+        new_name: String,
+    },
     /// Show agents that would be archived by `ygg reap --agents` at the
     /// given staleness threshold. Never mutates.
     Stale {
@@ -980,6 +986,24 @@ async fn main() -> anyhow::Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("agent '{name}' not found"))?;
                     repo.unarchive(agent.agent_id).await?;
                     println!("restored '{name}'");
+                }
+                AgentAction::Rename { old, new_name } => {
+                    let agent = repo.get_by_name(&old).await?
+                        .ok_or_else(|| anyhow::anyhow!("agent '{old}' not found"))?;
+                    if old == new_name {
+                        println!("noop: '{old}' already named that");
+                    } else if let Err(e) = repo.rename(agent.agent_id, &new_name).await {
+                        // 23505 = unique_violation; surface as friendly error.
+                        let msg = e.as_database_error()
+                            .and_then(|d| d.code().map(|c| c.to_string()));
+                        if msg.as_deref() == Some("23505") {
+                            anyhow::bail!("agent '{new_name}' already exists (with same persona)");
+                        } else {
+                            return Err(e.into());
+                        }
+                    } else {
+                        println!("renamed '{old}' → '{new_name}'");
+                    }
                 }
                 AgentAction::Stale { older_than_days } => {
                     let stale = repo.find_stale(older_than_days).await?;
