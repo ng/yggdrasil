@@ -39,6 +39,13 @@ pub struct EvalView {
     pub lifetime_referenced: i64,
     pub lifetime_redactions: i64,
     pub lifetime_digests: i64,
+
+    /// Learnings (yggdrasil-81). `captured` is window-scoped; `total` and
+    /// `applied` are unscoped since the rate of new captures is small and
+    /// the interesting numbers are cumulative.
+    pub learnings_captured: i64,
+    pub learnings_total: i64,
+    pub learnings_applied: i64,
 }
 
 impl EvalView {
@@ -53,6 +60,7 @@ impl EvalView {
             locks_acquired: 0, locks_released: 0, redactions: 0,
             lifetime_cache_hits: 0, lifetime_referenced: 0,
             lifetime_redactions: 0, lifetime_digests: 0,
+            learnings_captured: 0, learnings_total: 0, learnings_applied: 0,
         }
     }
 
@@ -124,6 +132,19 @@ impl EvalView {
         self.lifetime_referenced = lifetime_count(pool, "hit_referenced").await;
         self.lifetime_redactions = lifetime_count(pool, "redaction_applied").await;
         self.lifetime_digests    = lifetime_count(pool, "digest_written").await;
+
+        // Learnings — window captures + cumulative totals. applied_count
+        // sums until yggdrasil-82 ships the hook that increments it.
+        let (lcap, ltotal, lapplied): (i64, i64, i64) = sqlx::query_as(
+            r#"SELECT
+                 COUNT(*) FILTER (WHERE created_at >= $1)::bigint,
+                 COUNT(*)::bigint,
+                 COALESCE(SUM(applied_count), 0)::bigint
+               FROM learnings"#,
+        ).bind(since).fetch_one(pool).await.unwrap_or((0, 0, 0));
+        self.learnings_captured = lcap;
+        self.learnings_total = ltotal;
+        self.learnings_applied = lapplied;
         Ok(())
     }
 
@@ -265,6 +286,11 @@ impl EvalView {
         );
         frame.render_widget(para, chunks[2]);
 
+        let learnings_line_style = if self.learnings_applied > 0 {
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
         let activity = vec![
             Line::from(vec![
                 Span::raw("  "),
@@ -272,6 +298,13 @@ impl EvalView {
                     self.nodes_written, self.digests_written,
                     self.locks_acquired, self.locks_released, self.redactions),
                     Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!(
+                    "learnings {} captured in window · {} total · {} applications",
+                    self.learnings_captured, self.learnings_total, self.learnings_applied,
+                ), learnings_line_style),
             ]),
         ];
         let para = Paragraph::new(activity).block(
