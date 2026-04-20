@@ -127,6 +127,15 @@ pub struct DashboardView {
     pub db_tasks_total: i64,
     pub db_learnings: i64,
     pub db_locks_active: i64,
+
+    /// Inline rename buffer on the agents panel. When `Some`, typed keys
+    /// append to the buffer; Enter commits; Esc cancels. Tuple:
+    /// `(agent_id_being_renamed, buffer)`.
+    pub rename: Option<(Uuid, String)>,
+    /// Short-lived status message for the agents panel (archived / renamed /
+    /// rename-failed). Rendered under the agents table; cleared on next
+    /// action.
+    pub flash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -170,6 +179,69 @@ impl DashboardView {
             live_sessions_by_agent: HashMap::new(),
             db_nodes: 0, db_tasks_open: 0, db_tasks_total: 0,
             db_learnings: 0, db_locks_active: 0,
+            rename: None, flash: None,
+        }
+    }
+
+    /// Agents-panel rename lifecycle. Mirrors the DAG add-mode pattern.
+    pub fn rename_mode(&self) -> bool { self.rename.is_some() }
+    pub fn rename_begin(&mut self) {
+        if let Some(a) = self.agents.get(self.selected) {
+            self.rename = Some((a.agent_id, a.agent_name.clone()));
+            self.flash = None;
+        }
+    }
+    pub fn rename_cancel(&mut self) { self.rename = None; }
+    pub fn rename_push(&mut self, c: char) {
+        if let Some((_, buf)) = self.rename.as_mut() { buf.push(c); }
+    }
+    pub fn rename_pop(&mut self) {
+        if let Some((_, buf)) = self.rename.as_mut() { buf.pop(); }
+    }
+    pub fn rename_buffer(&self) -> Option<&str> {
+        self.rename.as_ref().map(|(_, b)| b.as_str())
+    }
+
+    /// Commit the in-flight rename. On success, refreshes the agents list so
+    /// the new name is visible immediately. Sets `flash` regardless of outcome.
+    pub async fn rename_commit(&mut self, pool: &PgPool) {
+        let Some((agent_id, buf)) = self.rename.take() else { return };
+        let new_name = buf.trim();
+        if new_name.is_empty() {
+            self.flash = Some("rename cancelled (empty)".into());
+            return;
+        }
+        let repo = AgentRepo::new(pool);
+        match repo.rename(agent_id, new_name).await {
+            Ok(()) => {
+                self.flash = Some(format!("renamed → {new_name}"));
+                let _ = self.refresh(pool).await;
+            }
+            Err(e) => {
+                let code = e.as_database_error().and_then(|d| d.code().map(|c| c.to_string()));
+                self.flash = Some(if code.as_deref() == Some("23505") {
+                    format!("rename failed: '{new_name}' already exists")
+                } else {
+                    format!("rename failed: {e}")
+                });
+            }
+        }
+    }
+
+    /// Archive the currently-selected agent. Fires on `a` when no rename is
+    /// in flight; refreshes the list so the archived row disappears.
+    pub async fn archive_selected(&mut self, pool: &PgPool) {
+        let Some(a) = self.agents.get(self.selected).cloned() else { return };
+        let repo = AgentRepo::new(pool);
+        match repo.archive(a.agent_id).await {
+            Ok(()) => {
+                self.flash = Some(format!("archived '{}'", a.agent_name));
+                let _ = self.refresh(pool).await;
+                if self.selected >= self.agents.len() {
+                    self.selected = self.agents.len().saturating_sub(1);
+                }
+            }
+            Err(e) => self.flash = Some(format!("archive failed: {e}")),
         }
     }
 
@@ -422,6 +494,10 @@ impl DashboardView {
         self.render_workers(frame, chunks[3]);
         self.render_transitions(frame, chunks[4]);
         self.render_locks_table(frame, chunks[5]);
+
+        if self.rename.is_some() {
+            render_rename_overlay(frame, chunks[2], self);
+        }
     }
 
     fn render_workers(&self, frame: &mut Frame, area: Rect) {
@@ -851,6 +927,12 @@ impl DashboardView {
             ]).style(style)
         }).collect();
 
+        // Surface action status (rename/archive) in the panel title so the
+        // user gets feedback without a separate status line.
+        let title = match self.flash.as_deref() {
+            Some(msg) => format!(" Agents  ·  {msg}  ·  r=rename a=archive "),
+            None => " Agents  ·  r=rename a=archive ".to_string(),
+        };
         let table = Table::new(rows, [
             Constraint::Percentage(25),
             Constraint::Percentage(15),
@@ -859,7 +941,7 @@ impl DashboardView {
             Constraint::Percentage(20),
         ])
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Agents "));
+        .block(Block::default().borders(Borders::ALL).title(title));
 
         frame.render_widget(table, area);
     }
@@ -1009,4 +1091,36 @@ fn humanize_duration(secs: i64) -> String {
     else if secs < 3600 { format!("{}m", secs / 60) }
     else if secs < 86400 { format!("{}h", secs / 3600) }
     else { format!("{}d", secs / 86400) }
+}
+
+/// Centered popup on the agents pane area while a rename is in progress.
+/// Clear + bordered block with the old name and an inline input buffer.
+fn render_rename_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
+    let Some((_, buf)) = dash.rename.as_ref() else { return };
+    let old = dash.agents.iter()
+        .find(|a| a.agent_id == dash.rename.as_ref().unwrap().0)
+        .map(|a| a.agent_name.as_str())
+        .unwrap_or("?");
+    let w = area.width.saturating_sub(8).min(70);
+    let h = 6u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect { x, y, width: w, height: h };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let hint = format!(" rename '{old}'  ·  Enter=commit · Esc=cancel ");
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("▸ ", Style::default().fg(Color::Cyan)),
+            Span::styled(buf.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL)
+            .title(hint)
+            .border_style(Style::default().fg(Color::Cyan)));
+    frame.render_widget(para, popup);
 }

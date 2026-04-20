@@ -174,6 +174,26 @@ impl App {
             return;
         }
 
+        // Dashboard inline-rename overlay captures keys while active.
+        // Mirrors the DAG add-mode pattern; Enter commits, Esc cancels,
+        // Ctrl-C still quits.
+        if self.active_view == ActiveView::Dashboard && self.dashboard.rename_mode() {
+            match code {
+                KeyCode::Esc => self.dashboard.rename_cancel(),
+                KeyCode::Backspace => self.dashboard.rename_pop(),
+                KeyCode::Enter => self.dashboard.rename_commit(pool).await,
+                KeyCode::Char(c) => {
+                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        self.should_quit = true;
+                    } else {
+                        self.dashboard.rename_push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Query pane is always in input mode while active, so typing
         // characters goes to the input buffer. Esc or Tab/arrows leave;
         // Ctrl-C quits. Enter runs the query.
@@ -322,6 +342,16 @@ impl App {
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
+            }
+            KeyCode::Char('r') if self.active_view == ActiveView::Dashboard
+                && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
+            {
+                self.dashboard.rename_begin();
+            }
+            KeyCode::Char('a') if self.active_view == ActiveView::Dashboard
+                && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
+            {
+                self.dashboard.archive_selected(pool).await;
             }
             KeyCode::Char('w') if self.active_view == ActiveView::Dashboard => {
                 // Toggle focus between agents + workers panel. Whatever's
