@@ -22,6 +22,8 @@ ADRs are append-only. Superseded decisions get a new ADR that references the old
 | 0012 | [Mechanical scoring as the primary retrieval precision mechanism](0012-mechanical-scoring.md) | Accepted |
 | 0013 | [Split agent identity from CC session state](0013-session-state-split.md) | Accepted |
 | 0014 | [First-class scoped memories](0014-scoped-memories.md) | Accepted |
+| 0015 | [Retrieval scope reduction — pivot toward orchestrator-only](0015-retrieval-scope-reduction.md) | Proposed |
+| 0016 | [Autonomous execution — scheduler + durable task runs](0016-autonomous-execution.md) | Proposed |
 
 ## Writing a new ADR
 

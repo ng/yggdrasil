@@ -182,6 +182,10 @@ docs/adr/         Architecture Decision Records
 
 Deeper topics live in `docs/`:
 
+- [**Orchestration runtime**](docs/orchestration.md) — how Yggdrasil autonomously advances a DAG end-to-end: scheduler, task runs, payload flow, lock integration, approval levels, dynamic child-spawn, failure semantics.
+- [**Eval benchmarks**](docs/eval-benchmarks.md) — `ygg bench` scenarios, baselines, Tier-A metrics (wall-clock, pass^k, token-cost, lock-wait), and the METR-style 50%-horizon methodology.
+- [**Task-runs data model**](docs/design/task-runs.md) — schema for the DBOS-shaped execution layer: `task_runs`, state/reason enums, payload formats, blob store, idempotency strategy.
+- [**Scheduler design**](docs/design/scheduler.md) — the single authoritative daemon: tick loop, `SKIP LOCKED` claim query, retry math, loop detection, failure modes.
 - [**Retrieval and injection**](docs/retrieval.md) — why embeddings (and why not *only* embeddings), what gets injected at `UserPromptSubmit` and `PreToolUse`, sequence diagrams for each flow, and the classifier-gated tool-level injection we haven't shipped yet.
 - [**Design principles**](docs/design-principles.md) — substrate separation; premises, not rules; smarter-cheaper-fewer-tokens with a concrete cache taxonomy; habituation / disclosure gate; epoch reflections; the forgetting question.
 - [**Open questions**](docs/open-questions.md) — the central hypothesis (does shared memory across agents help or hurt?), directions under consideration, and the named LLM failure modes Yggdrasil touches (context rot, see-sawing, sycophancy, cross-agent contamination).
