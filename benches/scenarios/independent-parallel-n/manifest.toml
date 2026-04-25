@@ -1,0 +1,87 @@
+# Scenario 1: independent-parallel-n
+# docs/eval-benchmarks.md § Scenario 1.
+#
+# N independent doc-page tasks with no shared files. Measures coordination
+# overhead vs. actual parallelism. Pareto target: ygg-N approaches (4×) the
+# wall-clock of vanilla-single while keeping pass^k high.
+
+id = "independent-parallel-n"
+title = "Independent parallel — throughput baseline"
+default_parallelism = 4
+
+# Each task creates one markdown doc page.
+[[tasks]]
+id    = "api-retry"
+title = "Add docs/topics/api-retry.md"
+prompt = """
+Create the file docs/topics/api-retry.md with the following content. Do not
+add anything else; do not modify any other file. Commit with message
+"docs: add api-retry topic page".
+
+```
+# API retry
+
+Brief overview of when retries are appropriate.
+
+## Strategies
+
+Cover exponential backoff, jitter, idempotency keys.
+```
+"""
+
+[[tasks]]
+id    = "db-config"
+title = "Add docs/topics/db-config.md"
+prompt = """
+Create the file docs/topics/db-config.md with the following content. Do not
+add anything else; do not modify any other file. Commit with message
+"docs: add db-config topic page".
+
+```
+# Database configuration
+
+Brief overview of pool sizing and timeouts.
+
+## Strategies
+
+Cover connection pools, statement timeouts, idle-in-transaction.
+```
+"""
+
+[[tasks]]
+id    = "graphql-errors"
+title = "Add docs/topics/graphql-errors.md"
+prompt = """
+Create the file docs/topics/graphql-errors.md with the following content.
+Do not add anything else; do not modify any other file. Commit with message
+"docs: add graphql-errors topic page".
+
+```
+# GraphQL errors
+
+Brief overview of the partial-response error model.
+
+## Strategies
+
+Cover error extensions, path arrays, client retry vs. user-visible.
+```
+"""
+
+[[tasks]]
+id    = "test-patterns"
+title = "Add docs/topics/test-patterns.md"
+prompt = """
+Create the file docs/topics/test-patterns.md with the following content.
+Do not add anything else; do not modify any other file. Commit with message
+"docs: add test-patterns topic page".
+
+```
+# Test patterns
+
+Brief overview of property-based testing and golden files.
+
+## Strategies
+
+Cover quickcheck, snapshot tests, fixture isolation.
+```
+"""

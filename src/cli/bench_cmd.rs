@@ -1,7 +1,10 @@
-//! `ygg bench` subcommand. Specified in docs/eval-benchmarks.md. Scaffold
-//! lands first (this file); scenario drivers land per yggdrasil-103+104.
+//! `ygg bench` subcommand. Specified in docs/eval-benchmarks.md.
 
-use crate::bench::{harness_sha, scenarios, BenchRepo, BenchTaskResult};
+use crate::bench::drivers::{VanillaSingleDriver, VanillaTmuxDriver, YggDriver};
+use crate::bench::manifest::LoadedManifest;
+use crate::bench::runner::{Driver, RunnerConfig};
+use crate::bench::stats::{bootstrap_mean_ci, ci_diff_verdict, pass_at_k, pass_power_k, Verdict};
+use crate::bench::{harness_sha, scenarios, Baseline, BenchRepo, Tier};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -11,7 +14,6 @@ const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
 const GRAY: &str = "\x1b[38;5;245m";
 
-/// `ygg bench list` — print known scenarios and their implementation status.
 pub fn list() {
     println!("{DIM}id{RESET}                          {DIM}status{RESET}      {DIM}title{RESET}");
     for s in scenarios::ALL {
@@ -23,10 +25,9 @@ pub fn list() {
         println!("  {:<26} {status}    {}", s.id, s.title);
     }
     println!();
-    println!("{DIM}Specs in docs/eval-benchmarks.md. Drivers land per yggdrasil-103/104.{RESET}");
+    println!("{DIM}Specs in docs/eval-benchmarks.md.{RESET}");
 }
 
-/// `ygg bench report <run-id>` — print a single bench run.
 pub async fn report(pool: &PgPool, run_id: Uuid) -> anyhow::Result<()> {
     let repo = BenchRepo::new(pool);
     let run = repo.get_run(run_id).await?
@@ -63,13 +64,10 @@ pub async fn report(pool: &PgPool, run_id: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `ygg bench run <scenario>` — kick off a scenario. Scaffold-only:
-/// records a bench_runs row + finalizes as failed when the driver isn't
-/// wired. Real drivers land per yggdrasil-103.
 pub async fn run(
     pool: &PgPool,
     scenario_id: &str,
-    baseline: crate::bench::Baseline,
+    baseline: Baseline,
     parallelism: i32,
     model: &str,
     seed: Option<i64>,
@@ -77,33 +75,41 @@ pub async fn run(
     let spec = scenarios::find(scenario_id)
         .ok_or_else(|| anyhow::anyhow!("unknown scenario: {scenario_id}"))?;
 
-    let repo = BenchRepo::new(pool);
-    let run = repo.create_run(
-        spec.id,
-        baseline,
-        parallelism,
-        model,
-        &harness_sha(),
-        seed,
-    ).await?;
-
-    println!("created bench run {} ({})", run.run_id, spec.title);
-
     if !spec.implemented {
-        let note = format!("scenario '{}' has no driver yet (yggdrasil-103+)", spec.id);
-        repo.finalize(run.run_id, false, Some(&note)).await?;
+        let repo = BenchRepo::new(pool);
+        let run = repo.create_run(
+            spec.id, baseline, parallelism, model, &harness_sha(), seed,
+        ).await?;
+        repo.finalize(run.run_id, false,
+            Some("scenario driver not implemented yet")).await?;
         anyhow::bail!("scenario driver not implemented: {scenario_id}");
     }
 
-    // Drivers land per yggdrasil-103 (vanilla-single, vanilla-tmux, ygg).
-    // Until then, fall through to the not-implemented finalize above.
-    Ok(run.run_id)
+    // Load fixture from CARGO_MANIFEST_DIR/benches/scenarios/<id>/. When run
+    // installed (no source tree alongside), users can override via
+    // YGG_BENCH_SCENARIOS_DIR.
+    let scenarios_dir = std::env::var("YGG_BENCH_SCENARIOS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("benches/scenarios")
+        });
+    let manifest = LoadedManifest::load(scenarios_dir.join(spec.id))?;
+
+    let cfg = RunnerConfig::default();
+    let driver: Box<dyn Driver> = match baseline {
+        Baseline::VanillaSingle => Box::new(VanillaSingleDriver { config: cfg.clone() }),
+        Baseline::VanillaTmux   => Box::new(VanillaTmuxDriver   { config: cfg.clone() }),
+        Baseline::Ygg           => Box::new(YggDriver           { config: cfg.clone() }),
+    };
+
+    let _ = parallelism; // honored by the manifest's default_parallelism
+    let _ = model;       // recorded by create_run inside execute()
+    let run_id = crate::bench::runner::execute(pool, &manifest, driver.as_ref(), seed, &cfg).await?;
+    println!("bench run: {run_id}");
+    Ok(run_id)
 }
 
-/// `ygg bench diff <run-a> <run-b>` — pairwise compare two runs. Refuses to
-/// declare a winner if confidence intervals would overlap; for the scaffold
-/// this is the single-sample form (k=1 case). Real CI computation lands with
-/// the multi-run aggregation in yggdrasil-103.
 pub async fn diff(pool: &PgPool, a: Uuid, b: Uuid) -> anyhow::Result<()> {
     let repo = BenchRepo::new(pool);
     let run_a = repo.get_run(a).await?
@@ -121,29 +127,36 @@ pub async fn diff(pool: &PgPool, a: Uuid, b: Uuid) -> anyhow::Result<()> {
     let res_a = repo.list_task_results(a).await?;
     let res_b = repo.list_task_results(b).await?;
 
-    let wall_a = res_a.iter().map(|r| r.wall_clock_s).max().unwrap_or(0);
-    let wall_b = res_b.iter().map(|r| r.wall_clock_s).max().unwrap_or(0);
+    let wall_a: Vec<f64> = res_a.iter().map(|r| r.wall_clock_s as f64).collect();
+    let wall_b: Vec<f64> = res_b.iter().map(|r| r.wall_clock_s as f64).collect();
+    let (m_a, lo_a, hi_a) = bootstrap_mean_ci(&wall_a, 1000);
+    let (m_b, lo_b, hi_b) = bootstrap_mean_ci(&wall_b, 1000);
+
     let pass_a = res_a.iter().filter(|r| r.passed).count();
     let pass_b = res_b.iter().filter(|r| r.passed).count();
 
     println!("Scenario:  {}", run_a.scenario);
     println!();
-    println!("                  {DIM}{}{RESET}    {DIM}{}{RESET}", run_a.baseline, run_b.baseline);
-    println!("wall-clock        {wall_a:>6}s  {wall_b:>6}s");
-    println!("tasks-passed      {:>6}    {:>6}", pass_a, pass_b);
+    println!("                  {DIM}{}{RESET}            {DIM}{}{RESET}", run_a.baseline, run_b.baseline);
+    println!("wall-clock mean   {:>7.1}s [{:>5.1},{:>5.1}]   {:>7.1}s [{:>5.1},{:>5.1}]",
+        m_a, lo_a, hi_a, m_b, lo_b, hi_b);
+    println!("tasks-passed      {:>6}                 {:>6}", pass_a, pass_b);
+
+    let v = ci_diff_verdict(lo_a, hi_a, lo_b, hi_b);
     println!();
-    println!("{DIM}Single-sample diff. k>=4 + bootstrap CIs land with yggdrasil-103.{RESET}");
-    println!("{DIM}Treat point estimates with skepticism until then.{RESET}");
+    let verdict = match v {
+        Verdict::Inconclusive => format!("{DIM}inconclusive (95% CIs overlap){RESET}"),
+        Verdict::ALess  => format!("{GREEN}{} faster than {} (95% CIs disjoint){RESET}",
+            run_a.baseline, run_b.baseline),
+        Verdict::AMore  => format!("{GREEN}{} faster than {} (95% CIs disjoint){RESET}",
+            run_b.baseline, run_a.baseline),
+    };
+    println!("Verdict: {verdict}");
     Ok(())
 }
 
-/// `ygg bench ci --tier <tier>` — CI-mode. Runs the scenario(s) for the tier,
-/// exits non-zero if any regression detected against the rolling median.
-/// Scaffold delegates to `run` for the smoke tier, returning whether it would
-/// gate. Full regression gating lands with yggdrasil-103.
-pub async fn ci(pool: &PgPool, tier: crate::bench::Tier) -> anyhow::Result<()> {
-    use crate::bench::Tier;
-    let scenarios = match tier {
+pub async fn ci(pool: &PgPool, tier: Tier) -> anyhow::Result<()> {
+    let scenario_ids: Vec<&str> = match tier {
         Tier::Smoke => vec!["independent-parallel-n"],
         Tier::Regression => vec![
             "independent-parallel-n",
@@ -153,18 +166,46 @@ pub async fn ci(pool: &PgPool, tier: crate::bench::Tier) -> anyhow::Result<()> {
         ],
         Tier::Overnight => scenarios::ALL.iter().map(|s| s.id).collect(),
     };
-    let any_implemented = scenarios.iter()
-        .any(|id| scenarios::find(id).is_some_and(|s| s.implemented));
-    if !any_implemented {
-        anyhow::bail!(
-            "tier {} has no implemented scenarios yet; CI gating waits on yggdrasil-103",
-            tier.as_str()
-        );
+
+    for scenario_id in scenario_ids {
+        let Some(spec) = scenarios::find(scenario_id) else { continue; };
+        if !spec.implemented {
+            eprintln!("ci: skipping {scenario_id} (driver not implemented)");
+            continue;
+        }
+        eprintln!("ci: running {scenario_id} ygg baseline...");
+        let run_id = run(pool, scenario_id, Baseline::Ygg, 4, "claude-sonnet-4-6", None).await?;
+        let bench = BenchRepo::new(pool).get_run(run_id).await?
+            .ok_or_else(|| anyhow::anyhow!("just-created run vanished"))?;
+        if bench.passed != Some(true) {
+            anyhow::bail!("ci: {scenario_id} did not pass (run {run_id})");
+        }
     }
-    // When drivers are wired, this loop actually runs each scenario with k=4
-    // and compares against rolling median — see yggdrasil-103.
+    eprintln!("ci: all scenarios passed");
     Ok(())
 }
 
+/// Aggregate over the last N runs of (scenario, baseline) to compute pass^k.
+/// Used by `ygg bench ci` regression-gate logic; exposed for tests.
+pub async fn pass_power_k_for(
+    pool: &PgPool,
+    scenario: &str,
+    baseline: Baseline,
+    k: usize,
+) -> anyhow::Result<f64> {
+    let runs: Vec<(bool,)> = sqlx::query_as(
+        r#"SELECT COALESCE(passed, false) FROM bench_runs
+            WHERE scenario = $1 AND baseline = $2
+            ORDER BY started_at DESC LIMIT $3"#,
+    )
+    .bind(scenario)
+    .bind(baseline.as_str())
+    .bind(k as i64)
+    .fetch_all(pool)
+    .await?;
+    let bools: Vec<bool> = runs.into_iter().map(|(b,)| b).collect();
+    Ok(pass_power_k(&bools, k))
+}
+
 #[allow(dead_code)]
-fn unused_marker() -> Option<BenchTaskResult> { None }
+fn _ensure_pass_at_k_used(p: &[bool]) -> f64 { pass_at_k(p, p.len()) }

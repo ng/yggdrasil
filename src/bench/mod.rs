@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+pub mod drivers;
+pub mod manifest;
+pub mod runner;
 pub mod scenarios;
+pub mod stats;
 
 /// Three baselines per docs/eval-benchmarks.md § Baselines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -763,6 +763,58 @@ async fn test_scheduler_approval_gate_blocks_then_unblocks() {
 }
 
 #[tokio::test]
+async fn test_bench_runner_independent_parallel_n_with_fake_claude() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    // Use the in-tree fake claude binary so the test doesn't burn real tokens.
+    let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/fixtures/fake-claude.sh");
+    assert!(fake.exists(), "fake-claude.sh fixture must ship in-tree");
+
+    let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/scenarios");
+    let manifest = ygg::bench::manifest::LoadedManifest::load(
+        scenarios_dir.join("independent-parallel-n")
+    ).unwrap();
+
+    let workspace = std::env::temp_dir().join(format!("ygg-bench-test-{}", uuid::Uuid::new_v4()));
+    let cfg = ygg::bench::runner::RunnerConfig {
+        claude_bin: fake,
+        task_timeout_s: 60,
+        workspace_root: Some(workspace.clone()),
+    };
+
+    // Use the ygg driver to exercise the parallel path.
+    let driver = ygg::bench::drivers::YggDriver { config: cfg.clone() };
+    let run_id = ygg::bench::runner::execute(&pool, &manifest, &driver, Some(42), &cfg).await.unwrap();
+
+    let repo = ygg::bench::BenchRepo::new(&pool);
+    let bench = repo.get_run(run_id).await.unwrap().unwrap();
+    assert_eq!(bench.passed, Some(true), "fake claude should produce a passing run");
+    assert_eq!(bench.scenario, "independent-parallel-n");
+
+    // All four task results must be marked passed.
+    let results = repo.list_task_results(run_id).await.unwrap();
+    assert_eq!(results.len(), 4);
+    for r in &results {
+        assert!(r.passed, "task #{} should pass", r.task_idx);
+        assert!(r.tokens_in.is_some(), "fake claude emits a usage block");
+    }
+
+    // pass_power_k_for over k=1 should be 1.0 since this run passed.
+    let p = ygg::cli::bench_cmd::pass_power_k_for(
+        &pool, "independent-parallel-n", ygg::bench::Baseline::Ygg, 1
+    ).await.unwrap();
+    assert!(p >= 1.0 - 1e-9, "single passed run should yield pass^1 = 1.0, got {p}");
+
+    // Cleanup workspace.
+    let _ = std::fs::remove_dir_all(&workspace);
+    sqlx::query("DELETE FROM bench_runs WHERE run_id = $1").bind(run_id)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_scheduler_backfill_idempotent() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();

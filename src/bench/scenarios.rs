@@ -26,7 +26,7 @@ pub const ALL: &[ScenarioSpec] = &[
         title: "Independent parallel — throughput baseline",
         description: "N independent doc-page tasks, no shared files. Measures coordination overhead.",
         default_parallelism: 4,
-        implemented: false,
+        implemented: true,
     },
     ScenarioSpec {
         id: "dag-linear-3",

@@ -1,0 +1,3 @@
+Marker so the seed_repo directory ships in the tree. The harness git-inits
+this directory before each baseline run so all three baselines start from
+the same state.
