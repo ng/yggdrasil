@@ -16,8 +16,55 @@
 
 prompt=$(cat)
 
-# Extract path, heading, body, commit. Each is best-effort; we sanity-check
-# below. Use awk where it's clearer than grep+sed pipes.
+# Detect mode: create vs modify. Both share a commit-message footer.
+commit=$(printf '%s\n' "$prompt" | tr '\n' ' ' \
+    | awk 'match($0, /Commit with message[ ]+"[^"]+"/) {
+        s = substr($0, RSTART, RLENGTH);
+        if (match(s, /"[^"]+"/)) print substr(s, RSTART+1, RLENGTH-2);
+    }')
+
+# Modify-mode: contention scenario. Pattern: "change `OLD` to `NEW`" inside
+# an existing file (Cargo.toml). Apply with sed and commit. Independent of
+# the create-mode path so the patterns don't collide.
+if printf '%s\n' "$prompt" | grep -q 'Modify the existing'; then
+    target=$(printf '%s\n' "$prompt" | awk '/Modify the existing/{
+        for (i=1; i<=NF; i++) if ($i == "existing") { gsub(/[:.]$/, "", $(i+1)); print $(i+1); exit }
+    }')
+    # Capture all "change `OLD` to `NEW`" pairs.
+    pairs=$(printf '%s\n' "$prompt" | tr '\n' ' ' \
+        | grep -oE 'change `[^`]+` to `[^`]+`')
+    if [ -z "$target" ] || [ ! -f "$target" ] || [ -z "$pairs" ] || [ -z "$commit" ]; then
+        cat <<JSON
+{"error":"could not parse modify prompt","target":"$target","commit":"$commit"}
+JSON
+        exit 2
+    fi
+    # Apply each replacement. Use python's pure-text replace via printf to
+    # avoid sed regex escaping headaches.
+    while IFS= read -r line; do
+        old=$(printf '%s' "$line" | sed -E 's/^change `([^`]+)` to `([^`]+)`$/\1/')
+        new=$(printf '%s' "$line" | sed -E 's/^change `([^`]+)` to `([^`]+)`$/\2/')
+        # Replace using awk which handles fixed strings safely.
+        tmp=$(mktemp)
+        awk -v old="$old" -v new="$new" '{
+            idx = index($0, old);
+            if (idx > 0) {
+                $0 = substr($0, 1, idx-1) new substr($0, idx + length(old));
+            }
+            print
+        }' "$target" > "$tmp"
+        mv "$tmp" "$target"
+    done <<< "$pairs"
+
+    git add "$target" 2>/dev/null
+    git commit -q -m "$commit" 2>/dev/null
+    cat <<JSON
+{"type":"result","subtype":"success","is_error":false,"result":"modified $target","usage":{"input_tokens":150,"output_tokens":30,"cache_read_input_tokens":1000},"total_cost_usd":0.0006}
+JSON
+    exit 0
+fi
+
+# Create-mode: extract path, heading, body. Used by Scenario 1.
 path=$(printf '%s\n' "$prompt" | awk '/Create the file [^ ]+/{
     for (i=1; i<=NF; i++) if ($i == "file") { print $(i+1); exit }
 }')
@@ -26,11 +73,6 @@ body=$(printf '%s\n' "$prompt" | awk '
     /^```/ { fence = !fence; next }
     fence { print }
 ')
-commit=$(printf '%s\n' "$prompt" | tr '\n' ' ' \
-    | awk 'match($0, /Commit with message[ ]+"[^"]+"/) {
-        s = substr($0, RSTART, RLENGTH);
-        if (match(s, /"[^"]+"/)) print substr(s, RSTART+1, RLENGTH-2);
-    }')
 
 if [ -z "$path" ] || [ -z "$body" ] || [ -z "$commit" ]; then
     cat <<JSON

@@ -1,0 +1,31 @@
+# Scenario 4: contention
+# docs/eval-benchmarks.md § Scenario 4.
+#
+# Two tasks both edit the same file (Cargo.toml) bumping different
+# dependencies. With locks the edits are sequenced and both land; without
+# locks one edit overwrites the other (silent corruption).
+#
+# This scenario is the canary for the orchestrator's lock primitive. The
+# YggDriver's per-task git clones don't exercise the live lock manager —
+# end-to-end validation requires running the real ygg scheduler with two
+# tmux-hosted Claude agents pre-declaring required_locks on the shared file.
+# Marked implemented=false in scenarios::ALL until the scheduler-backed
+# end-to-end driver (yggdrasil-101 / 105 follow-ups) lands.
+
+id = "contention"
+title = "Lock contention"
+default_parallelism = 2
+
+[[tasks]]
+id = "bump-serde"
+title = "Bump serde to 1.0.220 in Cargo.toml"
+prompt = """
+Modify the existing Cargo.toml in this directory: change `serde = "1.0.200"` to `serde = "1.0.220"`. Do not touch any other dependency. Commit with message "deps: bump serde to 1.0.220".
+"""
+
+[[tasks]]
+id = "bump-tokio"
+title = "Bump tokio to 1.40 in Cargo.toml"
+prompt = """
+Modify the existing Cargo.toml in this directory: change `tokio = "1.30"` to `tokio = "1.40"`. Do not touch any other dependency. Commit with message "deps: bump tokio to 1.40".
+"""

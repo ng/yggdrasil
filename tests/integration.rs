@@ -815,6 +815,94 @@ async fn test_bench_runner_independent_parallel_n_with_fake_claude() {
 }
 
 #[tokio::test]
+async fn test_bench_diff_refuses_overlapping_cis() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    // Create two bench runs of the same scenario with similar wall-clocks
+    // so their bootstrap CIs overlap. The diff verdict should be Inconclusive,
+    // proving we refuse to declare a winner from noise.
+    let repo = ygg::bench::BenchRepo::new(&pool);
+    let a = repo.create_run(
+        "test-overlap", ygg::bench::Baseline::VanillaSingle, 1,
+        "fake", "0", None,
+    ).await.unwrap();
+    let b = repo.create_run(
+        "test-overlap", ygg::bench::Baseline::Ygg, 1,
+        "fake", "0", None,
+    ).await.unwrap();
+
+    // Wall-clocks within ±2s (CIs definitely overlap).
+    for (idx, sec) in [10, 11, 12, 11].iter().enumerate() {
+        repo.write_task_result(a.run_id, &ygg::bench::BenchTaskResult {
+            run_id: a.run_id, task_idx: idx as i32, passed: true,
+            wall_clock_s: *sec, tokens_in: None, tokens_out: None,
+            tokens_cache: None, usd: None, reopened: false,
+        }).await.unwrap();
+    }
+    for (idx, sec) in [11, 10, 12, 11].iter().enumerate() {
+        repo.write_task_result(b.run_id, &ygg::bench::BenchTaskResult {
+            run_id: b.run_id, task_idx: idx as i32, passed: true,
+            wall_clock_s: *sec, tokens_in: None, tokens_out: None,
+            tokens_cache: None, usd: None, reopened: false,
+        }).await.unwrap();
+    }
+    repo.finalize(a.run_id, true, None).await.unwrap();
+    repo.finalize(b.run_id, true, None).await.unwrap();
+
+    // The CLI's `bench diff` is a printer over these same primitives; assert
+    // the math directly to keep the test stable against output formatting.
+    let res_a = repo.list_task_results(a.run_id).await.unwrap();
+    let res_b = repo.list_task_results(b.run_id).await.unwrap();
+    let wall_a: Vec<f64> = res_a.iter().map(|r| r.wall_clock_s as f64).collect();
+    let wall_b: Vec<f64> = res_b.iter().map(|r| r.wall_clock_s as f64).collect();
+    let (_, lo_a, hi_a) = ygg::bench::stats::bootstrap_mean_ci(&wall_a, 1000);
+    let (_, lo_b, hi_b) = ygg::bench::stats::bootstrap_mean_ci(&wall_b, 1000);
+    let v = ygg::bench::stats::ci_diff_verdict(lo_a, hi_a, lo_b, hi_b);
+    assert!(matches!(v, ygg::bench::stats::Verdict::Inconclusive),
+        "overlapping CIs must produce Inconclusive verdict; got {v:?}");
+
+    sqlx::query("DELETE FROM bench_runs WHERE scenario = 'test-overlap'")
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_bench_runner_contention_with_fake_claude() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/fixtures/fake-claude.sh");
+    let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/scenarios");
+    let manifest = ygg::bench::manifest::LoadedManifest::load(
+        scenarios_dir.join("contention")
+    ).unwrap();
+
+    let workspace = std::env::temp_dir().join(format!("ygg-bench-cont-{}", uuid::Uuid::new_v4()));
+    let cfg = ygg::bench::runner::RunnerConfig {
+        claude_bin: fake,
+        task_timeout_s: 30,
+        workspace_root: Some(workspace.clone()),
+    };
+
+    // Use VanillaSingle (sequential) so both bumps land in Cargo.toml. The
+    // scheduler-backed YggDriver with locks would also pass; the parallel
+    // race-without-locks path is the negative test, requiring an explicit
+    // mode flag — left for a follow-up.
+    let driver = ygg::bench::drivers::VanillaSingleDriver { config: cfg.clone() };
+    let run_id = ygg::bench::runner::execute(&pool, &manifest, &driver, None, &cfg).await.unwrap();
+
+    let repo = ygg::bench::BenchRepo::new(&pool);
+    let bench = repo.get_run(run_id).await.unwrap().unwrap();
+    assert_eq!(bench.passed, Some(true), "sequential driver should land both bumps");
+
+    let _ = std::fs::remove_dir_all(&workspace);
+    sqlx::query("DELETE FROM bench_runs WHERE run_id = $1").bind(run_id)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_scheduler_backfill_idempotent() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();

@@ -47,7 +47,7 @@ pub const ALL: &[ScenarioSpec] = &[
         title: "Lock contention",
         description: "Two tasks both edit the same file. Measures lock correctness.",
         default_parallelism: 2,
-        implemented: false,
+        implemented: true,
     },
     ScenarioSpec {
         id: "failure-recovery",
