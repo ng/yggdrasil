@@ -13,6 +13,7 @@ use super::dashboard::DashboardView;
 use super::dag_view::DagView;
 use super::eval_view::EvalView;
 use super::locks_view::LocksView;
+use super::runs_view::RunsView;
 use super::log_view::LogView;
 use super::memgraph_view::MemGraphView;
 use super::prompt_view::PromptView;
@@ -32,6 +33,7 @@ pub enum ActiveView {
     Eval,
     Prompt,
     Locks,
+    Runs,
 }
 
 pub struct App {
@@ -47,6 +49,7 @@ pub struct App {
     pub eval: EvalView,
     pub prompt: PromptView,
     pub locks: LocksView,
+    pub runs: RunsView,
     pub agent_name: String,
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
@@ -86,6 +89,7 @@ impl App {
             eval: EvalView::new(),
             prompt: PromptView::new(),
             locks: LocksView::new(),
+            runs: RunsView::new(),
             agent_name,
             query_focus: false,
             status_tail: Vec::new(),
@@ -286,6 +290,11 @@ impl App {
             KeyCode::Char('8') => self.set_view(ActiveView::Eval),
             KeyCode::Char('9') => self.set_view(ActiveView::Prompt),
             KeyCode::Char('0') => self.set_view(ActiveView::Locks),
+            KeyCode::Char('R') => self.set_view(ActiveView::Runs),
+            KeyCode::Char('f') if self.active_view == ActiveView::Runs => {
+                self.runs.cycle_filter();
+                let _ = self.runs.refresh(pool).await;
+            }
             KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
             KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
             KeyCode::Char('f') if self.active_view == ActiveView::Logs => {
@@ -387,6 +396,7 @@ impl App {
                 ActiveView::MemGraph => self.memgraph.scroll_up(),
                 ActiveView::Prompt => self.prompt.select_prev(),
                 ActiveView::Locks => self.locks.select_prev(),
+                ActiveView::Runs => self.runs.select_prev(),
                 _ => {}
             },
             KeyCode::Down => match self.active_view {
@@ -401,6 +411,7 @@ impl App {
                 ActiveView::MemGraph => self.memgraph.scroll_down(),
                 ActiveView::Prompt => self.prompt.select_next(),
                 ActiveView::Locks => self.locks.select_next(),
+                ActiveView::Runs => self.runs.select_next(),
                 _ => {}
             },
             KeyCode::PageUp if self.active_view == ActiveView::Prompt => {
@@ -467,13 +478,14 @@ impl App {
             ActiveView::MemGraph => ActiveView::Eval,
             ActiveView::Eval => ActiveView::Prompt,
             ActiveView::Prompt => ActiveView::Locks,
-            ActiveView::Locks => ActiveView::Dashboard,
+            ActiveView::Locks => ActiveView::Runs,
+            ActiveView::Runs => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::Locks,
+            ActiveView::Dashboard => ActiveView::Runs,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
@@ -483,6 +495,7 @@ impl App {
             ActiveView::Eval => ActiveView::MemGraph,
             ActiveView::Prompt => ActiveView::Eval,
             ActiveView::Locks => ActiveView::Prompt,
+            ActiveView::Runs => ActiveView::Locks,
         };
         self.set_view(prev);
     }
@@ -522,6 +535,7 @@ impl App {
             tab("[8] Eval",      self.active_view == ActiveView::Eval),
             tab("[9] Prompt",    self.active_view == ActiveView::Prompt),
             tab("[0] Locks",     self.active_view == ActiveView::Locks),
+            tab("[R] Runs",      self.active_view == ActiveView::Runs),
         ];
         frame.render_widget(Line::from(tabs), chunks[0]);
 
@@ -540,6 +554,7 @@ impl App {
             ActiveView::Eval => "w=cycle window (1h/6h/24h/7d)",
             ActiveView::Prompt => "↑↓ pins · PgUp/PgDn scroll MEMORY.md",
             ActiveView::Locks => "↑↓ select  ·  r=release",
+            ActiveView::Runs => "↑↓ select  ·  f=cycle filter (all/live/terminal)",
         };
         let hint_line = Line::from(vec![
             nav_span,
@@ -559,6 +574,7 @@ impl App {
             ActiveView::Eval      => self.eval.render(frame, chunks[2]),
             ActiveView::Prompt    => self.prompt.render(frame, chunks[2]),
             ActiveView::Locks     => self.locks.render(frame, chunks[2]),
+            ActiveView::Runs      => self.runs.render(frame, chunks[2]),
         }
 
         // Global status strip — two columns: events left, orchestration
@@ -788,6 +804,7 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                 ActiveView::Eval    => { app.eval.refresh(pool).await?; }
                 ActiveView::Prompt  => { app.prompt.refresh(pool).await?; }
                 ActiveView::Locks   => { app.locks.refresh(pool, config.lock_ttl_secs).await?; }
+                ActiveView::Runs    => { app.runs.refresh(pool).await?; }
                 _ => {}
             }
             last_refresh = Some(Instant::now());
