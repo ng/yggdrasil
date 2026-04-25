@@ -33,6 +33,10 @@ pub struct SchedulerConfig {
     /// N consecutive identical fingerprints → poison. Set to a large number
     /// to disable; default 3.
     pub poison_threshold: i32,
+    /// yggdrasil-109: when true, the scheduler treats tasks at any
+    /// `approval_level` as approved without an explicit `approved_at`. Set
+    /// via `YGG_AUTO_APPROVE=1|true|yes` for unattended overnight runs.
+    pub auto_approve: bool,
 }
 
 impl SchedulerConfig {
@@ -55,8 +59,27 @@ impl SchedulerConfig {
             default_max_attempts: 3,
             default_heartbeat_ttl_s: 300,
             poison_threshold,
+            auto_approve: parse_bool_env("YGG_AUTO_APPROVE"),
         }
     }
+}
+
+/// Parse a 1/true/yes/on env flag, case-insensitive. Anything else (including
+/// unset) → false. Centralized so we don't drift across env-flag readers.
+fn parse_bool_env(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1")
+            | Some("true")
+            | Some("TRUE")
+            | Some("True")
+            | Some("yes")
+            | Some("YES")
+            | Some("Yes")
+            | Some("on")
+            | Some("ON")
+            | Some("On")
+    )
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -77,8 +100,14 @@ pub async fn tick(pool: &PgPool, cfg: &SchedulerConfig) -> Result<TickStats, any
     stats.reaped = reap_expired_heartbeats(pool).await?;
     stats.deadlined = enforce_deadlines(pool).await?;
     stats.poisoned = detect_loops(pool, cfg.poison_threshold).await?;
-    stats.finalized = finalize_terminal_runs(pool).await?;
+    // yggdrasil-112: retries MUST run before finalize. finalize closes the
+    // parent task when the latest attempt is terminal; schedule_retries' guard
+    // is `WHERE t.status <> 'closed'`, so reversing this order silently kills
+    // retry. If a retry queues a fresh `ready` attempt, finalize then sees a
+    // non-terminal latest attempt and skips the task (DISTINCT ON ... ORDER BY
+    // attempt DESC).
     stats.retried = schedule_retries(pool, cfg).await?;
+    stats.finalized = finalize_terminal_runs(pool).await?;
     stats.scheduled = schedule_ready_tasks(pool, cfg).await?;
     stats.dispatched = dispatch_ready(pool, cfg).await?;
     Ok(stats)
@@ -259,11 +288,13 @@ pub async fn schedule_ready_tasks(
               )
               -- Approval gate: tasks at approve_plan/completion need a
               -- positive approved_at before the scheduler will dispatch.
-              AND (t.approval_level = 'auto' OR t.approved_at IS NOT NULL)
+              -- yggdrasil-109: $1 short-circuits the gate when YGG_AUTO_APPROVE.
+              AND ($1 OR t.approval_level = 'auto' OR t.approved_at IS NOT NULL)
             ORDER BY t.priority, t.updated_at
             FOR UPDATE OF t SKIP LOCKED
             LIMIT 100"#,
     )
+    .bind(cfg.auto_approve)
     .fetch_all(pool)
     .await?;
 
@@ -598,9 +629,11 @@ pub async fn dispatchable_under_budgets(
                   JOIN tasks bt ON bt.task_id = d.blocker_id
                    WHERE d.task_id = tr.task_id AND bt.status <> 'closed'
               )
-              AND (t.approval_level = 'auto' OR t.approved_at IS NOT NULL)
+              -- yggdrasil-109: $1 short-circuits the gate when YGG_AUTO_APPROVE.
+              AND ($1 OR t.approval_level = 'auto' OR t.approved_at IS NOT NULL)
             ORDER BY t.priority, tr.scheduled_at"#,
     )
+    .bind(cfg.auto_approve)
     .fetch_all(pool)
     .await?;
 

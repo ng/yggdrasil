@@ -588,6 +588,7 @@ async fn test_scheduler_finalizes_terminal_run_closes_task() {
         default_max_attempts: 3,
         default_heartbeat_ttl_s: 300,
         poison_threshold: 3,
+        auto_approve: false,
     };
     let stats = ygg::scheduler::tick(&pool, &cfg).await.unwrap();
     assert!(
@@ -647,6 +648,7 @@ async fn test_scheduler_schedules_runnable_task_to_ready() {
         default_max_attempts: 3,
         default_heartbeat_ttl_s: 300,
         poison_threshold: 3,
+        auto_approve: false,
     };
     let scheduled = ygg::scheduler::schedule_ready_tasks(&pool, &cfg)
         .await
@@ -828,6 +830,7 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
         default_max_attempts: 3,
         default_heartbeat_ttl_s: 300,
         poison_threshold: 3,
+        auto_approve: false,
     };
     let n = ygg::scheduler::schedule_retries(&pool, &cfg).await.unwrap();
     assert_eq!(n, 1);
@@ -858,6 +861,144 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
     // Idempotency: second call should not double-retry (successor already exists).
     let n2 = ygg::scheduler::schedule_retries(&pool, &cfg).await.unwrap();
     assert_eq!(n2, 0);
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// yggdrasil-112 regression: `tick()` must run schedule_retries before
+/// finalize_terminal_runs. With the reverse order, finalize closes the task
+/// and the retry's `WHERE t.status <> 'closed'` skips it (retry = dead code).
+#[tokio::test]
+async fn test_scheduler_tick_retries_before_finalize() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-retry-order'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-retry-order', 'sched-retry-order') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO tasks (repo_id, seq, title, status, runnable, max_attempts) VALUES ($1, 1, 'retry-order', 'in_progress', TRUE, 3) RETURNING task_id"
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    // Failed attempt 1, ended 10 minutes ago — backoff window is well past.
+    sqlx::query(
+        r#"INSERT INTO task_runs
+           (task_id, attempt, idempotency_key, state, reason,
+            ended_at, error, max_attempts)
+           VALUES ($1, 1, 'run:retry-order:1', 'failed', 'agent_error',
+                   now() - interval '10 minutes',
+                   '{"reason_code":"agent_error","message":"tests red"}'::jsonb, 3)"#,
+    )
+    .bind(task.0)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // max_concurrent=0 keeps dispatch_ready from spawning a real agent for the
+    // newly-queued retry attempt; we only care that retry fires before finalize
+    // and that the parent task isn't closed mid-retry.
+    let cfg = ygg::scheduler::SchedulerConfig {
+        tick_interval: std::time::Duration::from_secs(1),
+        max_concurrent: 0,
+        default_max_attempts: 3,
+        default_heartbeat_ttl_s: 300,
+        poison_threshold: 3,
+        auto_approve: false,
+    };
+    // tick() scans global state, so its returned counters can include other
+    // tests' rows. We only assert side effects on OUR task.
+    let _ = ygg::scheduler::tick(&pool, &cfg).await.unwrap();
+
+    let status: String = sqlx::query_scalar("SELECT status::text FROM tasks WHERE task_id = $1")
+        .bind(task.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(status, "closed", "task must NOT be closed mid-retry");
+
+    let states: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT attempt, state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt",
+    )
+    .bind(task.0)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(states.len(), 2, "retry must have queued attempt 2");
+    assert_eq!(states[1].1, "ready");
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// yggdrasil-110 regression: heartbeat with an unresolvable agent_name must
+/// NOT match runs whose agent_id is NULL via `IS NOT DISTINCT FROM`. The
+/// previous query would cross-contaminate any two NULL-agent_id runs.
+#[tokio::test]
+async fn test_heartbeat_refuses_unresolvable_agent() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'hb-null'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'hb-null', 'hb-null') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'hb', 'in_progress') RETURNING task_id"
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    // Run with NULL agent_id (e.g. created by some other unresolvable agent).
+    sqlx::query(
+        r#"INSERT INTO task_runs (task_id, attempt, idempotency_key, state, agent_id, max_attempts, heartbeat_at)
+           VALUES ($1, 1, 'run:hb-null:1', 'running', NULL, 1, now() - interval '1 hour')"#,
+    )
+    .bind(task.0)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Heartbeat from an unresolvable name must error, not silently update the
+    // NULL-agent_id row.
+    let result = ygg::cli::run_cmd::heartbeat_cli(&pool, None, "no-such-agent-12345").await;
+    assert!(
+        result.is_err(),
+        "heartbeat with unresolvable agent must error"
+    );
+
+    let hb_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT heartbeat_at FROM task_runs WHERE task_id = $1")
+            .bind(task.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let now = chrono::Utc::now();
+    assert!(
+        hb_at.unwrap() < now - chrono::Duration::minutes(30),
+        "heartbeat_at must NOT have been bumped (cross-contamination check)"
+    );
 
     sqlx::query("DELETE FROM repos WHERE repo_id = $1")
         .bind(repo.0)
@@ -1009,6 +1150,7 @@ async fn test_scheduler_approval_gate_blocks_then_unblocks() {
         default_max_attempts: 3,
         default_heartbeat_ttl_s: 300,
         poison_threshold: 3,
+        auto_approve: false,
     };
 
     // Without approval, schedule_ready_tasks should NOT pick this up.
@@ -1023,6 +1165,73 @@ async fn test_scheduler_approval_gate_blocks_then_unblocks() {
         .await
         .unwrap();
     assert_eq!(n, 1);
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// yggdrasil-109 regression: with `auto_approve=true`, a task at
+/// approval_level=approve_plan and no approved_at must dispatch as if approved.
+#[tokio::test]
+async fn test_scheduler_auto_approve_short_circuits_gate() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-autoap'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-autoap', 'sched-autoap') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        r#"INSERT INTO tasks (repo_id, seq, title, status, runnable, approval_level)
+           VALUES ($1, 1, 'autoap', 'open', TRUE, 'approve_plan')
+           RETURNING task_id"#,
+    )
+    .bind(repo.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let cfg_off = ygg::scheduler::SchedulerConfig {
+        tick_interval: std::time::Duration::from_secs(1),
+        max_concurrent: 4,
+        default_max_attempts: 3,
+        default_heartbeat_ttl_s: 300,
+        poison_threshold: 3,
+        auto_approve: false,
+    };
+    let n_blocked = ygg::scheduler::schedule_ready_tasks(&pool, &cfg_off)
+        .await
+        .unwrap();
+    assert_eq!(n_blocked, 0, "approval gate blocks without auto_approve");
+
+    let cfg_on = ygg::scheduler::SchedulerConfig {
+        auto_approve: true,
+        ..cfg_off.clone()
+    };
+    let n_passed = ygg::scheduler::schedule_ready_tasks(&pool, &cfg_on)
+        .await
+        .unwrap();
+    assert_eq!(n_passed, 1, "auto_approve must short-circuit the gate");
+
+    let state: String = sqlx::query_scalar(
+        "SELECT state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt DESC LIMIT 1",
+    )
+    .bind(task.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "ready");
 
     sqlx::query("DELETE FROM repos WHERE repo_id = $1")
         .bind(repo.0)
