@@ -805,6 +805,17 @@ enum TaskAction {
         /// Emit stats as JSON
         #[arg(long)] json: bool,
     },
+    /// Approve a task gated on approve_plan / approve_completion. Sets
+    /// approved_at = now() so the scheduler can dispatch.
+    Approve {
+        reference: String,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Clear poison state and let the scheduler retry. Resets the poisoned
+    /// run to 'failed' and reopens the task.
+    Unpoison {
+        reference: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1363,6 +1374,20 @@ async fn main() -> anyhow::Result<()> {
                 },
                 TaskAction::Stats { all, json } => {
                     ygg::cli::task_cmd::stats(&pool, all, json).await?;
+                }
+                TaskAction::Approve { reference, agent } => {
+                    let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;
+                    let agent = resolve_agent_arg(agent);
+                    let agent_id = ygg::models::agent::AgentRepo::new(&pool)
+                        .get_by_name(&agent).await?
+                        .map(|a| a.agent_id);
+                    ygg::scheduler::approve(&pool, task.task_id, agent_id).await?;
+                    println!("{reference} approved");
+                }
+                TaskAction::Unpoison { reference } => {
+                    let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;
+                    ygg::scheduler::unpoison(&pool, task.task_id).await?;
+                    println!("{reference} unpoisoned (status reset to open; latest run flipped failed)");
                 }
             }
         }

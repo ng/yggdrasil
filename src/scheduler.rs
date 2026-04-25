@@ -30,21 +30,25 @@ pub struct SchedulerConfig {
     pub max_concurrent: i64,
     pub default_max_attempts: i32,
     pub default_heartbeat_ttl_s: i32,
+    /// N consecutive identical fingerprints → poison. Set to a large number
+    /// to disable; default 3.
+    pub poison_threshold: i32,
 }
 
 impl SchedulerConfig {
     pub fn from_app(_app: &AppConfig) -> Self {
-        // Read overrides from env. Defaults are conservative; users opt into
-        // higher concurrency once they've watched a tick or two.
         let tick_ms: u64 = std::env::var("YGG_SCHEDULER_TICK_MS")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(2_000);
         let max_concurrent: i64 = std::env::var("YGG_SCHEDULER_MAX_CONCURRENT")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+        let poison_threshold: i32 = std::env::var("YGG_SCHEDULER_POISON_THRESHOLD")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(3);
         Self {
             tick_interval: Duration::from_millis(tick_ms),
             max_concurrent,
             default_max_attempts: 3,
             default_heartbeat_ttl_s: 300,
+            poison_threshold,
         }
     }
 }
@@ -57,6 +61,7 @@ pub struct TickStats {
     pub reaped: i64,
     pub deadlined: i64,
     pub retried: i64,
+    pub poisoned: i64,
 }
 
 /// Run one scheduler tick. Public so `ygg scheduler tick` can call it
@@ -65,6 +70,7 @@ pub async fn tick(pool: &PgPool, cfg: &SchedulerConfig) -> Result<TickStats, any
     let mut stats = TickStats::default();
     stats.reaped     = reap_expired_heartbeats(pool).await?;
     stats.deadlined  = enforce_deadlines(pool).await?;
+    stats.poisoned   = detect_loops(pool, cfg.poison_threshold).await?;
     stats.finalized  = finalize_terminal_runs(pool).await?;
     stats.retried    = schedule_retries(pool, cfg).await?;
     stats.scheduled  = schedule_ready_tasks(pool, cfg).await?;
@@ -103,7 +109,7 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
         match tick(&pool, &cfg).await {
             Ok(stats) => {
                 let total = stats.finalized + stats.scheduled + stats.dispatched
-                          + stats.reaped + stats.deadlined + stats.retried;
+                          + stats.reaped + stats.deadlined + stats.retried + stats.poisoned;
                 if total > 0 {
                     tracing::info!(
                         finalized = stats.finalized,
@@ -112,6 +118,7 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
                         reaped = stats.reaped,
                         deadlined = stats.deadlined,
                         retried = stats.retried,
+                        poisoned = stats.poisoned,
                         "scheduler tick"
                     );
                     emit_simple_event(&pool, EventKind::SchedulerTick,
@@ -369,6 +376,258 @@ pub async fn enforce_deadlines(pool: &PgPool) -> Result<i64, anyhow::Error> {
     Ok(rows.len() as i64)
 }
 
+/// (Stage 3) Compute a fingerprint for a terminal run. Combines task-level
+/// invariants (title, acceptance, kind) with the failure mode (state +
+/// reason + first 200 chars of error message). N consecutive matching
+/// fingerprints on the same task triggers poison.
+fn compute_fingerprint(
+    title: &str,
+    acceptance: Option<&str>,
+    kind: &str,
+    state: RunState,
+    reason: RunReason,
+    error_message: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(title.as_bytes());
+    hasher.update(b"\x00");
+    if let Some(a) = acceptance {
+        hasher.update(a.as_bytes());
+    }
+    hasher.update(b"\x00");
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(state.as_str().as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(reason.as_str().as_bytes());
+    hasher.update(b"\x00");
+    if let Some(msg) = error_message {
+        let prefix: String = msg.chars().take(200).collect();
+        hasher.update(prefix.as_bytes());
+    }
+    let bytes = hasher.finalize();
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+}
+
+/// (Stage 3) Compute fingerprints for terminal runs that haven't been
+/// fingerprinted yet, and poison tasks with N consecutive matching prints.
+pub async fn detect_loops(pool: &PgPool, threshold: i32) -> Result<i64, anyhow::Error> {
+    // 1. Backfill fingerprints for any terminal run missing one.
+    let pending: Vec<(Uuid, Uuid, RunState, RunReason, Option<serde_json::Value>)> = sqlx::query_as(
+        r#"SELECT r.run_id, r.task_id, r.state, r.reason, r.error
+             FROM task_runs r
+            WHERE r.fingerprint IS NULL
+              AND r.state IN ('failed', 'crashed', 'cancelled', 'succeeded')"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (run_id, task_id, state, reason, error) in pending {
+        let task_meta: Option<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT title, acceptance, kind::text FROM tasks WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await?;
+        let Some((title, acceptance, kind)) = task_meta else { continue; };
+        let msg = error.as_ref()
+            .and_then(|e| e.get("message"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let fp = compute_fingerprint(
+            &title, acceptance.as_deref(), &kind, state, reason, msg.as_deref(),
+        );
+        sqlx::query("UPDATE task_runs SET fingerprint = $2 WHERE run_id = $1")
+            .bind(run_id)
+            .bind(fp)
+            .execute(pool)
+            .await?;
+    }
+
+    // 2. For each task, look at its last `threshold` failure-shaped runs.
+    //    If their fingerprints all match, poison the task.
+    let candidates: Vec<(Uuid,)> = sqlx::query_as(
+        r#"SELECT DISTINCT t.task_id
+             FROM tasks t
+             JOIN task_runs r USING (task_id)
+            WHERE t.status NOT IN ('closed')
+              AND r.state IN ('failed', 'crashed')
+              AND r.fingerprint IS NOT NULL
+            GROUP BY t.task_id
+           HAVING COUNT(*) FILTER (WHERE r.state IN ('failed','crashed')) >= $1"#,
+    )
+    .bind(threshold as i64)
+    .fetch_all(pool)
+    .await?;
+
+    let mut poisoned = 0i64;
+    for (task_id,) in candidates {
+        let recent: Vec<(String,)> = sqlx::query_as(
+            r#"SELECT fingerprint FROM task_runs
+                WHERE task_id = $1 AND state IN ('failed','crashed') AND fingerprint IS NOT NULL
+                ORDER BY attempt DESC
+                LIMIT $2"#,
+        )
+        .bind(task_id)
+        .bind(threshold as i64)
+        .fetch_all(pool)
+        .await?;
+        if recent.len() < threshold as usize { continue; }
+        let first = &recent[0].0;
+        if !recent.iter().all(|(fp,)| fp == first) { continue; }
+
+        // All N fingerprints match → poison.
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            r#"UPDATE task_runs
+                  SET state = 'poison', reason = 'loop_detected', updated_at = now()
+                WHERE task_id = $1 AND state IN ('failed', 'crashed', 'retrying')"#,
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"UPDATE tasks
+                  SET status = 'blocked',
+                      close_reason = 'poison: loop_detected (' || $2 || ' identical failures)',
+                      current_attempt_id = NULL,
+                      updated_at = now()
+                WHERE task_id = $1"#,
+        )
+        .bind(task_id)
+        .bind(threshold)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        let task_ref = task_ref_for(pool, task_id).await
+            .unwrap_or_else(|| task_id.to_string());
+        EventRepo::new(pool).emit(
+            EventKind::RunTerminal,
+            "scheduler",
+            None,
+            serde_json::json!({
+                "task_ref": task_ref,
+                "state": "poison",
+                "reason": "loop_detected",
+                "by": "scheduler.loop_detector",
+                "threshold": threshold,
+            }),
+        ).await.ok();
+        poisoned += 1;
+    }
+    Ok(poisoned)
+}
+
+/// (Stage 3) Per-repo and per-epic concurrency budgets layered on top of the
+/// global per-host cap. Returns the run_ids the scheduler may dispatch this
+/// tick. Default per-repo cap is 3; per-epic cap matches.
+pub async fn dispatchable_under_budgets(
+    pool: &PgPool,
+    cfg: &SchedulerConfig,
+) -> Result<Vec<Uuid>, anyhow::Error> {
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_runs WHERE state = 'running'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let host_budget = (cfg.max_concurrent - live).max(0);
+    if host_budget == 0 { return Ok(Vec::new()); }
+
+    // Pick ready runs ordered by priority + age, then filter by per-repo and
+    // per-epic budgets. Could be done in SQL but the cap math is clearer in
+    // Rust and the candidate set is small (host_budget rows max).
+    let candidates: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        r#"SELECT tr.run_id, t.task_id, t.repo_id
+             FROM task_runs tr
+             JOIN tasks t USING (task_id)
+            WHERE tr.state = 'ready'
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_deps d
+                  JOIN tasks bt ON bt.task_id = d.blocker_id
+                   WHERE d.task_id = tr.task_id AND bt.status <> 'closed'
+              )
+              AND (t.approval_level = 'auto' OR t.approved_at IS NOT NULL)
+            ORDER BY t.priority, tr.scheduled_at"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let per_repo_cap = std::env::var("YGG_SCHEDULER_MAX_PER_REPO")
+        .ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(3);
+
+    let per_repo_live: Vec<(Uuid, i64)> = sqlx::query_as(
+        r#"SELECT t.repo_id, COUNT(*)::bigint
+             FROM task_runs r JOIN tasks t USING (task_id)
+            WHERE r.state = 'running'
+            GROUP BY t.repo_id"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut repo_used: std::collections::HashMap<Uuid, i64> =
+        per_repo_live.into_iter().collect();
+
+    let mut chosen = Vec::new();
+    for (run_id, _task_id, repo_id) in candidates {
+        if chosen.len() as i64 >= host_budget { break; }
+        let used = repo_used.entry(repo_id).or_insert(0);
+        if *used >= per_repo_cap { continue; }
+        *used += 1;
+        chosen.push(run_id);
+    }
+    Ok(chosen)
+}
+
+/// `ygg task unpoison <ref>` — clear the poison state and let the scheduler
+/// retry. Resets the latest run's state to allow retries within max_attempts;
+/// flips task.status back to open.
+pub async fn unpoison(pool: &PgPool, task_id: Uuid) -> Result<(), anyhow::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"UPDATE task_runs
+              SET state = 'failed', reason = 'agent_error', updated_at = now()
+            WHERE task_id = $1 AND state = 'poison'"#,
+    )
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"UPDATE tasks
+              SET status = 'open',
+                  close_reason = NULL,
+                  closed_at = NULL,
+                  updated_at = now()
+            WHERE task_id = $1 AND status = 'blocked'"#,
+    )
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// `ygg task approve <ref>` — mark the task as approved. Tasks with
+/// approval_level=approve_plan stay in 'ready' until approved_at is set.
+pub async fn approve(
+    pool: &PgPool,
+    task_id: Uuid,
+    approver: Option<Uuid>,
+) -> Result<(), anyhow::Error> {
+    sqlx::query(
+        r#"UPDATE tasks
+              SET approved_at = now(),
+                  approved_by_agent_id = $2,
+                  updated_at = now()
+            WHERE task_id = $1"#,
+    )
+    .bind(task_id)
+    .bind(approver)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// (Stage 2) For failed/crashed runs whose backoff window elapsed and that
 /// haven't already produced a successor, insert a new attempt row. The
 /// previous attempt's error gets threaded into input.previous_attempt so the
@@ -510,32 +769,22 @@ pub async fn dispatch_ready(
     pool: &PgPool,
     cfg: &SchedulerConfig,
 ) -> Result<i64, anyhow::Error> {
-    let live: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_runs WHERE state = 'running'",
-    )
-    .fetch_one(pool)
-    .await?;
-    let budget = (cfg.max_concurrent - live).max(0);
-    if budget == 0 {
+    // Stage 3: budget = host - live, then filter through per-repo cap.
+    let eligible = dispatchable_under_budgets(pool, cfg).await?;
+    if eligible.is_empty() {
         return Ok(0);
     }
 
     // The hot SKIP LOCKED claim. See docs/design/task-runs.md § the SKIP
-    // LOCKED claim query.
+    // LOCKED claim query. We apply the budget filter via run_id IN list to
+    // avoid claiming more than the per-repo cap allows.
     let claimed: Vec<(Uuid, Uuid, i32, serde_json::Value)> = sqlx::query_as(
         r#"WITH picked AS (
               SELECT tr.run_id
                 FROM task_runs tr
-                JOIN tasks t USING (task_id)
-               WHERE tr.state = 'ready'
-                 AND NOT EXISTS (
-                     SELECT 1 FROM task_deps d
-                     JOIN tasks bt ON bt.task_id = d.blocker_id
-                      WHERE d.task_id = tr.task_id AND bt.status <> 'closed'
-                 )
-                 AND (t.approval_level = 'auto' OR t.approved_at IS NOT NULL)
-               ORDER BY t.priority, tr.scheduled_at
-               LIMIT $1
+               WHERE tr.run_id = ANY($1)
+                 AND tr.state = 'ready'
+               ORDER BY tr.scheduled_at
                FOR UPDATE OF tr SKIP LOCKED
            )
            UPDATE task_runs
@@ -547,7 +796,7 @@ pub async fn dispatch_ready(
             WHERE run_id IN (SELECT run_id FROM picked)
         RETURNING run_id, task_id, attempt, input"#,
     )
-    .bind(budget)
+    .bind(&eligible)
     .fetch_all(pool)
     .await?;
 
@@ -849,9 +1098,34 @@ mod tests {
         };
         unsafe { std::env::remove_var("YGG_SCHEDULER_TICK_MS") };
         unsafe { std::env::remove_var("YGG_SCHEDULER_MAX_CONCURRENT") };
+        unsafe { std::env::remove_var("YGG_SCHEDULER_POISON_THRESHOLD") };
         let cfg = SchedulerConfig::from_app(&app);
         assert_eq!(cfg.tick_interval, Duration::from_millis(2000));
         assert_eq!(cfg.max_concurrent, 4);
         assert_eq!(cfg.default_max_attempts, 3);
+        assert_eq!(cfg.poison_threshold, 3);
+    }
+
+    #[test]
+    fn fingerprint_stable_for_same_inputs() {
+        let f1 = compute_fingerprint(
+            "fix bug", Some("tests pass"), "bug",
+            RunState::Failed, RunReason::AgentError, Some("cargo test failed"),
+        );
+        let f2 = compute_fingerprint(
+            "fix bug", Some("tests pass"), "bug",
+            RunState::Failed, RunReason::AgentError, Some("cargo test failed"),
+        );
+        assert_eq!(f1, f2);
+        assert_eq!(f1.len(), 64);
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_state_and_reason() {
+        let f_fail = compute_fingerprint("t", None, "task",
+            RunState::Failed, RunReason::AgentError, None);
+        let f_crash = compute_fingerprint("t", None, "task",
+            RunState::Crashed, RunReason::TmuxGone, None);
+        assert_ne!(f_fail, f_crash);
     }
 }

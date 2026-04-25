@@ -444,6 +444,7 @@ async fn test_scheduler_finalizes_terminal_run_closes_task() {
         max_concurrent: 4,
         default_max_attempts: 3,
         default_heartbeat_ttl_s: 300,
+        poison_threshold: 3,
     };
     let stats = ygg::scheduler::tick(&pool, &cfg).await.unwrap();
     assert!(stats.finalized >= 1, "finalize_terminal_runs should close the task");
@@ -483,6 +484,7 @@ async fn test_scheduler_schedules_runnable_task_to_ready() {
         max_concurrent: 4,
         default_max_attempts: 3,
         default_heartbeat_ttl_s: 300,
+        poison_threshold: 3,
     };
     let scheduled = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
     assert!(scheduled >= 1, "runnable + auto-approved task should be scheduled");
@@ -611,6 +613,7 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
         max_concurrent: 4,
         default_max_attempts: 3,
         default_heartbeat_ttl_s: 300,
+        poison_threshold: 3,
     };
     let n = ygg::scheduler::schedule_retries(&pool, &cfg).await.unwrap();
     assert_eq!(n, 1);
@@ -634,6 +637,126 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
     // Idempotency: second call should not double-retry (successor already exists).
     let n2 = ygg::scheduler::schedule_retries(&pool, &cfg).await.unwrap();
     assert_eq!(n2, 0);
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_detect_loops_poisons_repeating_failures() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-loop'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-loop', 'sched-loop') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO tasks (repo_id, seq, title, status, max_attempts) VALUES ($1, 1, 'flaky', 'in_progress', 5) RETURNING task_id"
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    // Three failed attempts with identical error.
+    for n in 1..=3 {
+        sqlx::query(
+            r#"INSERT INTO task_runs (task_id, attempt, idempotency_key, state, reason, error, ended_at)
+               VALUES ($1, $2, $3, 'failed', 'agent_error',
+                       '{"reason_code":"agent_error","message":"tests red"}'::jsonb,
+                       now())"#,
+        )
+        .bind(task.0)
+        .bind(n)
+        .bind(format!("run:loop:{n}"))
+        .execute(&pool).await.unwrap();
+    }
+
+    let poisoned = ygg::scheduler::detect_loops(&pool, 3).await.unwrap();
+    assert_eq!(poisoned, 1);
+
+    let status: String = sqlx::query_scalar("SELECT status::text FROM tasks WHERE task_id = $1")
+        .bind(task.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "blocked");
+
+    let states: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT attempt, state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt"
+    ).bind(task.0).fetch_all(&pool).await.unwrap();
+    for (_, s) in &states {
+        assert_eq!(s, "poison");
+    }
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_unpoison_reopens_task() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-unpo'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-unpo', 'sched-unpo') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'unpo', 'blocked') RETURNING task_id"
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO task_runs (task_id, attempt, idempotency_key, state, reason) VALUES ($1, 1, 'run:unpo:1', 'poison', 'loop_detected')"
+    ).bind(task.0).execute(&pool).await.unwrap();
+
+    ygg::scheduler::unpoison(&pool, task.0).await.unwrap();
+
+    let status: String = sqlx::query_scalar("SELECT status::text FROM tasks WHERE task_id = $1")
+        .bind(task.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "open");
+    let run_state: String = sqlx::query_scalar(
+        "SELECT state::text FROM task_runs WHERE task_id = $1"
+    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(run_state, "failed");
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_approval_gate_blocks_then_unblocks() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-appr'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-appr', 'sched-appr') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        r#"INSERT INTO tasks (repo_id, seq, title, status, runnable, approval_level)
+           VALUES ($1, 1, 'gated', 'open', TRUE, 'approve_plan')
+           RETURNING task_id"#,
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    let cfg = ygg::scheduler::SchedulerConfig {
+        tick_interval: std::time::Duration::from_secs(1),
+        max_concurrent: 4,
+        default_max_attempts: 3,
+        default_heartbeat_ttl_s: 300,
+        poison_threshold: 3,
+    };
+
+    // Without approval, schedule_ready_tasks should NOT pick this up.
+    let n = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
+    assert_eq!(n, 0, "approval_level=approve_plan must block dispatch");
+
+    // After approving, schedule should pick it up.
+    ygg::scheduler::approve(&pool, task.0, None).await.unwrap();
+    let n = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
+    assert_eq!(n, 1);
 
     sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
         .execute(&pool).await.unwrap();
