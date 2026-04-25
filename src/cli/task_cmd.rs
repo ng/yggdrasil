@@ -633,6 +633,36 @@ pub async fn claim(
         "{reference} claimed by {agent_name} (run #{} {})",
         run.attempt, run.run_id
     );
+
+    // yggdrasil-82: surface scoped learnings whose file_glob matches any
+    // file path mentioned in the task's text fields, plus repo-wide and
+    // global learnings. Best-effort — silent on Postgres hiccups.
+    let mut text = t.title.clone();
+    if !t.description.is_empty() {
+        text.push('\n');
+        text.push_str(&t.description);
+    }
+    if let Some(a) = &t.acceptance {
+        text.push('\n');
+        text.push_str(a);
+    }
+    if let Some(d) = &t.design {
+        text.push('\n');
+        text.push_str(d);
+    }
+    if let Some(n) = &t.notes {
+        text.push('\n');
+        text.push_str(n);
+    }
+    let files = crate::cli::learning_cmd::extract_file_mentions(&text);
+    if let Ok(lines) =
+        crate::cli::learning_cmd::surface_for_files(pool, Some(t.repo_id), &files).await
+    {
+        for line in lines {
+            println!("{line}");
+        }
+    }
+
     Ok(())
 }
 

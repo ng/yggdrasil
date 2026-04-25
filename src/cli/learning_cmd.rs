@@ -105,9 +105,121 @@ pub async fn delete(pool: &sqlx::PgPool, learning_id: Uuid) -> Result<(), anyhow
     Ok(())
 }
 
+/// Surface scoped learnings whose `file_glob` matches any of the given paths
+/// (yggdrasil-82). Returns formatted lines suitable for direct stdout / hook
+/// injection. Increments each surfaced learning's `applied_count` so the
+/// usage telemetry reflects real hits, not just creation.
+///
+/// Repo-scope and global learnings (`file_glob IS NULL`) are included
+/// unconditionally — the surface function is the orchestration-layer
+/// replacement for fuzzy similarity retrieval of durable rules per ADR 0015.
+pub async fn surface_for_files(
+    pool: &sqlx::PgPool,
+    repo_id: Option<Uuid>,
+    files: &[String],
+) -> Result<Vec<String>, anyhow::Error> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let repo = LearningRepo::new(pool);
+
+    // Pass 1: per-file matches. NULL file_glob counts as "applies to any
+    // file in this repo" — list_matching includes those automatically.
+    for f in files {
+        let rows = repo.list_matching(repo_id, Some(f), None).await?;
+        for l in rows {
+            if !seen.insert(l.learning_id) {
+                continue;
+            }
+            out.push(format_learning_line(&l));
+            let _ = repo.increment_applied(l.learning_id).await;
+        }
+    }
+
+    // Pass 2: also surface repo-wide learnings (file_glob IS NULL) even when
+    // no file paths were detected — they're "always relevant in this repo."
+    if files.is_empty() {
+        let rows = repo.list_matching(repo_id, None, None).await?;
+        for l in rows {
+            // Skip glob-scoped learnings here; they need a path match.
+            if l.file_glob.is_some() {
+                continue;
+            }
+            if !seen.insert(l.learning_id) {
+                continue;
+            }
+            out.push(format_learning_line(&l));
+            let _ = repo.increment_applied(l.learning_id).await;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Best-effort file-path extractor for free-text task fields. Matches tokens
+/// that look like `<path>.<ext>` where `ext` is 2–5 alpha chars, capturing
+/// common forms (`src/main.rs`, `Cargo.toml`, `terraform/*.tf`,
+/// `docs/orchestration.md`). Deliberately conservative; false negatives
+/// beat false positives in a learning-surface context.
+pub fn extract_file_mentions(text: &str) -> Vec<String> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static FILE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?:[a-zA-Z0-9_./*\-]+/)?[a-zA-Z0-9_*\-]+\.[a-zA-Z]{2,5}")
+            .expect("file-mention regex")
+    });
+    let mut found: Vec<String> = FILE_PATTERN
+        .find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn format_learning_line(l: &crate::models::learning::Learning) -> String {
+    let scope = match (&l.repo_id, &l.file_glob, &l.rule_id) {
+        (None, _, _) => "global".to_string(),
+        (Some(_), Some(g), Some(id)) => format!("{g} · {id}"),
+        (Some(_), Some(g), None) => g.to_string(),
+        (Some(_), None, Some(id)) => format!("rule={id}"),
+        (Some(_), None, None) => "repo".to_string(),
+    };
+    format!("[ygg learning · {scope}] {}", short(&l.text, 200))
+}
+
 fn short(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
     s.chars().take(max).collect::<String>() + "…"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_common_paths() {
+        let t = "Edit src/main.rs and update Cargo.toml; also touch docs/orchestration.md.";
+        let found = extract_file_mentions(t);
+        assert!(found.contains(&"src/main.rs".to_string()));
+        assert!(found.contains(&"Cargo.toml".to_string()));
+        assert!(found.contains(&"docs/orchestration.md".to_string()));
+    }
+
+    #[test]
+    fn rejects_version_strings() {
+        let t = "Bump serde to 1.0.220 and tokio to 1.40.";
+        let found = extract_file_mentions(t);
+        // "1.0.220" / "1.40" are version strings, not file paths.
+        assert!(found.iter().all(|f| !f.starts_with("1.")));
+    }
+
+    #[test]
+    fn handles_globs() {
+        let t = "Run `cargo check`; touches migrations/*.sql and terraform/*.tf";
+        let found = extract_file_mentions(t);
+        assert!(found.iter().any(|f| f.contains("*.sql")));
+        assert!(found.iter().any(|f| f.contains("*.tf")));
+    }
 }
