@@ -1194,6 +1194,110 @@ async fn test_bench_diff_refuses_overlapping_cis() {
 }
 
 #[tokio::test]
+async fn test_learnings_surface_for_files_matches_glob_and_increments() {
+    // yggdrasil-82: surface_for_files matches scoped learnings by file_glob,
+    // includes repo-wide (NULL glob) hits, and bumps applied_count for each.
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'learn-surf'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'learn-surf', 'learn-surf') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+
+    let lr = ygg::models::learning::LearningRepo::new(&pool);
+    // `*.rs` translates to SQL LIKE `%.rs` which matches `src/main.rs`.
+    // The model's translate(glob, '*?', '%_') doesn't do `**`-collapsing,
+    // so use a single-`*` glob that LIKE handles natively.
+    let glob_match = lr
+        .create(
+            Some(repo.0),
+            Some("*.rs"),
+            None,
+            "Use anyhow::Result on public functions.",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let repo_wide = lr
+        .create(
+            Some(repo.0),
+            None,
+            None,
+            "Always run cargo fmt before pushing.",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let other_glob = lr
+        .create(
+            Some(repo.0),
+            Some("docs/*.md"),
+            None,
+            "Mermaid sections should preserve ASCII fallback.",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let files = vec!["src/main.rs".to_string()];
+    let lines = ygg::cli::learning_cmd::surface_for_files(&pool, Some(repo.0), &files)
+        .await
+        .unwrap();
+
+    // src/main.rs matches src/**/*.rs (glob_match) and the repo-wide entry,
+    // but NOT docs/*.md (other_glob). Order shouldn't matter for the assertion.
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("anyhow::Result"),
+        "glob match should surface"
+    );
+    assert!(
+        joined.contains("cargo fmt"),
+        "repo-wide learning should surface"
+    );
+    assert!(
+        !joined.contains("Mermaid"),
+        "non-matching glob must not surface"
+    );
+
+    // applied_count incremented for the surfaced ones.
+    let n_glob: i32 =
+        sqlx::query_scalar("SELECT applied_count FROM learnings WHERE learning_id = $1")
+            .bind(glob_match.learning_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let n_repo: i32 =
+        sqlx::query_scalar("SELECT applied_count FROM learnings WHERE learning_id = $1")
+            .bind(repo_wide.learning_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let n_other: i32 =
+        sqlx::query_scalar("SELECT applied_count FROM learnings WHERE learning_id = $1")
+            .bind(other_glob.learning_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(n_glob, 1);
+    assert_eq!(n_repo, 1);
+    assert_eq!(n_other, 0);
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_task_create_runnable_default_by_kind() {
     // yggdrasil-105: new tasks of kind task|bug|feature|chore are runnable by
     // default; epics stay manual until they opt in via plan_strategy='llm'.
