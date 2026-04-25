@@ -67,19 +67,16 @@ impl SchedulerConfig {
 /// Parse a 1/true/yes/on env flag, case-insensitive. Anything else (including
 /// unset) → false. Centralized so we don't drift across env-flag readers.
 fn parse_bool_env(name: &str) -> bool {
-    matches!(
-        std::env::var(name).ok().as_deref(),
-        Some("1")
-            | Some("true")
-            | Some("TRUE")
-            | Some("True")
-            | Some("yes")
-            | Some("YES")
-            | Some("Yes")
-            | Some("on")
-            | Some("ON")
-            | Some("On")
-    )
+    std::env::var(name)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|v| {
+            v == "1"
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+        })
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -624,6 +621,10 @@ pub async fn dispatchable_under_budgets(
              FROM task_runs tr
              JOIN tasks t USING (task_id)
             WHERE tr.state = 'ready'
+              -- yggdrasil-108 follow-up: re-check runnable so `ygg task
+              -- runnable --off` cancels already-queued ready runs on the next
+              -- tick. Otherwise the column flip only stops *future* schedules.
+              AND t.runnable = TRUE
               AND NOT EXISTS (
                   SELECT 1 FROM task_deps d
                   JOIN tasks bt ON bt.task_id = d.blocker_id
