@@ -166,6 +166,25 @@ pub struct DashboardView {
     /// least `YGG_AUTO_ARCHIVE_INTERVAL_SECS` have passed since the last
     /// run (default 300s).
     orphan_last_check: Option<Instant>,
+
+    /// yggdrasil-142 scheduler tile: rolling totals for the last hour of
+    /// `scheduler_tick` events (sum across the whole window) plus the most
+    /// recent ts so we can flag a stale daemon.
+    sched_finalized_1h: i64,
+    sched_dispatched_1h: i64,
+    sched_retried_1h: i64,
+    sched_reaped_1h: i64,
+    sched_poisoned_1h: i64,
+    sched_deadlined_1h: i64,
+    sched_last_tick_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 30-bucket sparkline of dispatched-runs-per-2-minutes for the last hour.
+    sched_dispatch_spark: Vec<u64>,
+    /// Live queue depth: count of task_runs in non-terminal pre-running states.
+    sched_queue_depth: i64,
+    sched_running: i64,
+    /// Most-frequent loop-detection fingerprint repeat count (>1 means an
+    /// agent's been doing the same thing N times in a row).
+    sched_top_loop_count: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -221,6 +240,17 @@ impl DashboardView {
             rename: None,
             flash: None,
             orphan_last_check: None,
+            sched_finalized_1h: 0,
+            sched_dispatched_1h: 0,
+            sched_retried_1h: 0,
+            sched_reaped_1h: 0,
+            sched_poisoned_1h: 0,
+            sched_deadlined_1h: 0,
+            sched_last_tick_at: None,
+            sched_dispatch_spark: vec![0; 30],
+            sched_queue_depth: 0,
+            sched_running: 0,
+            sched_top_loop_count: 0,
         }
     }
 
@@ -651,6 +681,82 @@ impl DashboardView {
             self.worker_sel = self.workers.len().saturating_sub(1);
         }
 
+        // yggdrasil-142 scheduler tile: aggregate the last 60 min of
+        // `scheduler_tick` payloads. Each tick emits a TickStats JSON
+        // (finalized/scheduled/dispatched/reaped/deadlined/retried/poisoned),
+        // so a SUM over the window gives us hour totals + a sparkline.
+        let tick_rows: Vec<(chrono::DateTime<chrono::Utc>, serde_json::Value)> = sqlx::query_as(
+            "SELECT created_at, payload FROM events
+             WHERE event_kind::text = 'scheduler_tick'
+               AND created_at >= now() - interval '1 hour'
+             ORDER BY created_at",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let mut fin = 0i64;
+        let mut disp = 0i64;
+        let mut ret = 0i64;
+        let mut reap = 0i64;
+        let mut pois = 0i64;
+        let mut dead = 0i64;
+        let mut last_ts: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut spark = vec![0u64; 30]; // 30 buckets × 2min = 60min
+        let now = Utc::now();
+        for (ts, p) in &tick_rows {
+            let get = |k: &str| -> i64 { p.get(k).and_then(|v| v.as_i64()).unwrap_or(0) };
+            fin += get("finalized");
+            disp += get("dispatched");
+            ret += get("retried");
+            reap += get("reaped");
+            pois += get("poisoned");
+            dead += get("deadlined");
+            last_ts = Some(*ts);
+            // Bucket dispatched count into 2-min slots, oldest→newest.
+            let mins_ago = (now - *ts).num_minutes().max(0);
+            if mins_ago < 60 {
+                let idx = (29 - (mins_ago / 2).min(29)) as usize;
+                spark[idx] = spark[idx].saturating_add(get("dispatched") as u64);
+            }
+        }
+        self.sched_finalized_1h = fin;
+        self.sched_dispatched_1h = disp;
+        self.sched_retried_1h = ret;
+        self.sched_reaped_1h = reap;
+        self.sched_poisoned_1h = pois;
+        self.sched_deadlined_1h = dead;
+        self.sched_last_tick_at = last_ts;
+        self.sched_dispatch_spark = spark;
+
+        // Queue depth + running count: live snapshot of task_runs.
+        let (queue, running): (i64, i64) = sqlx::query_as(
+            "SELECT
+               COUNT(*) FILTER (WHERE state IN ('scheduled', 'ready', 'retrying')),
+               COUNT(*) FILTER (WHERE state = 'running')
+             FROM task_runs",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0, 0));
+        self.sched_queue_depth = queue;
+        self.sched_running = running;
+
+        // Top loop-detection fingerprint repeat count: surfaces "an agent's
+        // been hammering the same fingerprint N times". Read direct from the
+        // task_runs.fingerprint groups in the last hour.
+        let top_loop: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) c FROM task_runs
+              WHERE fingerprint IS NOT NULL
+                AND ended_at >= now() - interval '1 hour'
+              GROUP BY fingerprint
+              ORDER BY c DESC LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+        self.sched_top_loop_count = top_loop.unwrap_or(0);
+
         Ok(())
     }
 
@@ -674,12 +780,13 @@ impl DashboardView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        // Layout: alerts · pulse · agents (stretch) · transitions · locks
+        // Layout: alerts · pulse · scheduler · agents (stretch) · workers · transitions · locks
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // alerts
                 Constraint::Length(6), // system pulse
+                Constraint::Length(5), // scheduler tile (yggdrasil-142)
                 Constraint::Min(8),    // agents
                 Constraint::Length(6), // workers (click-to-do spawns)
                 Constraint::Length(7), // state transitions
@@ -689,14 +796,154 @@ impl DashboardView {
 
         self.render_alerts(frame, chunks[0]);
         self.render_pulse(frame, chunks[1]);
-        self.render_agents_table(frame, chunks[2]);
-        self.render_workers(frame, chunks[3]);
-        self.render_transitions(frame, chunks[4]);
-        self.render_locks_table(frame, chunks[5]);
+        self.render_scheduler_tile(frame, chunks[2]);
+        self.render_agents_table(frame, chunks[3]);
+        self.render_workers(frame, chunks[4]);
+        self.render_transitions(frame, chunks[5]);
+        self.render_locks_table(frame, chunks[6]);
 
         if self.rename.is_some() {
-            render_rename_overlay(frame, chunks[2], self);
+            render_rename_overlay(frame, chunks[3], self);
         }
+    }
+
+    /// yggdrasil-142: scheduler observability tile. Left = sparkline of
+    /// dispatched-runs over the last hour (30 buckets × 2 min); right =
+    /// numeric snapshot of last-hour totals + live queue/running + an
+    /// "alive?" hint via last-tick age.
+    fn render_scheduler_tile(&self, frame: &mut Frame, area: Rect) {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(area);
+
+        let max = *self.sched_dispatch_spark.iter().max().unwrap_or(&0);
+        let spark = Sparkline::default()
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                " Dispatched / 2min — 1h  ·  peak {}  ·  ← old · now → ",
+                max
+            )))
+            .data(&self.sched_dispatch_spark)
+            .max(max.max(1))
+            .style(Style::default().fg(Color::Yellow));
+        frame.render_widget(spark, cols[0]);
+
+        // Last-tick age decides the daemon-alive hint. Scheduler default
+        // tick interval is 2s; >30s with no tick = the daemon isn't running
+        // (or is wedged). Don't say "stuck" if there's been zero activity in
+        // the entire hour — emit the no-data hint instead.
+        let alive_label = match self.sched_last_tick_at {
+            None => Span::styled(
+                "no recent ticks · scheduler may be off",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Some(ts) => {
+                let age = (Utc::now() - ts).num_seconds().max(0);
+                if age > 30 {
+                    Span::styled(
+                        format!("STALE · last tick {age}s ago"),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled(
+                        format!("alive · last tick {age}s ago"),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }
+            }
+        };
+
+        let lines: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled("status    ", Style::default().fg(Color::DarkGray)),
+                alive_label,
+            ]),
+            Line::from(vec![
+                Span::styled("queue     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} ready ", self.sched_queue_depth),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("· {} running ", self.sched_running),
+                    if self.sched_running > 0 {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::styled(
+                    format!(
+                        "· loop-top {}",
+                        if self.sched_top_loop_count > 1 {
+                            self.sched_top_loop_count.to_string()
+                        } else {
+                            "—".into()
+                        }
+                    ),
+                    if self.sched_top_loop_count >= 3 {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("last 1h   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} dispatched ", self.sched_dispatched_1h),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("· {} finalized ", self.sched_finalized_1h),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("· {} retried ", self.sched_retried_1h),
+                    if self.sched_retried_1h > 0 {
+                        Style::default().fg(Color::Magenta)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::styled(
+                    format!("· {} reaped ", self.sched_reaped_1h),
+                    if self.sched_reaped_1h > 0 {
+                        Style::default().fg(Color::Red)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::styled(
+                    format!("· {} poisoned", self.sched_poisoned_1h),
+                    if self.sched_poisoned_1h > 0 {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]),
+        ];
+
+        let title = format!(
+            " Scheduler  ·  [R] runs detail  ·  ygg scheduler status  ·  YGG_AUTO_APPROVE={} ",
+            if std::env::var("YGG_AUTO_APPROVE")
+                .map(|v| matches!(v.trim(), "1") || v.trim().eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                "on"
+            } else {
+                "off"
+            }
+        );
+        let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
+        frame.render_widget(para, cols[1]);
     }
 
     fn render_workers(&self, frame: &mut Frame, area: Rect) {
