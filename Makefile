@@ -55,18 +55,22 @@ verify:
 		echo "FAIL: $(PREFIX)/ygg not found or not executable" >&2; \
 		exit 1; \
 	fi
-	@out=$$(perl -e ' \
-		eval { \
-			local $$SIG{ALRM} = sub { die "timeout\n" }; \
-			alarm 5; \
-			my $$pid = open(my $$fh, "-|", "$(PREFIX)/ygg", "--version") or die $$!; \
-			my $$line = <$$fh>; \
-			alarm 0; \
-			close $$fh; \
-			print $$line if defined $$line; \
-		}; \
-		if ($$@) { print STDERR "verify: $$@"; exit 1 } \
-	' 2>&1) ; rc=$$?; \
+	@if command -v perl >/dev/null 2>&1; then \
+		out=$$(perl -e ' \
+			eval { \
+				local $$SIG{ALRM} = sub { die "timeout\n" }; \
+				alarm 5; \
+				my $$pid = open(my $$fh, "-|", "$(PREFIX)/ygg", "--version") or die $$!; \
+				my $$line = <$$fh>; \
+				alarm 0; \
+				close $$fh; \
+				print $$line if defined $$line; \
+			}; \
+			if ($$@) { print STDERR "verify: $$@"; exit 1 } \
+		' 2>&1) ; rc=$$?; \
+	else \
+		out=$$($(PREFIX)/ygg --version 2>&1); rc=$$?; \
+	fi; \
 	if [ $$rc -ne 0 ] || ! echo "$$out" | grep -q "^ygg "; then \
 		echo "FAIL: $(PREFIX)/ygg --version did not return cleanly within 5s." >&2; \
 		echo "      symptom: SIGKILL or hang. on macOS this means the codesign cache for" >&2; \
