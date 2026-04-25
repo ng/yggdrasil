@@ -137,11 +137,13 @@ pub async fn surface_for_files(
 
     // Pass 2: also surface repo-wide learnings (file_glob IS NULL) even when
     // no file paths were detected — they're "always relevant in this repo."
+    // Skip both glob-scoped and rule-scoped rows here: those need an explicit
+    // file path / rule id match to surface, and `list_matching(_, None, None)`
+    // happily returns them otherwise.
     if files.is_empty() {
         let rows = repo.list_matching(repo_id, None, None).await?;
         for l in rows {
-            // Skip glob-scoped learnings here; they need a path match.
-            if l.file_glob.is_some() {
+            if l.file_glob.is_some() || l.rule_id.is_some() {
                 continue;
             }
             if !seen.insert(l.learning_id) {
@@ -163,9 +165,15 @@ pub async fn surface_for_files(
 pub fn extract_file_mentions(text: &str) -> Vec<String> {
     use once_cell::sync::Lazy;
     use regex::Regex;
+    // Allow multi-dot basenames (e.g. `vite.config.ts`, `tsconfig.build.json`)
+    // by letting the basename consume an optional run of dot-separated
+    // segments before the final 2–5-letter extension. The directory prefix
+    // before the basename keeps the same character class as before.
     static FILE_PATTERN: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?:[a-zA-Z0-9_./*\-]+/)?[a-zA-Z0-9_*\-]+\.[a-zA-Z]{2,5}")
-            .expect("file-mention regex")
+        Regex::new(
+            r"(?:[a-zA-Z0-9_./*\-]+/)?(?:[a-zA-Z0-9_*\-]+(?:\.[a-zA-Z0-9_*\-]+)*)\.[a-zA-Z]{2,5}",
+        )
+        .expect("file-mention regex")
     });
     let mut found: Vec<String> = FILE_PATTERN
         .find_iter(text)
@@ -221,5 +229,19 @@ mod tests {
         let found = extract_file_mentions(t);
         assert!(found.iter().any(|f| f.contains("*.sql")));
         assert!(found.iter().any(|f| f.contains("*.tf")));
+    }
+
+    #[test]
+    fn handles_multi_dot_basenames() {
+        let t = "Update vite.config.ts and tsconfig.build.json before merging.";
+        let found = extract_file_mentions(t);
+        assert!(
+            found.iter().any(|f| f == "vite.config.ts"),
+            "should preserve the full multi-dot basename, got {found:?}"
+        );
+        assert!(
+            found.iter().any(|f| f == "tsconfig.build.json"),
+            "should preserve the full multi-dot basename, got {found:?}"
+        );
     }
 }
