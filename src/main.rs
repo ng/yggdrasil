@@ -1,5 +1,18 @@
 use clap::{Parser, Subcommand};
 
+/// Resolve the canonical agent name. Explicit `--agent` wins; falls back to
+/// YGG_AGENT_NAME env, then the current directory's basename, then "ygg".
+fn resolve_agent_arg(agent: Option<String>) -> String {
+    agent
+        .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "ygg".to_string())
+        })
+}
+
 /// Accept priority as either an integer (0..=4) or a beads-style `P0`..`P4`.
 /// Agents used to bd often guess the `P2` form; this keeps them honest
 /// without forcing a migration.
@@ -46,14 +59,10 @@ enum Commands {
     /// Run database migrations
     Migrate,
 
-    /// Start an agent run loop
+    /// Agent run loop + task-run lifecycle (claim, finalize, heartbeat, show)
     Run {
-        /// Agent name (creates or resumes)
-        #[arg(short, long)]
-        name: String,
-        /// Initial task description
-        #[arg(short, long)]
-        task: Option<String>,
+        #[command(subcommand)]
+        action: RunAction,
     },
 
     /// Spawn a new agent in a tmux window
@@ -427,6 +436,54 @@ enum MsgAction {
     /// Advance the cursor so inbox is empty until the next message arrives.
     /// Called by the prompt-submit hook after injection.
     MarkRead {
+        #[arg(short, long)] agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunAction {
+    /// Start an agent run loop (preserved from the legacy top-level `ygg run`).
+    Start {
+        /// Agent name (creates or resumes)
+        #[arg(short, long)] name: String,
+        /// Initial task description
+        #[arg(short, long)] task: Option<String>,
+    },
+    /// Open a run for the given task reference. Used by spawned agents whose
+    /// SessionStart hook claims their bound task.
+    Claim {
+        /// Task reference (e.g. yggdrasil-142)
+        task_ref: String,
+        /// Override agent name (defaults to env / pwd basename).
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Bump heartbeat_at on a running run. Called by PreToolUse hook.
+    Heartbeat {
+        /// Specific run id (default: latest running run for this agent).
+        #[arg(long)] run_id: Option<String>,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Finalize a task's current run with the given terminal state.
+    Finalize {
+        task_ref: String,
+        /// succeeded | failed | crashed | cancelled | poison
+        #[arg(long, default_value = "succeeded")] state: String,
+        /// run_reason (default 'ok')
+        #[arg(long, default_value = "ok")] reason: String,
+        #[arg(short, long)] agent: Option<String>,
+    },
+    /// Print one run's detail.
+    Show {
+        run_id: String,
+    },
+    /// Print run history for a task.
+    List {
+        task_ref: String,
+    },
+    /// Stop-hook handoff: capture commits + branch into the agent's latest
+    /// running run, transition state heuristically (succeeded if a commit
+    /// landed since started_at, else failed). Idempotent.
+    CaptureOutcome {
         #[arg(short, long)] agent: Option<String>,
     },
 }
@@ -822,18 +879,45 @@ async fn main() -> anyhow::Result<()> {
             ygg::db::run_migrations(&pool).await?;
             println!("Migrations complete.");
         }
-        Commands::Run { name, task } => {
+        Commands::Run { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let session_id = ygg::status::new_session_id();
-            ygg::cli::run::execute(
-                &pool,
-                &config,
-                &name,
-                task.as_deref(),
-                &session_id,
-            )
-            .await?;
+            match action {
+                RunAction::Start { name, task } => {
+                    let session_id = ygg::status::new_session_id();
+                    ygg::cli::run::execute(
+                        &pool, &config, &name, task.as_deref(), &session_id,
+                    ).await?;
+                }
+                RunAction::Claim { task_ref, agent } => {
+                    let agent = resolve_agent_arg(agent);
+                    ygg::cli::run_cmd::claim_cli(&pool, &task_ref, &agent).await?;
+                }
+                RunAction::Heartbeat { run_id, agent } => {
+                    let agent = resolve_agent_arg(agent);
+                    let id = run_id
+                        .map(|s| uuid::Uuid::parse_str(&s)
+                            .map_err(|e| anyhow::anyhow!("invalid run-id: {e}")))
+                        .transpose()?;
+                    ygg::cli::run_cmd::heartbeat_cli(&pool, id, &agent).await?;
+                }
+                RunAction::Finalize { task_ref, state, reason, agent } => {
+                    let agent = resolve_agent_arg(agent);
+                    ygg::cli::run_cmd::finalize_cli(&pool, &task_ref, &state, &reason, &agent).await?;
+                }
+                RunAction::Show { run_id } => {
+                    let id = uuid::Uuid::parse_str(&run_id)
+                        .map_err(|e| anyhow::anyhow!("invalid run-id: {e}"))?;
+                    ygg::cli::run_cmd::show_cli(&pool, id).await?;
+                }
+                RunAction::List { task_ref } => {
+                    ygg::cli::run_cmd::list_cli(&pool, &task_ref).await?;
+                }
+                RunAction::CaptureOutcome { agent } => {
+                    let agent = resolve_agent_arg(agent);
+                    ygg::cli::run_cmd::capture_outcome_cli(&pool, &agent, None).await?;
+                }
+            }
         }
         Commands::Spawn { task, name } => {
             let config = ygg::config::AppConfig::from_env()?;

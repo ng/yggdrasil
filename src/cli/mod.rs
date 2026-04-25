@@ -22,6 +22,7 @@ pub mod recovery_cmd;
 pub mod remember;
 pub mod rollup_cmd;
 pub mod run;
+pub mod run_cmd;
 pub mod spawn;
 pub mod status_cmd;
 pub mod stop_check;

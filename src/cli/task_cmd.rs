@@ -405,6 +405,37 @@ pub async fn show(pool: &sqlx::PgPool, reference: &str, json: bool) -> Result<()
         println!();
         println!("  [flagged for human decision]");
     }
+
+    // Run history (ADR 0016). Prints when at least one task_runs row exists.
+    let runs = crate::models::task_run::TaskRunRepo::new(pool)
+        .list_by_task(t.task_id).await?;
+    if !runs.is_empty() {
+        println!();
+        println!("  Runs:");
+        for r in &runs {
+            let started = r.started_at
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "—".into());
+            let duration = match (r.started_at, r.ended_at) {
+                (Some(s), Some(e)) => format!("{}s", (e - s).num_seconds().max(0)),
+                (Some(s), None)    => format!("{}s+", (chrono::Utc::now() - s).num_seconds().max(0)),
+                _ => "—".into(),
+            };
+            let commit = r.output_commit_sha
+                .as_deref()
+                .map(|s| &s[..s.len().min(10)])
+                .unwrap_or("");
+            println!(
+                "    #{}  {:<9}  {:<19}  {:>8}  {}  {}",
+                r.attempt,
+                r.state.as_str(),
+                r.reason.as_str(),
+                started,
+                duration,
+                commit,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -478,7 +509,25 @@ pub async fn claim(
         ..Default::default()
     }).await?;
     TaskRepo::new(pool).set_status(t.task_id, TaskStatus::InProgress, agent_id, None).await?;
-    println!("{reference} claimed by {agent_name}");
+
+    // ADR 0016 manual-mode parity: open a task_runs row so the run history is
+    // visible in `ygg task show` and matches what the scheduler would have
+    // written for an auto-dispatched claim.
+    let run = super::run_cmd::open_for_task(
+        pool, t.task_id, agent_id, serde_json::json!({}),
+    ).await?;
+    let _ = crate::models::event::EventRepo::new(pool).emit(
+        crate::models::event::EventKind::RunClaimed,
+        agent_name,
+        agent_id,
+        serde_json::json!({
+            "task_ref": reference,
+            "run_id": run.run_id,
+            "attempt": run.attempt,
+            "agent": agent_name,
+        }),
+    ).await;
+    println!("{reference} claimed by {agent_name} (run #{} {})", run.attempt, run.run_id);
     Ok(())
 }
 
@@ -488,7 +537,38 @@ pub async fn close(
     reason: Option<&str>,
     agent_name: &str,
 ) -> Result<(), anyhow::Error> {
+    let t = resolve_task(pool, reference).await?;
+    let agent_id = resolve_agent_id(pool, agent_name).await?;
+
+    // Finalize the current run BEFORE flipping task status so the event
+    // ordering is run_terminal → task_status_changed.
+    let reason_str = reason.unwrap_or("");
+    let (run_state, run_reason) = classify_close_reason(reason_str);
+    let _ = super::run_cmd::finalize_for_task(
+        pool, t.task_id, run_state, run_reason, agent_name, agent_id,
+    ).await?;
+
     set_status(pool, reference, "closed", reason, agent_name).await
+}
+
+/// Heuristic mapping from free-text close reason → run terminal state. Manual
+/// closes that mention "fail"/"crash"/"cancel" preserve that nuance in the
+/// run history; everything else is treated as a successful manual close.
+fn classify_close_reason(reason: &str) -> (
+    crate::models::task_run::RunState,
+    crate::models::task_run::RunReason,
+) {
+    use crate::models::task_run::{RunReason, RunState};
+    let r = reason.to_ascii_lowercase();
+    if r.contains("crash") {
+        (RunState::Crashed, RunReason::TmuxGone)
+    } else if r.contains("cancel") || r.contains("abort") {
+        (RunState::Cancelled, RunReason::UserCancelled)
+    } else if r.contains("fail") || r.contains("error") {
+        (RunState::Failed, RunReason::AgentError)
+    } else {
+        (RunState::Succeeded, RunReason::Ok)
+    }
 }
 
 pub async fn add_dep(pool: &sqlx::PgPool, task_ref: &str, blocker_ref: &str) -> Result<(), anyhow::Error> {
