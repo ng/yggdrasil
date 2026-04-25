@@ -87,7 +87,17 @@ cargo build --release        # Build the ygg binary
 cargo test                   # Run tests (requires Postgres via docker-compose)
 docker-compose up -d         # Start Postgres + pgvector
 ygg migrate                  # Run migrations
+make install                 # Build + install to ~/.local/bin/ygg + verify
+make reinstall               # Re-sign + verify the existing install (recovery)
 ```
+
+**macOS install gotcha:** `cp -f target/release/ygg ~/.local/bin/ygg` over a
+running binary invalidates the Gatekeeper / codesign cache. The first
+invocation after that **silently SIGKILLs** (no error, just exit 137 / "ygg
+status" hangs). Use `make install` — it copies to a sibling tmp path, atomic
+`mv`, re-signs ad-hoc, and runs a 5s `--version` smoke. If you already hit
+this and the installed binary hangs, run `make reinstall` to re-sign without
+rebuilding.
 
 ## Architecture Overview
 
