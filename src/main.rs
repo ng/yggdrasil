@@ -225,6 +225,14 @@ enum Commands {
         hours: i64,
     },
 
+    /// Orchestrator eval suite — run scripted scenarios against three baselines
+    /// (vanilla-single, vanilla-tmux, ygg) and produce comparable numbers.
+    /// Specified in docs/eval-benchmarks.md. Drivers land per yggdrasil-103.
+    Bench {
+        #[command(subcommand)]
+        action: BenchAction,
+    },
+
     /// Pressure-test recovery paths: compaction, skip-it, crash. Reports
     /// PASS/FAIL for each scenario with forensic detail. Run periodically
     /// to catch regressions in the memory-survival story.
@@ -420,6 +428,39 @@ enum MsgAction {
     /// Called by the prompt-submit hook after injection.
     MarkRead {
         #[arg(short, long)] agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchAction {
+    /// List known scenarios and implementation status.
+    List,
+    /// Run a scenario against a baseline. Drivers land per yggdrasil-103;
+    /// today this records a bench_runs row and exits non-zero.
+    Run {
+        /// Scenario id (see `ygg bench list`).
+        scenario: String,
+        /// Baseline: vanilla-single | vanilla-tmux | ygg.
+        #[arg(long, default_value = "ygg")] baseline: String,
+        /// Override default parallelism for the scenario.
+        #[arg(long)] parallelism: Option<i32>,
+        /// Model id passed through to the driver.
+        #[arg(long, default_value = "claude-sonnet-4-6")] model: String,
+        /// Optional seed (recorded for reproducibility audit; not yet used).
+        #[arg(long)] seed: Option<i64>,
+    },
+    /// Print a single bench run's summary.
+    Report {
+        run_id: String,
+    },
+    /// Pairwise compare two runs of the same scenario.
+    Diff {
+        a: String,
+        b: String,
+    },
+    /// CI gate — run the tier's scenarios, exit non-zero on regression.
+    Ci {
+        #[arg(long, default_value = "smoke")] tier: String,
     },
 }
 
@@ -1238,6 +1279,50 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::eval_cmd::execute(&pool, hours).await?;
+        }
+        Commands::Bench { action } => {
+            match action {
+                BenchAction::List => {
+                    ygg::cli::bench_cmd::list();
+                }
+                BenchAction::Run { scenario, baseline, parallelism, model, seed } => {
+                    let config = ygg::config::AppConfig::from_env()?;
+                    let pool = ygg::db::create_pool(&config.database_url).await?;
+                    let baseline: ygg::bench::Baseline = baseline.parse()
+                        .map_err(|e: String| anyhow::anyhow!(e))?;
+                    let parallelism = parallelism.unwrap_or_else(|| {
+                        ygg::bench::scenarios::find(&scenario)
+                            .map(|s| s.default_parallelism as i32)
+                            .unwrap_or(1)
+                    });
+                    ygg::cli::bench_cmd::run(
+                        &pool, &scenario, baseline, parallelism, &model, seed,
+                    ).await?;
+                }
+                BenchAction::Report { run_id } => {
+                    let id = uuid::Uuid::parse_str(&run_id)
+                        .map_err(|e| anyhow::anyhow!("invalid run-id: {e}"))?;
+                    let config = ygg::config::AppConfig::from_env()?;
+                    let pool = ygg::db::create_pool(&config.database_url).await?;
+                    ygg::cli::bench_cmd::report(&pool, id).await?;
+                }
+                BenchAction::Diff { a, b } => {
+                    let a = uuid::Uuid::parse_str(&a)
+                        .map_err(|e| anyhow::anyhow!("invalid run-id a: {e}"))?;
+                    let b = uuid::Uuid::parse_str(&b)
+                        .map_err(|e| anyhow::anyhow!("invalid run-id b: {e}"))?;
+                    let config = ygg::config::AppConfig::from_env()?;
+                    let pool = ygg::db::create_pool(&config.database_url).await?;
+                    ygg::cli::bench_cmd::diff(&pool, a, b).await?;
+                }
+                BenchAction::Ci { tier } => {
+                    let tier: ygg::bench::Tier = tier.parse()
+                        .map_err(|e: String| anyhow::anyhow!(e))?;
+                    let config = ygg::config::AppConfig::from_env()?;
+                    let pool = ygg::db::create_pool(&config.database_url).await?;
+                    ygg::cli::bench_cmd::ci(&pool, tier).await?;
+                }
+            }
         }
         Commands::Trace { last, agent, full } => {
             let config = ygg::config::AppConfig::from_env()?;

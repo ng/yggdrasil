@@ -1,5 +1,6 @@
 pub mod agent_cmd;
 pub mod bar_cmd;
+pub mod bench_cmd;
 pub mod dashboard_cmd;
 pub mod digest;
 pub mod eval_cmd;
