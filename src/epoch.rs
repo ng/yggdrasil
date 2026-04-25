@@ -22,17 +22,15 @@ const DEFAULT_DELTA_TOKENS: i64 = 20_000;
 
 /// Check whether an epoch digest should fire, and if so, spawn one in
 /// the background. Non-blocking. Safe to call on every inject.
-pub async fn maybe_fire(
-    pool: &sqlx::PgPool,
-    agent_id: Uuid,
-    agent_name: &str,
-) {
+pub async fn maybe_fire(pool: &sqlx::PgPool, agent_id: Uuid, agent_name: &str) {
     if std::env::var("YGG_EPOCH").ok().as_deref() == Some("off") {
         return;
     }
 
     let delta: i64 = std::env::var("YGG_EPOCH_DELTA_TOKENS")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_DELTA_TOKENS);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_DELTA_TOKENS);
 
     let Some(transcript) = crate::cli::digest::find_latest_transcript() else {
         return;
@@ -44,7 +42,7 @@ pub async fn maybe_fire(
     // Pull last-epoch mark from agents.metadata. Missing = 0.
     let last_tokens: i64 = sqlx::query_scalar(
         "SELECT COALESCE((metadata->>'last_epoch_tokens')::bigint, 0)
-         FROM agents WHERE agent_id = $1"
+         FROM agents WHERE agent_id = $1",
     )
     .bind(agent_id)
     .fetch_one(pool)
@@ -52,8 +50,10 @@ pub async fn maybe_fire(
     .unwrap_or(0);
 
     if current_tokens.saturating_sub(last_tokens) < delta {
-        debug!("epoch: {current_tokens} tok, delta {} < {delta}, skipping",
-            current_tokens.saturating_sub(last_tokens));
+        debug!(
+            "epoch: {current_tokens} tok, delta {} < {delta}, skipping",
+            current_tokens.saturating_sub(last_tokens)
+        );
         return;
     }
 
@@ -72,7 +72,7 @@ pub async fn maybe_fire(
                 'last_epoch_tokens', $2::bigint,
                 'last_epoch_at', $3::text)
            WHERE agent_id = $1
-             AND COALESCE((metadata->>'last_epoch_tokens')::bigint, 0) < $2::bigint"#
+             AND COALESCE((metadata->>'last_epoch_tokens')::bigint, 0) < $2::bigint"#,
     )
     .bind(agent_id)
     .bind(current_tokens)
@@ -99,8 +99,11 @@ pub async fn maybe_fire(
     let agent_name_owned = agent_name.to_string();
     let transcript_owned = transcript.clone();
     tokio::spawn(async move {
-        let Ok(cfg) = crate::config::AppConfig::from_env() else { return; };
-        match crate::cli::digest::execute(&pool2, &cfg, &agent_name_owned, &transcript_owned).await {
+        let Ok(cfg) = crate::config::AppConfig::from_env() else {
+            return;
+        };
+        match crate::cli::digest::execute(&pool2, &cfg, &agent_name_owned, &transcript_owned).await
+        {
             Ok(()) => info!("epoch: background digest complete"),
             Err(e) => warn!("epoch: background digest failed: {e}"),
         }

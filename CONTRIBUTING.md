@@ -24,7 +24,7 @@ ygg up                            # tmux dashboard
 ## Tests
 
 - **Library tests** are fast and don't need Postgres: `cargo test --lib`.
-- **Integration tests** require a running Postgres at `DATABASE_URL` (the docker-compose default is fine): `DATABASE_URL=postgres://localhost:5432/ygg cargo test --test integration -- --test-threads=1`.
+- **Integration tests** require a running Postgres at `DATABASE_URL`. CI uses `postgres://postgres:postgres@localhost:5432/ygg` (the pgvector service container's defaults). Locally the docker-compose default `postgres://localhost:5432/ygg` works too. Run: `DATABASE_URL=postgres://postgres:postgres@localhost:5432/ygg cargo test --test integration -- --test-threads=1`.
 - **Bench tests** use a fake `claude` binary at `benches/fixtures/fake-claude.sh` so they run in CI without API tokens. Real `ygg bench` runs invoke the real `claude` CLI; set `YGG_BENCH_CLAUDE_BIN` to override.
 
 ## ADRs

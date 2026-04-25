@@ -18,16 +18,26 @@ const PRESSURE_TTL: Duration = Duration::from_secs(5);
 fn agent_pressure_tokens(agent_name: &str) -> Option<i64> {
     let home = std::env::var("HOME").ok()?;
     let projects = std::path::PathBuf::from(&home).join(".claude/projects");
-    if !projects.exists() { return None; }
+    if !projects.exists() {
+        return None;
+    }
     let entries = std::fs::read_dir(&projects).ok()?;
     let needle = format!("-{agent_name}");
     let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
-        if !name.ends_with(&needle) { continue; }
-        let Ok(inner) = std::fs::read_dir(entry.path()) else { continue };
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+            continue;
+        };
+        if !name.ends_with(&needle) {
+            continue;
+        }
+        let Ok(inner) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
         for f in inner.flatten() {
-            if f.path().extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+            if f.path().extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
             let mt = f.metadata().ok().and_then(|m| m.modified().ok());
             if let Some(t) = mt {
                 match &best {
@@ -64,18 +74,27 @@ fn parse_last_usage_tokens(path: &std::path::Path) -> Option<i64> {
 
     // Scan lines in reverse order for the first JSON with a usable usage block.
     for line in buf.lines().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         // Usage can appear nested under message.usage (assistant entries) or
         // at the top level, depending on the record shape.
-        let usage = v.pointer("/message/usage")
-            .or_else(|| v.pointer("/usage"));
+        let usage = v.pointer("/message/usage").or_else(|| v.pointer("/usage"));
         let Some(u) = usage else { continue };
-        let cr = u.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-        let cc = u.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let cr = u
+            .get("cache_read_input_tokens")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
+        let cc = u
+            .get("cache_creation_input_tokens")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
         let inp = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
         let out = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
         let total = cr + cc + inp + out;
-        if total > 0 { return Some(total); }
+        if total > 0 {
+            return Some(total);
+        }
     }
     None
 }
@@ -95,9 +114,15 @@ pub struct DashboardView {
     cache_hits_24h: i64,
     cache_total_24h: i64,
     redactions_24h: i64,
-    prompts_hourly: Vec<u64>,                 // global, last 24h, oldest→newest
+    prompts_hourly: Vec<u64>, // global, last 24h, oldest→newest
     per_agent_hourly: HashMap<Uuid, [u64; 24]>, // per agent, last 24h
-    recent_transitions: Vec<(chrono::DateTime<chrono::Utc>, String, String, String, Option<String>)>,
+    recent_transitions: Vec<(
+        chrono::DateTime<chrono::Utc>,
+        String,
+        String,
+        String,
+        Option<String>,
+    )>,
     /// Live workers. Separate agent / persona / state so the panel can
     /// render them as proper columns instead of one squashed label.
     /// (task_ref, agent, persona, state_glyph, state_color, title, started_at, tmux_window)
@@ -168,10 +193,16 @@ pub struct WorkerRow {
 impl DashboardView {
     pub fn new() -> Self {
         Self {
-            agents: vec![], locks: vec![], selected: 0,
+            agents: vec![],
+            locks: vec![],
+            selected: 0,
             agent_name_by_id: HashMap::new(),
-            prompts_1h: 0, digests_1h: 0, hits_1h: 0,
-            cache_hits_24h: 0, cache_total_24h: 0, redactions_24h: 0,
+            prompts_1h: 0,
+            digests_1h: 0,
+            hits_1h: 0,
+            cache_hits_24h: 0,
+            cache_total_24h: 0,
+            redactions_24h: 0,
             prompts_hourly: vec![0; 24],
             per_agent_hourly: HashMap::new(),
             recent_transitions: Vec::new(),
@@ -182,9 +213,13 @@ impl DashboardView {
             session_scoped: false,
             current_session_id: None,
             live_sessions_by_agent: HashMap::new(),
-            db_nodes: 0, db_tasks_open: 0, db_tasks_total: 0,
-            db_learnings: 0, db_locks_active: 0,
-            rename: None, flash: None,
+            db_nodes: 0,
+            db_tasks_open: 0,
+            db_tasks_total: 0,
+            db_learnings: 0,
+            db_locks_active: 0,
+            rename: None,
+            flash: None,
             orphan_last_check: None,
         }
     }
@@ -199,23 +234,34 @@ impl DashboardView {
     /// Disabled by setting `YGG_AUTO_ARCHIVE_ORPHANS=0`.
     async fn sweep_orphans(&mut self, pool: &PgPool) {
         let enabled = std::env::var("YGG_AUTO_ARCHIVE_ORPHANS")
-            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")))
+            .map(|v| {
+                !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+            })
             .unwrap_or(true);
-        if !enabled { return; }
+        if !enabled {
+            return;
+        }
 
         let interval = std::env::var("YGG_AUTO_ARCHIVE_INTERVAL_SECS")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
         let now = Instant::now();
         if let Some(last) = self.orphan_last_check {
-            if now.duration_since(last).as_secs() < interval { return; }
+            if now.duration_since(last).as_secs() < interval {
+                return;
+            }
         }
         self.orphan_last_check = Some(now);
 
         let stale_secs = std::env::var("YGG_AUTO_ARCHIVE_STALE_SECS")
-            .ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(3600);
 
         let candidates = match AgentRepo::new(pool)
-            .list_orphan_candidates(stale_secs).await
+            .list_orphan_candidates(stale_secs)
+            .await
         {
             Ok(c) => c,
             Err(_) => return,
@@ -239,19 +285,27 @@ impl DashboardView {
     }
 
     /// Agents-panel rename lifecycle. Mirrors the DAG add-mode pattern.
-    pub fn rename_mode(&self) -> bool { self.rename.is_some() }
+    pub fn rename_mode(&self) -> bool {
+        self.rename.is_some()
+    }
     pub fn rename_begin(&mut self) {
         if let Some(a) = self.agents.get(self.selected) {
             self.rename = Some((a.agent_id, a.agent_name.clone()));
             self.flash = None;
         }
     }
-    pub fn rename_cancel(&mut self) { self.rename = None; }
+    pub fn rename_cancel(&mut self) {
+        self.rename = None;
+    }
     pub fn rename_push(&mut self, c: char) {
-        if let Some((_, buf)) = self.rename.as_mut() { buf.push(c); }
+        if let Some((_, buf)) = self.rename.as_mut() {
+            buf.push(c);
+        }
     }
     pub fn rename_pop(&mut self) {
-        if let Some((_, buf)) = self.rename.as_mut() { buf.pop(); }
+        if let Some((_, buf)) = self.rename.as_mut() {
+            buf.pop();
+        }
     }
     pub fn rename_buffer(&self) -> Option<&str> {
         self.rename.as_ref().map(|(_, b)| b.as_str())
@@ -260,7 +314,9 @@ impl DashboardView {
     /// Commit the in-flight rename. On success, refreshes the agents list so
     /// the new name is visible immediately. Sets `flash` regardless of outcome.
     pub async fn rename_commit(&mut self, pool: &PgPool) {
-        let Some((agent_id, buf)) = self.rename.take() else { return };
+        let Some((agent_id, buf)) = self.rename.take() else {
+            return;
+        };
         let new_name = buf.trim();
         if new_name.is_empty() {
             self.flash = Some("rename cancelled (empty)".into());
@@ -273,7 +329,9 @@ impl DashboardView {
                 let _ = self.refresh(pool).await;
             }
             Err(e) => {
-                let code = e.as_database_error().and_then(|d| d.code().map(|c| c.to_string()));
+                let code = e
+                    .as_database_error()
+                    .and_then(|d| d.code().map(|c| c.to_string()));
                 self.flash = Some(if code.as_deref() == Some("23505") {
                     format!("rename failed: '{new_name}' already exists")
                 } else {
@@ -286,7 +344,9 @@ impl DashboardView {
     /// Archive the currently-selected agent. Fires on `a` when no rename is
     /// in flight; refreshes the list so the archived row disappears.
     pub async fn archive_selected(&mut self, pool: &PgPool) {
-        let Some(a) = self.agents.get(self.selected).cloned() else { return };
+        let Some(a) = self.agents.get(self.selected).cloned() else {
+            return;
+        };
         let repo = AgentRepo::new(pool);
         match repo.archive(a.agent_id).await {
             Ok(()) => {
@@ -300,12 +360,16 @@ impl DashboardView {
         }
     }
 
-    pub fn toggle_session_scope(&mut self) { self.session_scoped = !self.session_scoped; }
+    pub fn toggle_session_scope(&mut self) {
+        self.session_scoped = !self.session_scoped;
+    }
 
     fn cached_pressure(&mut self, agent_name: &str) -> Option<i64> {
         let now = Instant::now();
         if let Some((t, v)) = self.pressure_cache.get(agent_name) {
-            if now.duration_since(*t) < PRESSURE_TTL { return *v; }
+            if now.duration_since(*t) < PRESSURE_TTL {
+                return *v;
+            }
         }
         let v = agent_pressure_tokens(agent_name);
         self.pressure_cache.insert(agent_name.to_string(), (now, v));
@@ -319,7 +383,9 @@ impl DashboardView {
 
         let agent_repo = AgentRepo::new(pool);
         self.agents = agent_repo.list().await?;
-        self.agent_name_by_id = self.agents.iter()
+        self.agent_name_by_id = self
+            .agents
+            .iter()
             .map(|a| (a.agent_id, a.agent_name.clone()))
             .collect();
 
@@ -329,8 +395,11 @@ impl DashboardView {
         // Live session counts per agent — surfaces when one identity has
         // multiple concurrent CC sessions racing on the same state.
         self.live_sessions_by_agent = crate::models::session::SessionRepo::new(pool)
-            .live_counts().await.unwrap_or_default()
-            .into_iter().collect();
+            .live_counts()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         // When session-scoped, lock queries to the most-recent CC session
         // that's emitted events in the last 6h. Avoids showing a freshly-
@@ -340,9 +409,16 @@ impl DashboardView {
                 "SELECT cc_session_id FROM events
                  WHERE cc_session_id IS NOT NULL
                    AND created_at > now() - interval '6 hours'
-                 ORDER BY created_at DESC LIMIT 1"
-            ).fetch_optional(pool).await.ok().flatten().flatten()
-        } else { None };
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .flatten()
+        } else {
+            None
+        };
 
         // Pulse queries — single roundtrip for the small counters. When a
         // session is in scope we replace the time window with a session
@@ -379,16 +455,24 @@ impl DashboardView {
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
                      COUNT(*) FILTER (WHERE event_kind::text = 'redaction_applied')
-                   FROM events WHERE cc_session_id = $1"#
-            ).bind(sid).fetch_one(pool).await.unwrap_or((0, 0, 0))
+                   FROM events WHERE cc_session_id = $1"#,
+            )
+            .bind(sid)
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0, 0, 0))
         } else {
             sqlx::query_as(
                 r#"SELECT
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
                      COUNT(*) FILTER (WHERE event_kind::text = 'redaction_applied')
-                   FROM events WHERE created_at >= $1"#
-            ).bind(since_24h).fetch_one(pool).await.unwrap_or((0, 0, 0))
+                   FROM events WHERE created_at >= $1"#,
+            )
+            .bind(since_24h)
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0, 0, 0))
         };
         self.cache_hits_24h = ch24;
         self.cache_total_24h = ch24 + cc24;
@@ -398,17 +482,18 @@ impl DashboardView {
         // cheap at current scale (all target tables indexed). locks_active
         // excludes expired rows since a held lock is ttl-bound, not just a
         // row existence.
-        let (nodes, tasks_open, tasks_total, learnings, locks_active): (
-            i64, i64, i64, i64, i64,
-        ) = sqlx::query_as(
-            r#"SELECT
+        let (nodes, tasks_open, tasks_total, learnings, locks_active): (i64, i64, i64, i64, i64) =
+            sqlx::query_as(
+                r#"SELECT
                  (SELECT COUNT(*) FROM nodes),
                  (SELECT COUNT(*) FROM tasks WHERE status <> 'closed'),
                  (SELECT COUNT(*) FROM tasks),
                  (SELECT COUNT(*) FROM learnings),
                  (SELECT COUNT(*) FROM locks WHERE expires_at > now())"#,
-        )
-        .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0));
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0, 0, 0, 0, 0));
         self.db_nodes = nodes;
         self.db_tasks_open = tasks_open;
         self.db_tasks_total = tasks_total;
@@ -423,8 +508,11 @@ impl DashboardView {
              WHERE created_at >= now() - interval '24 hours'
                AND event_kind::text = 'node_written'
                AND payload->>'kind' = 'user_message'
-             GROUP BY 1 ORDER BY 1"
-        ).fetch_all(pool).await.unwrap_or_default();
+             GROUP BY 1 ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
         let mut series = vec![0u64; 24];
         for (b, n) in sparkline {
             let idx = (b - 1).clamp(0, 23) as usize;
@@ -442,8 +530,11 @@ impl DashboardView {
                AND event_kind::text = 'node_written'
                AND payload->>'kind' = 'user_message'
                AND agent_id IS NOT NULL
-             GROUP BY 1, 2"
-        ).fetch_all(pool).await.unwrap_or_default();
+             GROUP BY 1, 2",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
         self.per_agent_hourly.clear();
         for (aid, b, n) in per_agent {
             let idx = (b - 1).clamp(0, 23) as usize;
@@ -456,14 +547,28 @@ impl DashboardView {
             sqlx::query_as(
                 "SELECT created_at, agent_name, payload FROM events
                  WHERE event_kind = 'agent_state_changed'
-                 ORDER BY created_at DESC LIMIT 5"
-            ).fetch_all(pool).await.unwrap_or_default();
-        self.recent_transitions = trans.into_iter().map(|(ts, name, p)| {
-            let from = p.get("from").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-            let to   = p.get("to").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-            let tool = p.get("tool").and_then(|v| v.as_str()).map(String::from);
-            (ts, name, from, to, tool)
-        }).collect();
+                 ORDER BY created_at DESC LIMIT 5",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        self.recent_transitions = trans
+            .into_iter()
+            .map(|(ts, name, p)| {
+                let from = p
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let to = p
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let tool = p.get("tool").and_then(|v| v.as_str()).map(String::from);
+                (ts, name, from, to, tool)
+            })
+            .collect();
 
         // Piggyback a tmux-window check on every refresh. The external
         // `ygg watch` observer does this too, but not everyone runs it —
@@ -474,9 +579,22 @@ impl DashboardView {
 
         // Workers panel reads from the workers table. Observer
         // (yggdrasil-51) maintains state; we just show it.
-        let worker_rows: Vec<(String, i32, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, String, String, bool, bool, Option<String>)> =
-            sqlx::query_as(
-                r#"SELECT r.task_prefix, t.seq, t.title,
+        let worker_rows: Vec<(
+            String,
+            i32,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+            bool,
+            bool,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"SELECT r.task_prefix, t.seq, t.title,
                           a.agent_name, a.persona,
                           w.state::text, w.started_at, w.last_seen_at,
                           w.tmux_session, w.tmux_window,
@@ -490,23 +608,45 @@ impl DashboardView {
                            AND (w.branch_pushed = false OR w.branch_merged = false))
                     ORDER BY (w.ended_at IS NULL) DESC, w.started_at DESC
                     LIMIT 15"#,
-            ).fetch_all(pool).await.unwrap_or_default();
-        self.workers = worker_rows.into_iter().map(|(prefix, seq, title, agent, persona, state, started, last_seen, ts_sess, ts_win, pushed, merged, pr)| {
-            WorkerRow {
-                task_ref: format!("{prefix}-{seq}"),
-                agent: agent.unwrap_or_else(|| "unassigned".into()),
-                persona,
-                state,
-                title,
-                started_at: started,
-                last_seen_at: last_seen,
-                tmux_session: ts_sess,
-                tmux_window: ts_win,
-                branch_pushed: pushed,
-                branch_merged: merged,
-                pr_url: pr,
-            }
-        }).collect();
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        self.workers = worker_rows
+            .into_iter()
+            .map(
+                |(
+                    prefix,
+                    seq,
+                    title,
+                    agent,
+                    persona,
+                    state,
+                    started,
+                    last_seen,
+                    ts_sess,
+                    ts_win,
+                    pushed,
+                    merged,
+                    pr,
+                )| {
+                    WorkerRow {
+                        task_ref: format!("{prefix}-{seq}"),
+                        agent: agent.unwrap_or_else(|| "unassigned".into()),
+                        persona,
+                        state,
+                        title,
+                        started_at: started,
+                        last_seen_at: last_seen,
+                        tmux_session: ts_sess,
+                        tmux_window: ts_win,
+                        branch_pushed: pushed,
+                        branch_merged: merged,
+                        pr_url: pr,
+                    }
+                },
+            )
+            .collect();
         if self.worker_sel >= self.workers.len() {
             self.worker_sel = self.workers.len().saturating_sub(1);
         }
@@ -538,12 +678,12 @@ impl DashboardView {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // alerts
-                Constraint::Length(6),  // system pulse
-                Constraint::Min(8),     // agents
-                Constraint::Length(6),  // workers (click-to-do spawns)
-                Constraint::Length(7),  // state transitions
-                Constraint::Length(4),  // locks summary (detail on [0] Locks tab)
+                Constraint::Length(3), // alerts
+                Constraint::Length(6), // system pulse
+                Constraint::Min(8),    // agents
+                Constraint::Length(6), // workers (click-to-do spawns)
+                Constraint::Length(7), // state transitions
+                Constraint::Length(4), // locks summary (detail on [0] Locks tab)
             ])
             .split(area);
 
@@ -567,7 +707,8 @@ impl DashboardView {
                     "  · no workers running — spawn one with `r` on DAG or Enter on Tasks",
                     Style::default().fg(Color::DarkGray),
                 )),
-            ]).block(Block::default().borders(Borders::ALL).title(" Workers "));
+            ])
+            .block(Block::default().borders(Borders::ALL).title(" Workers "));
             frame.render_widget(para, area);
             return;
         }
@@ -580,72 +721,120 @@ impl DashboardView {
         // "just paused mid-thought" from a pane capture, so we lean on the
         // last_seen_at age as a proxy.
         const IDLE_ATTN_SECS: i64 = 60;
-        let needs_attn_count = self.workers.iter().filter(|w| {
-            let stale = (now - w.last_seen_at).num_seconds().max(0) > IDLE_ATTN_SECS;
-            w.state == "needs_attention" || (w.state == "idle" && stale)
-        }).count();
-        let lines: Vec<Line> = self.workers.iter().enumerate().map(|(i, w)| {
-            // Age = seconds since last seen by the observer, NOT since spawn.
-            // Answers "is this still alive?" directly. Stale rows (>2m since
-            // last seen) dim to DarkGray so abandoned workers stand out even
-            // before the reconciler flips state.
-            let seen_secs = (now - w.last_seen_at).num_seconds().max(0);
-            let age = humanize_duration(seen_secs);
-            let age_color = if seen_secs > 120 { Color::DarkGray } else { Color::Gray };
-            let (g, c) = worker_state_style(&w.state);
-            let is_cursor = focused && i == self.worker_sel;
-            let cursor = if is_cursor { "▸ " } else { "  " };
-            // Attention treatment fires on: (1) explicit needs_attention,
-            // (2) idle + last_seen older than IDLE_ATTN_SECS. Case 2 is the
-            // "task complete, awaiting operator" signal the classifier
-            // can't distinguish from pane content alone.
-            let idle_stale = w.state == "idle" && seen_secs > IDLE_ATTN_SECS;
-            let needs_attn = w.state == "needs_attention" || idle_stale;
-            let title_style = if needs_attn {
-                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else if is_cursor {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            // When the state is ambiguous (idle-stale), surface the reason
-            // in the state cell itself so the operator sees WHY it's yellow.
-            let state_label = if idle_stale {
-                format!("idle {age}")
-            } else {
-                w.state.clone()
-            };
-            let state_color = if needs_attn { Color::Yellow } else { c };
-            Line::from(vec![
-                Span::styled(cursor, Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{g} "), Style::default().fg(c).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<16}", w.task_ref),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<16}", short_cell(&w.agent, 16)),
-                    Style::default().fg(Color::White)),
-                Span::styled(format!("{:<12}",
-                    w.persona.as_deref().map(|p| short_cell(p, 12)).unwrap_or_else(|| "—".into())),
-                    Style::default().fg(Color::Magenta)),
-                Span::styled(format!("{:<10}", short_cell(&state_label, 10)),
-                    Style::default().fg(state_color)
-                        .add_modifier(if needs_attn { Modifier::BOLD } else { Modifier::empty() })),
-                Span::styled(format!("{:<10}", delivery_badge(w)),
-                    Style::default().fg(delivery_color(w))),
-                Span::styled(format!("{age:<6}"), Style::default().fg(age_color)),
-                Span::raw(" "),
-                Span::styled(short_title(&w.title), title_style),
-            ])
-        }).collect();
+        let needs_attn_count = self
+            .workers
+            .iter()
+            .filter(|w| {
+                let stale = (now - w.last_seen_at).num_seconds().max(0) > IDLE_ATTN_SECS;
+                w.state == "needs_attention" || (w.state == "idle" && stale)
+            })
+            .count();
+        let lines: Vec<Line> = self
+            .workers
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                // Age = seconds since last seen by the observer, NOT since spawn.
+                // Answers "is this still alive?" directly. Stale rows (>2m since
+                // last seen) dim to DarkGray so abandoned workers stand out even
+                // before the reconciler flips state.
+                let seen_secs = (now - w.last_seen_at).num_seconds().max(0);
+                let age = humanize_duration(seen_secs);
+                let age_color = if seen_secs > 120 {
+                    Color::DarkGray
+                } else {
+                    Color::Gray
+                };
+                let (g, c) = worker_state_style(&w.state);
+                let is_cursor = focused && i == self.worker_sel;
+                let cursor = if is_cursor { "▸ " } else { "  " };
+                // Attention treatment fires on: (1) explicit needs_attention,
+                // (2) idle + last_seen older than IDLE_ATTN_SECS. Case 2 is the
+                // "task complete, awaiting operator" signal the classifier
+                // can't distinguish from pane content alone.
+                let idle_stale = w.state == "idle" && seen_secs > IDLE_ATTN_SECS;
+                let needs_attn = w.state == "needs_attention" || idle_stale;
+                let title_style = if needs_attn {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_cursor {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                // When the state is ambiguous (idle-stale), surface the reason
+                // in the state cell itself so the operator sees WHY it's yellow.
+                let state_label = if idle_stale {
+                    format!("idle {age}")
+                } else {
+                    w.state.clone()
+                };
+                let state_color = if needs_attn { Color::Yellow } else { c };
+                Line::from(vec![
+                    Span::styled(cursor, Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        format!("{g} "),
+                        Style::default().fg(c).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{:<16}", w.task_ref),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{:<16}", short_cell(&w.agent, 16)),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(
+                        format!(
+                            "{:<12}",
+                            w.persona
+                                .as_deref()
+                                .map(|p| short_cell(p, 12))
+                                .unwrap_or_else(|| "—".into())
+                        ),
+                        Style::default().fg(Color::Magenta),
+                    ),
+                    Span::styled(
+                        format!("{:<10}", short_cell(&state_label, 10)),
+                        Style::default()
+                            .fg(state_color)
+                            .add_modifier(if needs_attn {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                    Span::styled(
+                        format!("{:<10}", delivery_badge(w)),
+                        Style::default().fg(delivery_color(w)),
+                    ),
+                    Span::styled(format!("{age:<6}"), Style::default().fg(age_color)),
+                    Span::raw(" "),
+                    Span::styled(short_title(&w.title), title_style),
+                ])
+            })
+            .collect();
         let attn_suffix = if needs_attn_count > 0 {
             format!("  ·  ⚠ {needs_attn_count} need attention")
-        } else { String::new() };
-        let title = format!(" Workers — {}{attn_suffix}  ·  age=since last seen  ·  w=focus  ↑↓  Enter=attach ",
-            self.workers.len());
+        } else {
+            String::new()
+        };
+        let title = format!(
+            " Workers — {}{attn_suffix}  ·  age=since last seen  ·  w=focus  ↑↓  Enter=attach ",
+            self.workers.len()
+        );
         let block = Block::default()
-            .borders(Borders::ALL).title(title)
+            .borders(Borders::ALL)
+            .title(title)
             .border_style(if focused {
                 Style::default().fg(Color::Cyan)
-            } else { Style::default() });
+            } else {
+                Style::default()
+            });
         let para = Paragraph::new(lines).block(block);
         frame.render_widget(para, area);
     }
@@ -656,16 +845,24 @@ impl DashboardView {
             self.worker_sel = 0;
         }
     }
-    pub fn agents_focus(&mut self) { self.focus = DashboardFocus::Agents; }
+    pub fn agents_focus(&mut self) {
+        self.focus = DashboardFocus::Agents;
+    }
 
     pub fn worker_up(&mut self) {
-        if self.workers.is_empty() { return; }
+        if self.workers.is_empty() {
+            return;
+        }
         self.worker_sel = if self.worker_sel == 0 {
             self.workers.len() - 1
-        } else { self.worker_sel - 1 };
+        } else {
+            self.worker_sel - 1
+        };
     }
     pub fn worker_down(&mut self) {
-        if self.workers.is_empty() { return; }
+        if self.workers.is_empty() {
+            return;
+        }
         self.worker_sel = (self.worker_sel + 1) % self.workers.len();
     }
     pub fn selected_worker(&self) -> Option<&WorkerRow> {
@@ -679,34 +876,50 @@ impl DashboardView {
                 Style::default().fg(Color::DarkGray),
             ))]
         } else {
-            self.recent_transitions.iter().map(|(ts, name, from, to, tool)| {
-                let t = ts.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
-                let to_color = state_color(to);
-                let mut spans = vec![
-                    Span::styled(t, Style::default().fg(Color::DarkGray)),
-                    Span::raw("  "),
-                    Span::styled(name.clone(), Style::default().fg(Color::Cyan)),
-                    Span::raw("  "),
-                    Span::styled(from.clone(), Style::default().fg(Color::DarkGray)),
-                    Span::raw(" → "),
-                    Span::styled(to.clone(), Style::default().fg(to_color).add_modifier(Modifier::BOLD)),
-                ];
-                if let Some(t) = tool {
-                    spans.push(Span::styled(format!(" ({t})"),
-                        Style::default().fg(Color::Yellow)));
-                }
-                Line::from(spans)
-            }).collect()
+            self.recent_transitions
+                .iter()
+                .map(|(ts, name, from, to, tool)| {
+                    let t = ts
+                        .with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string();
+                    let to_color = state_color(to);
+                    let mut spans = vec![
+                        Span::styled(t, Style::default().fg(Color::DarkGray)),
+                        Span::raw("  "),
+                        Span::styled(name.clone(), Style::default().fg(Color::Cyan)),
+                        Span::raw("  "),
+                        Span::styled(from.clone(), Style::default().fg(Color::DarkGray)),
+                        Span::raw(" → "),
+                        Span::styled(
+                            to.clone(),
+                            Style::default().fg(to_color).add_modifier(Modifier::BOLD),
+                        ),
+                    ];
+                    if let Some(t) = tool {
+                        spans.push(Span::styled(
+                            format!(" ({t})"),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
+                    Line::from(spans)
+                })
+                .collect()
         };
-        let para = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Recent state transitions "));
+        let para = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Recent state transitions "),
+        );
         frame.render_widget(para, area);
     }
 
     fn render_alerts(&mut self, frame: &mut Frame, area: Rect) {
         let mut alerts: Vec<Span> = Vec::new();
         let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_000_000);
 
         // High pressure agents (>=90%)
         let agent_names: Vec<String> = self.agents.iter().map(|a| a.agent_name.clone()).collect();
@@ -717,7 +930,10 @@ impl DashboardView {
                     if pct >= 90 {
                         alerts.push(Span::styled(
                             format!(" ⛔ {name} {pct}% "),
-                            Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Red)
+                                .add_modifier(Modifier::BOLD),
                         ));
                         alerts.push(Span::raw("  "));
                     } else if pct >= 75 {
@@ -734,21 +950,29 @@ impl DashboardView {
         // Locks held "too long" — 30m+ is our threshold for "someone's probably
         // stuck". Expired locks are just stale state and not interesting.
         let now = Utc::now();
-        let long_held = self.locks.iter()
-            .filter(|l| (l.expires_at - now).num_seconds() > 0)  // still live
+        let long_held = self
+            .locks
+            .iter()
+            .filter(|l| (l.expires_at - now).num_seconds() > 0) // still live
             .filter(|l| (now - l.acquired_at).num_minutes() >= 30)
             .count();
         if long_held > 0 {
             alerts.push(Span::styled(
-                format!(" ⏳ {long_held} lock{} held 30m+ ", if long_held == 1 { "" } else { "s" }),
+                format!(
+                    " ⏳ {long_held} lock{} held 30m+ ",
+                    if long_held == 1 { "" } else { "s" }
+                ),
                 Style::default().fg(Color::Black).bg(Color::Yellow),
             ));
             alerts.push(Span::raw("  "));
         }
 
         // Error-state agents
-        let errored = self.agents.iter()
-            .filter(|a| a.current_state == crate::models::agent::AgentState::Error).count();
+        let errored = self
+            .agents
+            .iter()
+            .filter(|a| a.current_state == crate::models::agent::AgentState::Error)
+            .count();
         if errored > 0 {
             alerts.push(Span::styled(
                 format!(" ✗ {errored} agent(s) in error "),
@@ -789,8 +1013,10 @@ impl DashboardView {
         // Sparkline on the left
         let max = *self.prompts_hourly.iter().max().unwrap_or(&1);
         let spark = Sparkline::default()
-            .block(Block::default().borders(Borders::ALL)
-                .title(format!(" Prompts / hour — 24h  ·  peak {}  ·  ← old · now → ", max)))
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                " Prompts / hour — 24h  ·  peak {}  ·  ← old · now → ",
+                max
+            )))
             .data(&self.prompts_hourly)
             .max(max.max(1))
             .style(Style::default().fg(Color::Cyan));
@@ -798,57 +1024,101 @@ impl DashboardView {
 
         let cache_rate = if self.cache_total_24h > 0 {
             (self.cache_hits_24h as f64 / self.cache_total_24h as f64 * 100.0) as i64
-        } else { 0 };
+        } else {
+            0
+        };
 
-        let active = self.agents.iter()
+        let active = self
+            .agents
+            .iter()
             .filter(|a| a.current_state == crate::models::agent::AgentState::Executing)
             .count();
 
         // Session-scope indicator lives in the labels — we re-use the same
         // counter fields but relabel "last 1h / last 24h" to just "session"
         // when scoped, so the numbers aren't misleading.
-        let counter_label = if self.current_session_id.is_some() { "session   " } else { "last 1h   " };
-        let totals_label  = if self.current_session_id.is_some() { "session   " } else { "last 24h  " };
+        let counter_label = if self.current_session_id.is_some() {
+            "session   "
+        } else {
+            "last 1h   "
+        };
+        let totals_label = if self.current_session_id.is_some() {
+            "session   "
+        } else {
+            "last 24h  "
+        };
 
         let lines: Vec<Line> = vec![
             Line::from(vec![
                 Span::styled("agents    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} total · {} active", self.agents.len(), active),
-                    Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} total · {} active", self.agents.len(), active),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
                 Span::styled(counter_label, Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} prompts · {} digests · {} recalls",
-                    self.prompts_1h, self.digests_1h, self.hits_1h),
-                    Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(
+                        "{} prompts · {} digests · {} recalls",
+                        self.prompts_1h, self.digests_1h, self.hits_1h
+                    ),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
                 Span::styled(totals_label, Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("cache {}/{} ({}%) ",
-                    self.cache_hits_24h, self.cache_total_24h, cache_rate),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("· redacted {}", self.redactions_24h),
+                Span::styled(
+                    format!(
+                        "cache {}/{} ({}%) ",
+                        self.cache_hits_24h, self.cache_total_24h, cache_rate
+                    ),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("· redacted {}", self.redactions_24h),
                     if self.redactions_24h > 0 {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    } else { Style::default().add_modifier(Modifier::BOLD) }),
+                    } else {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    },
+                ),
             ]),
             // DB corpus totals — size of the tracked state, not activity.
             // Updates every refresh tick. Post-pivot (ADR 0015), nodes +
             // memories fields will naturally drop to 0 and the line shrinks.
             Line::from(vec![
                 Span::styled("db        ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} tasks ", self.db_tasks_total),
-                    Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(format!("({} open) ", self.db_tasks_open),
-                    Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("· {} learnings ", self.db_learnings),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("· {} nodes ", self.db_nodes),
-                    Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("· {} locks", self.db_locks_active),
+                Span::styled(
+                    format!("{} tasks ", self.db_tasks_total),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({} open) ", self.db_tasks_open),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("· {} learnings ", self.db_learnings),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("· {} nodes ", self.db_nodes),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("· {} locks", self.db_locks_active),
                     if self.db_locks_active > 0 {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                    } else { Style::default().fg(Color::DarkGray) }),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
             ]),
         ];
         let title = match &self.current_session_id {
@@ -859,28 +1129,38 @@ impl DashboardView {
             None => {
                 let hint = if self.session_scoped {
                     " — no recent session  (S=global) "
-                } else { "  (S=session) " };
+                } else {
+                    "  (S=session) "
+                };
                 format!(" System pulse{} ", hint)
             }
         };
-        let pulse = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title));
+        let pulse =
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(pulse, cols[1]);
     }
 
     fn render_agents_table(&mut self, frame: &mut Frame, area: Rect) {
         let header = Row::new(vec![
-            Cell::from("NAME").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Cell::from("NAME").style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Cell::from("STATE"),
             Cell::from("PRESSURE"),
             Cell::from("24H"),
             Cell::from("UPDATED"),
-        ]).height(1);
+        ])
+        .height(1);
 
         // Shared y-axis for comparable sparklines across agents.
-        let global_max = self.per_agent_hourly.values()
+        let global_max = self
+            .per_agent_hourly
+            .values()
             .flat_map(|s| s.iter().copied())
-            .max().unwrap_or(1)
+            .max()
+            .unwrap_or(1)
             .max(1);
 
         // Pre-compute cached pressure per agent — we can't call &mut self
@@ -893,98 +1173,131 @@ impl DashboardView {
 
         let selected = self.selected;
         let per_agent = &self.per_agent_hourly;
-        let rows: Vec<Row> = self.agents.iter().enumerate().map(|(i, agent)| {
-            let style = if i == selected {
-                Style::default().bg(Color::DarkGray)
-            } else { Style::default() };
+        let rows: Vec<Row> = self
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(i, agent)| {
+                let style = if i == selected {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
 
-            // Humanize: the enum names read like internals ("context_flush")
-            // but most of them map to an intuitive one-word label.
-            let (base_label, state_color): (&str, Color) = match agent.current_state {
-                crate::models::agent::AgentState::Idle           => ("idle",      Color::Gray),
-                crate::models::agent::AgentState::Planning       => ("planning",  Color::Cyan),
-                crate::models::agent::AgentState::Executing      => ("working",   Color::Green),
-                crate::models::agent::AgentState::WaitingTool    => ("tool",      Color::Yellow),
-                crate::models::agent::AgentState::ContextFlush   => ("digesting", Color::Magenta),
-                crate::models::agent::AgentState::HumanOverride  => ("paused",    Color::Yellow),
-                crate::models::agent::AgentState::Mediation      => ("mediating", Color::Cyan),
-                crate::models::agent::AgentState::Error          => ("error",     Color::Red),
-                crate::models::agent::AgentState::Shutdown       => ("shutdown",  Color::DarkGray),
-            };
-            // For WaitingTool, append the tool name (e.g. "tool: Bash") from metadata
-            let mut state_label: String = if matches!(agent.current_state, crate::models::agent::AgentState::WaitingTool) {
-                match agent.metadata.get("last_tool").and_then(|v| v.as_str()) {
-                    Some(t) if !t.is_empty() => format!("{base_label}: {t}"),
-                    _ => base_label.to_string(),
-                }
-            } else {
-                base_label.to_string()
-            };
-            // Staleness: if the row says we're active but hasn't been
-            // updated in 10+ minutes, the CC session is probably dead.
-            // Visual-only — no mutation — dim color + "(stale)" suffix
-            // so a dead "tool: Bash" doesn't read identical to a live one.
-            let is_active_state = matches!(
-                agent.current_state,
-                crate::models::agent::AgentState::Executing
-                  | crate::models::agent::AgentState::WaitingTool
-                  | crate::models::agent::AgentState::Planning
-                  | crate::models::agent::AgentState::ContextFlush
-            );
-            let idle_mins = (Utc::now() - agent.updated_at).num_minutes();
-            let state_color = if is_active_state && idle_mins >= 10 {
-                state_label.push_str(" (stale)");
-                Color::DarkGray
-            } else {
-                state_color
-            };
+                // Humanize: the enum names read like internals ("context_flush")
+                // but most of them map to an intuitive one-word label.
+                let (base_label, state_color): (&str, Color) = match agent.current_state {
+                    crate::models::agent::AgentState::Idle => ("idle", Color::Gray),
+                    crate::models::agent::AgentState::Planning => ("planning", Color::Cyan),
+                    crate::models::agent::AgentState::Executing => ("working", Color::Green),
+                    crate::models::agent::AgentState::WaitingTool => ("tool", Color::Yellow),
+                    crate::models::agent::AgentState::ContextFlush => ("digesting", Color::Magenta),
+                    crate::models::agent::AgentState::HumanOverride => ("paused", Color::Yellow),
+                    crate::models::agent::AgentState::Mediation => ("mediating", Color::Cyan),
+                    crate::models::agent::AgentState::Error => ("error", Color::Red),
+                    crate::models::agent::AgentState::Shutdown => ("shutdown", Color::DarkGray),
+                };
+                // For WaitingTool, append the tool name (e.g. "tool: Bash") from metadata
+                let mut state_label: String = if matches!(
+                    agent.current_state,
+                    crate::models::agent::AgentState::WaitingTool
+                ) {
+                    match agent.metadata.get("last_tool").and_then(|v| v.as_str()) {
+                        Some(t) if !t.is_empty() => format!("{base_label}: {t}"),
+                        _ => base_label.to_string(),
+                    }
+                } else {
+                    base_label.to_string()
+                };
+                // Staleness: if the row says we're active but hasn't been
+                // updated in 10+ minutes, the CC session is probably dead.
+                // Visual-only — no mutation — dim color + "(stale)" suffix
+                // so a dead "tool: Bash" doesn't read identical to a live one.
+                let is_active_state = matches!(
+                    agent.current_state,
+                    crate::models::agent::AgentState::Executing
+                        | crate::models::agent::AgentState::WaitingTool
+                        | crate::models::agent::AgentState::Planning
+                        | crate::models::agent::AgentState::ContextFlush
+                );
+                let idle_mins = (Utc::now() - agent.updated_at).num_minutes();
+                let state_color = if is_active_state && idle_mins >= 10 {
+                    state_label.push_str(" (stale)");
+                    Color::DarkGray
+                } else {
+                    state_color
+                };
 
-            // Pressure comes from the TRANSCRIPT file size, not our
-            // agents.context_tokens counter (which only reflects nodes WE
-            // write and drifts badly). Falls through to — if no transcript
-            // is findable for this agent.
-            let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
-            let (pressure_bar, pressure_color) = match pressure_by_name.get(&agent.agent_name).copied().flatten() {
-                Some(tokens) if limit > 0 => {
-                    let pct = ((tokens as f64 / limit as f64) * 100.0).min(999.0) as u32;
-                    let blocks = (pct / 10).min(10) as usize;
-                    let color = if pct >= 90 { Color::Red }
-                                else if pct >= 75 { Color::Yellow }
-                                else if pct >= 50 { Color::Cyan }
-                                else { Color::Green };
-                    (format!("{}{} {}% ({}K)",
-                        "█".repeat(blocks), "░".repeat(10 - blocks), pct, tokens / 1000),
-                     color)
-                }
-                _ => ("—".to_string(), Color::DarkGray),
-            };
+                // Pressure comes from the TRANSCRIPT file size, not our
+                // agents.context_tokens counter (which only reflects nodes WE
+                // write and drifts badly). Falls through to — if no transcript
+                // is findable for this agent.
+                let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1_000_000);
+                let (pressure_bar, pressure_color) =
+                    match pressure_by_name.get(&agent.agent_name).copied().flatten() {
+                        Some(tokens) if limit > 0 => {
+                            let pct = ((tokens as f64 / limit as f64) * 100.0).min(999.0) as u32;
+                            let blocks = (pct / 10).min(10) as usize;
+                            let color = if pct >= 90 {
+                                Color::Red
+                            } else if pct >= 75 {
+                                Color::Yellow
+                            } else if pct >= 50 {
+                                Color::Cyan
+                            } else {
+                                Color::Green
+                            };
+                            (
+                                format!(
+                                    "{}{} {}% ({}K)",
+                                    "█".repeat(blocks),
+                                    "░".repeat(10 - blocks),
+                                    pct,
+                                    tokens / 1000
+                                ),
+                                color,
+                            )
+                        }
+                        _ => ("—".to_string(), Color::DarkGray),
+                    };
 
-            let sparkline = per_agent.get(&agent.agent_id)
-                .map(|s| text_sparkline(s, global_max))
-                .unwrap_or_else(|| "        ".to_string());
+                let sparkline = per_agent
+                    .get(&agent.agent_id)
+                    .map(|s| text_sparkline(s, global_max))
+                    .unwrap_or_else(|| "        ".to_string());
 
-            // Attach a "×N" badge when an agent has >1 live CC session —
-            // means multiple windows are racing on the same identity.
-            // Persona, when set, appears as " :role" so you can tell two
-            // personas of the same repo apart at a glance.
-            let live = self.live_sessions_by_agent.get(&agent.agent_id).copied().unwrap_or(0);
-            let base = match &agent.persona {
-                Some(p) if !p.is_empty() => format!("{} :{p}", agent.agent_name),
-                _ => agent.agent_name.clone(),
-            };
-            let name_cell = if live > 1 {
-                format!("{base}  ×{live}")
-            } else { base };
+                // Attach a "×N" badge when an agent has >1 live CC session —
+                // means multiple windows are racing on the same identity.
+                // Persona, when set, appears as " :role" so you can tell two
+                // personas of the same repo apart at a glance.
+                let live = self
+                    .live_sessions_by_agent
+                    .get(&agent.agent_id)
+                    .copied()
+                    .unwrap_or(0);
+                let base = match &agent.persona {
+                    Some(p) if !p.is_empty() => format!("{} :{p}", agent.agent_name),
+                    _ => agent.agent_name.clone(),
+                };
+                let name_cell = if live > 1 {
+                    format!("{base}  ×{live}")
+                } else {
+                    base
+                };
 
-            Row::new(vec![
-                Cell::from(name_cell),
-                Cell::from(state_label).style(Style::default().fg(state_color)),
-                Cell::from(pressure_bar).style(Style::default().fg(pressure_color)),
-                Cell::from(sparkline).style(Style::default().fg(Color::Cyan)),
-                Cell::from(humanize_since(agent.updated_at)),
-            ]).style(style)
-        }).collect();
+                Row::new(vec![
+                    Cell::from(name_cell),
+                    Cell::from(state_label).style(Style::default().fg(state_color)),
+                    Cell::from(pressure_bar).style(Style::default().fg(pressure_color)),
+                    Cell::from(sparkline).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(humanize_since(agent.updated_at)),
+                ])
+                .style(style)
+            })
+            .collect();
 
         // Surface action status (rename/archive) in the panel title so the
         // user gets feedback without a separate status line.
@@ -992,13 +1305,16 @@ impl DashboardView {
             Some(msg) => format!(" Agents  ·  {msg}  ·  r=rename a=archive "),
             None => " Agents  ·  r=rename a=archive ".to_string(),
         };
-        let table = Table::new(rows, [
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-        ])
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Percentage(25),
+                Constraint::Percentage(15),
+                Constraint::Percentage(25),
+                Constraint::Percentage(15),
+                Constraint::Percentage(20),
+            ],
+        )
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title));
 
@@ -1010,35 +1326,57 @@ impl DashboardView {
         // dashboard surfaces (a) total live, (b) stale (>30m held), (c) the
         // longest-held single lock so a stuck resource is still obvious.
         let now = Utc::now();
-        let live: Vec<&crate::lock::ResourceLock> = self.locks.iter()
+        let live: Vec<&crate::lock::ResourceLock> = self
+            .locks
+            .iter()
             .filter(|l| (l.expires_at - now).num_seconds() > 0)
             .collect();
         let total = live.len();
-        let stale = live.iter()
+        let stale = live
+            .iter()
             .filter(|l| (now - l.acquired_at).num_seconds() > 1800)
             .count();
-        let oldest = live.iter()
+        let oldest = live
+            .iter()
             .max_by_key(|l| (now - l.acquired_at).num_seconds())
             .map(|l| {
                 let held = humanize_duration((now - l.acquired_at).num_seconds().max(0));
-                let agent = self.agent_name_by_id.get(&l.agent_id)
+                let agent = self
+                    .agent_name_by_id
+                    .get(&l.agent_id)
                     .cloned()
                     .unwrap_or_else(|| format!("{}…", &l.agent_id.to_string()[..8]));
                 format!("{held} by {agent} on {}", short_resource(&l.resource_key))
             });
 
-        let stale_color = if stale > 0 { Color::Yellow } else { Color::Green };
+        let stale_color = if stale > 0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
         let lines = vec![
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled(format!("{total}"), Style::default().fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{total}"),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" live  ·  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{stale}"), Style::default().fg(stale_color)
-                    .add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{stale}"),
+                    Style::default()
+                        .fg(stale_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" stale (>30m)  ·  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("[0] Locks for detail",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    "[0] Locks for detail",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
             ]),
             match oldest {
                 Some(s) => Line::from(vec![
@@ -1048,8 +1386,8 @@ impl DashboardView {
                 None => Line::from(""),
             },
         ];
-        let para = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Locks "));
+        let para =
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Locks "));
         frame.render_widget(para, area);
     }
 }
@@ -1058,7 +1396,9 @@ impl DashboardView {
 /// components plus an ellipsis prefix. Keeps the informative tail visible.
 fn short_resource(s: &str) -> String {
     let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
-    if parts.len() <= 2 { return s.to_string(); }
+    if parts.len() <= 2 {
+        return s.to_string();
+    }
     let tail = parts[parts.len() - 2..].join("/");
     format!("…/{tail}")
 }
@@ -1085,72 +1425,103 @@ fn state_color(s: &str) -> Color {
 /// so values across rows are visually comparable.
 fn text_sparkline(series: &[u64], max: u64) -> String {
     // 8-step bar chars, empty cell for zero so sparse agents look sparse.
-    const BARS: [char; 8] = ['▁','▂','▃','▄','▅','▆','▇','█'];
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let max = max.max(1);
-    series.iter().map(|&v| {
-        if v == 0 { ' ' }
-        else {
-            let step = ((v * 7 + max - 1) / max).min(7) as usize;
-            BARS[step]
-        }
-    }).collect()
+    series
+        .iter()
+        .map(|&v| {
+            if v == 0 {
+                ' '
+            } else {
+                let step = ((v * 7 + max - 1) / max).min(7) as usize;
+                BARS[step]
+            }
+        })
+        .collect()
 }
 
 fn short_title(s: &str) -> String {
-    if s.chars().count() <= 60 { s.to_string() }
-    else { s.chars().take(60).collect::<String>() + "…" }
+    if s.chars().count() <= 60 {
+        s.to_string()
+    } else {
+        s.chars().take(60).collect::<String>() + "…"
+    }
 }
 
 fn short_cell(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { s.to_string() }
-    else { s.chars().take(max.saturating_sub(1)).collect::<String>() + "…" }
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
 }
 
 fn delivery_badge(w: &WorkerRow) -> &'static str {
     // Only meaningful for terminated workers.
     let terminated = matches!(w.state.as_str(), "completed" | "failed" | "abandoned");
-    if !terminated { return ""; }
-    if w.branch_merged { "✓ merged" }
-    else if w.pr_url.is_some() { "⏺ pr-open" }
-    else if w.branch_pushed { "⬆ pushed" }
-    else { "⬆ unpushed" }
+    if !terminated {
+        return "";
+    }
+    if w.branch_merged {
+        "✓ merged"
+    } else if w.pr_url.is_some() {
+        "⏺ pr-open"
+    } else if w.branch_pushed {
+        "⬆ pushed"
+    } else {
+        "⬆ unpushed"
+    }
 }
 
 fn delivery_color(w: &WorkerRow) -> Color {
-    if w.branch_merged { Color::Green }
-    else if w.pr_url.is_some() { Color::Cyan }
-    else if w.branch_pushed { Color::Yellow }
-    else if matches!(w.state.as_str(), "completed" | "failed" | "abandoned") {
+    if w.branch_merged {
+        Color::Green
+    } else if w.pr_url.is_some() {
+        Color::Cyan
+    } else if w.branch_pushed {
+        Color::Yellow
+    } else if matches!(w.state.as_str(), "completed" | "failed" | "abandoned") {
         Color::Red
-    } else { Color::DarkGray }
+    } else {
+        Color::DarkGray
+    }
 }
 
 fn worker_state_style(state: &str) -> (&'static str, Color) {
     match state {
-        "spawned"         => ("◌", Color::DarkGray),
-        "running"         => ("▶", Color::Green),
-        "idle"            => ("•", Color::Gray),
+        "spawned" => ("◌", Color::DarkGray),
+        "running" => ("▶", Color::Green),
+        "idle" => ("•", Color::Gray),
         "needs_attention" => ("⚠", Color::Yellow),
-        "completed"       => ("✓", Color::DarkGray),
-        "failed"          => ("✗", Color::Red),
-        "abandoned"       => ("⊘", Color::DarkGray),
-        _                 => ("?", Color::Gray),
+        "completed" => ("✓", Color::DarkGray),
+        "failed" => ("✗", Color::Red),
+        "abandoned" => ("⊘", Color::DarkGray),
+        _ => ("?", Color::Gray),
     }
 }
 
 fn humanize_duration(secs: i64) -> String {
     let secs = secs.max(0);
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else { format!("{}d", secs / 86400) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }
 
 /// Centered popup on the agents pane area while a rename is in progress.
 /// Clear + bordered block with the old name and an inline input buffer.
 fn render_rename_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
-    let Some((_, buf)) = dash.rename.as_ref() else { return };
-    let old = dash.agents.iter()
+    let Some((_, buf)) = dash.rename.as_ref() else {
+        return;
+    };
+    let old = dash
+        .agents
+        .iter()
         .find(|a| a.agent_id == dash.rename.as_ref().unwrap().0)
         .map(|a| a.agent_name.as_str())
         .unwrap_or("?");
@@ -1158,7 +1529,12 @@ fn render_rename_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
     let h = 6u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect { x, y, width: w, height: h };
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
     frame.render_widget(ratatui::widgets::Clear, popup);
 
     let hint = format!(" rename '{old}'  ·  Enter=commit · Esc=cancel ");
@@ -1167,13 +1543,18 @@ fn render_rename_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
         Line::from(vec![
             Span::raw("  "),
             Span::styled("▸ ", Style::default().fg(Color::Cyan)),
-            Span::styled(buf.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                buf.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Color::Cyan)),
         ]),
     ];
-    let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL)
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
             .title(hint)
-            .border_style(Style::default().fg(Color::Cyan)));
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
     frame.render_widget(para, popup);
 }

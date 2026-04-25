@@ -16,7 +16,7 @@ use crate::models::event::{EventKind, EventRepo};
 
 /// Parsed transcript — one entry per Claude Code turn with role + text + timestamp.
 pub struct Turn {
-    pub role: String,    // "user" | "assistant"
+    pub role: String, // "user" | "assistant"
     pub text: String,
     pub ts: Option<DateTime<Utc>>,
 }
@@ -25,12 +25,18 @@ pub struct Turn {
 /// variety of message shapes (content may be a string OR an array of content
 /// blocks with `type`/`text` fields).
 pub fn parse_transcript_turns(path: &str) -> Vec<Turn> {
-    let Ok(file) = std::fs::File::open(path) else { return Vec::new(); };
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
     let reader = std::io::BufReader::new(file);
     let mut out = Vec::new();
     for line in reader.lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue; };
-        let Some(msg_type) = v.get("type").and_then(|t| t.as_str()) else { continue; };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(msg_type) = v.get("type").and_then(|t| t.as_str()) else {
+            continue;
+        };
         // Claude Code transcripts use type="user"|"assistant" at the top level,
         // and sometimes nest the message inside v["message"].
         let role = match msg_type {
@@ -39,11 +45,19 @@ pub fn parse_transcript_turns(path: &str) -> Vec<Turn> {
             _ => continue,
         };
         let text = extract_message_text(&v).unwrap_or_default();
-        if text.trim().is_empty() { continue; }
-        let ts = v.get("timestamp").and_then(|t| t.as_str())
+        if text.trim().is_empty() {
+            continue;
+        }
+        let ts = v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|d| d.with_timezone(&Utc));
-        out.push(Turn { role: role.to_string(), text, ts });
+        out.push(Turn {
+            role: role.to_string(),
+            text,
+            ts,
+        });
     }
     out
 }
@@ -61,7 +75,11 @@ fn extract_message_text(v: &serde_json::Value) -> Option<String> {
                     parts.push(t.to_string());
                 }
             }
-            if parts.is_empty() { None } else { Some(parts.join("\n")) }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
         }
         _ => None,
     }
@@ -71,27 +89,37 @@ fn extract_message_text(v: &serde_json::Value) -> Option<String> {
 /// drop common stopwords. Returns a set of tokens.
 fn tokenize(text: &str) -> HashSet<String> {
     const STOPWORDS: &[&str] = &[
-        "a","an","the","and","or","but","if","then","of","in","on","at","to",
-        "for","with","by","as","is","are","was","were","be","been","being",
-        "it","its","this","that","these","those","have","has","had","do","does","did",
-        "i","you","we","they","he","she","them","me","my","your","our",
-        "not","no","yes","so","than","so","such","can","will","would","could",
-        "should","there","here","which","what","who","how","why","when",
+        "a", "an", "the", "and", "or", "but", "if", "then", "of", "in", "on", "at", "to", "for",
+        "with", "by", "as", "is", "are", "was", "were", "be", "been", "being", "it", "its", "this",
+        "that", "these", "those", "have", "has", "had", "do", "does", "did", "i", "you", "we",
+        "they", "he", "she", "them", "me", "my", "your", "our", "not", "no", "yes", "so", "than",
+        "so", "such", "can", "will", "would", "could", "should", "there", "here", "which", "what",
+        "who", "how", "why", "when",
     ];
     let stopwords: HashSet<&str> = STOPWORDS.iter().copied().collect();
     text.split(|c: char| !c.is_alphanumeric())
         .filter_map(|w| {
             let w = w.to_lowercase();
-            if w.len() < 3 || stopwords.contains(w.as_str()) { None } else { Some(w) }
+            if w.len() < 3 || stopwords.contains(w.as_str()) {
+                None
+            } else {
+                Some(w)
+            }
         })
         .collect()
 }
 
 fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
-    if a.is_empty() || b.is_empty() { return 0.0; }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
     let inter = a.intersection(b).count();
     let union = a.union(b).count();
-    if union == 0 { 0.0 } else { inter as f64 / union as f64 }
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
 }
 
 /// Containment (overlap coefficient) — the fraction of the SNIPPET's tokens
@@ -100,7 +128,9 @@ fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 /// symmetric Jaccard is dominated by the response length and can't clear
 /// any sensible threshold even when the response clearly uses the snippet.
 fn containment(snippet: &HashSet<String>, response: &HashSet<String>) -> f64 {
-    if snippet.is_empty() || response.is_empty() { return 0.0; }
+    if snippet.is_empty() || response.is_empty() {
+        return 0.0;
+    }
     let inter = snippet.intersection(response).count();
     inter as f64 / snippet.len() as f64
 }
@@ -122,7 +152,9 @@ pub async fn score_references(
     // manual review: literal reuse hits ~0.8+, paraphrase ~0.4-0.6, noise
     // under 0.3. Old 0.12 Jaccard threshold was unreachable in practice.
     let threshold: f64 = std::env::var("YGG_REFERENCE_THRESHOLD")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(0.4);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.4);
 
     let turns = parse_transcript_turns(transcript_path);
     if turns.is_empty() {
@@ -135,7 +167,7 @@ pub async fn score_references(
         "SELECT id, created_at, payload FROM events
          WHERE event_kind::text = 'similarity_hit' AND agent_id = $1
            AND created_at > now() - interval '7 days'
-         ORDER BY created_at ASC"
+         ORDER BY created_at ASC",
     )
     .bind(agent_id)
     .fetch_all(pool)
@@ -149,7 +181,7 @@ pub async fn score_references(
     let already: HashSet<Uuid> = sqlx::query_scalar(
         "SELECT (payload->>'similarity_hit_event_id')::uuid FROM events
          WHERE event_kind::text = 'hit_referenced' AND agent_id = $1
-           AND payload->>'similarity_hit_event_id' IS NOT NULL"
+           AND payload->>'similarity_hit_event_id' IS NOT NULL",
     )
     .bind(agent_id)
     .fetch_all(pool)
@@ -165,13 +197,17 @@ pub async fn score_references(
     let mut report = ReferenceReport::default();
 
     for (hit_id, hit_ts, payload) in &rows {
-        if already.contains(hit_id) { continue; }
-        let Some(snippet) = payload.get("snippet").and_then(|s| s.as_str()) else { continue; };
+        if already.contains(hit_id) {
+            continue;
+        }
+        let Some(snippet) = payload.get("snippet").and_then(|s| s.as_str()) else {
+            continue;
+        };
 
         // Find the next assistant turn with ts > hit_ts.
-        let assistant = turns.iter().find(|t| {
-            t.role == "assistant" && t.ts.map(|ts| ts > *hit_ts).unwrap_or(false)
-        });
+        let assistant = turns
+            .iter()
+            .find(|t| t.role == "assistant" && t.ts.map(|ts| ts > *hit_ts).unwrap_or(false));
         let Some(assistant) = assistant else {
             // No paired assistant turn yet; skip and try again next pass.
             continue;
@@ -184,19 +220,24 @@ pub async fn score_references(
 
         if overlap >= threshold {
             report.referenced += 1;
-            let source_id = payload.get("source_node_id").and_then(|v| v.as_str()).unwrap_or("");
-            let _ = event_repo.emit(
-                EventKind::HitReferenced,
-                agent_name,
-                Some(agent_id),
-                serde_json::json!({
-                    "similarity_hit_event_id": hit_id,
-                    "source_node_id": source_id,
-                    "overlap": overlap,
-                    "method": "containment",
-                    "threshold": threshold,
-                }),
-            ).await;
+            let source_id = payload
+                .get("source_node_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let _ = event_repo
+                .emit(
+                    EventKind::HitReferenced,
+                    agent_name,
+                    Some(agent_id),
+                    serde_json::json!({
+                        "similarity_hit_event_id": hit_id,
+                        "source_node_id": source_id,
+                        "overlap": overlap,
+                        "method": "containment",
+                        "threshold": threshold,
+                    }),
+                )
+                .await;
         }
     }
 
@@ -247,12 +288,15 @@ mod tests {
             "I checked the migration files and the sqlx runner applies them \
              in filename ordering. The ordering convention is lexicographic; \
              please don't rename existing migration files or the sequence \
-             drifts for other developers who already ran them."
+             drifts for other developers who already ran them.",
         );
         let c = containment(&snippet, &response);
         assert!(c >= 0.9, "expected near-full containment, got {c}");
         let j = jaccard(&snippet, &response);
-        assert!(j < 0.2, "jaccard should be much lower than containment here, got {j}");
+        assert!(
+            j < 0.2,
+            "jaccard should be much lower than containment here, got {j}"
+        );
     }
 
     #[test]

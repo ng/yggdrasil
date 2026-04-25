@@ -8,9 +8,15 @@ ALTER TYPE event_kind ADD VALUE IF NOT EXISTS 'message';
 
 ALTER TABLE events ADD COLUMN IF NOT EXISTS recipient_agent_id UUID REFERENCES agents(agent_id);
 
--- Partial index: only pays for itself on message events, which are rare.
+-- Partial index: only pays for itself on message events. Filter on
+-- recipient_agent_id IS NOT NULL rather than event_kind='message' because
+-- ALTER TYPE … ADD VALUE is not visible to the same transaction in
+-- Postgres, and sqlx wraps each migration file in a transaction. Fresh
+-- installs would fail with "unsafe use of new value 'message'". Functionally
+-- equivalent: the recipient_agent_id column is only ever populated by
+-- message events.
 CREATE INDEX IF NOT EXISTS idx_events_recipient_unread
     ON events (recipient_agent_id, created_at DESC)
-    WHERE event_kind = 'message';
+    WHERE recipient_agent_id IS NOT NULL;
 
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS message_cursor TIMESTAMPTZ DEFAULT '1970-01-01'::timestamptz;

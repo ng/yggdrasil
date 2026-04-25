@@ -38,7 +38,10 @@ pub fn pass_power_k(passes: &[bool], k: usize) -> f64 {
         return 0.0;
     }
     let groups = passes.len() / k;
-    let all_pass = passes.chunks_exact(k).filter(|g| g.iter().all(|&p| p)).count();
+    let all_pass = passes
+        .chunks_exact(k)
+        .filter(|g| g.iter().all(|&p| p))
+        .count();
     all_pass as f64 / groups as f64
 }
 
@@ -49,7 +52,10 @@ pub fn pass_at_k(passes: &[bool], k: usize) -> f64 {
         return 0.0;
     }
     let groups = passes.len() / k;
-    let any_pass = passes.chunks_exact(k).filter(|g| g.iter().any(|&p| p)).count();
+    let any_pass = passes
+        .chunks_exact(k)
+        .filter(|g| g.iter().any(|&p| p))
+        .count();
     any_pass as f64 / groups as f64
 }
 
@@ -62,7 +68,9 @@ fn next_u64(s: u64) -> u64 {
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() { return 0.0; }
+    if sorted.is_empty() {
+        return 0.0;
+    }
     let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
 }
@@ -73,15 +81,20 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 /// - `Verdict::ALess` when a's upper < b's lower
 /// - `Verdict::AMore` when a's lower > b's upper
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Verdict { Inconclusive, ALess, AMore }
+pub enum Verdict {
+    Inconclusive,
+    ALess,
+    AMore,
+}
 
-pub fn ci_diff_verdict(
-    a_lo: f64, a_hi: f64,
-    b_lo: f64, b_hi: f64,
-) -> Verdict {
-    if a_hi < b_lo { Verdict::ALess }
-    else if a_lo > b_hi { Verdict::AMore }
-    else { Verdict::Inconclusive }
+pub fn ci_diff_verdict(a_lo: f64, a_hi: f64, b_lo: f64, b_hi: f64) -> Verdict {
+    if a_hi < b_lo {
+        Verdict::ALess
+    } else if a_lo > b_hi {
+        Verdict::AMore
+    } else {
+        Verdict::Inconclusive
+    }
 }
 
 #[cfg(test)]
@@ -135,7 +148,10 @@ mod tests {
 
     #[test]
     fn ci_overlap_is_inconclusive() {
-        assert_eq!(ci_diff_verdict(10.0, 20.0, 15.0, 25.0), Verdict::Inconclusive);
+        assert_eq!(
+            ci_diff_verdict(10.0, 20.0, 15.0, 25.0),
+            Verdict::Inconclusive
+        );
     }
 
     #[test]

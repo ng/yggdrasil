@@ -41,18 +41,21 @@ pub async fn status(pool: &PgPool) -> Result<(), anyhow::Error> {
         println!("scheduler: running (advisory lock held)");
     }
 
-    let scheduled: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_runs WHERE state = 'scheduled'",
-    ).fetch_one(pool).await?;
-    let ready: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_runs WHERE state = 'ready'",
-    ).fetch_one(pool).await?;
-    let running: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_runs WHERE state = 'running'",
-    ).fetch_one(pool).await?;
+    let scheduled: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE state = 'scheduled'")
+            .fetch_one(pool)
+            .await?;
+    let ready: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE state = 'ready'")
+        .fetch_one(pool)
+        .await?;
+    let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE state = 'running'")
+        .fetch_one(pool)
+        .await?;
     let runnable: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tasks WHERE runnable = TRUE AND status IN ('open','in_progress')",
-    ).fetch_one(pool).await?;
+    )
+    .fetch_one(pool)
+    .await?;
 
     println!("queue:");
     println!("  runnable tasks (not yet scheduled): {runnable}");

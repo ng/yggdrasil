@@ -12,7 +12,7 @@
 
 use crate::config::AppConfig;
 use crate::models::event::{EventKind, EventRepo};
-use crate::models::task_run::{idempotency_key_for, RunReason, RunState};
+use crate::models::task_run::{RunReason, RunState, idempotency_key_for};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::time::Duration;
@@ -38,11 +38,17 @@ pub struct SchedulerConfig {
 impl SchedulerConfig {
     pub fn from_app(_app: &AppConfig) -> Self {
         let tick_ms: u64 = std::env::var("YGG_SCHEDULER_TICK_MS")
-            .ok().and_then(|s| s.parse().ok()).unwrap_or(2_000);
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000);
         let max_concurrent: i64 = std::env::var("YGG_SCHEDULER_MAX_CONCURRENT")
-            .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4);
         let poison_threshold: i32 = std::env::var("YGG_SCHEDULER_POISON_THRESHOLD")
-            .ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
         Self {
             tick_interval: Duration::from_millis(tick_ms),
             max_concurrent,
@@ -68,12 +74,12 @@ pub struct TickStats {
 /// synchronously for testing without spinning up the daemon loop.
 pub async fn tick(pool: &PgPool, cfg: &SchedulerConfig) -> Result<TickStats, anyhow::Error> {
     let mut stats = TickStats::default();
-    stats.reaped     = reap_expired_heartbeats(pool).await?;
-    stats.deadlined  = enforce_deadlines(pool).await?;
-    stats.poisoned   = detect_loops(pool, cfg.poison_threshold).await?;
-    stats.finalized  = finalize_terminal_runs(pool).await?;
-    stats.retried    = schedule_retries(pool, cfg).await?;
-    stats.scheduled  = schedule_ready_tasks(pool, cfg).await?;
+    stats.reaped = reap_expired_heartbeats(pool).await?;
+    stats.deadlined = enforce_deadlines(pool).await?;
+    stats.poisoned = detect_loops(pool, cfg.poison_threshold).await?;
+    stats.finalized = finalize_terminal_runs(pool).await?;
+    stats.retried = schedule_retries(pool, cfg).await?;
+    stats.scheduled = schedule_ready_tasks(pool, cfg).await?;
     stats.dispatched = dispatch_ready(pool, cfg).await?;
     Ok(stats)
 }
@@ -87,10 +93,16 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
         max_concurrent = cfg.max_concurrent,
         "scheduler started"
     );
-    emit_simple_event(&pool, EventKind::SchedulerTick, serde_json::json!({
-        "started": true,
-        "max_concurrent": cfg.max_concurrent,
-    })).await.ok();
+    emit_simple_event(
+        &pool,
+        EventKind::SchedulerTick,
+        serde_json::json!({
+            "started": true,
+            "max_concurrent": cfg.max_concurrent,
+        }),
+    )
+    .await
+    .ok();
 
     loop {
         // Sleep + ctrl-c handling. LISTEN/NOTIFY wake-up lands per yggdrasil-99
@@ -108,8 +120,13 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
 
         match tick(&pool, &cfg).await {
             Ok(stats) => {
-                let total = stats.finalized + stats.scheduled + stats.dispatched
-                          + stats.reaped + stats.deadlined + stats.retried + stats.poisoned;
+                let total = stats.finalized
+                    + stats.scheduled
+                    + stats.dispatched
+                    + stats.reaped
+                    + stats.deadlined
+                    + stats.retried
+                    + stats.poisoned;
                 if total > 0 {
                     tracing::info!(
                         finalized = stats.finalized,
@@ -121,15 +138,22 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
                         poisoned = stats.poisoned,
                         "scheduler tick"
                     );
-                    emit_simple_event(&pool, EventKind::SchedulerTick,
-                        serde_json::json!(stats)).await.ok();
+                    emit_simple_event(&pool, EventKind::SchedulerTick, serde_json::json!(stats))
+                        .await
+                        .ok();
                 }
             }
             Err(err) => {
                 tracing::warn!(error = %err, "scheduler tick failed");
-                emit_simple_event(&pool, EventKind::SchedulerError, serde_json::json!({
-                    "error": err.to_string(),
-                })).await.ok();
+                emit_simple_event(
+                    &pool,
+                    EventKind::SchedulerError,
+                    serde_json::json!({
+                        "error": err.to_string(),
+                    }),
+                )
+                .await
+                .ok();
             }
         }
     }
@@ -164,10 +188,10 @@ pub async fn finalize_terminal_runs(pool: &PgPool) -> Result<i64, anyhow::Error>
     for (task_id, state, reason, attempt, commit) in rows {
         let close_reason = match state {
             RunState::Succeeded => format!("run #{attempt} succeeded"),
-            RunState::Failed     => format!("run #{attempt} failed: {reason}"),
-            RunState::Crashed    => format!("run #{attempt} crashed: {reason}"),
-            RunState::Cancelled  => format!("run #{attempt} cancelled"),
-            RunState::Poison     => format!("run #{attempt} poisoned: {reason}"),
+            RunState::Failed => format!("run #{attempt} failed: {reason}"),
+            RunState::Crashed => format!("run #{attempt} crashed: {reason}"),
+            RunState::Cancelled => format!("run #{attempt} cancelled"),
+            RunState::Poison => format!("run #{attempt} poisoned: {reason}"),
             _ => continue,
         };
 
@@ -245,20 +269,18 @@ pub async fn schedule_ready_tasks(
 
     let mut scheduled = 0i64;
     for (task_id, max_attempts, timeout_ms) in rows {
-        let prev_attempt: Option<i32> = sqlx::query_scalar(
-            "SELECT MAX(attempt) FROM task_runs WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .ok()
-        .flatten();
+        let prev_attempt: Option<i32> =
+            sqlx::query_scalar("SELECT MAX(attempt) FROM task_runs WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await
+                .ok()
+                .flatten();
         let attempt = prev_attempt.unwrap_or(0) + 1;
         let max = max_attempts.unwrap_or(cfg.default_max_attempts);
 
-        let deadline = timeout_ms.map(|ms|
-            chrono::Utc::now() + chrono::Duration::milliseconds(ms.max(0))
-        );
+        let deadline =
+            timeout_ms.map(|ms| chrono::Utc::now() + chrono::Duration::milliseconds(ms.max(0)));
 
         let key = idempotency_key_for(task_id, attempt);
         // Insert directly as 'ready'. If we crash mid-tick the row is on disk
@@ -283,18 +305,22 @@ pub async fn schedule_ready_tasks(
 
         if let Some(run_id) = row {
             scheduled += 1;
-            let task_ref = task_ref_for(pool, task_id).await
+            let task_ref = task_ref_for(pool, task_id)
+                .await
                 .unwrap_or_else(|| task_id.to_string());
-            EventRepo::new(pool).emit(
-                EventKind::RunScheduled,
-                "scheduler",
-                None,
-                serde_json::json!({
-                    "task_ref": task_ref,
-                    "run_id": run_id,
-                    "attempt": attempt,
-                }),
-            ).await.ok();
+            EventRepo::new(pool)
+                .emit(
+                    EventKind::RunScheduled,
+                    "scheduler",
+                    None,
+                    serde_json::json!({
+                        "task_ref": task_ref,
+                        "run_id": run_id,
+                        "attempt": attempt,
+                    }),
+                )
+                .await
+                .ok();
         }
     }
     Ok(scheduled)
@@ -319,21 +345,25 @@ pub async fn reap_expired_heartbeats(pool: &PgPool) -> Result<i64, anyhow::Error
     .await?;
 
     for (run_id, task_id, attempt, agent_id) in &rows {
-        let task_ref = task_ref_for(pool, *task_id).await
+        let task_ref = task_ref_for(pool, *task_id)
+            .await
             .unwrap_or_else(|| task_id.to_string());
-        EventRepo::new(pool).emit(
-            EventKind::RunTerminal,
-            "scheduler",
-            *agent_id,
-            serde_json::json!({
-                "task_ref": task_ref,
-                "run_id": run_id,
-                "attempt": attempt,
-                "state": "crashed",
-                "reason": "heartbeat_timeout",
-                "by": "scheduler.reap",
-            }),
-        ).await.ok();
+        EventRepo::new(pool)
+            .emit(
+                EventKind::RunTerminal,
+                "scheduler",
+                *agent_id,
+                serde_json::json!({
+                    "task_ref": task_ref,
+                    "run_id": run_id,
+                    "attempt": attempt,
+                    "state": "crashed",
+                    "reason": "heartbeat_timeout",
+                    "by": "scheduler.reap",
+                }),
+            )
+            .await
+            .ok();
     }
     Ok(rows.len() as i64)
 }
@@ -357,21 +387,25 @@ pub async fn enforce_deadlines(pool: &PgPool) -> Result<i64, anyhow::Error> {
     .await?;
 
     for (run_id, task_id, attempt) in &rows {
-        let task_ref = task_ref_for(pool, *task_id).await
+        let task_ref = task_ref_for(pool, *task_id)
+            .await
             .unwrap_or_else(|| task_id.to_string());
-        EventRepo::new(pool).emit(
-            EventKind::RunTerminal,
-            "scheduler",
-            None,
-            serde_json::json!({
-                "task_ref": task_ref,
-                "run_id": run_id,
-                "attempt": attempt,
-                "state": "cancelled",
-                "reason": "timeout",
-                "by": "scheduler.deadline",
-            }),
-        ).await.ok();
+        EventRepo::new(pool)
+            .emit(
+                EventKind::RunTerminal,
+                "scheduler",
+                None,
+                serde_json::json!({
+                    "task_ref": task_ref,
+                    "run_id": run_id,
+                    "attempt": attempt,
+                    "state": "cancelled",
+                    "reason": "timeout",
+                    "by": "scheduler.deadline",
+                }),
+            )
+            .await
+            .ok();
     }
     Ok(rows.len() as i64)
 }
@@ -414,29 +448,37 @@ fn compute_fingerprint(
 /// fingerprinted yet, and poison tasks with N consecutive matching prints.
 pub async fn detect_loops(pool: &PgPool, threshold: i32) -> Result<i64, anyhow::Error> {
     // 1. Backfill fingerprints for any terminal run missing one.
-    let pending: Vec<(Uuid, Uuid, RunState, RunReason, Option<serde_json::Value>)> = sqlx::query_as(
-        r#"SELECT r.run_id, r.task_id, r.state, r.reason, r.error
+    let pending: Vec<(Uuid, Uuid, RunState, RunReason, Option<serde_json::Value>)> =
+        sqlx::query_as(
+            r#"SELECT r.run_id, r.task_id, r.state, r.reason, r.error
              FROM task_runs r
             WHERE r.fingerprint IS NULL
               AND r.state IN ('failed', 'crashed', 'cancelled', 'succeeded')"#,
-    )
-    .fetch_all(pool)
-    .await?;
+        )
+        .fetch_all(pool)
+        .await?;
 
     for (run_id, task_id, state, reason, error) in pending {
-        let task_meta: Option<(String, Option<String>, String)> = sqlx::query_as(
-            "SELECT title, acceptance, kind::text FROM tasks WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_optional(pool)
-        .await?;
-        let Some((title, acceptance, kind)) = task_meta else { continue; };
-        let msg = error.as_ref()
+        let task_meta: Option<(String, Option<String>, String)> =
+            sqlx::query_as("SELECT title, acceptance, kind::text FROM tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_optional(pool)
+                .await?;
+        let Some((title, acceptance, kind)) = task_meta else {
+            continue;
+        };
+        let msg = error
+            .as_ref()
             .and_then(|e| e.get("message"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let fp = compute_fingerprint(
-            &title, acceptance.as_deref(), &kind, state, reason, msg.as_deref(),
+            &title,
+            acceptance.as_deref(),
+            &kind,
+            state,
+            reason,
+            msg.as_deref(),
         );
         sqlx::query("UPDATE task_runs SET fingerprint = $2 WHERE run_id = $1")
             .bind(run_id)
@@ -473,9 +515,13 @@ pub async fn detect_loops(pool: &PgPool, threshold: i32) -> Result<i64, anyhow::
         .bind(threshold as i64)
         .fetch_all(pool)
         .await?;
-        if recent.len() < threshold as usize { continue; }
+        if recent.len() < threshold as usize {
+            continue;
+        }
         let first = &recent[0].0;
-        if !recent.iter().all(|(fp,)| fp == first) { continue; }
+        if !recent.iter().all(|(fp,)| fp == first) {
+            continue;
+        }
 
         // All N fingerprints match → poison.
         let mut tx = pool.begin().await?;
@@ -501,20 +547,24 @@ pub async fn detect_loops(pool: &PgPool, threshold: i32) -> Result<i64, anyhow::
         .await?;
         tx.commit().await?;
 
-        let task_ref = task_ref_for(pool, task_id).await
+        let task_ref = task_ref_for(pool, task_id)
+            .await
             .unwrap_or_else(|| task_id.to_string());
-        EventRepo::new(pool).emit(
-            EventKind::RunTerminal,
-            "scheduler",
-            None,
-            serde_json::json!({
-                "task_ref": task_ref,
-                "state": "poison",
-                "reason": "loop_detected",
-                "by": "scheduler.loop_detector",
-                "threshold": threshold,
-            }),
-        ).await.ok();
+        EventRepo::new(pool)
+            .emit(
+                EventKind::RunTerminal,
+                "scheduler",
+                None,
+                serde_json::json!({
+                    "task_ref": task_ref,
+                    "state": "poison",
+                    "reason": "loop_detected",
+                    "by": "scheduler.loop_detector",
+                    "threshold": threshold,
+                }),
+            )
+            .await
+            .ok();
         poisoned += 1;
     }
     Ok(poisoned)
@@ -527,13 +577,13 @@ pub async fn dispatchable_under_budgets(
     pool: &PgPool,
     cfg: &SchedulerConfig,
 ) -> Result<Vec<Uuid>, anyhow::Error> {
-    let live: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_runs WHERE state = 'running'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE state = 'running'")
+        .fetch_one(pool)
+        .await?;
     let host_budget = (cfg.max_concurrent - live).max(0);
-    if host_budget == 0 { return Ok(Vec::new()); }
+    if host_budget == 0 {
+        return Ok(Vec::new());
+    }
 
     // Pick ready runs ordered by priority + age, then filter by per-repo and
     // per-epic budgets. Could be done in SQL but the cap math is clearer in
@@ -555,7 +605,9 @@ pub async fn dispatchable_under_budgets(
     .await?;
 
     let per_repo_cap = std::env::var("YGG_SCHEDULER_MAX_PER_REPO")
-        .ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(3);
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(3);
 
     let per_repo_live: Vec<(Uuid, i64)> = sqlx::query_as(
         r#"SELECT t.repo_id, COUNT(*)::bigint
@@ -565,14 +617,17 @@ pub async fn dispatchable_under_budgets(
     )
     .fetch_all(pool)
     .await?;
-    let mut repo_used: std::collections::HashMap<Uuid, i64> =
-        per_repo_live.into_iter().collect();
+    let mut repo_used: std::collections::HashMap<Uuid, i64> = per_repo_live.into_iter().collect();
 
     let mut chosen = Vec::new();
     for (run_id, _task_id, repo_id) in candidates {
-        if chosen.len() as i64 >= host_budget { break; }
+        if chosen.len() as i64 >= host_budget {
+            break;
+        }
         let used = repo_used.entry(repo_id).or_insert(0);
-        if *used >= per_repo_cap { continue; }
+        if *used >= per_repo_cap {
+            continue;
+        }
         *used += 1;
         chosen.push(run_id);
     }
@@ -632,13 +687,20 @@ pub async fn approve(
 /// haven't already produced a successor, insert a new attempt row. The
 /// previous attempt's error gets threaded into input.previous_attempt so the
 /// retry agent can avoid the same failure mode.
-pub async fn schedule_retries(
-    pool: &PgPool,
-    cfg: &SchedulerConfig,
-) -> Result<i64, anyhow::Error> {
-    let candidates: Vec<(Uuid, Uuid, i32, i32, RunReason, Option<chrono::DateTime<chrono::Utc>>,
-                          serde_json::Value, Option<serde_json::Value>, serde_json::Value,
-                          Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query_as(
+pub async fn schedule_retries(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64, anyhow::Error> {
+    let candidates: Vec<(
+        Uuid,
+        Uuid,
+        i32,
+        i32,
+        RunReason,
+        Option<chrono::DateTime<chrono::Utc>>,
+        serde_json::Value,
+        Option<serde_json::Value>,
+        serde_json::Value,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<i64>,
+    )> = sqlx::query_as(
         r#"SELECT r.run_id, r.task_id, r.attempt, r.max_attempts, r.reason, r.ended_at,
                   r.input, r.error, r.retry_strategy,
                   r.deadline_at, t.timeout_ms
@@ -659,8 +721,19 @@ pub async fn schedule_retries(
 
     let mut retried = 0i64;
     let now = chrono::Utc::now();
-    for (run_id, task_id, attempt, _max, _reason, ended_at, input, error, retry_strategy,
-         _old_deadline, timeout_ms) in candidates
+    for (
+        run_id,
+        task_id,
+        attempt,
+        _max,
+        _reason,
+        ended_at,
+        input,
+        error,
+        retry_strategy,
+        _old_deadline,
+        timeout_ms,
+    ) in candidates
     {
         let backoff_ms = compute_backoff_ms(&retry_strategy, attempt);
         let due = ended_at
@@ -676,16 +749,18 @@ pub async fn schedule_retries(
         // Thread previous attempt summary forward.
         let mut next_input = input.clone();
         if let serde_json::Value::Object(map) = &mut next_input {
-            map.insert("previous_attempt".into(), serde_json::json!({
-                "run_id": run_id,
-                "attempt": attempt,
-                "error": error,
-            }));
+            map.insert(
+                "previous_attempt".into(),
+                serde_json::json!({
+                    "run_id": run_id,
+                    "attempt": attempt,
+                    "error": error,
+                }),
+            );
         }
 
-        let deadline = timeout_ms.map(|ms|
-            chrono::Utc::now() + chrono::Duration::milliseconds(ms.max(0))
-        );
+        let deadline =
+            timeout_ms.map(|ms| chrono::Utc::now() + chrono::Duration::milliseconds(ms.max(0)));
 
         let new_run: Option<Uuid> = sqlx::query_scalar(
             r#"INSERT INTO task_runs
@@ -716,20 +791,24 @@ pub async fn schedule_retries(
             .execute(pool)
             .await?;
 
-            let task_ref = task_ref_for(pool, task_id).await
+            let task_ref = task_ref_for(pool, task_id)
+                .await
                 .unwrap_or_else(|| task_id.to_string());
-            EventRepo::new(pool).emit(
-                EventKind::RunRetry,
-                "scheduler",
-                None,
-                serde_json::json!({
-                    "task_ref": task_ref,
-                    "run_id": new_run_id,
-                    "parent_run_id": run_id,
-                    "attempt": next_attempt,
-                    "backoff_ms": backoff_ms,
-                }),
-            ).await.ok();
+            EventRepo::new(pool)
+                .emit(
+                    EventKind::RunRetry,
+                    "scheduler",
+                    None,
+                    serde_json::json!({
+                        "task_ref": task_ref,
+                        "run_id": new_run_id,
+                        "parent_run_id": run_id,
+                        "attempt": next_attempt,
+                        "backoff_ms": backoff_ms,
+                    }),
+                )
+                .await
+                .ok();
             retried += 1;
         }
     }
@@ -739,17 +818,31 @@ pub async fn schedule_retries(
 /// Exponential backoff with optional jitter. Mirrors the JSONB shape stored
 /// on task_runs.retry_strategy and the default in the migration.
 fn compute_backoff_ms(strategy: &serde_json::Value, attempt: i32) -> i64 {
-    let kind = strategy.get("kind").and_then(|v| v.as_str()).unwrap_or("exponential");
-    let base_ms = strategy.get("base_ms").and_then(|v| v.as_i64()).unwrap_or(60_000);
-    let cap_ms  = strategy.get("cap_ms").and_then(|v| v.as_i64()).unwrap_or(600_000);
-    let jitter  = strategy.get("jitter").and_then(|v| v.as_bool()).unwrap_or(true);
+    let kind = strategy
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("exponential");
+    let base_ms = strategy
+        .get("base_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(60_000);
+    let cap_ms = strategy
+        .get("cap_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(600_000);
+    let jitter = strategy
+        .get("jitter")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     let raw = match kind {
         "fixed" => base_ms,
         _ => {
             // 2^(attempt-1) * base, clamped to cap.
             let shift = (attempt.saturating_sub(1).max(0).min(20)) as u32;
-            base_ms.saturating_mul(1i64.checked_shl(shift).unwrap_or(i64::MAX)).min(cap_ms)
+            base_ms
+                .saturating_mul(1i64.checked_shl(shift).unwrap_or(i64::MAX))
+                .min(cap_ms)
         }
     };
 
@@ -765,10 +858,7 @@ fn compute_backoff_ms(strategy: &serde_json::Value, attempt: i32) -> i64 {
 }
 
 /// (3) Claim ready runs up to budget; spawn agents; bind run→agent.
-pub async fn dispatch_ready(
-    pool: &PgPool,
-    cfg: &SchedulerConfig,
-) -> Result<i64, anyhow::Error> {
+pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64, anyhow::Error> {
     // Stage 3: budget = host - live, then filter through per-repo cap.
     let eligible = dispatchable_under_budgets(pool, cfg).await?;
     if eligible.is_empty() {
@@ -804,8 +894,7 @@ pub async fn dispatch_ready(
         return Ok(0);
     }
 
-    let app_cfg = AppConfig::from_env()
-        .map_err(|e| anyhow::anyhow!("config: {e}"))?;
+    let app_cfg = AppConfig::from_env().map_err(|e| anyhow::anyhow!("config: {e}"))?;
     let mut dispatched = 0i64;
     for (run_id, task_id, attempt, _input) in claimed {
         // Pull task title for the spawn prompt + ref for events.
@@ -846,14 +935,13 @@ pub async fn dispatch_ready(
             Ok(()) => {
                 // Bind the run to the agent we just registered (spawn::execute
                 // registers the agent before launching tmux).
-                let agent_id: Option<Uuid> = sqlx::query_scalar(
-                    "SELECT agent_id FROM agents WHERE name = $1 LIMIT 1",
-                )
-                .bind(&agent_name)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
+                let agent_id: Option<Uuid> =
+                    sqlx::query_scalar("SELECT agent_id FROM agents WHERE name = $1 LIMIT 1")
+                        .bind(&agent_name)
+                        .fetch_optional(pool)
+                        .await
+                        .ok()
+                        .flatten();
                 let mut tx = pool.begin().await?;
                 sqlx::query(
                     "UPDATE task_runs SET agent_id = $2, updated_at = now() WHERE run_id = $1",
@@ -871,17 +959,20 @@ pub async fn dispatch_ready(
                 .await?;
                 tx.commit().await?;
 
-                EventRepo::new(pool).emit(
-                    EventKind::RunClaimed,
-                    "scheduler",
-                    None,
-                    serde_json::json!({
-                        "task_ref": task_ref,
-                        "run_id": run_id,
-                        "attempt": attempt,
-                        "agent": agent_name,
-                    }),
-                ).await.ok();
+                EventRepo::new(pool)
+                    .emit(
+                        EventKind::RunClaimed,
+                        "scheduler",
+                        None,
+                        serde_json::json!({
+                            "task_ref": task_ref,
+                            "run_id": run_id,
+                            "attempt": attempt,
+                            "agent": agent_name,
+                        }),
+                    )
+                    .await
+                    .ok();
                 dispatched += 1;
             }
             Err(err) => {
@@ -900,17 +991,20 @@ pub async fn dispatch_ready(
                 .bind(err.to_string())
                 .execute(pool)
                 .await?;
-                EventRepo::new(pool).emit(
-                    EventKind::SchedulerError,
-                    "scheduler",
-                    None,
-                    serde_json::json!({
-                        "phase": "spawn",
-                        "task_ref": task_ref,
-                        "run_id": run_id,
-                        "error": err.to_string(),
-                    }),
-                ).await.ok();
+                EventRepo::new(pool)
+                    .emit(
+                        EventKind::SchedulerError,
+                        "scheduler",
+                        None,
+                        serde_json::json!({
+                            "phase": "spawn",
+                            "task_ref": task_ref,
+                            "run_id": run_id,
+                            "error": err.to_string(),
+                        }),
+                    )
+                    .await
+                    .ok();
             }
         }
     }
@@ -959,13 +1053,11 @@ pub async fn backfill(pool: &PgPool) -> Result<BackfillStats, anyhow::Error> {
         .fetch_optional(pool)
         .await?;
         if let Some(run_id) = row {
-            sqlx::query(
-                "UPDATE tasks SET current_attempt_id = $2 WHERE task_id = $1",
-            )
-            .bind(task_id)
-            .bind(run_id)
-            .execute(pool)
-            .await?;
+            sqlx::query("UPDATE tasks SET current_attempt_id = $2 WHERE task_id = $1")
+                .bind(task_id)
+                .bind(run_id)
+                .execute(pool)
+                .await?;
             stats.in_progress_runs_created += 1;
         } else {
             stats.skipped += 1;
@@ -975,22 +1067,23 @@ pub async fn backfill(pool: &PgPool) -> Result<BackfillStats, anyhow::Error> {
     // Closed tasks with no run rows. We can't reliably reconstruct the agent
     // or commit, so we leave those NULL — the row is mainly so `ygg task show`
     // displays "run #1 succeeded" for completeness.
-    let closed: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> = sqlx::query_as(
-        r#"SELECT t.task_id, t.closed_at, t.close_reason
+    let closed: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> =
+        sqlx::query_as(
+            r#"SELECT t.task_id, t.closed_at, t.close_reason
              FROM tasks t
             WHERE t.status = 'closed'
               AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id = t.task_id)
             LIMIT 5000"#,
-    )
-    .fetch_all(pool)
-    .await?;
+        )
+        .fetch_all(pool)
+        .await?;
 
     for (task_id, closed_at, reason) in closed {
         let key = idempotency_key_for(task_id, 1);
         let (state, run_reason) = match reason.as_deref() {
-            Some(r) if r.to_ascii_lowercase().contains("crash")  => ("crashed", "tmux_gone"),
+            Some(r) if r.to_ascii_lowercase().contains("crash") => ("crashed", "tmux_gone"),
             Some(r) if r.to_ascii_lowercase().contains("cancel") => ("cancelled", "user_cancelled"),
-            Some(r) if r.to_ascii_lowercase().contains("fail")   => ("failed", "agent_error"),
+            Some(r) if r.to_ascii_lowercase().contains("fail") => ("failed", "agent_error"),
             _ => ("succeeded", "ok"),
         };
         let row: Option<Uuid> = sqlx::query_scalar(
@@ -1023,7 +1116,11 @@ pub async fn backfill(pool: &PgPool) -> Result<BackfillStats, anyhow::Error> {
 }
 
 fn scheduler_agent_name(prefix: &str, seq: i32, attempt: i32) -> String {
-    let suffix = uuid::Uuid::new_v4().to_string().chars().take(6).collect::<String>();
+    let suffix = uuid::Uuid::new_v4()
+        .to_string()
+        .chars()
+        .take(6)
+        .collect::<String>();
     format!("ygg-{prefix}-{seq}-a{attempt}-{suffix}")
 }
 
@@ -1045,7 +1142,9 @@ async fn emit_simple_event(
     kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<(), sqlx::Error> {
-    EventRepo::new(pool).emit(kind, "scheduler", None, payload).await
+    EventRepo::new(pool)
+        .emit(kind, "scheduler", None, payload)
+        .await
 }
 
 /// Acquire the singleton advisory lock. Returned guard auto-releases on drop
@@ -1109,12 +1208,20 @@ mod tests {
     #[test]
     fn fingerprint_stable_for_same_inputs() {
         let f1 = compute_fingerprint(
-            "fix bug", Some("tests pass"), "bug",
-            RunState::Failed, RunReason::AgentError, Some("cargo test failed"),
+            "fix bug",
+            Some("tests pass"),
+            "bug",
+            RunState::Failed,
+            RunReason::AgentError,
+            Some("cargo test failed"),
         );
         let f2 = compute_fingerprint(
-            "fix bug", Some("tests pass"), "bug",
-            RunState::Failed, RunReason::AgentError, Some("cargo test failed"),
+            "fix bug",
+            Some("tests pass"),
+            "bug",
+            RunState::Failed,
+            RunReason::AgentError,
+            Some("cargo test failed"),
         );
         assert_eq!(f1, f2);
         assert_eq!(f1.len(), 64);
@@ -1122,10 +1229,22 @@ mod tests {
 
     #[test]
     fn fingerprint_distinguishes_state_and_reason() {
-        let f_fail = compute_fingerprint("t", None, "task",
-            RunState::Failed, RunReason::AgentError, None);
-        let f_crash = compute_fingerprint("t", None, "task",
-            RunState::Crashed, RunReason::TmuxGone, None);
+        let f_fail = compute_fingerprint(
+            "t",
+            None,
+            "task",
+            RunState::Failed,
+            RunReason::AgentError,
+            None,
+        );
+        let f_crash = compute_fingerprint(
+            "t",
+            None,
+            "task",
+            RunState::Crashed,
+            RunReason::TmuxGone,
+            None,
+        );
         assert_ne!(f_fail, f_crash);
     }
 }

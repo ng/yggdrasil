@@ -12,7 +12,11 @@ use uuid::Uuid;
 use crate::models::repo::{Repo, RepoRepo};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Format { Text, Markdown, Json }
+pub enum Format {
+    Text,
+    Markdown,
+    Json,
+}
 
 pub async fn execute(
     pool: &PgPool,
@@ -23,7 +27,10 @@ pub async fn execute(
     let since = Utc::now() - Duration::days(days);
     let repos = RepoRepo::new(pool).list().await.unwrap_or_default();
     let repos: Vec<Repo> = match repo_filter {
-        Some(prefix) => repos.into_iter().filter(|r| r.task_prefix == prefix).collect(),
+        Some(prefix) => repos
+            .into_iter()
+            .filter(|r| r.task_prefix == prefix)
+            .collect(),
         None => repos,
     };
 
@@ -43,7 +50,9 @@ pub async fn execute(
 
     match format {
         Format::Json => {
-            let json = serde_json::to_string_pretty(&rollups.iter().map(|r| r.to_json()).collect::<Vec<_>>())?;
+            let json = serde_json::to_string_pretty(
+                &rollups.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
+            )?;
             println!("{json}");
         }
         Format::Markdown => print_markdown(days, &rollups),
@@ -81,17 +90,30 @@ struct DigestRow {
     summary: String,
 }
 
-async fn build_repo_rollup(pool: &PgPool, repo: &Repo, since: DateTime<Utc>) -> Result<RepoRollup, anyhow::Error> {
+async fn build_repo_rollup(
+    pool: &PgPool,
+    repo: &Repo,
+    since: DateTime<Utc>,
+) -> Result<RepoRollup, anyhow::Error> {
     // Tasks created in the window, for this repo.
     let created: Vec<(i32, String, i16, String)> = sqlx::query_as(
         r#"SELECT seq, kind::text, priority, title FROM tasks
            WHERE repo_id = $1 AND created_at >= $2
            ORDER BY priority ASC, seq ASC"#,
     )
-    .bind(repo.repo_id).bind(since)
-    .fetch_all(pool).await.unwrap_or_default();
-    let tasks_created: Vec<TaskRow> = created.into_iter()
-        .map(|(seq, kind, priority, title)| TaskRow { seq, kind, priority, title })
+    .bind(repo.repo_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let tasks_created: Vec<TaskRow> = created
+        .into_iter()
+        .map(|(seq, kind, priority, title)| TaskRow {
+            seq,
+            kind,
+            priority,
+            title,
+        })
         .collect();
 
     // Tasks closed in the window, for this repo.
@@ -100,10 +122,19 @@ async fn build_repo_rollup(pool: &PgPool, repo: &Repo, since: DateTime<Utc>) -> 
            WHERE repo_id = $1 AND closed_at >= $2 AND status = 'closed'
            ORDER BY closed_at DESC"#,
     )
-    .bind(repo.repo_id).bind(since)
-    .fetch_all(pool).await.unwrap_or_default();
-    let tasks_closed: Vec<TaskRow> = closed.into_iter()
-        .map(|(seq, kind, priority, title)| TaskRow { seq, kind, priority, title })
+    .bind(repo.repo_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let tasks_closed: Vec<TaskRow> = closed
+        .into_iter()
+        .map(|(seq, kind, priority, title)| TaskRow {
+            seq,
+            kind,
+            priority,
+            title,
+        })
         .collect();
 
     // Which agents have touched tasks in this repo? We use those agents'
@@ -112,8 +143,12 @@ async fn build_repo_rollup(pool: &PgPool, repo: &Repo, since: DateTime<Utc>) -> 
     // task in this repo" as a proxy.
     let agent_ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT assignee FROM tasks
-         WHERE repo_id = $1 AND assignee IS NOT NULL"
-    ).bind(repo.repo_id).fetch_all(pool).await.unwrap_or_default();
+         WHERE repo_id = $1 AND assignee IS NOT NULL",
+    )
+    .bind(repo.repo_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
 
     // Digests written in window, from those agents, with summary text.
     let digest_rows = if !agent_ids.is_empty() {
@@ -126,18 +161,32 @@ async fn build_repo_rollup(pool: &PgPool, repo: &Repo, since: DateTime<Utc>) -> 
                ORDER BY created_at DESC
                LIMIT 20"#,
         )
-        .bind(since).bind(&agent_ids)
-        .fetch_all(pool).await.unwrap_or_default()
-    } else { Vec::new() };
-    let digests: Vec<DigestRow> = digest_rows.into_iter().map(|r| {
-        let payload: serde_json::Value = r.try_get("payload").unwrap_or(serde_json::Value::Null);
-        let summary = payload.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        DigestRow {
-            created_at: r.get("created_at"),
-            agent_name: r.get("agent_name"),
-            summary,
-        }
-    }).filter(|d| !d.summary.is_empty()).collect();
+        .bind(since)
+        .bind(&agent_ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let digests: Vec<DigestRow> = digest_rows
+        .into_iter()
+        .map(|r| {
+            let payload: serde_json::Value =
+                r.try_get("payload").unwrap_or(serde_json::Value::Null);
+            let summary = payload
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            DigestRow {
+                created_at: r.get("created_at"),
+                agent_name: r.get("agent_name"),
+                summary,
+            }
+        })
+        .filter(|d| !d.summary.is_empty())
+        .collect();
 
     // Corrections / reinforcements from those agents.
     let (corrections, reinforcements) = if !agent_ids.is_empty() {
@@ -148,9 +197,14 @@ async fn build_repo_rollup(pool: &PgPool, repo: &Repo, since: DateTime<Utc>) -> 
                  AND COALESCE(payload->>'sentiment', 'correction') = 'correction'
                ORDER BY created_at DESC LIMIT 10"#,
         )
-        .bind(since).bind(&agent_ids)
-        .fetch_all(pool).await.unwrap_or_default()
-        .into_iter().filter(|s: &String| !s.is_empty()).collect();
+        .bind(since)
+        .bind(&agent_ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s: &String| !s.is_empty())
+        .collect();
         let rein: Vec<String> = sqlx::query_scalar(
             r#"SELECT payload->>'feedback' FROM events
                WHERE event_kind = 'correction_detected'
@@ -158,14 +212,28 @@ async fn build_repo_rollup(pool: &PgPool, repo: &Repo, since: DateTime<Utc>) -> 
                  AND payload->>'sentiment' = 'reinforcement'
                ORDER BY created_at DESC LIMIT 10"#,
         )
-        .bind(since).bind(&agent_ids)
-        .fetch_all(pool).await.unwrap_or_default()
-        .into_iter().filter(|s: &String| !s.is_empty()).collect();
+        .bind(since)
+        .bind(&agent_ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s: &String| !s.is_empty())
+        .collect();
         (corr, rein)
-    } else { (Vec::new(), Vec::new()) };
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     // Retrieval / activity counters, scoped to those agents.
-    let (prompts, digests_count, sim_hits, cache_hits, cache_calls, redactions): (i64, i64, i64, i64, i64, i64) = if !agent_ids.is_empty() {
+    let (prompts, digests_count, sim_hits, cache_hits, cache_calls, redactions): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = if !agent_ids.is_empty() {
         sqlx::query_as(
             r#"SELECT
                  COUNT(*) FILTER (WHERE event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'),
@@ -178,7 +246,9 @@ async fn build_repo_rollup(pool: &PgPool, repo: &Repo, since: DateTime<Utc>) -> 
                WHERE created_at >= $1 AND agent_id = ANY($2)"#
         ).bind(since).bind(&agent_ids)
          .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0, 0))
-    } else { (0, 0, 0, 0, 0, 0) };
+    } else {
+        (0, 0, 0, 0, 0, 0)
+    };
 
     Ok(RepoRollup {
         repo: repo.clone(),
@@ -214,8 +284,10 @@ fn print_markdown(days: i64, rollups: &[RepoRollup]) {
         if !r.tasks_closed.is_empty() {
             println!("### Closed ({})", r.tasks_closed.len());
             for t in &r.tasks_closed {
-                println!("- `{}-{}` P{} [{}] {}",
-                    r.repo.task_prefix, t.seq, t.priority, t.kind, t.title);
+                println!(
+                    "- `{}-{}` P{} [{}] {}",
+                    r.repo.task_prefix, t.seq, t.priority, t.kind, t.title
+                );
             }
             println!();
         }
@@ -223,8 +295,10 @@ fn print_markdown(days: i64, rollups: &[RepoRollup]) {
         if !r.tasks_created.is_empty() {
             println!("### Created ({})", r.tasks_created.len());
             for t in &r.tasks_created {
-                println!("- `{}-{}` P{} [{}] {}",
-                    r.repo.task_prefix, t.seq, t.priority, t.kind, t.title);
+                println!(
+                    "- `{}-{}` P{} [{}] {}",
+                    r.repo.task_prefix, t.seq, t.priority, t.kind, t.title
+                );
             }
             println!();
         }
@@ -232,10 +306,12 @@ fn print_markdown(days: i64, rollups: &[RepoRollup]) {
         if !r.digests.is_empty() {
             println!("### Session digests");
             for d in &r.digests {
-                println!("- {} — {} — {}",
+                println!(
+                    "- {} — {} — {}",
                     d.created_at.format("%Y-%m-%d %H:%M"),
                     d.agent_name,
-                    truncate(&d.summary, 140));
+                    truncate(&d.summary, 140)
+                );
             }
             println!();
         }
@@ -258,12 +334,17 @@ fn print_markdown(days: i64, rollups: &[RepoRollup]) {
 
         let cache_rate = if r.cache_total > 0 {
             (r.cache_hits as f64 / r.cache_total as f64 * 100.0) as i64
-        } else { 0 };
+        } else {
+            0
+        };
         println!("### Stats");
         println!("- prompts: {}", r.prompts);
         println!("- digests: {}", r.digests_count);
         println!("- similarity hits: {}", r.similarity_hits);
-        println!("- cache: {}/{} ({}%)", r.cache_hits, r.cache_total, cache_rate);
+        println!(
+            "- cache: {}/{} ({}%)",
+            r.cache_hits, r.cache_total, cache_rate
+        );
         if r.redactions > 0 {
             println!("- redactions: {}", r.redactions);
         }
@@ -276,13 +357,23 @@ fn print_text(days: i64, rollups: &[RepoRollup]) {
     for r in rollups {
         println!();
         println!("  {} ({})", r.repo.name, r.repo.task_prefix);
-        println!("    closed {} · created {} · digests {} · prompts {} · hits {}",
-            r.tasks_closed.len(), r.tasks_created.len(),
-            r.digests_count, r.prompts, r.similarity_hits);
+        println!(
+            "    closed {} · created {} · digests {} · prompts {} · hits {}",
+            r.tasks_closed.len(),
+            r.tasks_created.len(),
+            r.digests_count,
+            r.prompts,
+            r.similarity_hits
+        );
         if !r.tasks_closed.is_empty() {
             println!("    closed:");
             for t in r.tasks_closed.iter().take(5) {
-                println!("      {}-{}  {}", r.repo.task_prefix, t.seq, truncate(&t.title, 60));
+                println!(
+                    "      {}-{}  {}",
+                    r.repo.task_prefix,
+                    t.seq,
+                    truncate(&t.title, 60)
+                );
             }
         }
     }
@@ -319,6 +410,8 @@ impl RepoRollup {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { return s.to_string(); }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
     s.chars().take(max).collect::<String>() + "…"
 }

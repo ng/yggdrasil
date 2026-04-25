@@ -68,20 +68,27 @@ impl MemGraphView {
     }
 
     pub fn scroll_up(&mut self) {
-        if self.recent.is_empty() { return; }
+        if self.recent.is_empty() {
+            return;
+        }
         let i = self.recent_state.selected().unwrap_or(0);
         let n = self.recent.len();
-        self.recent_state.select(Some(if i == 0 { n - 1 } else { i - 1 }));
+        self.recent_state
+            .select(Some(if i == 0 { n - 1 } else { i - 1 }));
     }
 
     pub fn scroll_down(&mut self) {
-        if self.recent.is_empty() { return; }
+        if self.recent.is_empty() {
+            return;
+        }
         let i = self.recent_state.selected().unwrap_or(0);
         self.recent_state.select(Some((i + 1) % self.recent.len()));
     }
 
     pub fn toggle_detail(&mut self) {
-        if self.recent.is_empty() { return; }
+        if self.recent.is_empty() {
+            return;
+        }
         self.detail_open = !self.detail_open;
     }
 
@@ -102,23 +109,30 @@ impl MemGraphView {
               AND n.kind IN ('directive', 'digest', 'user_message')
             ORDER BY n.created_at DESC
             LIMIT 40
-            "#
-        ).fetch_all(pool).await.unwrap_or_default();
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
-        let mut combined: Vec<MemNode> = node_rows.into_iter().map(|r| {
-            let content: serde_json::Value = r.try_get("content").unwrap_or(serde_json::Value::Null);
-            let full_text = extract_full_text(&content);
-            let snippet = full_text.replace('\n', " ");
-            MemNode {
-                id: r.get("id"),
-                kind: r.get("kind"),
-                agent_name: r.get("agent_name"),
-                created_at: r.get("created_at"),
-                snippet,
-                full_text,
-                source: MemSource::Node,
-            }
-        }).collect();
+        let mut combined: Vec<MemNode> = node_rows
+            .into_iter()
+            .map(|r| {
+                let content: serde_json::Value =
+                    r.try_get("content").unwrap_or(serde_json::Value::Null);
+                let full_text = extract_full_text(&content);
+                let snippet = full_text.replace('\n', " ");
+                MemNode {
+                    id: r.get("id"),
+                    kind: r.get("kind"),
+                    agent_name: r.get("agent_name"),
+                    created_at: r.get("created_at"),
+                    snippet,
+                    full_text,
+                    source: MemSource::Node,
+                }
+            })
+            .collect();
 
         // Memories (first-class scoped notes). Surface them alongside nodes.
         let mem_rows = sqlx::query(
@@ -129,8 +143,11 @@ impl MemGraphView {
               AND (expires_at IS NULL OR expires_at > now())
             ORDER BY pinned DESC, created_at DESC
             LIMIT 40
-            "#
-        ).fetch_all(pool).await.unwrap_or_default();
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
         for r in mem_rows {
             let text: String = r.get("text");
@@ -166,7 +183,11 @@ impl MemGraphView {
         // Pin the cursor inside the list if it ran off.
         if let Some(i) = self.recent_state.selected() {
             if i >= self.recent.len() {
-                self.recent_state.select(if self.recent.is_empty() { None } else { Some(self.recent.len() - 1) });
+                self.recent_state.select(if self.recent.is_empty() {
+                    None
+                } else {
+                    Some(self.recent.len() - 1)
+                });
             }
         }
 
@@ -188,16 +209,27 @@ impl MemGraphView {
         // The focus id could live in either nodes or memories — try both.
         let embedding: Option<Vector> = {
             let node = sqlx::query("SELECT embedding FROM nodes WHERE id = $1")
-                .bind(for_id).fetch_optional(pool).await.ok().flatten();
+                .bind(for_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
             if let Some(r) = node {
                 r.try_get("embedding").ok()
             } else {
                 sqlx::query("SELECT embedding FROM memories WHERE memory_id = $1")
-                    .bind(for_id).fetch_optional(pool).await.ok().flatten()
+                    .bind(for_id)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten()
                     .and_then(|r| r.try_get("embedding").ok())
             }
         };
-        let Some(embedding) = embedding else { self.neighbors.clear(); return; };
+        let Some(embedding) = embedding else {
+            self.neighbors.clear();
+            return;
+        };
 
         // Union neighbors from nodes + memories. Postgres sorts the whole
         // set by distance; we take the top 8 across both sources.
@@ -224,34 +256,39 @@ impl MemGraphView {
             )
             ORDER BY distance
             LIMIT 8
-            "#
+            "#,
         )
         .bind(&embedding)
         .bind(for_id)
-        .fetch_all(pool).await.unwrap_or_default();
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
-        self.neighbors = rows.into_iter().map(|r| {
-            let kind: String = r.get("kind");
-            let content_text: String = r.try_get("content_text").unwrap_or_default();
-            let distance: f64 = r.try_get("distance").unwrap_or(1.0);
-            let snippet = if kind == "memory" {
-                content_text.replace('\n', " ")
-            } else {
-                // Nodes store content as JSON; pull the most useful field.
-                serde_json::from_str::<serde_json::Value>(&content_text)
-                    .ok()
-                    .map(|v| extract_snippet(&v))
-                    .unwrap_or(content_text)
-            };
-            Neighbor {
-                id: r.get("id"),
-                kind,
-                agent_name: r.get("agent_name"),
-                similarity: (1.0 - distance).clamp(0.0, 1.0),
-                snippet,
-                created_at: r.get("created_at"),
-            }
-        }).collect();
+        self.neighbors = rows
+            .into_iter()
+            .map(|r| {
+                let kind: String = r.get("kind");
+                let content_text: String = r.try_get("content_text").unwrap_or_default();
+                let distance: f64 = r.try_get("distance").unwrap_or(1.0);
+                let snippet = if kind == "memory" {
+                    content_text.replace('\n', " ")
+                } else {
+                    // Nodes store content as JSON; pull the most useful field.
+                    serde_json::from_str::<serde_json::Value>(&content_text)
+                        .ok()
+                        .map(|v| extract_snippet(&v))
+                        .unwrap_or(content_text)
+                };
+                Neighbor {
+                    id: r.get("id"),
+                    kind,
+                    agent_name: r.get("agent_name"),
+                    similarity: (1.0 - distance).clamp(0.0, 1.0),
+                    snippet,
+                    created_at: r.get("created_at"),
+                }
+            })
+            .collect();
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -283,28 +320,44 @@ impl MemGraphView {
             let mx = sims.iter().cloned().fold(0.0_f64, f64::max);
             let mean = sims.iter().sum::<f64>() / sims.len() as f64;
             (mn, mx, mean)
-        } else { (0.0, 0.0, 0.0) };
+        } else {
+            (0.0, 0.0, 0.0)
+        };
 
         let focus_line = match self.selected_node() {
             Some(n) => format!("cursor: {}", short(&n.snippet, 70)),
             None => "cursor: (empty list)".to_string(),
         };
 
-        let line1 = Line::from(vec![
-            Span::styled("  ↑↓ scroll  ·  Enter=detail  ·  Esc=close",
-                Style::default().fg(Color::DarkGray)),
-        ]);
+        let line1 = Line::from(vec![Span::styled(
+            "  ↑↓ scroll  ·  Enter=detail  ·  Esc=close",
+            Style::default().fg(Color::DarkGray),
+        )]);
         let line2 = if neighbor_count > 0 {
             Line::from(vec![
-                Span::styled(format!("  {}  ·  ", focus_line), Style::default().fg(Color::Cyan)),
-                Span::styled(format!("neighbors: {neighbor_count}  "),
-                    Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("sim min {:.0}% / mean {:.0}% / max {:.0}%",
-                    min_sim * 100.0, mean_sim * 100.0, max_sim * 100.0),
-                    Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("  {}  ·  ", focus_line),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("neighbors: {neighbor_count}  "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!(
+                        "sim min {:.0}% / mean {:.0}% / max {:.0}%",
+                        min_sim * 100.0,
+                        mean_sim * 100.0,
+                        max_sim * 100.0
+                    ),
+                    Style::default().fg(Color::Green),
+                ),
             ])
         } else {
-            Line::from(Span::styled(format!("  {focus_line}"), Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(
+                format!("  {focus_line}"),
+                Style::default().fg(Color::DarkGray),
+            ))
         };
 
         let para = Paragraph::new(vec![line1, line2])
@@ -314,11 +367,23 @@ impl MemGraphView {
 
     fn render_recent(&mut self, frame: &mut Frame, area: Rect) {
         if self.recent.is_empty() {
-            let msg = if self.last_status.is_empty() { "loading…".to_string() } else { self.last_status.clone() };
+            let msg = if self.last_status.is_empty() {
+                "loading…".to_string()
+            } else {
+                self.last_status.clone()
+            };
             let para = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(format!("  {msg}"), Style::default().fg(Color::DarkGray))),
-            ]).block(Block::default().borders(Borders::ALL).title(" Recent high-signal nodes "));
+                Line::from(Span::styled(
+                    format!("  {msg}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Recent high-signal nodes "),
+            );
             frame.render_widget(para, area);
             return;
         }
@@ -329,44 +394,65 @@ impl MemGraphView {
             Cell::from("AGE").style(Style::default().fg(Color::Gray)),
             Cell::from("SNIPPET").style(Style::default().fg(Color::Gray)),
         ]);
-        let rows: Vec<Row> = self.recent.iter().map(|n| {
-            let (glyph, color, label) = match &n.source {
-                MemSource::Memory { pinned: true, scope } =>
-                    ("★", Color::Yellow, format!("memory:{scope}")),
-                MemSource::Memory { pinned: false, scope } =>
-                    ("♦", Color::Blue,   format!("memory:{scope}")),
-                MemSource::Node => {
-                    let (g, c) = kind_style(&n.kind);
-                    (g, c, n.kind.clone())
-                }
-            };
-            let age = humanize_since(n.created_at);
-            Row::new(vec![
-                Cell::from(format!("{glyph} {}", label)).style(Style::default().fg(color)),
-                Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
-                Cell::from(age).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(short(&n.snippet, 120)),
-            ])
-        }).collect();
+        let rows: Vec<Row> = self
+            .recent
+            .iter()
+            .map(|n| {
+                let (glyph, color, label) = match &n.source {
+                    MemSource::Memory {
+                        pinned: true,
+                        scope,
+                    } => ("★", Color::Yellow, format!("memory:{scope}")),
+                    MemSource::Memory {
+                        pinned: false,
+                        scope,
+                    } => ("♦", Color::Blue, format!("memory:{scope}")),
+                    MemSource::Node => {
+                        let (g, c) = kind_style(&n.kind);
+                        (g, c, n.kind.clone())
+                    }
+                };
+                let age = humanize_since(n.created_at);
+                Row::new(vec![
+                    Cell::from(format!("{glyph} {}", label)).style(Style::default().fg(color)),
+                    Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(age).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(short(&n.snippet, 120)),
+                ])
+            })
+            .collect();
 
-        let mem_count = self.recent.iter()
-            .filter(|n| matches!(n.source, MemSource::Memory { .. })).count();
+        let mem_count = self
+            .recent
+            .iter()
+            .filter(|n| matches!(n.source, MemSource::Memory { .. }))
+            .count();
         let node_count = self.recent.len() - mem_count;
         let title = format!(
             " Recent: {} nodes + {} memories  ·  Enter=detail ",
             node_count, mem_count
         );
-        let table = Table::new(rows, [
-            Constraint::Length(16),
-            Constraint::Length(18),
-            Constraint::Length(6),
-            Constraint::Min(20),
-        ])
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(16),
+                Constraint::Length(18),
+                Constraint::Length(6),
+                Constraint::Min(20),
+            ],
+        )
         .header(header)
-        .block(Block::default().borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(Color::Cyan)))
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
         frame.render_stateful_widget(table, area, &mut self.recent_state);
     }
 
@@ -384,9 +470,16 @@ impl MemGraphView {
             };
             let para = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(format!("  {msg}"), Style::default().fg(Color::DarkGray))),
-            ]).block(Block::default().borders(Borders::ALL)
-                .title(format!(" {focus_summary} ")));
+                Line::from(Span::styled(
+                    format!("  {msg}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {focus_summary} ")),
+            );
             frame.render_widget(para, area);
             return;
         }
@@ -399,41 +492,60 @@ impl MemGraphView {
             Cell::from("AGE").style(Style::default().fg(Color::Gray)),
             Cell::from("SNIPPET").style(Style::default().fg(Color::Gray)),
         ]);
-        let rows: Vec<Row> = self.neighbors.iter().map(|n| {
-            let (glyph, color) = kind_style(&n.kind);
-            let sim_pct = (n.similarity * 100.0) as u32;
-            let distance = 1.0 - n.similarity;
-            let bar_blocks = (sim_pct / 10).min(10) as usize;
-            let bar = format!("{}{}  {sim_pct:>3}%",
-                "█".repeat(bar_blocks),
-                "░".repeat(10 - bar_blocks));
-            let sim_color = if sim_pct >= 80 { Color::Green }
-                            else if sim_pct >= 60 { Color::Cyan }
-                            else if sim_pct >= 40 { Color::Yellow }
-                            else { Color::DarkGray };
-            let age = humanize_since(n.created_at);
-            Row::new(vec![
-                Cell::from(bar).style(Style::default().fg(sim_color)),
-                Cell::from(format!("{:.3}", distance)).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(format!("{glyph} {}", n.kind)).style(Style::default().fg(color)),
-                Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
-                Cell::from(age).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(short(&n.snippet, 120)),
-            ])
-        }).collect();
+        let rows: Vec<Row> = self
+            .neighbors
+            .iter()
+            .map(|n| {
+                let (glyph, color) = kind_style(&n.kind);
+                let sim_pct = (n.similarity * 100.0) as u32;
+                let distance = 1.0 - n.similarity;
+                let bar_blocks = (sim_pct / 10).min(10) as usize;
+                let bar = format!(
+                    "{}{}  {sim_pct:>3}%",
+                    "█".repeat(bar_blocks),
+                    "░".repeat(10 - bar_blocks)
+                );
+                let sim_color = if sim_pct >= 80 {
+                    Color::Green
+                } else if sim_pct >= 60 {
+                    Color::Cyan
+                } else if sim_pct >= 40 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                let age = humanize_since(n.created_at);
+                Row::new(vec![
+                    Cell::from(bar).style(Style::default().fg(sim_color)),
+                    Cell::from(format!("{:.3}", distance))
+                        .style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(format!("{glyph} {}", n.kind)).style(Style::default().fg(color)),
+                    Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(age).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(short(&n.snippet, 120)),
+                ])
+            })
+            .collect();
 
         let title = format!(" {focus_summary} ");
-        let table = Table::new(rows, [
-            Constraint::Length(18),
-            Constraint::Length(6),
-            Constraint::Length(18),
-            Constraint::Length(18),
-            Constraint::Length(6),
-            Constraint::Min(20),
-        ])
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(18),
+                Constraint::Length(6),
+                Constraint::Length(18),
+                Constraint::Length(18),
+                Constraint::Length(6),
+                Constraint::Min(20),
+            ],
+        )
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title)
-            .border_style(Style::default().fg(Color::DarkGray)));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
         frame.render_widget(table, area);
     }
 }
@@ -443,21 +555,37 @@ fn render_detail_overlay(frame: &mut Frame, area: Rect, node: &MemNode) {
     let popup_h = area.height.saturating_sub(4).min(32);
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect { x, y, width: popup_w, height: popup_h };
+    let popup = Rect {
+        x,
+        y,
+        width: popup_w,
+        height: popup_h,
+    };
 
     frame.render_widget(Clear, popup);
 
     let (glyph, color) = kind_style(&node.kind);
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled(format!(" {glyph} {} ", node.kind),
-                Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {glyph} {} ", node.kind),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(color)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled(node.agent_name.clone(), Style::default().fg(Color::Cyan)),
             Span::raw("  "),
-            Span::styled(humanize_since(node.created_at), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                humanize_since(node.created_at),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw("  "),
-            Span::styled(node.id.to_string()[..8].to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                node.id.to_string()[..8].to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(""),
     ];
@@ -469,7 +597,9 @@ fn render_detail_overlay(frame: &mut Frame, area: Rect, node: &MemNode) {
         .borders(Borders::ALL)
         .title(" detail — Enter/Esc to close ")
         .border_style(Style::default().fg(Color::Cyan));
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     frame.render_widget(para, popup);
 }
 
@@ -490,13 +620,17 @@ fn kind_style(kind: &str) -> (&'static str, Color) {
 fn extract_snippet(content: &serde_json::Value) -> String {
     for key in ["snippet", "text", "summary", "prompt", "body", "message"] {
         if let Some(s) = content.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() { return s.replace('\n', " "); }
+            if !s.is_empty() {
+                return s.replace('\n', " ");
+            }
         }
     }
     if let Some(obj) = content.as_object() {
         for (_, v) in obj {
             if let Some(s) = v.as_str() {
-                if !s.is_empty() { return s.replace('\n', " "); }
+                if !s.is_empty() {
+                    return s.replace('\n', " ");
+                }
             }
         }
     }
@@ -507,13 +641,17 @@ fn extract_snippet(content: &serde_json::Value) -> String {
 fn extract_full_text(content: &serde_json::Value) -> String {
     for key in ["text", "summary", "prompt", "body", "message", "snippet"] {
         if let Some(s) = content.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() { return s.to_string(); }
+            if !s.is_empty() {
+                return s.to_string();
+            }
         }
     }
     if let Some(obj) = content.as_object() {
         for (_, v) in obj {
             if let Some(s) = v.as_str() {
-                if !s.is_empty() { return s.to_string(); }
+                if !s.is_empty() {
+                    return s.to_string();
+                }
             }
         }
     }
@@ -521,14 +659,21 @@ fn extract_full_text(content: &serde_json::Value) -> String {
 }
 
 fn short(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { return s.to_string(); }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
     s.chars().take(max).collect::<String>() + "…"
 }
 
 fn humanize_since(ts: DateTime<Utc>) -> String {
     let secs = (Utc::now() - ts).num_seconds().max(0);
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else { format!("{}d", secs / 86400) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }

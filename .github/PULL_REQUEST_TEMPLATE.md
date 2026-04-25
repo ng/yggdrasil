@@ -5,6 +5,8 @@
 <!-- What you ran to convince yourself this works. CI runs cargo test
 automatically; mention any manual verification or new bench scenarios. -->
 
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo check --all-targets`
 - [ ] `cargo test --lib`
 - [ ] `cargo test --test integration` (requires Postgres)
 - [ ] Manual:

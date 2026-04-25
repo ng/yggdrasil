@@ -41,14 +41,15 @@ flowchart TD
     Lock -- no --> Exit2([exit: another scheduler is running])
     Lock -- yes --> Listen[LISTEN task_events / lock_events]
     Listen --> Wait{wake?}
-    Wait -- NOTIFY OR tick OR ctrl-c --> Tick
+    Wait -- NOTIFY OR tick interval --> Tick
+    Wait -- ctrl-c --> Cleanup[release advisory lock]
 
     subgraph Tick["tick()"]
         direction TB
         S1[reap_expired_heartbeats<br/>running → crashed]
         S2[enforce_deadlines<br/>running → cancelled]
         S3[detect_loops<br/>fingerprint match → poison]
-        S4[finalize_terminal_runs<br/>read Stop-hook outcome → close task]
+        S4[finalize_terminal_runs<br/>terminal run + open task → close task]
         S5[schedule_retries<br/>failed/crashed + backoff → new attempt]
         S6[schedule_ready_tasks<br/>runnable && deps clear → ready run]
         S7[dispatch_ready<br/>SKIP LOCKED claim + ygg spawn]
@@ -57,9 +58,14 @@ flowchart TD
 
     Tick --> Emit[emit scheduler_tick event]
     Emit --> Wait
-    Wait -- ctrl-c --> Cleanup[release advisory lock]
     Cleanup --> Done([exit])
 ```
+
+Step order matches `src/scheduler.rs::tick`. Reap → deadlines first so
+terminals exist before `detect_loops` backfills fingerprints and poisons
+matching tasks; `finalize_terminal_runs` then closes any open task whose
+latest run is terminal (including the just-poisoned ones); retries dispatch
+after that.
 
 ```rust
 const SCHEDULER_LOCK_ID: i64 = 0x4547_47_5343_48;  // "YGG SCH"

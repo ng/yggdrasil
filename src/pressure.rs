@@ -63,21 +63,26 @@ impl<'a> PressureMonitor<'a> {
         let digest_text = self.generate_chunked_digest(&context).await?;
 
         let agent = self.agent_repo.get(agent_id).await?.unwrap();
-        let digest_node = self.node_repo.insert(
-            agent.head_node_id,
-            agent_id,
-            NodeKind::Digest,
-            serde_json::json!({ "digest": digest_text }),
-            estimate_tokens(&digest_text) as i32,
-        ).await?;
+        let digest_node = self
+            .node_repo
+            .insert(
+                agent.head_node_id,
+                agent_id,
+                NodeKind::Digest,
+                serde_json::json!({ "digest": digest_text }),
+                estimate_tokens(&digest_text) as i32,
+            )
+            .await?;
 
         // Atomic state update — no crash window between set_digest and update_head
-        self.agent_repo.flush_context(
-            agent_id,
-            digest_node.id,
-            digest_node.id,
-            estimate_tokens(&digest_text) as i32,
-        ).await?;
+        self.agent_repo
+            .flush_context(
+                agent_id,
+                digest_node.id,
+                digest_node.id,
+                estimate_tokens(&digest_text) as i32,
+            )
+            .await?;
 
         tracing::info!(agent_id = %agent_id, digest_id = %digest_node.id, "digest generated");
 
@@ -105,15 +110,28 @@ impl<'a> PressureMonitor<'a> {
                     // Extract file paths from tool results
                     let content_str = node.content.to_string();
                     for word in content_str.split_whitespace() {
-                        if word.contains('/') && (word.ends_with(".rs") || word.ends_with(".ts") || word.ends_with(".py") || word.contains("src/")) {
+                        if word.contains('/')
+                            && (word.ends_with(".rs")
+                                || word.ends_with(".ts")
+                                || word.ends_with(".py")
+                                || word.contains("src/"))
+                        {
                             files_changed.push(word.trim_matches('"').to_string());
                         }
                     }
                 }
                 NodeKind::UserMessage | NodeKind::AssistantMessage => {
-                    let text = node.content.get("task").or(node.content.get("message"))
-                        .and_then(|v| v.as_str()).unwrap_or("");
-                    if text.contains("decided") || text.contains("chose") || text.contains("will use") || text.contains("switched to") {
+                    let text = node
+                        .content
+                        .get("task")
+                        .or(node.content.get("message"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if text.contains("decided")
+                        || text.contains("chose")
+                        || text.contains("will use")
+                        || text.contains("switched to")
+                    {
                         decisions.push(text.chars().take(200).collect());
                     }
                 }
@@ -127,10 +145,23 @@ impl<'a> PressureMonitor<'a> {
 
         let deterministic_section = format!(
             "## Files touched\n{}\n\n## Tool calls ({})\n{}\n\n## Key decisions\n{}",
-            files_changed.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n"),
+            files_changed
+                .iter()
+                .map(|f| format!("- {f}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             tool_calls.len(),
-            tool_calls.iter().take(20).map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n"),
-            decisions.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n"),
+            tool_calls
+                .iter()
+                .take(20)
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            decisions
+                .iter()
+                .map(|d| format!("- {d}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
 
         // Step 2: Serialize context for LLM summarization
@@ -145,7 +176,10 @@ impl<'a> PressureMonitor<'a> {
 
         if context_text.len() <= max_chunk_chars {
             // Small enough for one call
-            let summary = self.ollama.generate_digest(&context_text).await
+            let summary = self
+                .ollama
+                .generate_digest(&context_text)
+                .await
                 .unwrap_or_else(|_| "LLM summarization unavailable".to_string());
             return Ok(format!("{deterministic_section}\n\n## Summary\n{summary}"));
         }
@@ -158,7 +192,10 @@ impl<'a> PressureMonitor<'a> {
         for line in &lines {
             if current_chunk.len() + line.len() > max_chunk_chars {
                 if !current_chunk.is_empty() {
-                    let summary = self.ollama.generate_digest(&current_chunk).await
+                    let summary = self
+                        .ollama
+                        .generate_digest(&current_chunk)
+                        .await
                         .unwrap_or_else(|_| "chunk summary unavailable".to_string());
                     chunk_summaries.push(summary);
                     current_chunk.clear();
@@ -168,7 +205,10 @@ impl<'a> PressureMonitor<'a> {
             current_chunk.push('\n');
         }
         if !current_chunk.is_empty() {
-            let summary = self.ollama.generate_digest(&current_chunk).await
+            let summary = self
+                .ollama
+                .generate_digest(&current_chunk)
+                .await
                 .unwrap_or_else(|_| "chunk summary unavailable".to_string());
             chunk_summaries.push(summary);
         }
@@ -177,7 +217,11 @@ impl<'a> PressureMonitor<'a> {
         let merged = if chunk_summaries.len() > 1 {
             let combined = chunk_summaries.join("\n---\n");
             if combined.len() <= max_chunk_chars {
-                self.ollama.generate_digest(&format!("Merge these summaries into one coherent summary:\n{combined}")).await
+                self.ollama
+                    .generate_digest(&format!(
+                        "Merge these summaries into one coherent summary:\n{combined}"
+                    ))
+                    .await
                     .unwrap_or(combined)
             } else {
                 combined

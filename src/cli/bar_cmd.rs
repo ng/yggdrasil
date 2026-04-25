@@ -17,24 +17,26 @@ use chrono::{Duration, Utc};
 use std::io::Read;
 
 const RESET: &str = "\x1b[0m";
-const DIM:   &str = "\x1b[2m";
-const CYAN:  &str = "\x1b[36m";
+const DIM: &str = "\x1b[2m";
+const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[38;5;114m";
-const YELL:  &str = "\x1b[38;5;221m";
-const BOLD:  &str = "\x1b[1m";
+const YELL: &str = "\x1b[38;5;221m";
+const BOLD: &str = "\x1b[1m";
 
 pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     // Read Claude Code's JSON payload from stdin. Non-fatal if absent.
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
 
-    let j: serde_json::Value = serde_json::from_str(&input)
-        .unwrap_or_else(|_| serde_json::Value::Null);
+    let j: serde_json::Value =
+        serde_json::from_str(&input).unwrap_or_else(|_| serde_json::Value::Null);
 
-    let pct = j.pointer("/context_window/used_percentage")
+    let pct = j
+        .pointer("/context_window/used_percentage")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0) as i64;
-    let cost_usd = j.pointer("/cost/total_cost_usd")
+    let cost_usd = j
+        .pointer("/cost/total_cost_usd")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     // Claude Code's statusLine JSON doesn't reliably expose token_usage
@@ -46,13 +48,19 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     // When CC provides session_id, scope numbers to THIS session (the true
     // "what am I getting out of ygg right now" signal). Otherwise fall back
     // to a 24h global window like before.
-    let session_id = j.get("session_id").and_then(|v| v.as_str()).map(String::from);
+    let session_id = j
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let now_minus_24 = Utc::now() - Duration::hours(24);
     let now_minus_48 = Utc::now() - Duration::hours(48);
-    let (cache_hits, embed_calls, hits_today, cache_prev, calls_prev, hits_prev) =
-        if let Some(sid) = session_id.as_deref() {
-            // Session-scoped: current session vs last 24h global for trend comparison.
-            let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let (cache_hits, embed_calls, hits_today, cache_prev, calls_prev, hits_prev) = if let Some(
+        sid,
+    ) =
+        session_id.as_deref()
+    {
+        // Session-scoped: current session vs last 24h global for trend comparison.
+        let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
                 r#"SELECT
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND cc_session_id = $1),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND cc_session_id = $1),
@@ -65,9 +73,9 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
             .bind(sid)
             .bind(now_minus_24)
             .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0, 0));
-            row
-        } else {
-            let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        row
+    } else {
+        let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
                 r#"SELECT
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $1),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $1),
@@ -79,8 +87,8 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
             )
             .bind(now_minus_24).bind(now_minus_48)
             .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0, 0));
-            row
-        };
+        row
+    };
 
     let mut segments: Vec<String> = Vec::new();
 
@@ -100,7 +108,9 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     };
     let tok_suffix = if tok_total > 0 {
         format!(" {DIM}({}){RESET}", format_tokens(tok_total))
-    } else { String::new() };
+    } else {
+        String::new()
+    };
     segments.push(format!(
         "{bar_color}▊{RESET} {DIM}ctx{RESET} {value_style}{pct}%{RESET}{tok_suffix}"
     ));
@@ -121,7 +131,9 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         let trend = if prev_total >= 10 {
             let rate_prev = cache_prev as f64 / prev_total as f64;
             trend_arrow(rate_now - rate_prev, 0.05)
-        } else { "" };
+        } else {
+            ""
+        };
         segments.push(format!(
             "{DIM}ygg cache{RESET} {GREEN}{cache_hits}/{cache_total}{RESET}{trend}"
         ));
@@ -131,7 +143,9 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         let trend = if hits_prev >= 10 {
             let pct_change = (hits_today - hits_prev) as f64 / hits_prev as f64;
             trend_arrow(pct_change, 0.15)
-        } else { "" };
+        } else {
+            ""
+        };
         segments.push(format!(
             "{DIM}ygg recalls/24h{RESET} {BOLD}{hits_today}{RESET}{trend}"
         ));
@@ -147,22 +161,34 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
                  COUNT(*) FILTER (WHERE event_kind::text = 'hit_referenced'),
                  COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
                FROM events WHERE cc_session_id = $1"#,
-        ).bind(sid).fetch_one(pool).await.unwrap_or((0, 0))
+        )
+        .bind(sid)
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0, 0))
     } else {
         sqlx::query_as(
             r#"SELECT
                  COUNT(*) FILTER (WHERE event_kind::text = 'hit_referenced' AND created_at >= $1),
                  COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit' AND created_at >= $1)
                FROM events"#,
-        ).bind(now_minus_24).fetch_one(pool).await.unwrap_or((0, 0))
+        )
+        .bind(now_minus_24)
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0, 0))
     };
     if emitted > 0 {
         let rate = (refd as f64 / emitted as f64 * 100.0) as i64;
         // Threshold colors — mirror the eval pane so the same ratio tells
         // the same story in both places.
-        let color = if rate >= 40 { GREEN }
-                    else if rate >= 20 { YELL }
-                    else { DIM };
+        let color = if rate >= 40 {
+            GREEN
+        } else if rate >= 20 {
+            YELL
+        } else {
+            DIM
+        };
         segments.push(format!(
             "{DIM}ygg recall{RESET} {color}{refd}/{emitted} ({rate}%){RESET}"
         ));
@@ -177,11 +203,11 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
 /// the threshold below which we consider the movement noise.
 fn trend_arrow(delta: f64, flat_band: f64) -> &'static str {
     if delta > flat_band {
-        "\x1b[38;5;114m ↑\x1b[0m"  // green up
+        "\x1b[38;5;114m ↑\x1b[0m" // green up
     } else if delta < -flat_band {
-        "\x1b[38;5;203m ↓\x1b[0m"  // red down
+        "\x1b[38;5;203m ↓\x1b[0m" // red down
     } else {
-        "\x1b[2m ─\x1b[0m"  // dim flat
+        "\x1b[2m ─\x1b[0m" // dim flat
     }
 }
 
@@ -196,7 +222,9 @@ fn token_count(j: &serde_json::Value) -> Option<i64> {
     ];
     for path in direct {
         if let Some(n) = j.pointer(path).and_then(|v| v.as_i64()) {
-            if n > 0 { return Some(n); }
+            if n > 0 {
+                return Some(n);
+            }
         }
     }
     // Input + output sum, multiple spellings.
@@ -207,7 +235,9 @@ fn token_count(j: &serde_json::Value) -> Option<i64> {
     ] {
         let i = j.pointer(in_p).and_then(|v| v.as_i64()).unwrap_or(0);
         let o = j.pointer(out_p).and_then(|v| v.as_i64()).unwrap_or(0);
-        if i + o > 0 { return Some(i + o); }
+        if i + o > 0 {
+            return Some(i + o);
+        }
     }
     // Fallback: parse the last `usage` entry from the transcript JSONL —
     // same signal CC's own status line uses (cache_read + cache_creation +
@@ -231,15 +261,25 @@ fn last_usage_tokens_from_transcript(path: &std::path::Path) -> Option<i64> {
     let mut buf = String::new();
     file.take(200_000).read_to_string(&mut buf).ok()?;
     for line in buf.lines().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         let usage = v.pointer("/message/usage").or_else(|| v.pointer("/usage"));
         let Some(u) = usage else { continue };
-        let cr = u.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-        let cc = u.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+        let cr = u
+            .get("cache_read_input_tokens")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
+        let cc = u
+            .get("cache_creation_input_tokens")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
         let inp = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
         let out = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
         let total = cr + cc + inp + out;
-        if total > 0 { return Some(total); }
+        if total > 0 {
+            return Some(total);
+        }
     }
     None
 }

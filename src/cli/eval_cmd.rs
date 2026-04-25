@@ -5,13 +5,13 @@ use chrono::{DateTime, Duration, Utc};
 
 // ANSI
 const RESET: &str = "\x1b[0m";
-const BOLD:  &str = "\x1b[1m";
-const DIM:   &str = "\x1b[2m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
 const GREEN: &str = "\x1b[38;5;114m";
-const CYAN:  &str = "\x1b[38;5;81m";
-const YELL:  &str = "\x1b[38;5;221m";
+const CYAN: &str = "\x1b[38;5;81m";
+const YELL: &str = "\x1b[38;5;221m";
 const ORANG: &str = "\x1b[38;5;208m";
-const MAG:   &str = "\x1b[38;5;171m";
+const MAG: &str = "\x1b[38;5;171m";
 
 pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyhow::Error> {
     let since: DateTime<Utc> = Utc::now() - Duration::hours(window_hours);
@@ -29,16 +29,23 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
     println!("    similarity hits emitted ......... {hits}");
     println!("    avg hits per prompt ............. {avg_per_turn:.1}");
     if score_n > 0 {
-        println!("    avg score of kept hits .......... {:.2}", score_sum / score_n as f64);
+        println!(
+            "    avg score of kept hits .......... {:.2}",
+            score_sum / score_n as f64
+        );
     }
 
     // Reference rate — the real "did it help?" number
     let referenced = count_events(pool, since, "hit_referenced").await?;
     if hits > 0 && referenced > 0 {
         let rate = referenced as f64 / hits as f64 * 100.0;
-        println!("    referenced by next turn ......... {GREEN}{referenced}/{hits} ({rate:.0}%){RESET}");
+        println!(
+            "    referenced by next turn ......... {GREEN}{referenced}/{hits} ({rate:.0}%){RESET}"
+        );
     } else if hits > 0 {
-        println!("    referenced by next turn ......... {DIM}0/{hits} (0%) — digest hasn't scored yet{RESET}");
+        println!(
+            "    referenced by next turn ......... {DIM}0/{hits} (0%) — digest hasn't scored yet{RESET}"
+        );
     }
 
     let (kept, dropped) = scoring_stats(pool, since).await?;
@@ -49,7 +56,9 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
 
     let (cls_kept, cls_dropped, cls_bypassed) = classifier_stats(pool, since).await?;
     if cls_kept + cls_dropped + cls_bypassed > 0 {
-        println!("    classifier: kept/drop/bypass .... {cls_kept} / {cls_dropped} / {cls_bypassed}");
+        println!(
+            "    classifier: kept/drop/bypass .... {cls_kept} / {cls_dropped} / {cls_bypassed}"
+        );
     } else {
         println!("    classifier ...................... {DIM}disabled{RESET}");
     }
@@ -102,7 +111,9 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
            FROM learnings"#,
     )
     .bind(since)
-    .fetch_one(pool).await.unwrap_or((0, 0, 0));
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0, 0, 0));
     println!();
     println!("  {MAG}Learnings{RESET}");
     println!("    captured in window .............. {learnings_new}");
@@ -110,7 +121,9 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
     if learnings_fired_total > 0 {
         println!("    cumulative applications ......... {GREEN}{learnings_fired_total}{RESET}");
     } else if learnings_total > 0 {
-        println!("    cumulative applications ......... {DIM}0 (hook integration pending — yggdrasil-82){RESET}");
+        println!(
+            "    cumulative applications ......... {DIM}0 (hook integration pending — yggdrasil-82){RESET}"
+        );
     }
 
     // ── Hit quality ──────────────────────────────────────────────────────
@@ -126,31 +139,46 @@ pub async fn execute(pool: &sqlx::PgPool, window_hours: i64) -> Result<(), anyho
         println!("    {DIM}(no similarity_hit events yet in this window){RESET}");
     } else {
         println!("    {DIM}worst (surfaced ≥2, never referenced):{RESET}");
-        let worst: Vec<_> = quality.iter().filter(|q| q.referenced == 0 && q.emitted >= 2).take(5).collect();
+        let worst: Vec<_> = quality
+            .iter()
+            .filter(|q| q.referenced == 0 && q.emitted >= 2)
+            .take(5)
+            .collect();
         if worst.is_empty() {
-            println!("      {DIM}(none — every frequently-surfaced hit got referenced at least once){RESET}");
+            println!(
+                "      {DIM}(none — every frequently-surfaced hit got referenced at least once){RESET}"
+            );
         } else {
             for q in worst {
                 println!(
                     "      {}× surfaced / 0 ref   {DIM}from {}{RESET}  \"{}\"",
-                    q.emitted, q.source_agent, truncate(&q.snippet, 60)
+                    q.emitted,
+                    q.source_agent,
+                    truncate(&q.snippet, 60)
                 );
             }
         }
         println!();
         println!("    {DIM}best (highest referenced rate, minimum 2 surfaces):{RESET}");
-        let best: Vec<_> = quality.iter()
+        let best: Vec<_> = quality
+            .iter()
             .filter(|q| q.emitted >= 2 && q.referenced > 0)
             .take(5)
             .collect();
         if best.is_empty() {
-            println!("      {DIM}(none — no hit has been referenced yet, or digest hasn't run){RESET}");
+            println!(
+                "      {DIM}(none — no hit has been referenced yet, or digest hasn't run){RESET}"
+            );
         } else {
             for q in best {
                 let rate = (q.referenced as f64 / q.emitted as f64 * 100.0) as i64;
                 println!(
                     "      {}/{} ({}%)   {DIM}from {}{RESET}  \"{}\"",
-                    q.referenced, q.emitted, rate, q.source_agent, truncate(&q.snippet, 60)
+                    q.referenced,
+                    q.emitted,
+                    rate,
+                    q.source_agent,
+                    truncate(&q.snippet, 60)
                 );
             }
         }
@@ -217,22 +245,31 @@ async fn hit_quality(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|(src, snip, emit, refd)| HitQualityRow {
-        source_agent: src,
-        emitted: emit,
-        referenced: refd,
-        snippet: snip,
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(src, snip, emit, refd)| HitQualityRow {
+            source_agent: src,
+            emitted: emit,
+            referenced: refd,
+            snippet: snip,
+        })
+        .collect())
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { return s.to_string(); }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
     s.chars().take(max).collect::<String>() + "…"
 }
 
-async fn count_events(pool: &sqlx::PgPool, since: DateTime<Utc>, kind: &str) -> Result<i64, anyhow::Error> {
+async fn count_events(
+    pool: &sqlx::PgPool,
+    since: DateTime<Utc>,
+    kind: &str,
+) -> Result<i64, anyhow::Error> {
     let n: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM events WHERE event_kind::text = $1 AND created_at >= $2"
+        "SELECT COUNT(*) FROM events WHERE event_kind::text = $1 AND created_at >= $2",
     )
     .bind(kind)
     .bind(since)
@@ -253,63 +290,110 @@ async fn retrieval_stats(
     let (score_sum, score_n): (Option<f64>, i64) = sqlx::query_as(
         "SELECT SUM((payload->>'similarity')::float), COUNT(*)
          FROM events WHERE event_kind::text = 'similarity_hit' AND created_at >= $1
-         AND payload->>'similarity' IS NOT NULL"
-    ).bind(since).fetch_one(pool).await.unwrap_or((None, 0));
+         AND payload->>'similarity' IS NOT NULL",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await
+    .unwrap_or((None, 0));
 
     // Distinct user prompts = user_message node writes in the window.
     let prompts: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events
          WHERE event_kind::text = 'node_written' AND created_at >= $1
-         AND payload->>'snippet' IS NOT NULL"
-    ).bind(since).fetch_one(pool).await?;
+         AND payload->>'snippet' IS NOT NULL",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
 
-    let avg = if prompts.0 > 0 { hits.0 as f64 / prompts.0 as f64 } else { 0.0 };
+    let avg = if prompts.0 > 0 {
+        hits.0 as f64 / prompts.0 as f64
+    } else {
+        0.0
+    };
     Ok((hits.0, avg, score_sum.unwrap_or(0.0), score_n, prompts.0))
 }
 
-async fn scoring_stats(pool: &sqlx::PgPool, since: DateTime<Utc>) -> Result<(i64, i64), anyhow::Error> {
+async fn scoring_stats(
+    pool: &sqlx::PgPool,
+    since: DateTime<Utc>,
+) -> Result<(i64, i64), anyhow::Error> {
     let kept: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events WHERE event_kind::text = 'scoring_decision'
-         AND (payload->>'kept')::bool = true AND created_at >= $1"
-    ).bind(since).fetch_one(pool).await?;
+         AND (payload->>'kept')::bool = true AND created_at >= $1",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
     let dropped: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events WHERE event_kind::text = 'scoring_decision'
-         AND (payload->>'kept')::bool = false AND created_at >= $1"
-    ).bind(since).fetch_one(pool).await?;
+         AND (payload->>'kept')::bool = false AND created_at >= $1",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
     Ok((kept.0, dropped.0))
 }
 
-async fn drop_reason_breakdown(pool: &sqlx::PgPool, since: DateTime<Utc>) -> Result<Option<String>, anyhow::Error> {
+async fn drop_reason_breakdown(
+    pool: &sqlx::PgPool,
+    since: DateTime<Utc>,
+) -> Result<Option<String>, anyhow::Error> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT payload->>'drop_reason' AS r, COUNT(*) AS n
          FROM events WHERE event_kind::text = 'scoring_decision'
            AND (payload->>'kept')::bool = false AND created_at >= $1
            AND payload->>'drop_reason' IS NOT NULL
-         GROUP BY r ORDER BY n DESC"
-    ).bind(since).fetch_all(pool).await?;
-    if rows.is_empty() { return Ok(None); }
-    let s = rows.iter().map(|(r, n)| format!("{r}={n}")).collect::<Vec<_>>().join("  ");
+         GROUP BY r ORDER BY n DESC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let s = rows
+        .iter()
+        .map(|(r, n)| format!("{r}={n}"))
+        .collect::<Vec<_>>()
+        .join("  ");
     Ok(Some(s))
 }
 
-async fn classifier_stats(pool: &sqlx::PgPool, since: DateTime<Utc>) -> Result<(i64, i64, i64), anyhow::Error> {
+async fn classifier_stats(
+    pool: &sqlx::PgPool,
+    since: DateTime<Utc>,
+) -> Result<(i64, i64, i64), anyhow::Error> {
     let kept: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events WHERE event_kind::text = 'classifier_decision'
          AND (payload->>'kept')::bool = true AND (payload->>'bypassed')::bool = false
-         AND created_at >= $1"
-    ).bind(since).fetch_one(pool).await?;
+         AND created_at >= $1",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
     let dropped: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events WHERE event_kind::text = 'classifier_decision'
-         AND (payload->>'kept')::bool = false AND created_at >= $1"
-    ).bind(since).fetch_one(pool).await?;
+         AND (payload->>'kept')::bool = false AND created_at >= $1",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
     let bypassed: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events WHERE event_kind::text = 'classifier_decision'
-         AND (payload->>'bypassed')::bool = true AND created_at >= $1"
-    ).bind(since).fetch_one(pool).await?;
+         AND (payload->>'bypassed')::bool = true AND created_at >= $1",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
     Ok((kept.0, dropped.0, bypassed.0))
 }
 
-async fn embedding_stats(pool: &sqlx::PgPool, since: DateTime<Utc>) -> Result<(i64, i64), anyhow::Error> {
+async fn embedding_stats(
+    pool: &sqlx::PgPool,
+    since: DateTime<Utc>,
+) -> Result<(i64, i64), anyhow::Error> {
     let calls: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events WHERE event_kind::text = 'embedding_call' AND created_at >= $1"
     ).bind(since).fetch_one(pool).await?;

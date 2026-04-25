@@ -195,8 +195,8 @@ pub fn idempotency_key_for(task_id: Uuid, attempt: i32) -> String {
 /// Reject oversize payloads at the boundary. Returns `Err` with a descriptive
 /// message; callers should divert to `BlobStore::put` and reference by hash.
 pub fn check_inline_size(payload: &serde_json::Value, field: &str) -> Result<(), String> {
-    let serialized = serde_json::to_vec(payload)
-        .map_err(|e| format!("serializing {field}: {e}"))?;
+    let serialized =
+        serde_json::to_vec(payload).map_err(|e| format!("serializing {field}: {e}"))?;
     if serialized.len() > MAX_INLINE_PAYLOAD_BYTES {
         return Err(format!(
             "{field} payload {} bytes > MAX_INLINE_PAYLOAD_BYTES ({} bytes); \
@@ -221,8 +221,7 @@ impl<'a> TaskRunRepo<'a> {
     /// so duplicate inserts collide on the UNIQUE constraint and surface as
     /// errors rather than silent doubles.
     pub async fn create(&self, spec: TaskRunCreate) -> Result<TaskRun, sqlx::Error> {
-        check_inline_size(&spec.input, "input")
-            .map_err(|e| sqlx::Error::Protocol(e.into()))?;
+        check_inline_size(&spec.input, "input").map_err(|e| sqlx::Error::Protocol(e.into()))?;
 
         let key = idempotency_key_for(spec.task_id, spec.attempt);
         let max_attempts = spec.max_attempts.unwrap_or(3);
@@ -368,8 +367,15 @@ mod tests {
     #[test]
     fn run_state_round_trip() {
         for s in [
-            "scheduled", "ready", "running", "succeeded", "failed",
-            "crashed", "cancelled", "retrying", "poison",
+            "scheduled",
+            "ready",
+            "running",
+            "succeeded",
+            "failed",
+            "crashed",
+            "cancelled",
+            "retrying",
+            "poison",
         ] {
             let parsed: RunState = s.parse().unwrap();
             assert_eq!(parsed.as_str(), s);
@@ -379,9 +385,17 @@ mod tests {
     #[test]
     fn run_reason_round_trip() {
         for s in [
-            "ok", "agent_error", "heartbeat_timeout", "tmux_gone", "max_attempts",
-            "user_cancelled", "dependency_failed", "lock_conflict", "timeout",
-            "loop_detected", "budget_exceeded",
+            "ok",
+            "agent_error",
+            "heartbeat_timeout",
+            "tmux_gone",
+            "max_attempts",
+            "user_cancelled",
+            "dependency_failed",
+            "lock_conflict",
+            "timeout",
+            "loop_detected",
+            "budget_exceeded",
         ] {
             let parsed: RunReason = s.parse().unwrap();
             assert_eq!(parsed.as_str(), s);

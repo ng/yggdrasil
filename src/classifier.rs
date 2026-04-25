@@ -67,10 +67,9 @@ impl Classifier {
         let enabled = std::env::var("YGG_CLASSIFIER")
             .map(|v| v == "on" || v == "1" || v == "true")
             .unwrap_or(false);
-        let base_url = std::env::var("OLLAMA_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434".into());
-        let model = std::env::var("YGG_CLASSIFIER_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.into());
+        let base_url =
+            std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
+        let model = std::env::var("YGG_CLASSIFIER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
         let threshold = std::env::var("YGG_CLASSIFIER_THRESHOLD")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -89,39 +88,50 @@ impl Classifier {
         }
     }
 
-    pub fn threshold(&self) -> f64 { self.threshold }
-    pub fn model(&self) -> &str { &self.model }
-    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn threshold(&self) -> f64 {
+        self.threshold
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
 
     /// Fire-and-forget warm-up ping so the classifier model is resident when
     /// the next inject needs it. Zero-length prompt; just triggers the model
     /// load path so the keep_alive timer starts. Safe to spawn in the
     /// background from SessionStart.
     pub async fn warm_up(&self) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         let req = GenerateRequest {
             model: &self.model,
             prompt: "ok".to_string(),
             format: "json",
             stream: false,
-            options: GenerateOptions { temperature: 0.0, num_predict: 1 },
+            options: GenerateOptions {
+                temperature: 0.0,
+                num_predict: 1,
+            },
             keep_alive: "30m",
         };
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            self.http.post(format!("{}/api/generate", self.base_url)).json(&req).send(),
-        ).await;
+            self.http
+                .post(format!("{}/api/generate", self.base_url))
+                .json(&req)
+                .send(),
+        )
+        .await;
     }
 
     /// Classify a batch in a SINGLE model call. Ollama serializes inference
     /// per model server-side, so parallel per-candidate calls don't reduce
     /// wall time — one batched prompt does. The model is asked to return a
     /// JSON array of scores in the same order as the input memories.
-    pub async fn classify_batch(
-        &self,
-        prompt: &str,
-        candidates: &[&str],
-    ) -> Vec<Decision> {
+    pub async fn classify_batch(&self, prompt: &str, candidates: &[&str]) -> Vec<Decision> {
         if !self.enabled {
             return candidates.iter().map(|_| bypass("disabled")).collect();
         }
@@ -181,7 +191,8 @@ impl Classifier {
         };
 
         let fut = async {
-            let resp = self.http
+            let resp = self
+                .http
                 .post(format!("{}/api/generate", self.base_url))
                 .json(&req)
                 .send()
@@ -191,44 +202,51 @@ impl Classifier {
             if !resp.status().is_success() {
                 return Err(format!("http {}", resp.status()));
             }
-            let body: GenerateResponse = resp.json().await
-                .map_err(|e| format!("parse: {e}"))?;
+            let body: GenerateResponse = resp.json().await.map_err(|e| format!("parse: {e}"))?;
             Ok::<String, String>(body.response)
         };
 
         let timeout_ms = self.timeout_ms;
-        let raw = match tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            fut,
-        ).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                warn!("classifier: {e}");
-                return candidates.iter().map(|_| fail_open("request_failed")).collect();
-            }
-            Err(_) => {
-                warn!("classifier: batch timed out ({timeout_ms}ms); bypassing");
-                return candidates.iter().map(|_| bypass("timeout")).collect();
-            }
-        };
+        let raw =
+            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    warn!("classifier: {e}");
+                    return candidates
+                        .iter()
+                        .map(|_| fail_open("request_failed"))
+                        .collect();
+                }
+                Err(_) => {
+                    warn!("classifier: batch timed out ({timeout_ms}ms); bypassing");
+                    return candidates.iter().map(|_| bypass("timeout")).collect();
+                }
+            };
 
         let scores = match parse_scores(&raw, candidates.len()) {
             Some(s) => s,
             None => {
                 debug!("classifier: unparseable response '{}'", raw);
-                return candidates.iter().map(|_| fail_open("invalid_json")).collect();
+                return candidates
+                    .iter()
+                    .map(|_| fail_open("invalid_json"))
+                    .collect();
             }
         };
 
-        candidates.iter().enumerate().map(|(i, _)| {
-            let score = scores.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0);
-            Decision {
-                score,
-                kept: score >= self.threshold,
-                bypassed: false,
-                reason: "scored",
-            }
-        }).collect()
+        candidates
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let score = scores.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+                Decision {
+                    score,
+                    kept: score >= self.threshold,
+                    bypassed: false,
+                    reason: "scored",
+                }
+            })
+            .collect()
     }
 }
 
@@ -266,14 +284,28 @@ fn parse_scores(raw: &str, expected: usize) -> Option<Vec<f64>> {
 
 fn extract_numbered(obj: &serde_json::Map<String, serde_json::Value>, expected: usize) -> Vec<f64> {
     (1..=expected)
-        .map(|i| obj.get(&i.to_string()).and_then(|v| v.as_f64()).unwrap_or(1.0))
+        .map(|i| {
+            obj.get(&i.to_string())
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0)
+        })
         .collect()
 }
 
 fn fail_open(reason: &'static str) -> Decision {
-    Decision { score: 1.0, kept: true, bypassed: true, reason }
+    Decision {
+        score: 1.0,
+        kept: true,
+        bypassed: true,
+        reason,
+    }
 }
 
 fn bypass(reason: &'static str) -> Decision {
-    Decision { score: 1.0, kept: true, bypassed: true, reason }
+    Decision {
+        score: 1.0,
+        kept: true,
+        bypassed: true,
+        reason,
+    }
 }

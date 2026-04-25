@@ -21,7 +21,9 @@ pub struct TaskSpec {
     pub prompt: String,
 }
 
-fn default_parallelism() -> u32 { 1 }
+fn default_parallelism() -> u32 {
+    1
+}
 
 #[derive(Debug, Clone)]
 pub struct LoadedManifest {
@@ -35,8 +37,8 @@ impl LoadedManifest {
         let path = root.join("manifest.toml");
         let text = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-        let manifest: Manifest = toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+        let manifest: Manifest =
+            toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
         Ok(Self { manifest, root })
     }
 

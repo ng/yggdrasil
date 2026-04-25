@@ -33,10 +33,9 @@ impl Embedder {
 
     /// Default embedder using standard Ollama config.
     pub fn default_ollama() -> Self {
-        let base_url = std::env::var("OLLAMA_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434".into());
-        let model = std::env::var("OLLAMA_EMBED_MODEL")
-            .unwrap_or_else(|_| "all-minilm".into());
+        let base_url =
+            std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
+        let model = std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "all-minilm".into());
         Self::new(&base_url, &model)
     }
 
@@ -135,12 +134,7 @@ impl Embedder {
     }
 
     /// Embed and store on a node (fire-and-forget).
-    pub fn embed_and_store(
-        &self,
-        node_id: uuid::Uuid,
-        text: String,
-        pool: sqlx::PgPool,
-    ) {
+    pub fn embed_and_store(&self, node_id: uuid::Uuid, text: String, pool: sqlx::PgPool) {
         let base_url = self.base_url.clone();
         let model = self.model.clone();
 

@@ -53,8 +53,9 @@ impl TasksView {
     pub fn selected_task_id(&self) -> Option<(Uuid, String)> {
         let i = self.state.selected()?;
         match self.rows.get(i)? {
-            TaskRow::Task { prefix, task } =>
-                Some((task.task_id, format!("{prefix}-{}", task.seq))),
+            TaskRow::Task { prefix, task } => {
+                Some((task.task_id, format!("{prefix}-{}", task.seq)))
+            }
             _ => None,
         }
     }
@@ -62,7 +63,9 @@ impl TasksView {
     pub fn delete_begin(&mut self) {
         self.pending_delete = self.selected_task_id();
     }
-    pub fn delete_cancel(&mut self) { self.pending_delete = None; }
+    pub fn delete_cancel(&mut self) {
+        self.pending_delete = None;
+    }
     pub fn take_pending_delete(&mut self) -> Option<Uuid> {
         self.pending_delete.take().map(|(id, _)| id)
     }
@@ -71,10 +74,14 @@ impl TasksView {
         self.last_status.clear();
         self.loaded = true;
         let repos = RepoRepo::new(pool).list().await.unwrap_or_default();
-        let prefix_by_repo: HashMap<Uuid, String> = repos.iter()
-            .map(|r| (r.repo_id, r.task_prefix.clone())).collect();
+        let prefix_by_repo: HashMap<Uuid, String> = repos
+            .iter()
+            .map(|r| (r.repo_id, r.task_prefix.clone()))
+            .collect();
 
-        let tasks: Vec<Task> = TaskRepo::new(pool).list(None, None).await
+        let tasks: Vec<Task> = TaskRepo::new(pool)
+            .list(None, None)
+            .await
             .unwrap_or_default()
             .into_iter()
             .filter(|t| t.status != TaskStatus::Closed)
@@ -82,19 +89,33 @@ impl TasksView {
 
         let task_ids: Vec<Uuid> = tasks.iter().map(|t| t.task_id).collect();
         let edges: Vec<(Uuid, Uuid)> = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "SELECT task_id, blocker_id FROM task_deps WHERE task_id = ANY($1)"
-        ).bind(&task_ids).fetch_all(pool).await.unwrap_or_default();
+            "SELECT task_id, blocker_id FROM task_deps WHERE task_id = ANY($1)",
+        )
+        .bind(&task_ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
         // A task is blocked iff one of its blockers is still open/in-progress.
-        let open_ids: HashSet<Uuid> = tasks.iter()
-            .filter(|t| matches!(t.status, TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked))
-            .map(|t| t.task_id).collect();
+        let open_ids: HashSet<Uuid> = tasks
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
+                )
+            })
+            .map(|t| t.task_id)
+            .collect();
         let mut blocked: HashSet<Uuid> = HashSet::new();
         for (tid, bid) in &edges {
-            if open_ids.contains(bid) { blocked.insert(*tid); }
+            if open_ids.contains(bid) {
+                blocked.insert(*tid);
+            }
         }
 
-        let mut ready: Vec<(String, Task)> = tasks.into_iter()
+        let mut ready: Vec<(String, Task)> = tasks
+            .into_iter()
             .filter(|t| !blocked.contains(&t.task_id))
             .filter_map(|t| {
                 let p = prefix_by_repo.get(&t.repo_id).cloned()?;
@@ -113,10 +134,17 @@ impl TasksView {
             let mut bucket: Vec<(String, Task)> = vec![(prefix, task)];
             while let Some((_, peek)) = it.peek() {
                 if peek.kind == kind {
-                    if let Some(next) = it.next() { bucket.push(next); }
-                } else { break; }
+                    if let Some(next) = it.next() {
+                        bucket.push(next);
+                    }
+                } else {
+                    break;
+                }
             }
-            grouped.push(TaskRow::Header { kind, count: bucket.len() });
+            grouped.push(TaskRow::Header {
+                kind,
+                count: bucket.len(),
+            });
             for (p, t) in bucket {
                 grouped.push(TaskRow::Task { prefix: p, task: t });
             }
@@ -125,7 +153,8 @@ impl TasksView {
 
         if self.rows.is_empty() {
             self.last_status = format!(
-                "no ready tasks in any of {} registered repo(s)", repos.len()
+                "no ready tasks in any of {} registered repo(s)",
+                repos.len()
             );
             self.state.select(None);
         } else if self.state.selected().unwrap_or(0) >= self.rows.len() {
@@ -159,27 +188,37 @@ impl TasksView {
     }
 
     /// Short-lived status line shown in the title after a run/add keystroke.
-    pub fn set_flash(&mut self, msg: impl Into<String>) { self.flash = msg.into(); }
+    pub fn set_flash(&mut self, msg: impl Into<String>) {
+        self.flash = msg.into();
+    }
 
     pub fn select_prev(&mut self) {
-        let Some(target) = self.neighbor_task_row(-1) else { return; };
+        let Some(target) = self.neighbor_task_row(-1) else {
+            return;
+        };
         self.state.select(Some(target));
     }
 
     pub fn select_next(&mut self) {
-        let Some(target) = self.neighbor_task_row(1) else { return; };
+        let Some(target) = self.neighbor_task_row(1) else {
+            return;
+        };
         self.state.select(Some(target));
     }
 
     /// Walk the row list in `dir` (±1), skipping headers. Wraps around.
     fn neighbor_task_row(&self, dir: isize) -> Option<usize> {
-        if self.rows.is_empty() { return None; }
+        if self.rows.is_empty() {
+            return None;
+        }
         let len = self.rows.len();
         let start = self.state.selected().unwrap_or(0);
         let mut i = start;
         for _ in 0..len {
             i = ((i as isize + dir).rem_euclid(len as isize)) as usize;
-            if matches!(self.rows[i], TaskRow::Task { .. }) { return Some(i); }
+            if matches!(self.rows[i], TaskRow::Task { .. }) {
+                return Some(i);
+            }
         }
         None
     }
@@ -188,8 +227,11 @@ impl TasksView {
         let base = format!(" Tasks ready ({} across all repos) ", self.rows.len());
         let title = if let Some((_, label)) = &self.pending_delete {
             format!("{base} ·  DELETE {label}? y / any=cancel")
-        } else if self.flash.is_empty() { base }
-          else { format!("{base} ·  {}", self.flash) };
+        } else if self.flash.is_empty() {
+            base
+        } else {
+            format!("{base} ·  {}", self.flash)
+        };
 
         if !self.loaded {
             render_tasks_loading(frame, area, &title);
@@ -203,26 +245,33 @@ impl TasksView {
                 Line::from(""),
                 Line::from(vec![
                     Span::raw("  Try "),
-                    Span::styled("ygg task create \"...\" --kind task --priority 2",
-                        Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        "ygg task create \"...\" --kind task --priority 2",
+                        Style::default().fg(Color::Cyan),
+                    ),
                     Span::raw(" from inside a project."),
                 ]),
                 Line::from(""),
                 if !self.last_status.is_empty() {
                     Line::from(vec![
                         Span::styled("  · ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(self.last_status.clone(), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            self.last_status.clone(),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ])
-                } else { Line::from("") },
+                } else {
+                    Line::from("")
+                },
             ];
-            let para = Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(title));
+            let para =
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
             frame.render_widget(para, area);
             return;
         }
 
         let header = Row::new(vec![
-            Cell::from(""),  // run-state glyph column
+            Cell::from(""), // run-state glyph column
             Cell::from("KIND").style(Style::default().fg(Color::Gray)),
             Cell::from("ID").style(Style::default().fg(Color::Gray)),
             Cell::from("P").style(Style::default().fg(Color::Gray)),
@@ -230,37 +279,48 @@ impl TasksView {
             Cell::from("AGE").style(Style::default().fg(Color::Gray)),
         ]);
 
-        let rows: Vec<Row> = self.rows.iter().map(|row| match row {
-            TaskRow::Header { kind, count } => {
-                let (color, glyph) = kind_style(kind);
-                Row::new(vec![
-                    Cell::from(""),
-                    Cell::from(format!("{glyph} {}", pluralize_kind(kind)))
-                        .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    Cell::from(""),
-                    Cell::from(""),
-                    Cell::from(format!("({count})"))
-                        .style(Style::default().fg(Color::DarkGray)),
-                    Cell::from(""),
-                ])
-            }
-            TaskRow::Task { prefix, task: t } => {
-                // Single source of truth for run/kind/priority/title styling.
-                Row::new(crate::tui::widgets::task_row_cells(t, prefix))
-            }
-        }).collect();
+        let rows: Vec<Row> = self
+            .rows
+            .iter()
+            .map(|row| match row {
+                TaskRow::Header { kind, count } => {
+                    let (color, glyph) = kind_style(kind);
+                    Row::new(vec![
+                        Cell::from(""),
+                        Cell::from(format!("{glyph} {}", pluralize_kind(kind)))
+                            .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                        Cell::from(""),
+                        Cell::from(""),
+                        Cell::from(format!("({count})"))
+                            .style(Style::default().fg(Color::DarkGray)),
+                        Cell::from(""),
+                    ])
+                }
+                TaskRow::Task { prefix, task: t } => {
+                    // Single source of truth for run/kind/priority/title styling.
+                    Row::new(crate::tui::widgets::task_row_cells(t, prefix))
+                }
+            })
+            .collect();
 
-        let table = Table::new(rows, [
-            Constraint::Length(3),   // run-state glyph
-            Constraint::Length(14),  // KIND
-            Constraint::Length(16),  // ID
-            Constraint::Length(4),   // P
-            Constraint::Min(20),     // TITLE
-            Constraint::Length(5),   // AGE
-        ])
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(3),  // run-state glyph
+                Constraint::Length(14), // KIND
+                Constraint::Length(16), // ID
+                Constraint::Length(4),  // P
+                Constraint::Min(20),    // TITLE
+                Constraint::Length(5),  // AGE
+            ],
+        )
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
 
         frame.render_stateful_widget(table, area, &mut self.state);
 
@@ -314,19 +374,26 @@ fn pluralize_kind(k: &TaskKind) -> &'static str {
 /// Painted while the first refresh is in flight. A horizontal row of kind
 /// glyphs hints at the "tasks grouped by kind" layout that's coming.
 fn render_tasks_loading(frame: &mut Frame, area: Rect, title: &str) {
-    let hint = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
-    let sep  = Style::default().fg(Color::DarkGray);
+    let hint = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC);
+    let sep = Style::default().fg(Color::DarkGray);
 
     let row: Vec<Span> = vec![
-        Span::styled("◉",  Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "◉",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("   ·   ", sep),
-        Span::styled("✚",  Style::default().fg(Color::Cyan)),
+        Span::styled("✚", Style::default().fg(Color::Cyan)),
         Span::styled("   ·   ", sep),
         Span::styled("🐞", Style::default().fg(Color::Red)),
         Span::styled("   ·   ", sep),
-        Span::styled("○",  Style::default().fg(Color::White)),
+        Span::styled("○", Style::default().fg(Color::White)),
         Span::styled("   ·   ", sep),
-        Span::styled("·",  Style::default().fg(Color::DarkGray)),
+        Span::styled("·", Style::default().fg(Color::DarkGray)),
     ];
 
     let art: Vec<Line> = vec![
@@ -338,7 +405,9 @@ fn render_tasks_loading(frame: &mut Frame, area: Rect, title: &str) {
         Line::from(Span::styled("gathering ready work…", hint)),
     ];
 
-    let block = Block::default().borders(Borders::ALL).title(title.to_string());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title.to_string());
     let para = Paragraph::new(art)
         .block(block)
         .alignment(Alignment::Center);

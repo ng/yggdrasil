@@ -3,7 +3,12 @@ use crate::lock::LockManager;
 use crate::models::agent::AgentRepo;
 
 /// Handle `ygg lock acquire <resource>`
-pub async fn acquire(pool: &sqlx::PgPool, config: &AppConfig, resource: &str, agent_name: &str) -> Result<(), anyhow::Error> {
+pub async fn acquire(
+    pool: &sqlx::PgPool,
+    config: &AppConfig,
+    resource: &str,
+    agent_name: &str,
+) -> Result<(), anyhow::Error> {
     let agent_repo = AgentRepo::new(pool);
     let agent = agent_repo
         .get_by_name(agent_name)
@@ -13,7 +18,10 @@ pub async fn acquire(pool: &sqlx::PgPool, config: &AppConfig, resource: &str, ag
     let lock_mgr = LockManager::new(pool, config.lock_ttl_secs);
     match lock_mgr.acquire(resource, agent.agent_id).await {
         Ok(lock) => {
-            println!("Lock acquired: {} (expires {})", lock.resource_key, lock.expires_at);
+            println!(
+                "Lock acquired: {} (expires {})",
+                lock.resource_key, lock.expires_at
+            );
         }
         Err(e) => {
             println!("Failed: {e}");
@@ -23,7 +31,12 @@ pub async fn acquire(pool: &sqlx::PgPool, config: &AppConfig, resource: &str, ag
 }
 
 /// Handle `ygg lock release <resource>`
-pub async fn release(pool: &sqlx::PgPool, config: &AppConfig, resource: &str, agent_name: &str) -> Result<(), anyhow::Error> {
+pub async fn release(
+    pool: &sqlx::PgPool,
+    config: &AppConfig,
+    resource: &str,
+    agent_name: &str,
+) -> Result<(), anyhow::Error> {
     let agent_repo = AgentRepo::new(pool);
     let agent = agent_repo
         .get_by_name(agent_name)
@@ -64,9 +77,16 @@ pub async fn list(
     // round-tripping through UUIDs.
     let agent_repo = AgentRepo::new(pool);
     let now = chrono::Utc::now();
-    println!("{:<30} {:<20} {:<10} {:<10}", "RESOURCE", "AGENT", "HELD_FOR", "TTL");
+    println!(
+        "{:<30} {:<20} {:<10} {:<10}",
+        "RESOURCE", "AGENT", "HELD_FOR", "TTL"
+    );
     for lock in &locks {
-        let agent = agent_repo.get(lock.agent_id).await.ok().flatten()
+        let agent = agent_repo
+            .get(lock.agent_id)
+            .await
+            .ok()
+            .flatten()
             .map(|a| a.agent_name)
             .unwrap_or_else(|| format!("{}…", &lock.agent_id.to_string()[..8]));
         let held = (now - lock.acquired_at).num_seconds().max(0);
@@ -79,7 +99,14 @@ pub async fn list(
             format!("{ttl}s"),
         );
     }
-    println!("\n{} lock(s){}.", locks.len(),
-        if stale_only { format!(" held > {stale_secs}s") } else { String::new() });
+    println!(
+        "\n{} lock(s){}.",
+        locks.len(),
+        if stale_only {
+            format!(" held > {stale_secs}s")
+        } else {
+            String::new()
+        }
+    );
     Ok(())
 }

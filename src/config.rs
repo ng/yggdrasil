@@ -34,8 +34,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
             ollama_embed_model: env::var("OLLAMA_EMBED_MODEL")
                 .unwrap_or_else(|_| "all-minilm".into()),
-            ollama_chat_model: env::var("OLLAMA_CHAT_MODEL")
-                .unwrap_or_default(), // optional — digest is deterministic
+            ollama_chat_model: env::var("OLLAMA_CHAT_MODEL").unwrap_or_default(), // optional — digest is deterministic
             embedding_dimensions: env::var("EMBEDDING_DIMENSIONS")
                 .unwrap_or_else(|_| "384".into())
                 .parse()
@@ -60,8 +59,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "30".into())
                 .parse()
                 .unwrap_or(30),
-            rtk_binary_path: env::var("RTK_BINARY_PATH")
-                .unwrap_or_else(|_| "rtk".into()),
+            rtk_binary_path: env::var("RTK_BINARY_PATH").unwrap_or_else(|_| "rtk".into()),
         })
     }
 }

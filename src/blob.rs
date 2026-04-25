@@ -32,7 +32,11 @@ pub struct BlobRef(String);
 impl BlobRef {
     pub fn parse(s: impl Into<String>) -> Result<Self, BlobError> {
         let s = s.into();
-        if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        if s.len() != 64
+            || !s
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
             return Err(BlobError::InvalidRef(s));
         }
         Ok(Self(s))
@@ -108,7 +112,10 @@ impl BlobStore {
 
     pub fn stat(&self, r: &BlobRef) -> Result<BlobStat, BlobError> {
         let m = fs::metadata(self.path_for(r))?;
-        Ok(BlobStat { size: m.len(), modified: m.modified()? })
+        Ok(BlobStat {
+            size: m.len(),
+            modified: m.modified()?,
+        })
     }
 
     pub fn exists(&self, r: &BlobRef) -> bool {
@@ -125,16 +132,24 @@ impl BlobStore {
         }
         for outer in fs::read_dir(&self.root)? {
             let outer = outer?;
-            if !outer.file_type()?.is_dir() { continue; }
+            if !outer.file_type()?.is_dir() {
+                continue;
+            }
             for inner in fs::read_dir(outer.path())? {
                 let inner = inner?;
-                if !inner.file_type()?.is_dir() { continue; }
+                if !inner.file_type()?.is_dir() {
+                    continue;
+                }
                 for blob in fs::read_dir(inner.path())? {
                     let blob = blob?;
-                    if !blob.file_type()?.is_file() { continue; }
+                    if !blob.file_type()?.is_file() {
+                        continue;
+                    }
                     let name = blob.file_name();
                     let name_str = name.to_string_lossy();
-                    if name_str.starts_with(".tmp.") { continue; }
+                    if name_str.starts_with(".tmp.") {
+                        continue;
+                    }
                     let outer_name = outer.file_name();
                     let inner_name = inner.file_name();
                     let full = format!(

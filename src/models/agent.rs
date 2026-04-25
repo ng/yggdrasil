@@ -165,7 +165,7 @@ impl<'a> AgentRepo<'a> {
                 });
                 let _ = sqlx::query(
                     "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id)
-                     VALUES ('agent_state_changed', $1, $2, $3, $4)"
+                     VALUES ('agent_state_changed', $1, $2, $3, $4)",
                 )
                 .bind(agent_id)
                 .bind(&name)
@@ -218,11 +218,7 @@ impl<'a> AgentRepo<'a> {
     }
 
     /// Update the digest reference after a context flush.
-    pub async fn set_digest(
-        &self,
-        agent_id: Uuid,
-        digest_id: Uuid,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn set_digest(&self, agent_id: Uuid, digest_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE agents SET digest_id = $2, updated_at = now() WHERE agent_id = $1")
             .bind(agent_id)
             .bind(digest_id)
@@ -315,7 +311,9 @@ impl<'a> AgentRepo<'a> {
 
     pub async fn archive(&self, agent_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE agents SET archived_at = now() WHERE agent_id = $1")
-            .bind(agent_id).execute(self.pool).await?;
+            .bind(agent_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -325,7 +323,10 @@ impl<'a> AgentRepo<'a> {
     /// reject otherwise via the agents_name_persona_uk index.
     pub async fn rename(&self, agent_id: Uuid, new_name: &str) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE agents SET agent_name = $2, updated_at = now() WHERE agent_id = $1")
-            .bind(agent_id).bind(new_name).execute(self.pool).await?;
+            .bind(agent_id)
+            .bind(new_name)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -357,7 +358,9 @@ impl<'a> AgentRepo<'a> {
 
     pub async fn unarchive(&self, agent_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE agents SET archived_at = NULL WHERE agent_id = $1")
-            .bind(agent_id).execute(self.pool).await?;
+            .bind(agent_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 

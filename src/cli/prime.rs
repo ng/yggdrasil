@@ -4,7 +4,7 @@ use crate::{
     lock::LockManager,
     models::{
         agent::AgentRepo,
-        repo::{detect_git_repo, slugify, RepoRepo},
+        repo::{RepoRepo, detect_git_repo, slugify},
         task::{Task, TaskRepo},
     },
 };
@@ -47,15 +47,22 @@ struct DigestInfo {
     age_secs: i64,
 }
 
-async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<PrimeContext, anyhow::Error> {
+async fn try_with_db(
+    agent_name: &str,
+    transcript_path: Option<&str>,
+) -> Result<PrimeContext, anyhow::Error> {
     let config = AppConfig::from_env()?;
     let pool = db::create_pool(&config.database_url).await?;
     let agent_repo = AgentRepo::new(&pool);
     // Register (or touch) this agent so it exists in the DB. Persona from
     // $YGG_AGENT_PERSONA forms a compound key with agent_name — same cwd,
     // different role = different agent row.
-    let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
-    let agent = agent_repo.register_with_persona(agent_name, persona.as_deref()).await?;
+    let persona = std::env::var("YGG_AGENT_PERSONA")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let agent = agent_repo
+        .register_with_persona(agent_name, persona.as_deref())
+        .await?;
 
     // Fire-and-forget classifier warm-up so the first inject doesn't
     // eat a cold-start penalty. Only does anything if YGG_CLASSIFIER=on.
@@ -81,19 +88,17 @@ async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<
         .collect();
 
     // Count total nodes for this agent
-    let node_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM nodes WHERE agent_id = $1"
-    )
-    .bind(agent.agent_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap_or(0);
+    let node_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE agent_id = $1")
+        .bind(agent.agent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0);
 
     // Get most recent digest for this agent
     let last_digest = sqlx::query_as::<_, (serde_json::Value, chrono::DateTime<chrono::Utc>)>(
         r#"SELECT content, created_at FROM nodes
            WHERE agent_id = $1 AND kind = 'digest'
-           ORDER BY created_at DESC LIMIT 1"#
+           ORDER BY created_at DESC LIMIT 1"#,
     )
     .bind(agent.agent_id)
     .fetch_optional(&pool)
@@ -103,19 +108,33 @@ async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<
     .map(|(content, created_at)| {
         let age = (chrono::Utc::now() - created_at).num_seconds();
         DigestInfo {
-            summary: content.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-            turns: content.get("turn_count").and_then(|t| t.as_i64()).unwrap_or(0),
-            corrections: content.get("corrections").and_then(|c| c.as_array()).map(|a| a.len() as i64).unwrap_or(0),
-            reinforcements: content.get("reinforcements").and_then(|r| r.as_array()).map(|a| a.len() as i64).unwrap_or(0),
+            summary: content
+                .get("summary")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+            turns: content
+                .get("turn_count")
+                .and_then(|t| t.as_i64())
+                .unwrap_or(0),
+            corrections: content
+                .get("corrections")
+                .and_then(|c| c.as_array())
+                .map(|a| a.len() as i64)
+                .unwrap_or(0),
+            reinforcements: content
+                .get("reinforcements")
+                .and_then(|r| r.as_array())
+                .map(|a| a.len() as i64)
+                .unwrap_or(0),
             age_secs: age,
         }
     });
 
     // Estimate context from transcript file size.
     // JSONL has heavy JSON overhead (~10 chars per semantic token).
-    let transcript_tokens = transcript_path.and_then(|p| {
-        std::fs::metadata(p).ok().map(|m| (m.len() / 10) as i64)
-    });
+    let transcript_tokens =
+        transcript_path.and_then(|p| std::fs::metadata(p).ok().map(|m| (m.len() / 10) as i64));
 
     // Best-effort: detect current repo, surface a few ready tasks.
     let (repo_label, ready_tasks, open_count) = resolve_repo_context(&pool).await;
@@ -136,7 +155,9 @@ async fn try_with_db(agent_name: &str, transcript_path: Option<&str>) -> Result<
 }
 
 async fn resolve_repo_context(pool: &sqlx::PgPool) -> (Option<String>, Vec<Task>, i64) {
-    let Ok(cwd) = std::env::current_dir() else { return (None, vec![], 0); };
+    let Ok(cwd) = std::env::current_dir() else {
+        return (None, vec![], 0);
+    };
     let repo_repo = RepoRepo::new(pool);
 
     // Look up the repo without registering: prime should be side-effect-free
@@ -155,12 +176,18 @@ async fn resolve_repo_context(pool: &sqlx::PgPool) -> (Option<String>, Vec<Task>
         None
     };
 
-    let Some(repo) = repo_opt else { return (None, vec![], 0); };
+    let Some(repo) = repo_opt else {
+        return (None, vec![], 0);
+    };
     let task_repo = TaskRepo::new(pool);
     let ready = task_repo.ready(repo.repo_id).await.unwrap_or_default();
     let stats = task_repo.stats(Some(repo.repo_id)).await.ok();
     let open_count = stats.map(|s| s.open + s.in_progress).unwrap_or(0);
-    (Some(format!("{} ({})", repo.name, repo.task_prefix)), ready, open_count)
+    (
+        Some(format!("{} ({})", repo.name, repo.task_prefix)),
+        ready,
+        open_count,
+    )
 }
 
 fn print_rich(agent_name: &str, ctx: &PrimeContext) {
@@ -175,7 +202,11 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
     let lock_str = if ctx.locks.is_empty() {
         "none".to_string()
     } else {
-        ctx.locks.iter().map(|l| format!("`{l}`")).collect::<Vec<_>>().join(", ")
+        ctx.locks
+            .iter()
+            .map(|l| format!("`{l}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
 
     println!("<!-- ygg:prime -->");
@@ -236,7 +267,9 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
         println!("> (captures a summary node Yggdrasil will use to re-prime the next session).");
     } else if pct >= 75 {
         println!();
-        println!("> context at {pct}% — Yggdrasil digests on Stop / PreCompact automatically; no action required.");
+        println!(
+            "> context at {pct}% — Yggdrasil digests on Stop / PreCompact automatically; no action required."
+        );
     }
 
     if let Some(label) = &ctx.repo_label {
@@ -246,13 +279,20 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
             println!();
             println!("**ready tasks** (no unsatisfied blockers)");
             for t in ctx.ready_tasks.iter().take(5) {
-                let prefix = label.split_once('(')
+                let prefix = label
+                    .split_once('(')
                     .and_then(|(_, rest)| rest.strip_suffix(')'))
                     .unwrap_or("");
-                println!("  - `{}-{}`  P{} [{}]  {}", prefix, t.seq, t.priority, t.status, t.title);
+                println!(
+                    "  - `{}-{}`  P{} [{}]  {}",
+                    prefix, t.seq, t.priority, t.status, t.title
+                );
             }
             if ctx.ready_tasks.len() > 5 {
-                println!("  … and {} more (`ygg task ready`)", ctx.ready_tasks.len() - 5);
+                println!(
+                    "  … and {} more (`ygg task ready`)",
+                    ctx.ready_tasks.len() - 5
+                );
             }
         }
     }
@@ -260,14 +300,30 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
     println!();
     println!("### When to use `ygg`");
     println!();
-    println!("- **Finding work** → `ygg task ready` for unblocked tasks in this repo; `ygg task list` for everything.");
-    println!("- **Tracking work** → `ygg task create \"...\" --kind <task|bug|feature|chore|epic> --priority <0-4>` (0=critical, 4=backlog; NOT \"high\"/\"medium\"/\"low\"). `ygg task claim <ref>` to take one; `ygg task close <ref>` when done.");
-    println!("- **Persistent memory** → `ygg remember \"...\"` for durable notes the similarity retriever should surface in future sessions.");
-    println!("- **Before editing a shared resource** another agent might touch → `ygg lock acquire <key>`. Release when done.");
-    println!("- **For parallel work** that warrants its own context window → `ygg spawn --task \"...\"` instead of the native Task/Agent tool.");
-    println!("- **To steer or take over** another agent → `ygg interrupt take-over --agent <name>`.");
-    println!("- **Before assuming you're alone** → `ygg status` to see other agents' state and locks.");
-    println!("- **`[ygg memory | ...]` injections above your user prompts are real prior context** — read them.");
+    println!(
+        "- **Finding work** → `ygg task ready` for unblocked tasks in this repo; `ygg task list` for everything."
+    );
+    println!(
+        "- **Tracking work** → `ygg task create \"...\" --kind <task|bug|feature|chore|epic> --priority <0-4>` (0=critical, 4=backlog; NOT \"high\"/\"medium\"/\"low\"). `ygg task claim <ref>` to take one; `ygg task close <ref>` when done."
+    );
+    println!(
+        "- **Persistent memory** → `ygg remember \"...\"` for durable notes the similarity retriever should surface in future sessions."
+    );
+    println!(
+        "- **Before editing a shared resource** another agent might touch → `ygg lock acquire <key>`. Release when done."
+    );
+    println!(
+        "- **For parallel work** that warrants its own context window → `ygg spawn --task \"...\"` instead of the native Task/Agent tool."
+    );
+    println!(
+        "- **To steer or take over** another agent → `ygg interrupt take-over --agent <name>`."
+    );
+    println!(
+        "- **Before assuming you're alone** → `ygg status` to see other agents' state and locks."
+    );
+    println!(
+        "- **`[ygg memory | ...]` injections above your user prompts are real prior context** — read them."
+    );
     println!();
     println!("Do **not** use `bd` / beads in this project — `ygg task` replaces it.");
 }
@@ -283,8 +339,10 @@ fn print_degraded(agent_name: &str, err: &anyhow::Error) {
         Run `ygg init` if the database is not configured."
     );
     println!();
-    println!("Once the DB is reachable, `ygg prime` emits agent-coordination rules — for now, \
-        coordinate via `ygg lock acquire/release`, `ygg spawn`, `ygg status`. Do not use `bd` / beads.");
+    println!(
+        "Once the DB is reachable, `ygg prime` emits agent-coordination rules — for now, \
+        coordinate via `ygg lock acquire/release`, `ygg spawn`, `ygg status`. Do not use `bd` / beads."
+    );
 }
 
 fn pressure_bar(pct: u64) -> &'static str {
@@ -297,10 +355,16 @@ fn pressure_bar(pct: u64) -> &'static str {
 }
 
 fn format_age(secs: i64) -> String {
-    if secs < 60 { return format!("{secs}s ago"); }
+    if secs < 60 {
+        return format!("{secs}s ago");
+    }
     let mins = secs / 60;
-    if mins < 60 { return format!("{mins}m ago"); }
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
     let hours = mins / 60;
-    if hours < 24 { return format!("{hours}h ago"); }
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
     format!("{}d ago", hours / 24)
 }

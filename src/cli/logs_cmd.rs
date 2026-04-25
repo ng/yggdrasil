@@ -4,16 +4,16 @@ use sqlx::PgPool;
 use crate::models::event::{Event, EventKind, EventRepo};
 
 // ANSI colors
-const RESET:  &str = "\x1b[0m";
-const DIM:    &str = "\x1b[2m";
-const BOLD:   &str = "\x1b[1m";
-const GREEN:  &str = "\x1b[38;5;114m";
+const RESET: &str = "\x1b[0m";
+const DIM: &str = "\x1b[2m";
+const BOLD: &str = "\x1b[1m";
+const GREEN: &str = "\x1b[38;5;114m";
 const YELLOW: &str = "\x1b[38;5;221m";
-const CYAN:   &str = "\x1b[38;5;81m";
+const CYAN: &str = "\x1b[38;5;81m";
 const ORANGE: &str = "\x1b[38;5;208m";
-const RED:    &str = "\x1b[38;5;203m";
-const BLUE:   &str = "\x1b[38;5;111m";
-const GRAY:   &str = "\x1b[38;5;245m";
+const RED: &str = "\x1b[38;5;203m";
+const BLUE: &str = "\x1b[38;5;111m";
+const GRAY: &str = "\x1b[38;5;245m";
 
 pub async fn execute(
     pool: &PgPool,
@@ -28,18 +28,31 @@ pub async fn execute(
 
     let header_suffix = {
         let mut parts = Vec::new();
-        if let Some(n) = agent_name { parts.push(format!("agent={n}")); }
-        if let Some(ks) = &kinds { parts.push(format!("kind={}", ks.join(","))); }
-        if let Some(s) = cc_session_id { parts.push(format!("session={s}")); }
-        if parts.is_empty() { String::new() } else { format!("  {DIM}{}{RESET}", parts.join(" · ")) }
+        if let Some(n) = agent_name {
+            parts.push(format!("agent={n}"));
+        }
+        if let Some(ks) = &kinds {
+            parts.push(format!("kind={}", ks.join(",")));
+        }
+        if let Some(s) = cc_session_id {
+            parts.push(format!("session={s}"));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  {DIM}{}{RESET}", parts.join(" · "))
+        }
     };
     println!("{divider}");
     println!("  {BOLD}ygg event stream{RESET}{header_suffix}");
     println!("{divider}");
 
-    let mut recent = filtered_recent(pool, tail, agent_name, kinds.as_deref(), cc_session_id).await?;
+    let mut recent =
+        filtered_recent(pool, tail, agent_name, kinds.as_deref(), cc_session_id).await?;
     recent.reverse();
-    for event in &recent { print_event(event); }
+    for event in &recent {
+        print_event(event);
+    }
 
     if !follow {
         println!("{DIM}  (use --follow to stream live){RESET}");
@@ -51,7 +64,15 @@ pub async fn execute(
     let mut cursor: DateTime<Utc> = recent.last().map(|e| e.created_at).unwrap_or_else(Utc::now);
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        let new_events = filtered_since(pool, cursor, agent_name, kinds.as_deref(), cc_session_id, 50).await?;
+        let new_events = filtered_since(
+            pool,
+            cursor,
+            agent_name,
+            kinds.as_deref(),
+            cc_session_id,
+            50,
+        )
+        .await?;
         for event in &new_events {
             print_event(event);
             cursor = event.created_at;
@@ -77,10 +98,15 @@ async fn filtered_recent(
             LIMIT $4"#,
     )
     .bind(agent_name)
-    .bind(if kinds_owned.is_empty() { None } else { Some(kinds_owned.clone()) })
+    .bind(if kinds_owned.is_empty() {
+        None
+    } else {
+        Some(kinds_owned.clone())
+    })
     .bind(cc_session_id)
     .bind(tail)
-    .fetch_all(pool).await?;
+    .fetch_all(pool)
+    .await?;
     Ok(rows)
 }
 
@@ -105,10 +131,15 @@ async fn filtered_since(
     )
     .bind(since)
     .bind(agent_name)
-    .bind(if kinds_owned.is_empty() { None } else { Some(kinds_owned.clone()) })
+    .bind(if kinds_owned.is_empty() {
+        None
+    } else {
+        Some(kinds_owned.clone())
+    })
     .bind(cc_session_id)
     .bind(limit)
-    .fetch_all(pool).await?;
+    .fetch_all(pool)
+    .await?;
     Ok(rows)
 }
 
@@ -119,7 +150,10 @@ async fn filtered_since(
 /// delimited form — `time · symbol label · agent · detail` — each field
 /// stands on its own, colors segment the fields visually.
 fn print_event(event: &Event) {
-    let ts = event.created_at.with_timezone(&chrono::Local).format("%H:%M:%S");
+    let ts = event
+        .created_at
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S");
     let (color, symbol) = kind_style(&event.event_kind);
     let label = event.event_kind.label();
     let agent = truncate(&event.agent_name, 24);
@@ -134,30 +168,30 @@ const SEP: &str = "\x1b[38;5;240m·\x1b[0m";
 
 fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
     match kind {
-        EventKind::NodeWritten       => (GREEN,  "●"),
-        EventKind::LockAcquired      => (YELLOW, "⚿"),
-        EventKind::LockReleased      => (DIM,    "○"),
-        EventKind::DigestWritten     => (CYAN,   "◈"),
-        EventKind::SimilarityHit     => (BLUE,   "≈"),
-        EventKind::CorrectionDetected => (RED,   "✗"),
-        EventKind::HookFired         => (ORANGE, "▸"),
-        EventKind::EmbeddingCall     => (CYAN,   "⚡"),
-        EventKind::TaskCreated       => (GREEN,  "✚"),
+        EventKind::NodeWritten => (GREEN, "●"),
+        EventKind::LockAcquired => (YELLOW, "⚿"),
+        EventKind::LockReleased => (DIM, "○"),
+        EventKind::DigestWritten => (CYAN, "◈"),
+        EventKind::SimilarityHit => (BLUE, "≈"),
+        EventKind::CorrectionDetected => (RED, "✗"),
+        EventKind::HookFired => (ORANGE, "▸"),
+        EventKind::EmbeddingCall => (CYAN, "⚡"),
+        EventKind::TaskCreated => (GREEN, "✚"),
         EventKind::TaskStatusChanged => (YELLOW, "◆"),
-        EventKind::Remembered        => (BLUE,   "♦"),
-        EventKind::EmbeddingCacheHit => (GREEN,  "⚡"),
-        EventKind::ClassifierDecision => (CYAN,  "⚖"),
-        EventKind::ScoringDecision  => (GRAY,  "·"),
-        EventKind::RedactionApplied => (RED,   "✂"),
-        EventKind::HitReferenced    => (GREEN, "✓"),
+        EventKind::Remembered => (BLUE, "♦"),
+        EventKind::EmbeddingCacheHit => (GREEN, "⚡"),
+        EventKind::ClassifierDecision => (CYAN, "⚖"),
+        EventKind::ScoringDecision => (GRAY, "·"),
+        EventKind::RedactionApplied => (RED, "✂"),
+        EventKind::HitReferenced => (GREEN, "✓"),
         EventKind::AgentStateChanged => (BLUE, "↪"),
-        EventKind::Message           => (CYAN,  "✉"),
-        EventKind::RunScheduled      => (DIM,    "□"),
-        EventKind::RunClaimed        => (BLUE,   "▶"),
-        EventKind::RunTerminal       => (GREEN,  "■"),
-        EventKind::RunRetry          => (YELLOW, "↻"),
-        EventKind::SchedulerTick     => (DIM,    "·"),
-        EventKind::SchedulerError    => (RED,    "!"),
+        EventKind::Message => (CYAN, "✉"),
+        EventKind::RunScheduled => (DIM, "□"),
+        EventKind::RunClaimed => (BLUE, "▶"),
+        EventKind::RunTerminal => (GREEN, "■"),
+        EventKind::RunRetry => (YELLOW, "↻"),
+        EventKind::SchedulerTick => (DIM, "·"),
+        EventKind::SchedulerError => (RED, "!"),
     }
 }
 
@@ -180,44 +214,57 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
                 "system" => "system",
                 _ => kind,
             };
-            format!("{CYAN}{kind_label:<11}{RESET} {DIM}~{tok:>3}t{RESET}  {}", truncate(snip, 50))
+            format!(
+                "{CYAN}{kind_label:<11}{RESET} {DIM}~{tok:>3}t{RESET}  {}",
+                truncate(snip, 50)
+            )
         }
-        EventKind::LockAcquired | EventKind::LockReleased => {
-            p["resource"].as_str()
-                .map(|r| truncate(r, 60).to_string())
-                .unwrap_or_default()
-        }
+        EventKind::LockAcquired | EventKind::LockReleased => p["resource"]
+            .as_str()
+            .map(|r| truncate(r, 60).to_string())
+            .unwrap_or_default(),
         EventKind::DigestWritten => {
             let turns = p["turns"].as_i64().unwrap_or(0);
-            let corr  = p["corrections"].as_i64().unwrap_or(0);
+            let corr = p["corrections"].as_i64().unwrap_or(0);
             let reinf = p["reinforcements"].as_i64().unwrap_or(0);
             format!(
                 "{DIM}{turns:>4} turns{RESET}  {RED}{corr:>2} corrections{RESET}  {GREEN}{reinf:>2} reinforcements{RESET}"
             )
         }
         EventKind::SimilarityHit => {
-            let score = p["total_score"].as_f64().unwrap_or_else(|| p["similarity"].as_f64().unwrap_or(0.0));
-            let src  = p["source_agent"].as_str().unwrap_or("?");
+            let score = p["total_score"]
+                .as_f64()
+                .unwrap_or_else(|| p["similarity"].as_f64().unwrap_or(0.0));
+            let src = p["source_agent"].as_str().unwrap_or("?");
             let snip = p["snippet"].as_str().unwrap_or("");
-            let label = if score >= 0.6 { format!("{GREEN}strong{RESET}") }
-                        else if score >= 0.3 { format!("{BLUE}recall{RESET}") }
-                        else { format!("{DIM}faint{RESET}") };
-            format!("{label} {DIM}{score:.2} from {src}{RESET}  {}", truncate(snip, 40))
+            let label = if score >= 0.6 {
+                format!("{GREEN}strong{RESET}")
+            } else if score >= 0.3 {
+                format!("{BLUE}recall{RESET}")
+            } else {
+                format!("{DIM}faint{RESET}")
+            };
+            format!(
+                "{label} {DIM}{score:.2} from {src}{RESET}  {}",
+                truncate(snip, 40)
+            )
         }
         EventKind::CorrectionDetected => {
-            let fb   = p["feedback"].as_str().unwrap_or("");
+            let fb = p["feedback"].as_str().unwrap_or("");
             let sent = p["sentiment"].as_str().unwrap_or("");
             format!("{RED}{sent}{RESET}  {}", truncate(fb, 55))
         }
-        EventKind::HookFired => {
-            p["hook"].as_str().unwrap_or("").to_string()
-        }
+        EventKind::HookFired => p["hook"].as_str().unwrap_or("").to_string(),
         EventKind::EmbeddingCall => {
             let model = p["model"].as_str().unwrap_or("?");
-            let ms    = p["latency_ms"].as_u64().unwrap_or(0);
+            let ms = p["latency_ms"].as_u64().unwrap_or(0);
             let chars = p["input_chars"].as_u64().unwrap_or(0);
-            let ok    = p["success"].as_bool().unwrap_or(false);
-            let status = if ok { format!("{GREEN}ok{RESET}") } else { format!("{RED}fail{RESET}") };
+            let ok = p["success"].as_bool().unwrap_or(false);
+            let status = if ok {
+                format!("{GREEN}ok{RESET}")
+            } else {
+                format!("{RED}fail{RESET}")
+            };
             format!("{CYAN}{model:<11}{RESET} {chars:>4} chars  {ms:>4}ms  {status}")
         }
         EventKind::TaskCreated => {
@@ -225,26 +272,36 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let title = p["title"].as_str().unwrap_or("");
             let kind = p["kind"].as_str().unwrap_or("task");
             let pri = p["priority"].as_i64().unwrap_or(2);
-            format!("{GREEN}{rref}{RESET}  {DIM}P{pri} {kind}{RESET}  {}", truncate(title, 50))
+            format!(
+                "{GREEN}{rref}{RESET}  {DIM}P{pri} {kind}{RESET}  {}",
+                truncate(title, 50)
+            )
         }
         EventKind::TaskStatusChanged => {
             let rref = p["ref"].as_str().unwrap_or("?");
             let to = p["to"].as_str().unwrap_or("?");
             let reason = p["reason"].as_str();
-            let extra = reason.map(|r| format!("  {DIM}{}{RESET}", truncate(r, 40))).unwrap_or_default();
+            let extra = reason
+                .map(|r| format!("  {DIM}{}{RESET}", truncate(r, 40)))
+                .unwrap_or_default();
             format!("{YELLOW}{rref}{RESET} → {to}{extra}")
         }
         EventKind::Remembered => {
             let tok = p["tokens"].as_i64().unwrap_or(0);
             let snip = p["snippet"].as_str().unwrap_or("");
-            format!("{CYAN}directive{RESET}   {DIM}~{tok}t{RESET}  {}", truncate(snip, 50))
+            format!(
+                "{CYAN}directive{RESET}   {DIM}~{tok}t{RESET}  {}",
+                truncate(snip, 50)
+            )
         }
         EventKind::EmbeddingCacheHit => {
             let model = p["model"].as_str().unwrap_or("?");
-            let ms    = p["latency_ms"].as_u64().unwrap_or(0);
+            let ms = p["latency_ms"].as_u64().unwrap_or(0);
             let chars = p["input_chars"].as_u64().unwrap_or(0);
             let purpose = p["purpose"].as_str().unwrap_or("");
-            format!("{GREEN}{model:<11}{RESET} {chars:>4} chars  {ms:>4}ms  {DIM}{purpose} (cached){RESET}")
+            format!(
+                "{GREEN}{model:<11}{RESET} {chars:>4} chars  {ms:>4}ms  {DIM}{purpose} (cached){RESET}"
+            )
         }
         EventKind::ClassifierDecision => {
             let score = p["score"].as_f64().unwrap_or(0.0);
@@ -252,10 +309,17 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let bypassed = p["bypassed"].as_bool().unwrap_or(false);
             let src = p["source_agent"].as_str().unwrap_or("?");
             let snip = p["snippet"].as_str().unwrap_or("");
-            let verdict = if bypassed { format!("{DIM}bypass{RESET}") }
-                          else if kept { format!("{GREEN}keep{RESET}") }
-                          else { format!("{RED}drop{RESET}") };
-            format!("{verdict} {CYAN}score={score:.2}{RESET} {DIM}from {src}{RESET}  {}", truncate(snip, 40))
+            let verdict = if bypassed {
+                format!("{DIM}bypass{RESET}")
+            } else if kept {
+                format!("{GREEN}keep{RESET}")
+            } else {
+                format!("{RED}drop{RESET}")
+            };
+            format!(
+                "{verdict} {CYAN}score={score:.2}{RESET} {DIM}from {src}{RESET}  {}",
+                truncate(snip, 40)
+            )
         }
         EventKind::ScoringDecision => {
             let kept = p["kept"].as_bool().unwrap_or(false);
@@ -263,15 +327,32 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let total = p["components"]["total"].as_f64().unwrap_or(0.0);
             let snip = p["snippet"].as_str().unwrap_or("");
             let src = p["source_agent"].as_str().unwrap_or("?");
-            let verdict = if kept { format!("{GREEN}keep{RESET}") } else { format!("{RED}drop{RESET}") };
-            let extra = if !reason.is_empty() && !kept { format!(" {DIM}({reason}){RESET}") } else { String::new() };
-            format!("{verdict}{extra} {DIM}{total:.2} from {src}{RESET}  {}", truncate(snip, 35))
+            let verdict = if kept {
+                format!("{GREEN}keep{RESET}")
+            } else {
+                format!("{RED}drop{RESET}")
+            };
+            let extra = if !reason.is_empty() && !kept {
+                format!(" {DIM}({reason}){RESET}")
+            } else {
+                String::new()
+            };
+            format!(
+                "{verdict}{extra} {DIM}{total:.2} from {src}{RESET}  {}",
+                truncate(snip, 35)
+            )
         }
         EventKind::RedactionApplied => {
             let total = p["total"].as_i64().unwrap_or(0);
             let node_kind = p["node_kind"].as_str().unwrap_or("");
-            let kinds = p["kinds"].as_object()
-                .map(|o| o.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" "))
+            let kinds = p["kinds"]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| format!("{k}:{v}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
                 .unwrap_or_default();
             format!("{RED}{total} redacted{RESET} {DIM}in {node_kind} · {kinds}{RESET}")
         }
@@ -284,7 +365,9 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             let from = p["from"].as_str().unwrap_or("?");
             let to = p["to"].as_str().unwrap_or("?");
             let tool = p["tool"].as_str();
-            let suffix = tool.map(|t| format!(" {DIM}({t}){RESET}")).unwrap_or_default();
+            let suffix = tool
+                .map(|t| format!(" {DIM}({t}){RESET}"))
+                .unwrap_or_default();
             format!("{BLUE}{from}{RESET} → {to}{suffix}")
         }
         EventKind::Message => {
@@ -340,7 +423,9 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
 /// multi-byte glyphs (e.g. snippets with ─ box-drawing chars from our own
 /// log output that made its way into the DAG as a node).
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { return s; }
+    if s.len() <= max {
+        return s;
+    }
     // Walk backwards from `max` to the nearest char boundary.
     let mut end = max.min(s.len());
     while end > 0 && !s.is_char_boundary(end) {

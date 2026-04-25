@@ -11,15 +11,20 @@ use crate::models::task::{Task, TaskKind, TaskStatus};
 /// callers had before the extraction.
 pub fn run_state_glyph(t: &Task) -> (&'static str, Color, bool /* bold */) {
     match t.status {
-        TaskStatus::Open       => ("◯", Color::DarkGray, false),
-        TaskStatus::InProgress => ("▶", Color::Green,    true),
-        TaskStatus::Blocked    => ("⏸", Color::Red,      false),
-        TaskStatus::Closed     => {
-            let failed = t.close_reason.as_deref()
+        TaskStatus::Open => ("◯", Color::DarkGray, false),
+        TaskStatus::InProgress => ("▶", Color::Green, true),
+        TaskStatus::Blocked => ("⏸", Color::Red, false),
+        TaskStatus::Closed => {
+            let failed = t
+                .close_reason
+                .as_deref()
                 .map(|r| r.to_lowercase().contains("fail"))
                 .unwrap_or(false);
-            if failed { ("✗", Color::Red, false) }
-            else { ("✓", Color::DarkGray, false) }
+            if failed {
+                ("✗", Color::Red, false)
+            } else {
+                ("✓", Color::DarkGray, false)
+            }
         }
     }
 }
@@ -27,11 +32,11 @@ pub fn run_state_glyph(t: &Task) -> (&'static str, Color, bool /* bold */) {
 /// (glyph, color) for a task's kind.
 pub fn kind_glyph(k: &TaskKind) -> (&'static str, Color) {
     match k {
-        TaskKind::Epic    => ("◉", Color::Magenta),
+        TaskKind::Epic => ("◉", Color::Magenta),
         TaskKind::Feature => ("✚", Color::Cyan),
-        TaskKind::Bug     => ("🐞", Color::Red),
-        TaskKind::Chore   => ("·", Color::DarkGray),
-        TaskKind::Task    => ("○", Color::White),
+        TaskKind::Bug => ("🐞", Color::Red),
+        TaskKind::Chore => ("·", Color::DarkGray),
+        TaskKind::Task => ("○", Color::White),
     }
 }
 
@@ -47,7 +52,9 @@ pub fn priority_style(p: i16) -> Style {
 /// Title style: green+bold for in-progress so running tasks POP.
 pub fn title_style(status: &TaskStatus) -> Style {
     if matches!(status, TaskStatus::InProgress) {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     }
@@ -64,9 +71,13 @@ pub fn task_row_cells<'a>(t: &'a Task, prefix: &'a str) -> Vec<Cell<'a>> {
         Style::default().fg(run_color)
     };
     let age_secs = (chrono::Utc::now() - t.updated_at).num_seconds().max(0);
-    let age_style = if age_secs >= 7 * 86400 { Style::default().fg(Color::Yellow) }
-                    else if age_secs >= 86400 { Style::default().fg(Color::DarkGray) }
-                    else { Style::default().fg(Color::Gray) };
+    let age_style = if age_secs >= 7 * 86400 {
+        Style::default().fg(Color::Yellow)
+    } else if age_secs >= 86400 {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
     vec![
         Cell::from(run).style(run_style),
         Cell::from(format!("{kg} {:?}", t.kind).to_lowercase()).style(Style::default().fg(kc)),
@@ -78,9 +89,15 @@ pub fn task_row_cells<'a>(t: &'a Task, prefix: &'a str) -> Vec<Cell<'a>> {
 }
 
 fn humanize_age(secs: i64) -> String {
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else if secs < 7 * 86400 { format!("{}d", secs / 86400) }
-    else { format!("{}w", secs / (7 * 86400)) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else if secs < 7 * 86400 {
+        format!("{}d", secs / 86400)
+    } else {
+        format!("{}w", secs / (7 * 86400))
+    }
 }

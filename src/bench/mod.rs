@@ -45,7 +45,9 @@ impl std::str::FromStr for Baseline {
             "vanilla-single" | "single" => Ok(Self::VanillaSingle),
             "vanilla-tmux" | "tmux" => Ok(Self::VanillaTmux),
             "ygg" | "ygg-N" => Ok(Self::Ygg),
-            _ => Err(format!("unknown baseline: {s} (try vanilla-single|vanilla-tmux|ygg)")),
+            _ => Err(format!(
+                "unknown baseline: {s} (try vanilla-single|vanilla-tmux|ygg)"
+            )),
         }
     }
 }
@@ -77,7 +79,9 @@ impl std::str::FromStr for Tier {
             "smoke" => Ok(Self::Smoke),
             "regression" | "reg" => Ok(Self::Regression),
             "overnight" => Ok(Self::Overnight),
-            _ => Err(format!("unknown tier: {s} (try smoke|regression|overnight)")),
+            _ => Err(format!(
+                "unknown tier: {s} (try smoke|regression|overnight)"
+            )),
         }
     }
 }
@@ -253,10 +257,14 @@ pub fn harness_sha() -> String {
         .args(["rev-parse", "--short=10", "HEAD"])
         .output()
         .ok()
-        .and_then(|o| if o.status.success() {
-            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-        } else {
-            None
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string())

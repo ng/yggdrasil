@@ -34,7 +34,9 @@ pub async fn send(
 ) -> Result<(), anyhow::Error> {
     let repo = AgentRepo::new(pool);
     let from = repo.get_by_name(from_agent_name).await?;
-    let to = repo.get_by_name(to_agent_name).await?
+    let to = repo
+        .get_by_name(to_agent_name)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("recipient agent '{to_agent_name}' not found"))?;
 
     let from_id = from.as_ref().map(|a| a.agent_id);
@@ -75,7 +77,9 @@ pub async fn inbox(
     all: bool,
 ) -> Result<Vec<Message>, anyhow::Error> {
     let repo = AgentRepo::new(pool);
-    let agent = repo.get_by_name(agent_name).await?
+    let agent = repo
+        .get_by_name(agent_name)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("agent '{agent_name}' not found"))?;
 
     // Read cursor inline — AgentRepo doesn't expose it and we shouldn't
@@ -83,38 +87,40 @@ pub async fn inbox(
     let cursor: Option<DateTime<Utc>> = if all {
         None
     } else {
-        sqlx::query_scalar(
-            "SELECT message_cursor FROM agents WHERE agent_id = $1"
-        )
-        .bind(agent.agent_id)
-        .fetch_optional(pool)
-        .await?
-        .flatten()
+        sqlx::query_scalar("SELECT message_cursor FROM agents WHERE agent_id = $1")
+            .bind(agent.agent_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten()
     };
 
-    let rows: Vec<Message> = sqlx::query_as::<_, (Uuid, Option<Uuid>, String, serde_json::Value, DateTime<Utc>)>(
-        r#"SELECT id, agent_id, agent_name, payload, created_at
+    let rows: Vec<Message> =
+        sqlx::query_as::<_, (Uuid, Option<Uuid>, String, serde_json::Value, DateTime<Utc>)>(
+            r#"SELECT id, agent_id, agent_name, payload, created_at
              FROM events
             WHERE event_kind = 'message'
               AND recipient_agent_id = $1
               AND ($2::timestamptz IS NULL OR created_at > $2)
             ORDER BY created_at ASC
             LIMIT 200"#,
-    )
-    .bind(agent.agent_id)
-    .bind(cursor)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|(id, aid, aname, payload, ts)| Message {
-        id,
-        from_agent_id: aid,
-        from_agent_name: aname,
-        body: payload.get("body").and_then(|v| v.as_str())
-            .unwrap_or("").to_string(),
-        created_at: ts,
-    })
-    .collect();
+        )
+        .bind(agent.agent_id)
+        .bind(cursor)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(id, aid, aname, payload, ts)| Message {
+            id,
+            from_agent_id: aid,
+            from_agent_name: aname,
+            body: payload
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            created_at: ts,
+        })
+        .collect();
 
     Ok(rows)
 }
@@ -123,7 +129,9 @@ pub async fn inbox(
 /// been injected so the same messages don't resurface next turn.
 pub async fn mark_read(pool: &PgPool, agent_name: &str) -> Result<(), anyhow::Error> {
     let repo = AgentRepo::new(pool);
-    let agent = repo.get_by_name(agent_name).await?
+    let agent = repo
+        .get_by_name(agent_name)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("agent '{agent_name}' not found"))?;
     sqlx::query("UPDATE agents SET message_cursor = now() WHERE agent_id = $1")
         .bind(agent.agent_id)
@@ -141,7 +149,11 @@ pub fn print_inbox(msgs: &[Message]) {
     }
     for m in msgs {
         let ts = m.created_at.format("%Y-%m-%d %H:%M");
-        let from = if m.from_agent_name.is_empty() { "—" } else { &m.from_agent_name };
+        let from = if m.from_agent_name.is_empty() {
+            "—"
+        } else {
+            &m.from_agent_name
+        };
         println!("[ygg msg | from {from} | {ts}] {}", m.body);
     }
 }
@@ -152,10 +164,14 @@ fn push_via_tmux(to_agent: &str, body: &str) -> Result<(), anyhow::Error> {
     let out = Command::new("tmux")
         .args(["list-sessions", "-F", "#{session_name}"])
         .output()?;
-    if !out.status.success() { anyhow::bail!("tmux list-sessions failed"); }
+    if !out.status.success() {
+        anyhow::bail!("tmux list-sessions failed");
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     let prefix = format!("ygg-{to_agent}");
-    let target = text.lines().find(|l| l.starts_with(&prefix))
+    let target = text
+        .lines()
+        .find(|l| l.starts_with(&prefix))
         .ok_or_else(|| anyhow::anyhow!("no tmux session for agent '{to_agent}'"))?;
     // Deliver as a single line of input — works for both input-mode and
     // pane-at-prompt. Caller chose --push knowing it might interrupt.

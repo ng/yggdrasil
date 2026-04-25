@@ -71,7 +71,11 @@ impl Governor {
         directives.retain(|d| d.salience >= self.config.floor);
 
         // Sort by salience descending
-        directives.sort_by(|a, b| b.salience.partial_cmp(&a.salience).unwrap_or(std::cmp::Ordering::Equal));
+        directives.sort_by(|a, b| {
+            b.salience
+                .partial_cmp(&a.salience)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Cap at max_concurrent
         directives.truncate(self.config.max_concurrent);
@@ -122,9 +126,30 @@ mod tests {
         });
 
         let directives = vec![
-            ScoredDirective { node_id: Uuid::new_v4(), content: "a".into(), token_count: 10, similarity: 0.9, token_distance: 0, salience: 0.9 },
-            ScoredDirective { node_id: Uuid::new_v4(), content: "b".into(), token_count: 10, similarity: 0.8, token_distance: 0, salience: 0.8 },
-            ScoredDirective { node_id: Uuid::new_v4(), content: "c".into(), token_count: 10, similarity: 0.7, token_distance: 0, salience: 0.7 },
+            ScoredDirective {
+                node_id: Uuid::new_v4(),
+                content: "a".into(),
+                token_count: 10,
+                similarity: 0.9,
+                token_distance: 0,
+                salience: 0.9,
+            },
+            ScoredDirective {
+                node_id: Uuid::new_v4(),
+                content: "b".into(),
+                token_count: 10,
+                similarity: 0.8,
+                token_distance: 0,
+                salience: 0.8,
+            },
+            ScoredDirective {
+                node_id: Uuid::new_v4(),
+                content: "c".into(),
+                token_count: 10,
+                similarity: 0.7,
+                token_distance: 0,
+                salience: 0.7,
+            },
         ];
 
         let result = gov.govern(directives);
@@ -132,9 +157,14 @@ mod tests {
         assert!(result[0].salience > result[1].salience); // sorted
 
         // Second call — already-seen directives are deduped
-        let more = vec![
-            ScoredDirective { node_id: result[0].node_id, content: "a".into(), token_count: 10, similarity: 0.9, token_distance: 0, salience: 0.9 },
-        ];
+        let more = vec![ScoredDirective {
+            node_id: result[0].node_id,
+            content: "a".into(),
+            token_count: 10,
+            similarity: 0.9,
+            token_distance: 0,
+            salience: 0.9,
+        }];
         let result2 = gov.govern(more);
         assert_eq!(result2.len(), 0); // deduped
     }
