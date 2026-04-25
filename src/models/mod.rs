@@ -6,4 +6,5 @@ pub mod node;
 pub mod repo;
 pub mod session;
 pub mod task;
+pub mod task_run;
 pub mod worker;

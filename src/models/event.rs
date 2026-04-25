@@ -24,6 +24,12 @@ pub enum EventKind {
     HitReferenced,
     AgentStateChanged,
     Message,
+    RunScheduled,
+    RunClaimed,
+    RunTerminal,
+    RunRetry,
+    SchedulerTick,
+    SchedulerError,
 }
 
 impl EventKind {
@@ -47,6 +53,12 @@ impl EventKind {
             Self::HitReferenced => "referenced",
             Self::AgentStateChanged => "agent_state",
             Self::Message => "message",
+            Self::RunScheduled => "run_scheduled",
+            Self::RunClaimed => "run_claimed",
+            Self::RunTerminal => "run_terminal",
+            Self::RunRetry => "run_retry",
+            Self::SchedulerTick => "scheduler_tick",
+            Self::SchedulerError => "scheduler_error",
         }
     }
 }

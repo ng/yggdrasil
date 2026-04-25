@@ -152,6 +152,12 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::HitReferenced    => (GREEN, "✓"),
         EventKind::AgentStateChanged => (BLUE, "↪"),
         EventKind::Message           => (CYAN,  "✉"),
+        EventKind::RunScheduled      => (DIM,    "□"),
+        EventKind::RunClaimed        => (BLUE,   "▶"),
+        EventKind::RunTerminal       => (GREEN,  "■"),
+        EventKind::RunRetry          => (YELLOW, "↻"),
+        EventKind::SchedulerTick     => (DIM,    "·"),
+        EventKind::SchedulerError    => (RED,    "!"),
     }
 }
 
@@ -284,6 +290,48 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
         EventKind::Message => {
             let body = p["body"].as_str().unwrap_or("");
             format!("{CYAN}msg{RESET}  {}", truncate(body, 60))
+        }
+        EventKind::RunScheduled => {
+            let task = p["task_ref"].as_str().unwrap_or("?");
+            let attempt = p["attempt"].as_i64().unwrap_or(1);
+            format!("{DIM}{task} attempt={attempt}{RESET}")
+        }
+        EventKind::RunClaimed => {
+            let task = p["task_ref"].as_str().unwrap_or("?");
+            let agent = p["agent"].as_str().unwrap_or("?");
+            format!("{BLUE}{task}{RESET} → {agent}")
+        }
+        EventKind::RunTerminal => {
+            let task = p["task_ref"].as_str().unwrap_or("?");
+            let state = p["state"].as_str().unwrap_or("?");
+            let reason = p["reason"].as_str();
+            let color = match state {
+                "succeeded" => GREEN,
+                "failed" | "crashed" | "poison" => RED,
+                "cancelled" => DIM,
+                _ => GRAY,
+            };
+            let reason_extra = reason
+                .filter(|r| *r != "ok")
+                .map(|r| format!("  {DIM}{}{RESET}", r))
+                .unwrap_or_default();
+            format!("{color}{task}{RESET} {state}{reason_extra}")
+        }
+        EventKind::RunRetry => {
+            let task = p["task_ref"].as_str().unwrap_or("?");
+            let attempt = p["attempt"].as_i64().unwrap_or(0);
+            let backoff_ms = p["backoff_ms"].as_i64().unwrap_or(0);
+            format!("{YELLOW}{task}{RESET} attempt {attempt} after {DIM}{backoff_ms}ms{RESET}")
+        }
+        EventKind::SchedulerTick => {
+            let dispatched = p["dispatched"].as_i64().unwrap_or(0);
+            let finalized = p["finalized"].as_i64().unwrap_or(0);
+            let retried = p["retried"].as_i64().unwrap_or(0);
+            format!("{DIM}dispatched={dispatched} finalized={finalized} retried={retried}{RESET}")
+        }
+        EventKind::SchedulerError => {
+            let msg = p["error"].as_str().unwrap_or("");
+            format!("{RED}{}{RESET}", truncate(msg, 70))
         }
     }
 }

@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod blob;
 pub mod classifier;
 pub mod cli;
 pub mod config;
