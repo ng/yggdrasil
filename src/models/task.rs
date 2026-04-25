@@ -162,11 +162,16 @@ impl<'a> TaskRepo<'a> {
         let mut tx = self.pool.begin().await?;
         let seq = self.next_seq(repo_id, &mut tx).await?;
 
+        // ADR 0016 / yggdrasil-105: new tasks of kind task|bug|feature|chore
+        // default to runnable=TRUE so the scheduler picks them up. Epics stay
+        // manual unless they opt in via plan_strategy='llm' (set later).
+        let runnable_default = !matches!(spec.kind, TaskKind::Epic);
+
         let task: Task = sqlx::query_as::<_, Task>(
             r#"INSERT INTO tasks
                (repo_id, seq, title, description, acceptance, design, notes,
-                kind, priority, created_by, assignee, external_ref)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                kind, priority, created_by, assignee, external_ref, runnable)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                RETURNING task_id, repo_id, seq, title, description, acceptance, design, notes,
                          kind, status, priority, created_by, assignee, human_flag,
                          created_at, updated_at, closed_at, close_reason, relevance, external_ref"#,
@@ -183,6 +188,7 @@ impl<'a> TaskRepo<'a> {
         .bind(created_by)
         .bind(spec.assignee)
         .bind(spec.external_ref)
+        .bind(runnable_default)
         .fetch_one(&mut *tx)
         .await?;
 

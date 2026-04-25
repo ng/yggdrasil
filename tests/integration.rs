@@ -867,6 +867,48 @@ async fn test_bench_diff_refuses_overlapping_cis() {
 }
 
 #[tokio::test]
+async fn test_task_create_runnable_default_by_kind() {
+    // yggdrasil-105: new tasks of kind task|bug|feature|chore are runnable by
+    // default; epics stay manual until they opt in via plan_strategy='llm'.
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'runnable-default'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'runnable-default', 'runnable-default') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+
+    use ygg::models::task::{TaskCreate, TaskKind, TaskRepo};
+    let task_repo = TaskRepo::new(&pool);
+
+    for kind in [TaskKind::Task, TaskKind::Bug, TaskKind::Feature, TaskKind::Chore] {
+        let kind_str = format!("{kind}");
+        let task = task_repo.create(repo.0, None, TaskCreate {
+            title: &format!("auto-runnable {kind_str}"),
+            kind: kind.clone(), priority: 2, ..Default::default()
+        }).await.unwrap();
+        let runnable: bool = sqlx::query_scalar(
+            "SELECT runnable FROM tasks WHERE task_id = $1"
+        ).bind(task.task_id).fetch_one(&pool).await.unwrap();
+        assert!(runnable, "kind={kind_str} should be runnable=TRUE by default");
+    }
+
+    // Epics: not runnable by default.
+    let epic = task_repo.create(repo.0, None, TaskCreate {
+        title: "manual epic", kind: TaskKind::Epic, priority: 1,
+        ..Default::default()
+    }).await.unwrap();
+    let runnable: bool = sqlx::query_scalar(
+        "SELECT runnable FROM tasks WHERE task_id = $1"
+    ).bind(epic.task_id).fetch_one(&pool).await.unwrap();
+    assert!(!runnable, "epics must stay manual unless they opt in to plan_strategy");
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_bench_runner_contention_with_fake_claude() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
