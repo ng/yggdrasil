@@ -194,7 +194,7 @@ Deeper topics live in `docs/`:
 
 ---
 
-[^1]: Project URLs are best-effort; the canonical beads repository per `.beads/README.md` is `github.com/steveyegge/beads`. Earlier drafts of this README pointed elsewhere; corrected here.
+[^1]: Project URLs are best-effort; the canonical beads repository is `github.com/steveyegge/beads`. Earlier drafts of this README pointed elsewhere; corrected here.
 
 ## License
 
