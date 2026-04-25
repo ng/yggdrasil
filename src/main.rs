@@ -457,6 +457,8 @@ enum SchedulerAction {
     Status,
     /// Print what `tick` would do without writing.
     DryRun,
+    /// Synthesize task_runs rows for tasks that predate ADR 0016. Idempotent.
+    Backfill,
 }
 
 #[derive(Subcommand)]
@@ -1442,6 +1444,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 SchedulerAction::DryRun => {
                     ygg::cli::scheduler_cmd::dry_run(&pool).await?;
+                }
+                SchedulerAction::Backfill => {
+                    let stats = ygg::scheduler::backfill(&pool).await?;
+                    println!("{}", serde_json::to_string_pretty(&stats)?);
                 }
             }
         }

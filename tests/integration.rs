@@ -512,3 +512,157 @@ async fn test_scheduler_advisory_lock_singleton() {
     let g3 = ygg::scheduler::acquire_advisory_lock(&pool).await;
     assert!(g3.is_ok(), "after dropping first guard, third acquire must succeed");
 }
+
+#[tokio::test]
+async fn test_scheduler_reaps_expired_heartbeat() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-reap'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-reap', 'sched-reap') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'reap', 'in_progress') RETURNING task_id"
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    // running run with heartbeat 10 minutes ago and ttl 60s.
+    sqlx::query(
+        r#"INSERT INTO task_runs (task_id, attempt, idempotency_key, state, heartbeat_at, heartbeat_ttl_s, started_at)
+           VALUES ($1, 1, 'run:reap:1', 'running', now() - interval '10 minutes', 60, now() - interval '11 minutes')"#,
+    ).bind(task.0).execute(&pool).await.unwrap();
+
+    let reaped = ygg::scheduler::reap_expired_heartbeats(&pool).await.unwrap();
+    assert_eq!(reaped, 1);
+
+    let state: String = sqlx::query_scalar(
+        "SELECT state::text FROM task_runs WHERE task_id = $1"
+    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, "crashed");
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_enforces_deadline() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-dl'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-dl', 'sched-dl') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'dl', 'in_progress') RETURNING task_id"
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO task_runs (task_id, attempt, idempotency_key, state, deadline_at, started_at)
+           VALUES ($1, 1, 'run:dl:1', 'running', now() - interval '1 minute', now() - interval '5 minutes')"#,
+    ).bind(task.0).execute(&pool).await.unwrap();
+
+    let cancelled = ygg::scheduler::enforce_deadlines(&pool).await.unwrap();
+    assert_eq!(cancelled, 1);
+    let (state, reason): (String, String) = sqlx::query_as(
+        "SELECT state::text, reason::text FROM task_runs WHERE task_id = $1"
+    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, "cancelled");
+    assert_eq!(reason, "timeout");
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_schedules_retry_with_previous_attempt() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-retry'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-retry', 'sched-retry') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO tasks (repo_id, seq, title, status, runnable, max_attempts) VALUES ($1, 1, 'retry', 'in_progress', TRUE, 3) RETURNING task_id"
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    // Failed attempt 1, ended 10 minutes ago. Backoff is exp 60s base; well past.
+    sqlx::query(
+        r#"INSERT INTO task_runs
+           (task_id, attempt, idempotency_key, state, reason,
+            ended_at, error, max_attempts)
+           VALUES ($1, 1, 'run:retry:1', 'failed', 'agent_error',
+                   now() - interval '10 minutes',
+                   '{"reason_code":"agent_error","message":"tests red"}'::jsonb, 3)"#,
+    ).bind(task.0).execute(&pool).await.unwrap();
+
+    let cfg = ygg::scheduler::SchedulerConfig {
+        tick_interval: std::time::Duration::from_secs(1),
+        max_concurrent: 4,
+        default_max_attempts: 3,
+        default_heartbeat_ttl_s: 300,
+    };
+    let n = ygg::scheduler::schedule_retries(&pool, &cfg).await.unwrap();
+    assert_eq!(n, 1);
+
+    // Original is now in 'retrying'; new attempt 2 exists.
+    let states: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT attempt, state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt"
+    ).bind(task.0).fetch_all(&pool).await.unwrap();
+    assert_eq!(states.len(), 2);
+    assert_eq!(states[0].1, "retrying");
+    assert_eq!(states[1].1, "ready");
+
+    // Previous-attempt thread-through.
+    let new_input: serde_json::Value = sqlx::query_scalar(
+        "SELECT input FROM task_runs WHERE task_id = $1 AND attempt = 2"
+    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    let prev = new_input.get("previous_attempt").unwrap();
+    assert_eq!(prev["attempt"], 1);
+    assert_eq!(prev["error"]["reason_code"], "agent_error");
+
+    // Idempotency: second call should not double-retry (successor already exists).
+    let n2 = ygg::scheduler::schedule_retries(&pool, &cfg).await.unwrap();
+    assert_eq!(n2, 0);
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_backfill_idempotent() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-bf'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-bf', 'sched-bf') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'bf-ip', 'in_progress'), ($1, 2, 'bf-cl', 'closed')"
+    ).bind(repo.0).execute(&pool).await.unwrap();
+
+    let s1 = ygg::scheduler::backfill(&pool).await.unwrap();
+    assert!(s1.in_progress_runs_created >= 1);
+    assert!(s1.closed_runs_created >= 1);
+
+    let s2 = ygg::scheduler::backfill(&pool).await.unwrap();
+    assert_eq!(s2.in_progress_runs_created, 0);
+    assert_eq!(s2.closed_runs_created, 0);
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}

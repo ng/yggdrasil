@@ -54,14 +54,20 @@ pub struct TickStats {
     pub finalized: i64,
     pub scheduled: i64,
     pub dispatched: i64,
+    pub reaped: i64,
+    pub deadlined: i64,
+    pub retried: i64,
 }
 
 /// Run one scheduler tick. Public so `ygg scheduler tick` can call it
 /// synchronously for testing without spinning up the daemon loop.
 pub async fn tick(pool: &PgPool, cfg: &SchedulerConfig) -> Result<TickStats, anyhow::Error> {
     let mut stats = TickStats::default();
-    stats.finalized = finalize_terminal_runs(pool).await?;
-    stats.scheduled = schedule_ready_tasks(pool, cfg).await?;
+    stats.reaped     = reap_expired_heartbeats(pool).await?;
+    stats.deadlined  = enforce_deadlines(pool).await?;
+    stats.finalized  = finalize_terminal_runs(pool).await?;
+    stats.retried    = schedule_retries(pool, cfg).await?;
+    stats.scheduled  = schedule_ready_tasks(pool, cfg).await?;
     stats.dispatched = dispatch_ready(pool, cfg).await?;
     Ok(stats)
 }
@@ -96,11 +102,16 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
 
         match tick(&pool, &cfg).await {
             Ok(stats) => {
-                if stats.finalized + stats.scheduled + stats.dispatched > 0 {
+                let total = stats.finalized + stats.scheduled + stats.dispatched
+                          + stats.reaped + stats.deadlined + stats.retried;
+                if total > 0 {
                     tracing::info!(
                         finalized = stats.finalized,
                         scheduled = stats.scheduled,
                         dispatched = stats.dispatched,
+                        reaped = stats.reaped,
+                        deadlined = stats.deadlined,
+                        retried = stats.retried,
                         "scheduler tick"
                     );
                     emit_simple_event(&pool, EventKind::SchedulerTick,
@@ -282,6 +293,218 @@ pub async fn schedule_ready_tasks(
     Ok(scheduled)
 }
 
+/// (Stage 2) Mark running runs whose heartbeat is past TTL as crashed.
+/// PreToolUse hook bumps heartbeat_at on every tool call, so a quiet run
+/// past the TTL is genuinely stuck (tmux dead, claude killed, OS evicted).
+pub async fn reap_expired_heartbeats(pool: &PgPool) -> Result<i64, anyhow::Error> {
+    let rows: Vec<(Uuid, Uuid, i32, Option<Uuid>)> = sqlx::query_as(
+        r#"UPDATE task_runs
+              SET state = 'crashed',
+                  reason = 'heartbeat_timeout',
+                  ended_at = COALESCE(ended_at, now()),
+                  updated_at = now()
+            WHERE state = 'running'
+              AND heartbeat_at IS NOT NULL
+              AND heartbeat_at < now() - (heartbeat_ttl_s || ' seconds')::interval
+        RETURNING run_id, task_id, attempt, agent_id"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (run_id, task_id, attempt, agent_id) in &rows {
+        let task_ref = task_ref_for(pool, *task_id).await
+            .unwrap_or_else(|| task_id.to_string());
+        EventRepo::new(pool).emit(
+            EventKind::RunTerminal,
+            "scheduler",
+            *agent_id,
+            serde_json::json!({
+                "task_ref": task_ref,
+                "run_id": run_id,
+                "attempt": attempt,
+                "state": "crashed",
+                "reason": "heartbeat_timeout",
+                "by": "scheduler.reap",
+            }),
+        ).await.ok();
+    }
+    Ok(rows.len() as i64)
+}
+
+/// (Stage 2) Enforce deadlines on running runs. A deadline_at in the past
+/// transitions the run to cancelled with reason=timeout. Forceful: the
+/// scheduler does not currently signal the agent — that's a follow-up.
+pub async fn enforce_deadlines(pool: &PgPool) -> Result<i64, anyhow::Error> {
+    let rows: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        r#"UPDATE task_runs
+              SET state = 'cancelled',
+                  reason = 'timeout',
+                  ended_at = COALESCE(ended_at, now()),
+                  updated_at = now()
+            WHERE state = 'running'
+              AND deadline_at IS NOT NULL
+              AND deadline_at < now()
+        RETURNING run_id, task_id, attempt"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (run_id, task_id, attempt) in &rows {
+        let task_ref = task_ref_for(pool, *task_id).await
+            .unwrap_or_else(|| task_id.to_string());
+        EventRepo::new(pool).emit(
+            EventKind::RunTerminal,
+            "scheduler",
+            None,
+            serde_json::json!({
+                "task_ref": task_ref,
+                "run_id": run_id,
+                "attempt": attempt,
+                "state": "cancelled",
+                "reason": "timeout",
+                "by": "scheduler.deadline",
+            }),
+        ).await.ok();
+    }
+    Ok(rows.len() as i64)
+}
+
+/// (Stage 2) For failed/crashed runs whose backoff window elapsed and that
+/// haven't already produced a successor, insert a new attempt row. The
+/// previous attempt's error gets threaded into input.previous_attempt so the
+/// retry agent can avoid the same failure mode.
+pub async fn schedule_retries(
+    pool: &PgPool,
+    cfg: &SchedulerConfig,
+) -> Result<i64, anyhow::Error> {
+    let candidates: Vec<(Uuid, Uuid, i32, i32, RunReason, Option<chrono::DateTime<chrono::Utc>>,
+                          serde_json::Value, Option<serde_json::Value>, serde_json::Value,
+                          Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query_as(
+        r#"SELECT r.run_id, r.task_id, r.attempt, r.max_attempts, r.reason, r.ended_at,
+                  r.input, r.error, r.retry_strategy,
+                  r.deadline_at, t.timeout_ms
+             FROM task_runs r
+             JOIN tasks t ON t.task_id = r.task_id
+            WHERE r.state IN ('failed', 'crashed')
+              AND r.attempt < r.max_attempts
+              AND t.status <> 'closed'
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_runs r2
+                   WHERE r2.task_id = r.task_id AND r2.attempt = r.attempt + 1
+              )
+            ORDER BY r.ended_at NULLS FIRST
+            LIMIT 100"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut retried = 0i64;
+    let now = chrono::Utc::now();
+    for (run_id, task_id, attempt, _max, _reason, ended_at, input, error, retry_strategy,
+         _old_deadline, timeout_ms) in candidates
+    {
+        let backoff_ms = compute_backoff_ms(&retry_strategy, attempt);
+        let due = ended_at
+            .map(|t| t + chrono::Duration::milliseconds(backoff_ms))
+            .unwrap_or(now);
+        if due > now {
+            continue;
+        }
+
+        let next_attempt = attempt + 1;
+        let key = idempotency_key_for(task_id, next_attempt);
+
+        // Thread previous attempt summary forward.
+        let mut next_input = input.clone();
+        if let serde_json::Value::Object(map) = &mut next_input {
+            map.insert("previous_attempt".into(), serde_json::json!({
+                "run_id": run_id,
+                "attempt": attempt,
+                "error": error,
+            }));
+        }
+
+        let deadline = timeout_ms.map(|ms|
+            chrono::Utc::now() + chrono::Duration::milliseconds(ms.max(0))
+        );
+
+        let new_run: Option<Uuid> = sqlx::query_scalar(
+            r#"INSERT INTO task_runs
+               (task_id, attempt, parent_run_id, idempotency_key, state,
+                heartbeat_ttl_s, deadline_at, input)
+               VALUES ($1, $2, $3, $4, 'ready', $5, $6, $7)
+               ON CONFLICT (idempotency_key) DO NOTHING
+               RETURNING run_id"#,
+        )
+        .bind(task_id)
+        .bind(next_attempt)
+        .bind(run_id)
+        .bind(&key)
+        .bind(cfg.default_heartbeat_ttl_s)
+        .bind(deadline)
+        .bind(next_input)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(new_run_id) = new_run {
+            // Mark the previous run as 'retrying' for the brief window before
+            // the new attempt starts. This gives `ygg task show` a clean
+            // narrative ("attempt 1 failed → retrying → attempt 2 ...").
+            sqlx::query(
+                "UPDATE task_runs SET state = 'retrying', updated_at = now() WHERE run_id = $1",
+            )
+            .bind(run_id)
+            .execute(pool)
+            .await?;
+
+            let task_ref = task_ref_for(pool, task_id).await
+                .unwrap_or_else(|| task_id.to_string());
+            EventRepo::new(pool).emit(
+                EventKind::RunRetry,
+                "scheduler",
+                None,
+                serde_json::json!({
+                    "task_ref": task_ref,
+                    "run_id": new_run_id,
+                    "parent_run_id": run_id,
+                    "attempt": next_attempt,
+                    "backoff_ms": backoff_ms,
+                }),
+            ).await.ok();
+            retried += 1;
+        }
+    }
+    Ok(retried)
+}
+
+/// Exponential backoff with optional jitter. Mirrors the JSONB shape stored
+/// on task_runs.retry_strategy and the default in the migration.
+fn compute_backoff_ms(strategy: &serde_json::Value, attempt: i32) -> i64 {
+    let kind = strategy.get("kind").and_then(|v| v.as_str()).unwrap_or("exponential");
+    let base_ms = strategy.get("base_ms").and_then(|v| v.as_i64()).unwrap_or(60_000);
+    let cap_ms  = strategy.get("cap_ms").and_then(|v| v.as_i64()).unwrap_or(600_000);
+    let jitter  = strategy.get("jitter").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let raw = match kind {
+        "fixed" => base_ms,
+        _ => {
+            // 2^(attempt-1) * base, clamped to cap.
+            let shift = (attempt.saturating_sub(1).max(0).min(20)) as u32;
+            base_ms.saturating_mul(1i64.checked_shl(shift).unwrap_or(i64::MAX)).min(cap_ms)
+        }
+    };
+
+    if jitter {
+        // ±25% jitter, deterministic from a structural source so tests don't
+        // flake. Use lower bits of run + attempt to avoid pulling a full RNG.
+        let frac = ((attempt as i64).wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64)) & 0x7F;
+        let jitter_ms = (raw / 4) * (frac - 64) / 64;
+        (raw + jitter_ms).max(0)
+    } else {
+        raw
+    }
+}
+
 /// (3) Claim ready runs up to budget; spawn agents; bind run→agent.
 pub async fn dispatch_ready(
     pool: &PgPool,
@@ -443,6 +666,111 @@ pub async fn dispatch_ready(
         }
     }
     Ok(dispatched)
+}
+
+/// (yggdrasil-95) One-shot migration: synthesize task_runs rows for tasks
+/// that predate ADR 0016. Idempotent — safe to re-run; uses ON CONFLICT on
+/// the idempotency key. For in_progress tasks with a live worker, creates a
+/// running run; for closed tasks, creates a succeeded run pointing at the
+/// last known commit (best-effort).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct BackfillStats {
+    pub in_progress_runs_created: i64,
+    pub closed_runs_created: i64,
+    pub skipped: i64,
+}
+
+pub async fn backfill(pool: &PgPool) -> Result<BackfillStats, anyhow::Error> {
+    let mut stats = BackfillStats::default();
+
+    // In-progress tasks with no current_attempt_id and no existing run rows.
+    let in_progress: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT t.task_id, t.assignee
+             FROM tasks t
+            WHERE t.status = 'in_progress'
+              AND t.current_attempt_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id = t.task_id)"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (task_id, assignee) in in_progress {
+        let key = idempotency_key_for(task_id, 1);
+        let row: Option<Uuid> = sqlx::query_scalar(
+            r#"INSERT INTO task_runs
+               (task_id, attempt, idempotency_key, state, agent_id,
+                started_at, heartbeat_at, claimed_at, scheduled_at)
+               VALUES ($1, 1, $2, 'running', $3, now(), now(), now(), now())
+               ON CONFLICT (idempotency_key) DO NOTHING
+               RETURNING run_id"#,
+        )
+        .bind(task_id)
+        .bind(&key)
+        .bind(assignee)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(run_id) = row {
+            sqlx::query(
+                "UPDATE tasks SET current_attempt_id = $2 WHERE task_id = $1",
+            )
+            .bind(task_id)
+            .bind(run_id)
+            .execute(pool)
+            .await?;
+            stats.in_progress_runs_created += 1;
+        } else {
+            stats.skipped += 1;
+        }
+    }
+
+    // Closed tasks with no run rows. We can't reliably reconstruct the agent
+    // or commit, so we leave those NULL — the row is mainly so `ygg task show`
+    // displays "run #1 succeeded" for completeness.
+    let closed: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> = sqlx::query_as(
+        r#"SELECT t.task_id, t.closed_at, t.close_reason
+             FROM tasks t
+            WHERE t.status = 'closed'
+              AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id = t.task_id)
+            LIMIT 5000"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (task_id, closed_at, reason) in closed {
+        let key = idempotency_key_for(task_id, 1);
+        let (state, run_reason) = match reason.as_deref() {
+            Some(r) if r.to_ascii_lowercase().contains("crash")  => ("crashed", "tmux_gone"),
+            Some(r) if r.to_ascii_lowercase().contains("cancel") => ("cancelled", "user_cancelled"),
+            Some(r) if r.to_ascii_lowercase().contains("fail")   => ("failed", "agent_error"),
+            _ => ("succeeded", "ok"),
+        };
+        let row: Option<Uuid> = sqlx::query_scalar(
+            r#"INSERT INTO task_runs
+               (task_id, attempt, idempotency_key, state, reason,
+                started_at, ended_at, scheduled_at)
+               VALUES ($1, 1, $2,
+                       $3::text::run_state, $4::text::run_reason,
+                       COALESCE($5, now()) - interval '1 minute',
+                       COALESCE($5, now()),
+                       COALESCE($5, now()) - interval '1 minute')
+               ON CONFLICT (idempotency_key) DO NOTHING
+               RETURNING run_id"#,
+        )
+        .bind(task_id)
+        .bind(&key)
+        .bind(state)
+        .bind(run_reason)
+        .bind(closed_at)
+        .fetch_optional(pool)
+        .await?;
+        if row.is_some() {
+            stats.closed_runs_created += 1;
+        } else {
+            stats.skipped += 1;
+        }
+    }
+
+    Ok(stats)
 }
 
 fn scheduler_agent_name(prefix: &str, seq: i32, attempt: i32) -> String {

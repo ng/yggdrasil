@@ -14,6 +14,11 @@ if [ -n "$TOOL" ]; then
     ygg agent-tool "$TOOL" --agent "$AGENT" >/dev/null 2>&1 || true
 fi
 
+# ADR 0016 / yggdrasil-99: bump heartbeat_at on this agent's running task_run
+# so the scheduler doesn't reap us as crashed. No-op when the agent has no
+# bound run (manual sessions, primary interactive shell, etc).
+ygg run heartbeat --agent "$AGENT" >/dev/null 2>&1 || true
+
 # Only lock on file-modifying tools
 case "$TOOL" in
     Edit|Write|NotebookEdit)
