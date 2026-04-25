@@ -242,6 +242,13 @@ enum Commands {
         action: BenchAction,
     },
 
+    /// Autonomous task-DAG scheduler. Singleton per host (advisory-lock guarded).
+    /// Stage 1 MVP per docs/design/scheduler.md: dispatch_ready + finalize_terminal_runs.
+    Scheduler {
+        #[command(subcommand)]
+        action: SchedulerAction,
+    },
+
     /// Pressure-test recovery paths: compaction, skip-it, crash. Reports
     /// PASS/FAIL for each scenario with forensic detail. Run periodically
     /// to catch regressions in the memory-survival story.
@@ -438,6 +445,18 @@ enum MsgAction {
     MarkRead {
         #[arg(short, long)] agent: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum SchedulerAction {
+    /// Start the daemon in the foreground. Holds the singleton advisory lock.
+    Run,
+    /// Run one tick synchronously and exit. Prints stats as JSON.
+    Tick,
+    /// Print whether a scheduler is running and what's queued.
+    Status,
+    /// Print what `tick` would do without writing.
+    DryRun,
 }
 
 #[derive(Subcommand)]
@@ -1405,6 +1424,24 @@ async fn main() -> anyhow::Result<()> {
                     let config = ygg::config::AppConfig::from_env()?;
                     let pool = ygg::db::create_pool(&config.database_url).await?;
                     ygg::cli::bench_cmd::ci(&pool, tier).await?;
+                }
+            }
+        }
+        Commands::Scheduler { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            match action {
+                SchedulerAction::Run => {
+                    ygg::cli::scheduler_cmd::run(pool, &config).await?;
+                }
+                SchedulerAction::Tick => {
+                    ygg::cli::scheduler_cmd::tick(&pool, &config).await?;
+                }
+                SchedulerAction::Status => {
+                    ygg::cli::scheduler_cmd::status(&pool).await?;
+                }
+                SchedulerAction::DryRun => {
+                    ygg::cli::scheduler_cmd::dry_run(&pool).await?;
                 }
             }
         }

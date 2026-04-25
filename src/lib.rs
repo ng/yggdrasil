@@ -19,6 +19,7 @@ pub mod prompt;
 pub mod redaction;
 pub mod references;
 pub mod salience;
+pub mod scheduler;
 pub mod scoring;
 pub mod task_classify;
 pub mod stats;

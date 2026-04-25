@@ -412,3 +412,103 @@ async fn test_agent_rename() {
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-rename-src', 'test-rename-dst', 'test-rename-collision')")
         .execute(&pool).await.unwrap();
 }
+
+#[tokio::test]
+async fn test_scheduler_finalizes_terminal_run_closes_task() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    // Use a fixture repo + task. Cleanup any prior runs of the test.
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-test'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-test', 'sched-test') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+
+    // Create a task in_progress and insert a succeeded task_runs row.
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        r#"INSERT INTO tasks (repo_id, seq, title, status)
+           VALUES ($1, 1, 'sched fin test', 'in_progress')
+           RETURNING task_id"#,
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO task_runs (task_id, attempt, idempotency_key, state, output_commit_sha, ended_at)
+           VALUES ($1, 1, 'run:test:1', 'succeeded', 'deadbeef', now())"#,
+    ).bind(task.0).execute(&pool).await.unwrap();
+
+    let cfg = ygg::scheduler::SchedulerConfig {
+        tick_interval: std::time::Duration::from_secs(1),
+        max_concurrent: 4,
+        default_max_attempts: 3,
+        default_heartbeat_ttl_s: 300,
+    };
+    let stats = ygg::scheduler::tick(&pool, &cfg).await.unwrap();
+    assert!(stats.finalized >= 1, "finalize_terminal_runs should close the task");
+
+    let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT status::text, close_reason, result_blob_ref FROM tasks WHERE task_id = $1",
+    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(row.0, "closed");
+    assert!(row.1.unwrap().contains("succeeded"));
+    assert_eq!(row.2.as_deref(), Some("deadbeef"));
+
+    // Cleanup
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_schedules_runnable_task_to_ready() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-sched'")
+        .execute(&pool).await.unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-sched', 'sched-sched') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
+        .bind(repo.0).execute(&pool).await.unwrap();
+    let task: (uuid::Uuid,) = sqlx::query_as(
+        r#"INSERT INTO tasks (repo_id, seq, title, status, runnable, approval_level)
+           VALUES ($1, 1, 'sched runnable', 'open', TRUE, 'auto')
+           RETURNING task_id"#,
+    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+
+    let cfg = ygg::scheduler::SchedulerConfig {
+        tick_interval: std::time::Duration::from_secs(1),
+        max_concurrent: 4,
+        default_max_attempts: 3,
+        default_heartbeat_ttl_s: 300,
+    };
+    let scheduled = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
+    assert!(scheduled >= 1, "runnable + auto-approved task should be scheduled");
+
+    let state: String = sqlx::query_scalar(
+        "SELECT state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt DESC LIMIT 1",
+    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, "ready");
+
+    // A second tick shouldn't double-schedule (NOT EXISTS guard).
+    let scheduled2 = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
+    assert_eq!(scheduled2, 0, "should not double-schedule");
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
+        .execute(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_advisory_lock_singleton() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    let g1 = ygg::scheduler::acquire_advisory_lock(&pool).await.unwrap();
+    let g2 = ygg::scheduler::acquire_advisory_lock(&pool).await;
+    assert!(g2.is_err(), "second acquire must fail while first guard is alive");
+    drop(g1);
+    let g3 = ygg::scheduler::acquire_advisory_lock(&pool).await;
+    assert!(g3.is_ok(), "after dropping first guard, third acquire must succeed");
+}
