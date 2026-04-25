@@ -54,19 +54,22 @@ or chat responses — those are human-facing and full fidelity is correct.
 
 ## Session Completion
 
-Work is NOT complete until `git push` succeeds.
+This repo is **public**. Default to **PRs into `main`**, not direct pushes.
 
-1. Run quality gates if code changed (tests, linters, `cargo check`).
+Work is NOT complete until your branch is pushed and (where applicable) a PR is open.
+
+1. Run quality gates if code changed (`cargo test`, `cargo check --all-targets`, `cargo fmt --check`).
 2. Release any locks you still hold (`ygg lock list` → `ygg lock release <key>`).
-3. Push:
+3. Branch + PR (the default):
    ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
+   git checkout -b <topic-branch>
+   git push -u origin <topic-branch>
+   gh pr create --base main --fill          # see CONTRIBUTING.md for the body template
    ```
-4. If push fails, resolve and retry until it succeeds.
+4. **Direct push to `main` is acceptable for trivial changes only**: typos, generated-artifact updates, single-file docs edits a maintainer would rubber-stamp. When in doubt, open a PR.
+5. Reference any related tasks (`yggdrasil-NNN`) in the PR body so the rollup updates.
 
-**Never** stop before pushing; **never** say "ready to push when you are" — you push.
+**Never** stop before the branch is pushed and the PR is open. **Never** say "ready to push when you are" — push the branch and open the PR yourself.
 
 ## Non-Interactive Shell Commands
 
@@ -137,21 +140,12 @@ ygg logs --follow                           # Live event stream
 - **Durable notes** — `ygg remember "..."` writes a directive node the similarity retriever will surface in future sessions (scoped to the current repo when detectable). Prefer this over scratch `.md` files.
 - **Do NOT** use `bd` / beads. This project uses `ygg task` / `ygg remember` instead.
 
-## Session Completion
+## Session Completion (managed-block duplicate — see canonical block above)
 
-Work is NOT complete until `git push` succeeds.
-
-1. Run quality gates if code changed (tests, linters, build/type-check).
-2. Release any locks you still hold (`ygg lock list` → `ygg lock release <key>`).
-3. Push:
-   ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-4. If push fails, resolve and retry until it succeeds.
-
-**Never** stop before pushing; **never** say "ready to push when you are" — you push.
+The earlier "Session Completion" section is canonical. The managed
+integration block keeps the rules in sync for downstream repos that
+install `ygg integrate`. PR-into-main is the default; direct push to
+main only for trivial changes.
 
 ## Non-Interactive Shell Commands
 
