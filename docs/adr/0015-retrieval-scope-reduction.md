@@ -1,6 +1,6 @@
 # ADR 0015 — Retrieval scope reduction (pivot toward orchestrator-only)
 
-**Status:** proposed
+**Status:** accepted (Phase 1 landed via yggdrasil-76; Phases 2–4 gated on observation)
 **Date:** 2026-04-18
 
 ## Context
@@ -67,10 +67,16 @@ independently reversible — revert the commit and the prior behavior
 returns. At each phase, pause long enough to notice regressions in
 agent behavior before continuing.
 
-### Phase 1 — `YGG_INJECT=off` default
+### Phase 1 — `YGG_INJECT=off` default · **landed yggdrasil-76**
 
 Flip the per-turn similarity-inject hook to opt-in. Pinned memories
 still surface (separate code path); per-turn top-K node hits stop.
+
+`src/cli/inject.rs::inject_enabled()` reads `YGG_INJECT` from the
+environment and treats `on` / `1` / `true` / `yes` as enabled. Default
+(unset) is off. Both the vector-search section and the similarity-matched
+non-pinned-memory section sit behind that gate. Pinned memories,
+context-pressure warnings, and lock-status output stay on unconditionally.
 
 Measures:
 - `ygg eval` hit-quality numbers should not regress against baseline
@@ -78,7 +84,7 @@ Measures:
   way that's measurable here.
 - Agent subjective quality — does Claude ask clarifying questions
   more, reference prior sessions less? If no noticeable change in
-  1 week of use, continue.
+  1 week of use, continue with Phase 2.
 
 ### Phase 2 — drop `memories` table, migrate to CLAUDE.md includes
 

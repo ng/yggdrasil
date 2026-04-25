@@ -81,7 +81,11 @@ pub async fn execute(
     }
 
     // ── vector search ─────────────────────────────────────────────────────────
-    if let Some(prompt) = prompt_text {
+    // ADR 0015 Phase 1 (yggdrasil-76): the per-turn top-K similarity inject
+    // is opt-in. `YGG_INJECT=on` re-enables it; default is off. Pinned
+    // memories below the gate continue to surface unconditionally — that's
+    // the explicit force-path the pivot preserves.
+    if let Some(prompt) = prompt_text.filter(|_| inject_enabled()) {
         let embedder = Embedder::default_ollama();
         let ollama_alive = embedder.health_check().await;
         debug!("inject: ollama health={}", ollama_alive);
@@ -484,7 +488,10 @@ pub async fn execute(
         ));
     }
 
-    if let Some(prompt) = prompt_text {
+    // Similarity-matched non-pinned memories ride the same YGG_INJECT gate as
+    // the vector-search section above. Pinned memories above stay on
+    // unconditionally per ADR 0015.
+    if let Some(prompt) = prompt_text.filter(|_| inject_enabled()) {
         let embedder = Embedder::default_ollama();
         if embedder.health_check().await {
             if let Ok(q) = embedder.embed(prompt).await {
@@ -536,9 +543,45 @@ pub async fn execute(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// ADR 0015 Phase 1: per-turn similarity inject is opt-in. Reads `YGG_INJECT`
+/// from the environment; treats `on` / `1` / `true` / `yes` as enabled.
+/// Anything else (including unset) keeps the canonical "off" default.
+///
+/// Pinned memories are NOT gated by this flag — they emit unconditionally.
+/// See yggdrasil-76 and `docs/adr/0015-retrieval-scope-reduction.md`.
+pub fn inject_enabled() -> bool {
+    std::env::var("YGG_INJECT")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "on" | "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 fn estimate_tokens(text: &str) -> i32 {
     // Rough approximation: ~4 chars per token
     (text.len() / 4).max(1) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Single combined test — separate tests would race on the shared env var.
+    #[test]
+    fn inject_enabled_env_matrix() {
+        unsafe { std::env::remove_var("YGG_INJECT") };
+        assert!(!inject_enabled(), "YGG_INJECT unset → off");
+
+        for v in ["on", "ON", "1", "true", "TRUE", "yes", "Yes"] {
+            unsafe { std::env::set_var("YGG_INJECT", v) };
+            assert!(inject_enabled(), "YGG_INJECT={v} should enable");
+        }
+
+        for v in ["off", "0", "false", "no", "", "garbage"] {
+            unsafe { std::env::set_var("YGG_INJECT", v) };
+            assert!(!inject_enabled(), "YGG_INJECT={v} should disable");
+        }
+        unsafe { std::env::remove_var("YGG_INJECT") };
+    }
 }
 
 fn extract_snippet(content: &serde_json::Value) -> String {
