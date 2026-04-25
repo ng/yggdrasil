@@ -21,8 +21,13 @@ pub async fn execute(
     let node_repo = NodeRepo::new(pool);
     let event_repo = EventRepo::new(pool);
 
-    let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
-    let agent = match agent_repo.get_by_name_persona(agent_name, persona.as_deref()).await? {
+    let persona = std::env::var("YGG_AGENT_PERSONA")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let agent = match agent_repo
+        .get_by_name_persona(agent_name, persona.as_deref())
+        .await?
+    {
         Some(a) => a,
         None => {
             debug!("digest: agent '{}' not found — skipping", agent_name);
@@ -52,37 +57,57 @@ pub async fn execute(
     // doesn't produce the placeholder garbage a 1B model emits for
     // structured judgments). When disabled, summary falls back to
     // build_summary() from event headlines; open_threads is empty.
-    let turn_pairs: Vec<(String, String)> = entries.iter()
+    let turn_pairs: Vec<(String, String)> = entries
+        .iter()
         .map(|t| (t.role.clone(), t.text.clone()))
         .collect();
-    let llm_result = crate::llm_digest::LlmDigester::from_env().digest(&turn_pairs).await;
-    let method = if llm_result.is_some() { "llm" } else { "heuristic" };
+    let llm_result = crate::llm_digest::LlmDigester::from_env()
+        .digest(&turn_pairs)
+        .await;
+    let method = if llm_result.is_some() {
+        "llm"
+    } else {
+        "heuristic"
+    };
 
     // Summary: LLM if it produced a non-placeholder sentence; else heuristic.
-    let summary = llm_result.as_ref()
+    let summary = llm_result
+        .as_ref()
         .map(|r| r.summary.clone())
         .unwrap_or_else(|| build_summary(&entries, &heuristic_corrections));
 
     // Corrections + reinforcements: always heuristic. Regex is the right
     // tool here; the LLM demonstrably emits placeholders at 1B.
-    let corrections_json: Vec<serde_json::Value> = heuristic_corrections.iter()
-        .map(|c| serde_json::json!({
-            "feedback": c.feedback, "context": c.context, "sentiment": c.sentiment.to_str(),
-        })).collect();
-    let reinforcements_json: Vec<serde_json::Value> = heuristic_reinforcements.iter()
-        .map(|r| serde_json::json!({
-            "feedback": r.feedback, "context": r.context,
-        })).collect();
+    let corrections_json: Vec<serde_json::Value> = heuristic_corrections
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "feedback": c.feedback, "context": c.context, "sentiment": c.sentiment.to_str(),
+            })
+        })
+        .collect();
+    let reinforcements_json: Vec<serde_json::Value> = heuristic_reinforcements
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "feedback": r.feedback, "context": r.context,
+            })
+        })
+        .collect();
 
     // Open threads: LLM-only. Heuristic has no equivalent.
-    let open_threads: Vec<String> = llm_result.as_ref()
+    let open_threads: Vec<String> = llm_result
+        .as_ref()
         .map(|r| r.open_threads.clone())
         .unwrap_or_default();
 
     info!(
         "digest [{method}]: {} turns, {} corrections, {} reinforcements, {} open_threads, {} files",
-        entries.len(), corrections_json.len(), reinforcements_json.len(),
-        open_threads.len(), files_touched.len()
+        entries.len(),
+        corrections_json.len(),
+        reinforcements_json.len(),
+        open_threads.len(),
+        files_touched.len()
     );
 
     // Build the text we'll embed for cross-session similarity retrieval.
@@ -100,10 +125,16 @@ pub async fn execute(
                 parts.push(format!("good: {f}"));
             }
         }
-        for t in &open_threads { parts.push(format!("open: {t}")); }
+        for t in &open_threads {
+            parts.push(format!("open: {t}"));
+        }
         parts.join(". ")
     };
-    debug!("digest: embed text ({} chars): {:?}", embed_text.len(), &embed_text[..embed_text.len().min(120)]);
+    debug!(
+        "digest: embed text ({} chars): {:?}",
+        embed_text.len(),
+        &embed_text[..embed_text.len().min(120)]
+    );
 
     // Write Digest node
     let content = serde_json::json!({
@@ -117,13 +148,15 @@ pub async fn execute(
     });
 
     let token_count = estimate_tokens(&embed_text);
-    let node = node_repo.insert(
-        agent.head_node_id,
-        agent.agent_id,
-        NodeKind::Digest,
-        content,
-        token_count,
-    ).await?;
+    let node = node_repo
+        .insert(
+            agent.head_node_id,
+            agent.agent_id,
+            NodeKind::Digest,
+            content,
+            token_count,
+        )
+        .await?;
 
     // Embed and store
     let embedder = Embedder::new(&config.ollama_base_url, &config.ollama_embed_model);
@@ -132,18 +165,20 @@ pub async fn execute(
         let embed_result = embedder.embed(&embed_text).await;
         let embed_ms = embed_start.elapsed().as_millis() as u64;
 
-        let _ = event_repo.emit(
-            EventKind::EmbeddingCall,
-            agent_name,
-            Some(agent.agent_id),
-            serde_json::json!({
-                "model": &config.ollama_embed_model,
-                "input_chars": embed_text.len(),
-                "latency_ms": embed_ms,
-                "success": embed_result.is_ok(),
-                "purpose": "digest_embed",
-            }),
-        ).await;
+        let _ = event_repo
+            .emit(
+                EventKind::EmbeddingCall,
+                agent_name,
+                Some(agent.agent_id),
+                serde_json::json!({
+                    "model": &config.ollama_embed_model,
+                    "input_chars": embed_text.len(),
+                    "latency_ms": embed_ms,
+                    "success": embed_result.is_ok(),
+                    "purpose": "digest_embed",
+                }),
+            )
+            .await;
 
         match embed_result {
             Ok(vec) => {
@@ -156,16 +191,21 @@ pub async fn execute(
         warn!("digest: ollama unavailable — digest stored without embedding");
     }
 
-    agent_repo.update_head(agent.agent_id, node.id, agent.context_tokens).await?;
+    agent_repo
+        .update_head(agent.agent_id, node.id, agent.context_tokens)
+        .await?;
 
     // Score retrieval references — pair similarity_hit events with the
     // assistant turns that followed them, emit hit_referenced events for
     // overlaps ≥ threshold. Batch, idempotent. yggdrasil-20.
-    match crate::references::score_references(pool, agent.agent_id, agent_name, transcript_path).await {
+    match crate::references::score_references(pool, agent.agent_id, agent_name, transcript_path)
+        .await
+    {
         Ok(r) if r.scored > 0 => {
             info!(
                 "digest: references scored {} pairs, {} referenced ({:.0}%)",
-                r.scored, r.referenced,
+                r.scored,
+                r.referenced,
                 r.referenced as f64 / r.scored as f64 * 100.0
             );
         }
@@ -174,49 +214,56 @@ pub async fn execute(
     }
 
     // Emit events
-    let _ = event_repo.emit(
-        EventKind::DigestWritten,
-        agent_name,
-        Some(agent.agent_id),
-        serde_json::json!({
-            "node_id": node.id,
-            "turns": entries.len(),
-            "corrections": corrections_json.len(),
-            "reinforcements": reinforcements_json.len(),
-            "method": method,
-            "summary": &summary[..summary.len().min(120)],
-        }),
-    ).await;
+    let _ = event_repo
+        .emit(
+            EventKind::DigestWritten,
+            agent_name,
+            Some(agent.agent_id),
+            serde_json::json!({
+                "node_id": node.id,
+                "turns": entries.len(),
+                "corrections": corrections_json.len(),
+                "reinforcements": reinforcements_json.len(),
+                "method": method,
+                "summary": &summary[..summary.len().min(120)],
+            }),
+        )
+        .await;
 
     // Heuristic corrections still feed CorrectionDetected events (they carry
     // sentiment info the LLM path doesn't produce). If the LLM path won, the
     // heuristic array may still have useful entries — emit them regardless.
     for c in &heuristic_corrections {
-        let _ = event_repo.emit(
-            EventKind::CorrectionDetected,
-            agent_name,
-            Some(agent.agent_id),
-            serde_json::json!({
-                "feedback": c.feedback,
-                "sentiment": c.sentiment.to_str(),
-                "context": &c.context[..c.context.len().min(120)],
-            }),
-        ).await;
+        let _ = event_repo
+            .emit(
+                EventKind::CorrectionDetected,
+                agent_name,
+                Some(agent.agent_id),
+                serde_json::json!({
+                    "feedback": c.feedback,
+                    "sentiment": c.sentiment.to_str(),
+                    "context": &c.context[..c.context.len().min(120)],
+                }),
+            )
+            .await;
     }
 
     // Digest runs at Stop (session ended) and PreCompact (about to compact).
     // Per-session state lands in Idle; agents row mirrors for display.
-    let session_id = crate::models::session::resolve_current_session(
-        pool, agent.agent_id, None
-    ).await;
+    let session_id =
+        crate::models::session::resolve_current_session(pool, agent.agent_id, None).await;
     if let Some(sid) = session_id {
         if let Err(e) = crate::models::session::SessionRepo::new(pool)
-            .force_state(sid, AgentState::Idle, None).await
+            .force_state(sid, AgentState::Idle, None)
+            .await
         {
             warn!("digest: session force_state failed: {e}");
         }
     }
-    if let Err(e) = agent_repo.force_state(agent.agent_id, AgentState::Idle, None).await {
+    if let Err(e) = agent_repo
+        .force_state(agent.agent_id, AgentState::Idle, None)
+        .await
+    {
         warn!("digest: force_state failed: {e}");
     }
 
@@ -252,16 +299,25 @@ pub struct Turn {
 fn parse_transcript(path: &str) -> Vec<Turn> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) => { warn!("digest: cannot open transcript: {e}"); return vec![]; }
+        Err(e) => {
+            warn!("digest: cannot open transcript: {e}");
+            return vec![];
+        }
     };
 
     let mut turns = Vec::new();
     for line in std::io::BufReader::new(file).lines() {
-        let line = match line { Ok(l) => l, Err(_) => continue };
-        let Ok(val): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let Ok(val): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
+            continue;
+        };
 
         // Try multiple transcript formats Claude Code might use
-        let role = val.get("role")
+        let role = val
+            .get("role")
             .or_else(|| val.get("message").and_then(|m| m.get("role")))
             .and_then(|r| r.as_str())
             .map(|s| s.to_string());
@@ -284,18 +340,27 @@ fn extract_text(val: &serde_json::Value) -> Option<String> {
         return Some(s.to_string());
     }
     // Nested message.content string
-    if let Some(s) = val.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
+    if let Some(s) = val
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+    {
         return Some(s.to_string());
     }
     // content array — join text blocks
-    let content_arr = val.get("content")
+    let content_arr = val
+        .get("content")
         .or_else(|| val.get("message").and_then(|m| m.get("content")))?
         .as_array()?;
 
-    let text: String = content_arr.iter()
+    let text: String = content_arr
+        .iter()
         .filter_map(|block| {
             if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
             } else {
                 None
             }
@@ -325,8 +390,8 @@ impl Sentiment {
 
 #[derive(Debug)]
 pub struct CorrectionSignal {
-    pub feedback: String,   // the user's correction text
-    pub context: String,    // what the assistant was doing (prev turn snippet)
+    pub feedback: String, // the user's correction text
+    pub context: String,  // what the assistant was doing (prev turn snippet)
     pub sentiment: Sentiment,
 }
 
@@ -338,24 +403,62 @@ pub struct ReinforcementSignal {
 
 // Patterns that indicate the user is correcting Claude
 const CORRECTION_STARTS: &[&str] = &[
-    "no,", "no.", "no -", "no —", "nope", "nah,",
-    "wait,", "wait -", "actually,", "actually -",
-    "stop,", "stop.", "don't", "dont",
-    "wrong", "incorrect", "that's wrong", "that's not",
-    "revert", "undo", "go back",
+    "no,",
+    "no.",
+    "no -",
+    "no —",
+    "nope",
+    "nah,",
+    "wait,",
+    "wait -",
+    "actually,",
+    "actually -",
+    "stop,",
+    "stop.",
+    "don't",
+    "dont",
+    "wrong",
+    "incorrect",
+    "that's wrong",
+    "that's not",
+    "revert",
+    "undo",
+    "go back",
 ];
 
 const CORRECTION_CONTAINS: &[&str] = &[
-    "don't do that", "don't use", "don't add", "don't create",
-    "stop doing", "stop adding", "that's not right", "that's not what",
-    "i didn't ask", "i said", "not that", "wrong approach",
-    "too many", "too much", "unnecessary", "don't need",
+    "don't do that",
+    "don't use",
+    "don't add",
+    "don't create",
+    "stop doing",
+    "stop adding",
+    "that's not right",
+    "that's not what",
+    "i didn't ask",
+    "i said",
+    "not that",
+    "wrong approach",
+    "too many",
+    "too much",
+    "unnecessary",
+    "don't need",
 ];
 
 const REINFORCEMENT_STARTS: &[&str] = &[
-    "yes", "perfect", "exactly", "great", "good", "correct",
-    "that's it", "that's right", "nice", "looks good",
-    "works", "it works", "that works",
+    "yes",
+    "perfect",
+    "exactly",
+    "great",
+    "good",
+    "correct",
+    "that's it",
+    "that's right",
+    "nice",
+    "looks good",
+    "works",
+    "it works",
+    "that works",
 ];
 
 fn is_correction(text: &str) -> Option<Sentiment> {
@@ -384,21 +487,31 @@ fn is_reinforcement(text: &str) -> bool {
     let lower = text.to_lowercase();
     let trimmed = lower.trim();
     // Must be a short positive message (long messages are tasks, not reinforcement)
-    if trimmed.len() > 200 { return false; }
+    if trimmed.len() > 200 {
+        return false;
+    }
     REINFORCEMENT_STARTS.iter().any(|p| trimmed.starts_with(p))
 }
 
 fn extract_corrections(turns: &[Turn]) -> Vec<CorrectionSignal> {
     let mut out = Vec::new();
     for (i, turn) in turns.iter().enumerate() {
-        if turn.role != "user" { continue; }
+        if turn.role != "user" {
+            continue;
+        }
         if let Some(sentiment) = is_correction(&turn.text) {
             // Get context from the previous assistant turn
-            let context = turns[..i].iter().rev()
+            let context = turns[..i]
+                .iter()
+                .rev()
                 .find(|t| t.role == "assistant")
                 .map(|t| {
                     let s = t.text.trim();
-                    if s.len() > 200 { format!("{}…", &s[..197]) } else { s.to_string() }
+                    if s.len() > 200 {
+                        format!("{}…", &s[..197])
+                    } else {
+                        s.to_string()
+                    }
                 })
                 .unwrap_or_default();
 
@@ -415,13 +528,21 @@ fn extract_corrections(turns: &[Turn]) -> Vec<CorrectionSignal> {
 fn extract_reinforcements(turns: &[Turn]) -> Vec<ReinforcementSignal> {
     let mut out = Vec::new();
     for (i, turn) in turns.iter().enumerate() {
-        if turn.role != "user" { continue; }
+        if turn.role != "user" {
+            continue;
+        }
         if is_reinforcement(&turn.text) {
-            let context = turns[..i].iter().rev()
+            let context = turns[..i]
+                .iter()
+                .rev()
                 .find(|t| t.role == "assistant")
                 .map(|t| {
                     let s = t.text.trim();
-                    if s.len() > 200 { format!("{}…", &s[..197]) } else { s.to_string() }
+                    if s.len() > 200 {
+                        format!("{}…", &s[..197])
+                    } else {
+                        s.to_string()
+                    }
                 })
                 .unwrap_or_default();
 
@@ -442,9 +563,13 @@ fn extract_files_touched(turns: &[Turn]) -> Vec<String> {
     let path_re = regex::Regex::new(r#"(?:^|[\s`'"(])(/[^\s`'")\n]{3,})"#).unwrap();
 
     for turn in turns {
-        if turn.role != "assistant" { continue; }
+        if turn.role != "assistant" {
+            continue;
+        }
         for cap in path_re.captures_iter(&turn.text) {
-            let p = cap[1].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-');
+            let p = cap[1].trim_end_matches(|c: char| {
+                !c.is_alphanumeric() && c != '.' && c != '_' && c != '-'
+            });
             if p.contains('.') || p.starts_with("/workspaces") || p.starts_with("/home") {
                 files.insert(p.to_string());
             }
@@ -464,7 +589,11 @@ fn build_summary(turns: &[Turn], corrections: &[CorrectionSignal]) -> String {
     // First user message = the task
     if let Some(first) = turns.iter().find(|t| t.role == "user") {
         let s = first.text.trim();
-        parts.push(if s.len() > 300 { format!("{}…", &s[..297]) } else { s.to_string() });
+        parts.push(if s.len() > 300 {
+            format!("{}…", &s[..297])
+        } else {
+            s.to_string()
+        });
     }
 
     // Corrections become negative directives
@@ -475,11 +604,18 @@ fn build_summary(turns: &[Turn], corrections: &[CorrectionSignal]) -> String {
     // Last user message (if different from first and not a correction)
     if let Some(last_user) = turns.iter().rev().find(|t| t.role == "user") {
         let is_correction = is_correction(&last_user.text).is_some();
-        let is_first = turns.iter().find(|t| t.role == "user")
-            .map(|f| f.text == last_user.text).unwrap_or(false);
+        let is_first = turns
+            .iter()
+            .find(|t| t.role == "user")
+            .map(|f| f.text == last_user.text)
+            .unwrap_or(false);
         if !is_correction && !is_first && last_user.text.len() > 10 {
             let s = last_user.text.trim();
-            parts.push(if s.len() > 200 { format!("{}…", &s[..197]) } else { s.to_string() });
+            parts.push(if s.len() > 200 {
+                format!("{}…", &s[..197])
+            } else {
+                s.to_string()
+            });
         }
     }
 
@@ -508,7 +644,9 @@ pub fn find_latest_transcript() -> Option<String> {
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(&project_dir).ok()?.flatten() {
         let p = entry.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
         let mtime = entry.metadata().ok().and_then(|m| m.modified().ok())?;
         match &newest {
             None => newest = Some((mtime, p)),

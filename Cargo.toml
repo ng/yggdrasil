@@ -3,6 +3,12 @@ name = "ygg"
 version = "0.1.0"
 edition = "2024"
 description = "Yggdrasil — High-density agent orchestrator"
+license = "MIT"
+repository = "https://github.com/ng/yggdrasil"
+readme = "README.md"
+authors = ["Jonathan Ng <jon@jonathanng.com>"]
+keywords = ["agent", "orchestrator", "claude-code", "tmux", "postgres"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "ygg"

@@ -3,9 +3,9 @@
 //! and produced commits. Tests inject a fake binary that simulates Claude
 //! by parsing the prompt and writing the requested files.
 
+use crate::bench::Baseline;
 use crate::bench::manifest::{LoadedManifest, TaskSpec};
 use crate::bench::runner::{Driver, DriverOutcome, RunnerConfig};
-use crate::bench::Baseline;
 use std::path::Path;
 use std::time::Instant;
 
@@ -18,7 +18,9 @@ pub struct VanillaSingleDriver {
 
 #[async_trait::async_trait]
 impl Driver for VanillaSingleDriver {
-    fn baseline(&self) -> Baseline { Baseline::VanillaSingle }
+    fn baseline(&self) -> Baseline {
+        Baseline::VanillaSingle
+    }
 
     async fn run(
         &self,
@@ -44,7 +46,9 @@ pub struct VanillaTmuxDriver {
 
 #[async_trait::async_trait]
 impl Driver for VanillaTmuxDriver {
-    fn baseline(&self) -> Baseline { Baseline::VanillaTmux }
+    fn baseline(&self) -> Baseline {
+        Baseline::VanillaTmux
+    }
 
     async fn run(
         &self,
@@ -57,16 +61,22 @@ impl Driver for VanillaTmuxDriver {
         for (i, t) in tasks.iter().enumerate() {
             let cloned = root.join(format!(".clone-{i}"));
             std::process::Command::new("git")
-                .args(["clone", "-q", root.to_string_lossy().as_ref(),
-                       cloned.to_string_lossy().as_ref()])
+                .args([
+                    "clone",
+                    "-q",
+                    root.to_string_lossy().as_ref(),
+                    cloned.to_string_lossy().as_ref(),
+                ])
                 .status()?;
             // Identity in clone.
             let _ = std::process::Command::new("git")
                 .args(["config", "user.email", "bench@yggdrasil.local"])
-                .current_dir(&cloned).status();
+                .current_dir(&cloned)
+                .status();
             let _ = std::process::Command::new("git")
                 .args(["config", "user.name", "ygg bench"])
-                .current_dir(&cloned).status();
+                .current_dir(&cloned)
+                .status();
             let prompt = t.prompt.clone();
             let cfg = self.config.clone();
             handles.push(tokio::spawn(async move {
@@ -76,7 +86,8 @@ impl Driver for VanillaTmuxDriver {
 
         let mut outcomes = Vec::with_capacity(tasks.len());
         for (i, h) in handles.into_iter().enumerate() {
-            let mut outcome = h.await
+            let mut outcome = h
+                .await
                 .map_err(|e| anyhow::anyhow!("tmux task {i} join: {e}"))??;
             // Merge files produced in the clone back into root. Independent
             // tasks; conflicts shouldn't happen by scenario design.
@@ -84,26 +95,39 @@ impl Driver for VanillaTmuxDriver {
             let _ = merge_clone(&cloned, root);
             // Also import the commit history so grade.sh sees the messages.
             let _ = std::process::Command::new("git")
-                .args(["fetch", "-q", cloned.to_string_lossy().as_ref(),
-                       "+refs/heads/*:refs/remotes/clone/*"])
-                .current_dir(root).status();
+                .args([
+                    "fetch",
+                    "-q",
+                    cloned.to_string_lossy().as_ref(),
+                    "+refs/heads/*:refs/remotes/clone/*",
+                ])
+                .current_dir(root)
+                .status();
             // Stage + commit the merged files in root with a wrapper commit
             // that preserves the per-task message in the body so grade.sh
             // (which greps git log --all) can find both.
             let _ = std::process::Command::new("git")
-                .args(["add", "-A"]).current_dir(root).status();
+                .args(["add", "-A"])
+                .current_dir(root)
+                .status();
             // Get the latest commit message from the clone for the wrapper.
             let msg = std::process::Command::new("git")
                 .args(["log", "-1", "--pretty=%s"])
-                .current_dir(&cloned).output().ok()
+                .current_dir(&cloned)
+                .output()
+                .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|| format!("vanilla-tmux task {i}"));
             let _ = std::process::Command::new("git")
                 .args(["commit", "-q", "--allow-empty", "-m", &msg])
-                .current_dir(root).status();
+                .current_dir(root)
+                .status();
             outcome.commit_sha = std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"]).current_dir(root).output().ok()
+                .args(["rev-parse", "HEAD"])
+                .current_dir(root)
+                .output()
+                .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .map(|s| s.trim().to_string());
             outcomes.push(outcome);
@@ -115,7 +139,9 @@ impl Driver for VanillaTmuxDriver {
 fn merge_clone(clone: &Path, dest: &Path) -> std::io::Result<()> {
     for entry in walkdir_files(clone) {
         let rel = entry.strip_prefix(clone).unwrap_or(&entry);
-        if rel.starts_with(".git") { continue; }
+        if rel.starts_with(".git") {
+            continue;
+        }
         let target = dest.join(rel);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -136,7 +162,9 @@ fn walkdir_files(root: &Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if let Ok(ft) = entry.file_type() {
                 if ft.is_dir() {
-                    if entry.file_name() == ".git" { continue; }
+                    if entry.file_name() == ".git" {
+                        continue;
+                    }
                     out.extend(walkdir_files(&path));
                 } else {
                     out.push(path);
@@ -156,7 +184,9 @@ pub struct YggDriver {
 
 #[async_trait::async_trait]
 impl Driver for YggDriver {
-    fn baseline(&self) -> Baseline { Baseline::Ygg }
+    fn baseline(&self) -> Baseline {
+        Baseline::Ygg
+    }
 
     async fn run(
         &self,
@@ -172,15 +202,21 @@ impl Driver for YggDriver {
         for (i, t) in tasks.iter().enumerate() {
             let cloned = root.join(format!(".ygg-{i}"));
             std::process::Command::new("git")
-                .args(["clone", "-q", root.to_string_lossy().as_ref(),
-                       cloned.to_string_lossy().as_ref()])
+                .args([
+                    "clone",
+                    "-q",
+                    root.to_string_lossy().as_ref(),
+                    cloned.to_string_lossy().as_ref(),
+                ])
                 .status()?;
             let _ = std::process::Command::new("git")
                 .args(["config", "user.email", "bench@yggdrasil.local"])
-                .current_dir(&cloned).status();
+                .current_dir(&cloned)
+                .status();
             let _ = std::process::Command::new("git")
                 .args(["config", "user.name", "ygg bench"])
-                .current_dir(&cloned).status();
+                .current_dir(&cloned)
+                .status();
             let prompt = t.prompt.clone();
             let cfg = self.config.clone();
             handles.push(tokio::spawn(async move {
@@ -190,24 +226,33 @@ impl Driver for YggDriver {
 
         let mut outcomes = Vec::with_capacity(tasks.len());
         for (i, h) in handles.into_iter().enumerate() {
-            let mut outcome = h.await
+            let mut outcome = h
+                .await
                 .map_err(|e| anyhow::anyhow!("ygg task {i} join: {e}"))??;
             let cloned = root.join(format!(".ygg-{i}"));
             let _ = merge_clone(&cloned, root);
             let msg = std::process::Command::new("git")
                 .args(["log", "-1", "--pretty=%s"])
-                .current_dir(&cloned).output().ok()
+                .current_dir(&cloned)
+                .output()
+                .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("ygg task {i}"));
             let _ = std::process::Command::new("git")
-                .args(["add", "-A"]).current_dir(root).status();
+                .args(["add", "-A"])
+                .current_dir(root)
+                .status();
             let _ = std::process::Command::new("git")
                 .args(["commit", "-q", "--allow-empty", "-m", &msg])
-                .current_dir(root).status();
+                .current_dir(root)
+                .status();
             outcome.commit_sha = std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"]).current_dir(root).output().ok()
+                .args(["rev-parse", "HEAD"])
+                .current_dir(root)
+                .output()
+                .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .map(|s| s.trim().to_string());
             outcomes.push(outcome);
@@ -235,7 +280,8 @@ pub async fn invoke_claude(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| anyhow::anyhow!("spawn {}: {e}", cfg.claude_bin.display()))?;
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -248,12 +294,14 @@ pub async fn invoke_claude(
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => return Err(anyhow::anyhow!("claude wait: {e}")),
-        Err(_) => return Ok(DriverOutcome {
-            passed: false,
-            wall_clock_s: timeout.as_secs() as u32,
-            stderr_tail: Some(format!("timeout after {}s", timeout.as_secs())),
-            ..Default::default()
-        }),
+        Err(_) => {
+            return Ok(DriverOutcome {
+                passed: false,
+                wall_clock_s: timeout.as_secs() as u32,
+                stderr_tail: Some(format!("timeout after {}s", timeout.as_secs())),
+                ..Default::default()
+            });
+        }
     };
 
     let wall = started.elapsed().as_secs() as u32;
@@ -261,9 +309,10 @@ pub async fn invoke_claude(
     let stderr_tail = if output.stderr.is_empty() {
         None
     } else {
-        Some(String::from_utf8_lossy(
-            &output.stderr[output.stderr.len().saturating_sub(2000)..]
-        ).to_string())
+        Some(
+            String::from_utf8_lossy(&output.stderr[output.stderr.len().saturating_sub(2000)..])
+                .to_string(),
+        )
     };
 
     // Parse a usage block if the binary emitted JSON. Real claude -p does;
@@ -283,13 +332,30 @@ pub async fn invoke_claude(
     })
 }
 
-fn parse_usage(stdout: &str) -> (Option<i64>, Option<i64>, Option<i64>, Option<sqlx::types::BigDecimal>) {
+fn parse_usage(
+    stdout: &str,
+) -> (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<sqlx::types::BigDecimal>,
+) {
     let parsed: Option<serde_json::Value> = serde_json::from_str(stdout).ok();
-    let Some(v) = parsed else { return (None, None, None, None); };
-    let usage = v.get("usage").or_else(|| v.get("response").and_then(|r| r.get("usage")));
-    let i = usage.and_then(|u| u.get("input_tokens")).and_then(|n| n.as_i64());
-    let o = usage.and_then(|u| u.get("output_tokens")).and_then(|n| n.as_i64());
-    let c = usage.and_then(|u| u.get("cache_read_input_tokens")).and_then(|n| n.as_i64());
+    let Some(v) = parsed else {
+        return (None, None, None, None);
+    };
+    let usage = v
+        .get("usage")
+        .or_else(|| v.get("response").and_then(|r| r.get("usage")));
+    let i = usage
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|n| n.as_i64());
+    let o = usage
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|n| n.as_i64());
+    let c = usage
+        .and_then(|u| u.get("cache_read_input_tokens"))
+        .and_then(|n| n.as_i64());
     let usd_s = v.get("total_cost_usd").and_then(|n| n.as_f64());
     let usd = usd_s.and_then(|f| {
         use std::str::FromStr;

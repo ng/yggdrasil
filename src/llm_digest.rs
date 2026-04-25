@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 const DEFAULT_MODEL: &str = "llama3.2:1b";
-const DEFAULT_TIMEOUT_MS: u64 = 20_000;  // digest is not on a hot path; give the model room
-const MAX_TURNS: usize = 60;              // last N turns fed into the prompt
-const MAX_CHARS_PER_TURN: usize = 400;    // truncate each turn snippet
+const DEFAULT_TIMEOUT_MS: u64 = 20_000; // digest is not on a hot path; give the model room
+const MAX_TURNS: usize = 60; // last N turns fed into the prompt
+const MAX_CHARS_PER_TURN: usize = 400; // truncate each turn snippet
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LlmDigestResult {
@@ -52,11 +52,13 @@ impl LlmDigester {
             std::env::var("YGG_LLM_DIGEST").ok().as_deref(),
             Some("on" | "1" | "true")
         );
-        let base_url = std::env::var("OLLAMA_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434".into());
+        let base_url =
+            std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
         let model = std::env::var("YGG_DIGEST_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
         let timeout_ms = std::env::var("YGG_LLM_DIGEST_TIMEOUT_MS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_TIMEOUT_MS);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_MS);
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -66,7 +68,9 @@ impl LlmDigester {
         }
     }
 
-    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
 
     /// Run the LLM digest. Returns None on any failure — caller falls back.
     pub async fn digest(&self, turns: &[(String, String)]) -> Option<LlmDigestResult> {
@@ -99,23 +103,35 @@ and we will fall back to heuristic extraction.\n\n\
             keep_alive: &'a str,
         }
         #[derive(Serialize)]
-        struct Opts { temperature: f32, num_predict: u32 }
+        struct Opts {
+            temperature: f32,
+            num_predict: u32,
+        }
         #[derive(Deserialize)]
-        struct Resp { response: String }
+        struct Resp {
+            response: String,
+        }
 
         let req = Req {
             model: &self.model,
             prompt: instruction,
             format: "json",
             stream: false,
-            options: Opts { temperature: 0.0, num_predict: 600 },
+            options: Opts {
+                temperature: 0.0,
+                num_predict: 600,
+            },
             keep_alive: "30m",
         };
 
         let start = std::time::Instant::now();
         let fut = async {
-            let resp = self.http.post(format!("{}/api/generate", self.base_url))
-                .json(&req).send().await
+            let resp = self
+                .http
+                .post(format!("{}/api/generate", self.base_url))
+                .json(&req)
+                .send()
+                .await
                 .map_err(|e| format!("request: {e}"))?;
             if !resp.status().is_success() {
                 return Err(format!("http {}", resp.status()));
@@ -124,17 +140,26 @@ and we will fall back to heuristic extraction.\n\n\
             Ok::<String, String>(body.response)
         };
 
-        let raw = match tokio::time::timeout(
-            std::time::Duration::from_millis(self.timeout_ms),
-            fut,
-        ).await {
+        let raw = match tokio::time::timeout(std::time::Duration::from_millis(self.timeout_ms), fut)
+            .await
+        {
             Ok(Ok(s)) => s,
-            Ok(Err(e)) => { warn!("llm_digest: {e}"); return None; }
-            Err(_) => { warn!("llm_digest: timed out after {}ms", self.timeout_ms); return None; }
+            Ok(Err(e)) => {
+                warn!("llm_digest: {e}");
+                return None;
+            }
+            Err(_) => {
+                warn!("llm_digest: timed out after {}ms", self.timeout_ms);
+                return None;
+            }
         };
 
         let latency_ms = start.elapsed().as_millis() as u64;
-        debug!("llm_digest: raw response ({}ms): {}", latency_ms, &raw[..raw.len().min(400)]);
+        debug!(
+            "llm_digest: raw response ({}ms): {}",
+            latency_ms,
+            &raw[..raw.len().min(400)]
+        );
 
         let parsed = parse_digest_json(&raw)?;
         info!(
@@ -158,7 +183,11 @@ fn build_transcript_block(turns: &[(String, String)]) -> String {
     let mut out = String::new();
     for (role, text) in &turns[start..] {
         let t = if text.chars().count() > MAX_CHARS_PER_TURN {
-            let cut = text.char_indices().nth(MAX_CHARS_PER_TURN).map(|(i, _)| i).unwrap_or(text.len());
+            let cut = text
+                .char_indices()
+                .nth(MAX_CHARS_PER_TURN)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
             format!("{}…", &text[..cut])
         } else {
             text.clone()
@@ -217,7 +246,9 @@ fn parse_digest_json(raw: &str) -> Option<ParsedDigest> {
     }
 
     // Require at least a real summary; empty/placeholder digest is not useful.
-    if out.summary.is_empty() { return None; }
+    if out.summary.is_empty() {
+        return None;
+    }
     Some(out)
 }
 
@@ -227,7 +258,8 @@ mod tests {
 
     #[test]
     fn parses_standard_shape() {
-        let raw = r#"{"summary":"shipped the retrieval overhaul","open_threads":["test coverage"]}"#;
+        let raw =
+            r#"{"summary":"shipped the retrieval overhaul","open_threads":["test coverage"]}"#;
         let p = parse_digest_json(raw).unwrap();
         assert_eq!(p.summary, "shipped the retrieval overhaul");
         assert_eq!(p.open_threads, vec!["test coverage"]);

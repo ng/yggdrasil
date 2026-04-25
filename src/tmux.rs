@@ -44,7 +44,9 @@ impl TmuxManager {
             .map_err(|e| crate::YggError::Tmux(format!("create session failed: {e}")))?;
 
         if !status.success() {
-            return Err(crate::YggError::Tmux("failed to create tmux session".into()));
+            return Err(crate::YggError::Tmux(
+                "failed to create tmux session".into(),
+            ));
         }
         Ok(())
     }
@@ -95,10 +97,7 @@ impl TmuxManager {
     }
 
     /// Send keys to a specific pane.
-    pub async fn send_keys(
-        target: &str,
-        keys: &str,
-    ) -> Result<(), crate::YggError> {
+    pub async fn send_keys(target: &str, keys: &str) -> Result<(), crate::YggError> {
         Command::new("tmux")
             .args(["send-keys", "-t", target, keys, "Enter"])
             .status()
@@ -124,13 +123,7 @@ impl TmuxManager {
     /// List all windows in the ygg session.
     pub async fn list_windows() -> Result<Vec<String>, crate::YggError> {
         let output = Command::new("tmux")
-            .args([
-                "list-windows",
-                "-t",
-                SESSION_NAME,
-                "-F",
-                "#{window_name}",
-            ])
+            .args(["list-windows", "-t", SESSION_NAME, "-F", "#{window_name}"])
             .output()
             .await
             .map_err(|e| crate::YggError::Tmux(format!("list-windows failed: {e}")))?;

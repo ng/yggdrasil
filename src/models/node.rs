@@ -114,11 +114,7 @@ impl<'a> NodeRepo<'a> {
     }
 
     /// Set embedding on an existing node.
-    pub async fn set_embedding(
-        &self,
-        node_id: Uuid,
-        embedding: Vector,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn set_embedding(&self, node_id: Uuid, embedding: Vector) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE nodes SET embedding = $1 WHERE id = $2")
             .bind(embedding)
             .bind(node_id)
@@ -212,13 +208,18 @@ impl<'a> NodeRepo<'a> {
         }
 
         // Filter by kind — cast the enum array to text for the ANY match
-        let kind_strings: Vec<String> = kinds.iter().map(|k| format!("{k:?}").to_lowercase()
-            .replace("usermessage", "user_message")
-            .replace("assistantmessage", "assistant_message")
-            .replace("toolcall", "tool_call")
-            .replace("toolresult", "tool_result")
-            .replace("humanoverride", "human_override")
-        ).collect();
+        let kind_strings: Vec<String> = kinds
+            .iter()
+            .map(|k| {
+                format!("{k:?}")
+                    .to_lowercase()
+                    .replace("usermessage", "user_message")
+                    .replace("assistantmessage", "assistant_message")
+                    .replace("toolcall", "tool_call")
+                    .replace("toolresult", "tool_result")
+                    .replace("humanoverride", "human_override")
+            })
+            .collect();
 
         sqlx::query_as::<_, Node>(
             r#"
@@ -253,7 +254,8 @@ impl<'a> NodeRepo<'a> {
             NodeKind::Directive,
             serde_json::json!({ "directive": content }),
             crate::executor::estimate_tokens(content) as i32,
-        ).await
+        )
+        .await
     }
 
     /// Create a merge node that references results from multiple agents/branches.
@@ -278,21 +280,27 @@ impl<'a> NodeRepo<'a> {
                 "summary": summary,
             }),
             crate::executor::estimate_tokens(summary) as i32,
-        ).await
+        )
+        .await
     }
 
     /// Detect divergence: check if a node has children from different agents.
     pub async fn detect_divergence(&self, node_id: Uuid) -> Result<Vec<Vec<Node>>, sqlx::Error> {
         let children = self.get_children(node_id).await?;
-        if children.len() < 2 { return Ok(vec![]); }
+        if children.len() < 2 {
+            return Ok(vec![]);
+        }
 
         // Group by agent_id
-        let mut by_agent: std::collections::HashMap<Uuid, Vec<Node>> = std::collections::HashMap::new();
+        let mut by_agent: std::collections::HashMap<Uuid, Vec<Node>> =
+            std::collections::HashMap::new();
         for child in children {
             by_agent.entry(child.agent_id).or_default().push(child);
         }
 
-        if by_agent.len() < 2 { return Ok(vec![]); }
+        if by_agent.len() < 2 {
+            return Ok(vec![]);
+        }
 
         Ok(by_agent.into_values().collect())
     }
@@ -307,14 +315,18 @@ impl<'a> NodeRepo<'a> {
         limit: i32,
         max_distance: f64,
     ) -> Result<Vec<SearchHit>, sqlx::Error> {
-        let kind_strings: Vec<String> = kinds.iter().map(|k| {
-            format!("{k:?}").to_lowercase()
-                .replace("usermessage", "user_message")
-                .replace("assistantmessage", "assistant_message")
-                .replace("toolcall", "tool_call")
-                .replace("toolresult", "tool_result")
-                .replace("humanoverride", "human_override")
-        }).collect();
+        let kind_strings: Vec<String> = kinds
+            .iter()
+            .map(|k| {
+                format!("{k:?}")
+                    .to_lowercase()
+                    .replace("usermessage", "user_message")
+                    .replace("assistantmessage", "assistant_message")
+                    .replace("toolcall", "tool_call")
+                    .replace("toolresult", "tool_result")
+                    .replace("humanoverride", "human_override")
+            })
+            .collect();
 
         let rows = sqlx::query(
             r#"
@@ -337,31 +349,34 @@ impl<'a> NodeRepo<'a> {
         .fetch_all(self.pool)
         .await?;
 
-        let hits = rows.into_iter().map(|row| {
-            use sqlx::Row;
-            SearchHit {
-                id: row.get("id"),
-                agent_id: row.get("agent_id"),
-                agent_name: row.get("agent_name"),
-                kind: {
-                    let k: String = row.get("kind_text");
-                    match k.as_str() {
-                        "user_message" => NodeKind::UserMessage,
-                        "assistant_message" => NodeKind::AssistantMessage,
-                        "tool_call" => NodeKind::ToolCall,
-                        "tool_result" => NodeKind::ToolResult,
-                        "digest" => NodeKind::Digest,
-                        "directive" => NodeKind::Directive,
-                        "human_override" => NodeKind::HumanOverride,
-                        _ => NodeKind::System,
-                    }
-                },
-                content: row.get("content"),
-                token_count: row.get("token_count"),
-                created_at: row.get("created_at"),
-                distance: row.get("distance"),
-            }
-        }).collect();
+        let hits = rows
+            .into_iter()
+            .map(|row| {
+                use sqlx::Row;
+                SearchHit {
+                    id: row.get("id"),
+                    agent_id: row.get("agent_id"),
+                    agent_name: row.get("agent_name"),
+                    kind: {
+                        let k: String = row.get("kind_text");
+                        match k.as_str() {
+                            "user_message" => NodeKind::UserMessage,
+                            "assistant_message" => NodeKind::AssistantMessage,
+                            "tool_call" => NodeKind::ToolCall,
+                            "tool_result" => NodeKind::ToolResult,
+                            "digest" => NodeKind::Digest,
+                            "directive" => NodeKind::Directive,
+                            "human_override" => NodeKind::HumanOverride,
+                            _ => NodeKind::System,
+                        }
+                    },
+                    content: row.get("content"),
+                    token_count: row.get("token_count"),
+                    created_at: row.get("created_at"),
+                    distance: row.get("distance"),
+                }
+            })
+            .collect();
 
         Ok(hits)
     }
@@ -380,14 +395,18 @@ impl<'a> NodeRepo<'a> {
         limit: i32,
         max_distance: f64,
     ) -> Result<Vec<SearchHit>, sqlx::Error> {
-        let kind_strings: Vec<String> = kinds.iter().map(|k| {
-            format!("{k:?}").to_lowercase()
-                .replace("usermessage", "user_message")
-                .replace("assistantmessage", "assistant_message")
-                .replace("toolcall", "tool_call")
-                .replace("toolresult", "tool_result")
-                .replace("humanoverride", "human_override")
-        }).collect();
+        let kind_strings: Vec<String> = kinds
+            .iter()
+            .map(|k| {
+                format!("{k:?}")
+                    .to_lowercase()
+                    .replace("usermessage", "user_message")
+                    .replace("assistantmessage", "assistant_message")
+                    .replace("toolcall", "tool_call")
+                    .replace("toolresult", "tool_result")
+                    .replace("humanoverride", "human_override")
+            })
+            .collect();
 
         // Pull 2× limit per side so the post-RRF top-k has room to pick winners.
         let per_side = (limit as i64) * 2;
@@ -448,31 +467,34 @@ impl<'a> NodeRepo<'a> {
         .fetch_all(self.pool)
         .await?;
 
-        let hits = rows.into_iter().map(|row| {
-            use sqlx::Row;
-            SearchHit {
-                id: row.get("id"),
-                agent_id: row.get("agent_id"),
-                agent_name: row.get("agent_name"),
-                kind: {
-                    let k: String = row.get("kind_text");
-                    match k.as_str() {
-                        "user_message" => NodeKind::UserMessage,
-                        "assistant_message" => NodeKind::AssistantMessage,
-                        "tool_call" => NodeKind::ToolCall,
-                        "tool_result" => NodeKind::ToolResult,
-                        "digest" => NodeKind::Digest,
-                        "directive" => NodeKind::Directive,
-                        "human_override" => NodeKind::HumanOverride,
-                        _ => NodeKind::System,
-                    }
-                },
-                content: row.get("content"),
-                token_count: row.get("token_count"),
-                created_at: row.get("created_at"),
-                distance: row.get("distance"),
-            }
-        }).collect();
+        let hits = rows
+            .into_iter()
+            .map(|row| {
+                use sqlx::Row;
+                SearchHit {
+                    id: row.get("id"),
+                    agent_id: row.get("agent_id"),
+                    agent_name: row.get("agent_name"),
+                    kind: {
+                        let k: String = row.get("kind_text");
+                        match k.as_str() {
+                            "user_message" => NodeKind::UserMessage,
+                            "assistant_message" => NodeKind::AssistantMessage,
+                            "tool_call" => NodeKind::ToolCall,
+                            "tool_result" => NodeKind::ToolResult,
+                            "digest" => NodeKind::Digest,
+                            "directive" => NodeKind::Directive,
+                            "human_override" => NodeKind::HumanOverride,
+                            _ => NodeKind::System,
+                        }
+                    },
+                    content: row.get("content"),
+                    token_count: row.get("token_count"),
+                    created_at: row.get("created_at"),
+                    distance: row.get("distance"),
+                }
+            })
+            .collect();
 
         Ok(hits)
     }

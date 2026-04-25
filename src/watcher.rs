@@ -1,6 +1,6 @@
+use sqlx::PgPool;
 use std::process::Command;
 use std::time::Duration;
-use sqlx::PgPool;
 
 use crate::config::AppConfig;
 use crate::lock::LockManager;
@@ -22,7 +22,10 @@ impl Watcher {
     /// Main loop — runs until SIGTERM/SIGINT.
     pub async fn run(&self) -> Result<(), anyhow::Error> {
         let interval = Duration::from_secs(self.config.watcher_interval_secs);
-        tracing::info!(interval_secs = self.config.watcher_interval_secs, "watcher started");
+        tracing::info!(
+            interval_secs = self.config.watcher_interval_secs,
+            "watcher started"
+        );
 
         let mut tick = tokio::time::interval(interval);
 
@@ -51,9 +54,11 @@ impl Watcher {
 
         if reaped > 0 || stale > 0 || worker_updates > 0 || delivery_updates > 0 {
             tracing::info!(
-                reaped_locks = reaped, stale_agents = stale,
+                reaped_locks = reaped,
+                stale_agents = stale,
                 worker_updates = worker_updates,
-                delivery_updates = delivery_updates, "watcher tick"
+                delivery_updates = delivery_updates,
+                "watcher tick"
             );
         }
 
@@ -76,7 +81,10 @@ impl Watcher {
                        OR delivery_checked_at < now() - interval '60 seconds')
                 ORDER BY ended_at DESC NULLS LAST
                 LIMIT 20"#,
-        ).fetch_all(&self.pool).await.unwrap_or_default();
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
 
         let repo = WorkerRepo::new(&self.pool);
         let mut n = 0u64;
@@ -84,7 +92,9 @@ impl Watcher {
             // Branch name follows the plan_cmd scheme: ygg/<prefix>-<seq>
             let branch = derive_branch(&w.tmux_window);
             let (pushed, merged, pr) = inspect_delivery(&w.worktree_path, branch.as_deref());
-            let _ = repo.set_delivery(w.worker_id, pushed, merged, pr.as_deref()).await;
+            let _ = repo
+                .set_delivery(w.worker_id, pushed, merged, pr.as_deref())
+                .await;
             if pushed != w.branch_pushed || merged != w.branch_merged {
                 n += 1;
             }
@@ -98,15 +108,22 @@ impl Watcher {
     ///   - captures the pane and scans for prompt markers → needs_attention
     ///   - marks rows whose window is gone → abandoned
     async fn observe_workers(&self) -> Result<u64, anyhow::Error> {
-        let workers = WorkerRepo::new(&self.pool).list_live().await
+        let workers = WorkerRepo::new(&self.pool)
+            .list_live()
+            .await
             .unwrap_or_default();
-        if workers.is_empty() { return Ok(0); }
+        if workers.is_empty() {
+            return Ok(0);
+        }
 
         // Group by tmux_session so we make one list-windows call per.
         use std::collections::{HashMap, HashSet};
         let mut by_session: HashMap<String, Vec<Worker>> = HashMap::new();
         for w in workers {
-            by_session.entry(w.tmux_session.clone()).or_default().push(w);
+            by_session
+                .entry(w.tmux_session.clone())
+                .or_default()
+                .push(w);
         }
 
         let repo = WorkerRepo::new(&self.pool);
@@ -118,10 +135,13 @@ impl Watcher {
                 if !windows.contains(&w.tmux_window) {
                     // Window vanished — machine restart, manual kill, or
                     // claude exited and the shell closed.
-                    let _ = repo.set_state(
-                        w.worker_id, WorkerState::Abandoned,
-                        Some("tmux window absent on observer tick"),
-                    ).await;
+                    let _ = repo
+                        .set_state(
+                            w.worker_id,
+                            WorkerState::Abandoned,
+                            Some("tmux window absent on observer tick"),
+                        )
+                        .await;
                     changes += 1;
                     continue;
                 }
@@ -200,18 +220,28 @@ fn list_tmux_windows(session: &str) -> Vec<String> {
     let out = Command::new("tmux")
         .args(["list-windows", "-t", session, "-F", "#{window_name}"])
         .output();
-    let Ok(out) = out else { return Vec::new(); };
-    if !out.status.success() { return Vec::new(); }
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
     String::from_utf8_lossy(&out.stdout)
-        .lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn capture_pane(session: &str, window: &str) -> Option<String> {
     let target = format!("{session}:{window}");
     let out = Command::new("tmux")
         .args(["capture-pane", "-p", "-t", &target, "-S", "-200"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
@@ -223,47 +253,77 @@ fn derive_branch(window: &str) -> Option<String> {
     let parts: Vec<&str> = window.split('·').collect();
     if parts.len() >= 2 {
         Some(format!("ygg/{}", parts[1]))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// Three-way delivery inspection. Any of these can fail silently —
 /// git may not have a remote, gh may not be installed, branch may
 /// have been deleted. Return conservative (false/false/None) on any
 /// error so we don't mis-report.
-fn inspect_delivery(
-    worktree: &str,
-    branch: Option<&str>,
-) -> (bool, bool, Option<String>) {
-    let Some(branch) = branch else { return (false, false, None); };
+fn inspect_delivery(worktree: &str, branch: Option<&str>) -> (bool, bool, Option<String>) {
+    let Some(branch) = branch else {
+        return (false, false, None);
+    };
     let wt = std::path::Path::new(worktree);
-    if !wt.exists() { return (false, false, None); }
+    if !wt.exists() {
+        return (false, false, None);
+    }
 
     // Pushed: `git rev-parse <branch>@{upstream}` succeeds + `git log
     // origin/<branch>..<branch>` is empty.
-    let upstream_ok = Command::new("git").arg("-C").arg(wt)
-        .args(["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
-        .output().map(|o| o.status.success()).unwrap_or(false);
-    let pushed = upstream_ok && Command::new("git").arg("-C").arg(wt)
-        .args(["rev-list", "--count", &format!("origin/{branch}..{branch}")])
-        .output().ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim() == "0")
+    let upstream_ok = Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ])
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false);
+    let pushed = upstream_ok
+        && Command::new("git")
+            .arg("-C")
+            .arg(wt)
+            .args(["rev-list", "--count", &format!("origin/{branch}..{branch}")])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim() == "0")
+            .unwrap_or(false);
 
     // Merged: `git merge-base --is-ancestor <branch> origin/main` exit 0.
-    let merged = Command::new("git").arg("-C").arg(wt)
+    let merged = Command::new("git")
+        .arg("-C")
+        .arg(wt)
         .args(["merge-base", "--is-ancestor", branch, "origin/main"])
-        .output().map(|o| o.status.success()).unwrap_or(false);
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
     // PR via gh (optional). One-line JSON, first match.
-    let pr_url = Command::new("gh").arg("-C").arg(wt)
-        .args(["pr", "list", "--head", branch, "--json", "url", "--limit", "1"])
-        .output().ok()
+    let pr_url = Command::new("gh")
+        .arg("-C")
+        .arg(wt)
+        .args([
+            "pr", "list", "--head", branch, "--json", "url", "--limit", "1",
+        ])
+        .output()
+        .ok()
         .and_then(|o| {
-            if !o.status.success() { return None; }
+            if !o.status.success() {
+                return None;
+            }
             let s = String::from_utf8_lossy(&o.stdout);
             let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-            v.as_array()?.first()?.get("url")?.as_str().map(String::from)
+            v.as_array()?
+                .first()?
+                .get("url")?
+                .as_str()
+                .map(String::from)
         });
 
     (pushed, merged, pr_url)
@@ -282,7 +342,9 @@ fn classify_pane(pane: &str) -> WorkerState {
         "Select an option",
     ];
     for m in ATTENTION {
-        if pane.contains(m) { return WorkerState::NeedsAttention; }
+        if pane.contains(m) {
+            return WorkerState::NeedsAttention;
+        }
     }
 
     // "Active" heuristic: the Claude Code UI shows a thinking indicator

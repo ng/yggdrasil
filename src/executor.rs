@@ -24,7 +24,11 @@ impl Executor {
     }
 
     /// Execute a command through RTK: `rtk <command> [args...]`
-    pub async fn run(&self, command: &str, args: &[&str]) -> Result<ExecutionResult, crate::YggError> {
+    pub async fn run(
+        &self,
+        command: &str,
+        args: &[&str],
+    ) -> Result<ExecutionResult, crate::YggError> {
         let output = Command::new(&self.rtk_path)
             .arg(command)
             .args(args)
@@ -69,7 +73,13 @@ impl Executor {
             "args": args,
         });
         let call_node = node_repo
-            .insert(Some(parent_node_id), agent_id, NodeKind::ToolCall, call_content, 0)
+            .insert(
+                Some(parent_node_id),
+                agent_id,
+                NodeKind::ToolCall,
+                call_content,
+                0,
+            )
             .await?;
 
         // Execute

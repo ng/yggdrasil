@@ -17,29 +17,46 @@ async fn test_agent_lifecycle() {
 
     // Transition idle → executing
     let updated = agent_repo
-        .transition(agent.agent_id, ygg::models::agent::AgentState::Idle, ygg::models::agent::AgentState::Executing)
+        .transition(
+            agent.agent_id,
+            ygg::models::agent::AgentState::Idle,
+            ygg::models::agent::AgentState::Executing,
+        )
         .await
         .unwrap();
     assert!(updated.is_some());
-    assert_eq!(updated.unwrap().current_state, ygg::models::agent::AgentState::Executing);
+    assert_eq!(
+        updated.unwrap().current_state,
+        ygg::models::agent::AgentState::Executing
+    );
 
     // Invalid transition — executing → idle (should work)
     let back = agent_repo
-        .transition(agent.agent_id, ygg::models::agent::AgentState::Executing, ygg::models::agent::AgentState::Idle)
+        .transition(
+            agent.agent_id,
+            ygg::models::agent::AgentState::Executing,
+            ygg::models::agent::AgentState::Idle,
+        )
         .await
         .unwrap();
     assert!(back.is_some());
 
     // Wrong current state — should return None
     let bad = agent_repo
-        .transition(agent.agent_id, ygg::models::agent::AgentState::Executing, ygg::models::agent::AgentState::Shutdown)
+        .transition(
+            agent.agent_id,
+            ygg::models::agent::AgentState::Executing,
+            ygg::models::agent::AgentState::Shutdown,
+        )
         .await
         .unwrap();
     assert!(bad.is_none()); // already idle, not executing
 
     // Cleanup
     sqlx::query("DELETE FROM agents WHERE agent_name = 'test-agent-lifecycle'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -55,31 +72,43 @@ async fn test_node_dag() {
     let aid = agent.agent_id;
 
     // Insert root node
-    let root = node_repo.insert(
-        None, aid,
-        ygg::models::node::NodeKind::UserMessage,
-        serde_json::json!({"task": "test task"}),
-        10,
-    ).await.unwrap();
+    let root = node_repo
+        .insert(
+            None,
+            aid,
+            ygg::models::node::NodeKind::UserMessage,
+            serde_json::json!({"task": "test task"}),
+            10,
+        )
+        .await
+        .unwrap();
     assert!(root.ancestors.is_empty());
 
     // Insert child node
-    let child = node_repo.insert(
-        Some(root.id), aid,
-        ygg::models::node::NodeKind::AssistantMessage,
-        serde_json::json!({"response": "ok"}),
-        20,
-    ).await.unwrap();
+    let child = node_repo
+        .insert(
+            Some(root.id),
+            aid,
+            ygg::models::node::NodeKind::AssistantMessage,
+            serde_json::json!({"response": "ok"}),
+            20,
+        )
+        .await
+        .unwrap();
     assert_eq!(child.ancestors.len(), 1);
     assert_eq!(child.ancestors[0], root.id);
 
     // Insert grandchild
-    let grandchild = node_repo.insert(
-        Some(child.id), aid,
-        ygg::models::node::NodeKind::ToolCall,
-        serde_json::json!({"command": "ls"}),
-        5,
-    ).await.unwrap();
+    let grandchild = node_repo
+        .insert(
+            Some(child.id),
+            aid,
+            ygg::models::node::NodeKind::ToolCall,
+            serde_json::json!({"command": "ls"}),
+            5,
+        )
+        .await
+        .unwrap();
     assert_eq!(grandchild.ancestors.len(), 2);
 
     // Path traversal
@@ -87,7 +116,10 @@ async fn test_node_dag() {
     assert_eq!(path.len(), 3);
 
     // Token sum
-    let tokens = node_repo.calculate_path_tokens(grandchild.id).await.unwrap();
+    let tokens = node_repo
+        .calculate_path_tokens(grandchild.id)
+        .await
+        .unwrap();
     assert_eq!(tokens, 35); // 10 + 20 + 5
 
     // Children
@@ -96,8 +128,15 @@ async fn test_node_dag() {
     assert_eq!(children[0].id, child.id);
 
     // Cleanup
-    sqlx::query("DELETE FROM nodes WHERE agent_id = $1").bind(aid).execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM agents WHERE agent_name = 'test-node-dag'").execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM nodes WHERE agent_id = $1")
+        .bind(aid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM agents WHERE agent_name = 'test-node-dag'")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -173,7 +212,10 @@ async fn test_embedding_ollama() {
     assert!(true, "embedding succeeded");
 
     // Test that two different texts produce different embeddings
-    let vec2 = embedder.embed("quantum physics research paper").await.unwrap();
+    let vec2 = embedder
+        .embed("quantum physics research paper")
+        .await
+        .unwrap();
     // They should be different (we can't easily compare Vectors, but no error = success)
     assert!(true, "second embedding succeeded");
 }
@@ -197,27 +239,32 @@ async fn test_salience_governor() {
     assert!((s2 - 0.45).abs() < 0.01);
 
     // Governor caps at max_concurrent
-    let directives: Vec<ScoredDirective> = (0..10).map(|i| ScoredDirective {
-        node_id: uuid::Uuid::new_v4(),
-        content: format!("directive {i}"),
-        token_count: 10,
-        similarity: 0.9 - (i as f64 * 0.05),
-        token_distance: 0,
-        salience: 0.9 - (i as f64 * 0.05),
-    }).collect();
+    let directives: Vec<ScoredDirective> = (0..10)
+        .map(|i| ScoredDirective {
+            node_id: uuid::Uuid::new_v4(),
+            content: format!("directive {i}"),
+            token_count: 10,
+            similarity: 0.9 - (i as f64 * 0.05),
+            token_distance: 0,
+            salience: 0.9 - (i as f64 * 0.05),
+        })
+        .collect();
 
     let result = gov.govern(directives);
     assert_eq!(result.len(), 3); // capped
 
     // Dedup on second call
-    let more: Vec<ScoredDirective> = result.iter().map(|d| ScoredDirective {
-        node_id: d.node_id,
-        content: d.content.clone(),
-        token_count: d.token_count,
-        similarity: d.similarity,
-        token_distance: d.token_distance,
-        salience: d.salience,
-    }).collect();
+    let more: Vec<ScoredDirective> = result
+        .iter()
+        .map(|d| ScoredDirective {
+            node_id: d.node_id,
+            content: d.content.clone(),
+            token_count: d.token_count,
+            similarity: d.similarity,
+            token_distance: d.token_distance,
+            salience: d.salience,
+        })
+        .collect();
     let result2 = gov.govern(more);
     assert_eq!(result2.len(), 0); // all seen
 
@@ -235,11 +282,14 @@ async fn test_crash_recovery() {
 
     // Create agent stuck in executing
     let agent = agent_repo.register("test-crash-recovery").await.unwrap();
-    agent_repo.transition(
-        agent.agent_id,
-        ygg::models::agent::AgentState::Idle,
-        ygg::models::agent::AgentState::Executing,
-    ).await.unwrap();
+    agent_repo
+        .transition(
+            agent.agent_id,
+            ygg::models::agent::AgentState::Idle,
+            ygg::models::agent::AgentState::Executing,
+        )
+        .await
+        .unwrap();
 
     // Make it stale by backdating updated_at
     sqlx::query("UPDATE agents SET updated_at = now() - interval '1 hour' WHERE agent_name = 'test-crash-recovery'")
@@ -247,16 +297,25 @@ async fn test_crash_recovery() {
 
     // Find orphaned (stale > 60s)
     let orphaned = agent_repo.find_orphaned(60).await.unwrap();
-    assert!(orphaned.iter().any(|a| a.agent_name == "test-crash-recovery"));
+    assert!(
+        orphaned
+            .iter()
+            .any(|a| a.agent_name == "test-crash-recovery")
+    );
 
     // Reset
     agent_repo.reset_to_idle(agent.agent_id).await.unwrap();
     let recovered = agent_repo.get(agent.agent_id).await.unwrap().unwrap();
-    assert_eq!(recovered.current_state, ygg::models::agent::AgentState::Idle);
+    assert_eq!(
+        recovered.current_state,
+        ygg::models::agent::AgentState::Idle
+    );
 
     // Cleanup
     sqlx::query("DELETE FROM agents WHERE agent_name = 'test-crash-recovery'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -266,29 +325,57 @@ async fn test_msg_send_inbox_mark_read() {
     let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
 
     sqlx::query("DELETE FROM events WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
     agent_repo.register("test-msg-sender").await.unwrap();
     agent_repo.register("test-msg-recipient").await.unwrap();
 
     // Send two messages; inbox returns both; mark_read drains.
-    ygg::cli::msg_cmd::send(&pool, "test-msg-sender", "test-msg-recipient", "hello 1", false).await.unwrap();
-    ygg::cli::msg_cmd::send(&pool, "test-msg-sender", "test-msg-recipient", "hello 2", false).await.unwrap();
+    ygg::cli::msg_cmd::send(
+        &pool,
+        "test-msg-sender",
+        "test-msg-recipient",
+        "hello 1",
+        false,
+    )
+    .await
+    .unwrap();
+    ygg::cli::msg_cmd::send(
+        &pool,
+        "test-msg-sender",
+        "test-msg-recipient",
+        "hello 2",
+        false,
+    )
+    .await
+    .unwrap();
 
-    let unread = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", false).await.unwrap();
+    let unread = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", false)
+        .await
+        .unwrap();
     assert_eq!(unread.len(), 2);
     assert_eq!(unread[0].body, "hello 1");
     assert_eq!(unread[1].body, "hello 2");
     assert_eq!(unread[0].from_agent_name, "test-msg-sender");
 
-    ygg::cli::msg_cmd::mark_read(&pool, "test-msg-recipient").await.unwrap();
-    let post = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", false).await.unwrap();
+    ygg::cli::msg_cmd::mark_read(&pool, "test-msg-recipient")
+        .await
+        .unwrap();
+    let post = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", false)
+        .await
+        .unwrap();
     assert!(post.is_empty(), "inbox empty after mark_read");
 
     // But --all should still return both.
-    let all = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", true).await.unwrap();
+    let all = ygg::cli::msg_cmd::inbox(&pool, "test-msg-recipient", true)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 2);
 
     // Missing recipient errors.
@@ -297,9 +384,13 @@ async fn test_msg_send_inbox_mark_read() {
 
     // Cleanup
     sqlx::query("DELETE FROM events WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -309,7 +400,9 @@ async fn test_lock_release_all_for_agent() {
     let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
 
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-lock-stop-a', 'test-lock-stop-b')")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let a = agent_repo.register("test-lock-stop-a").await.unwrap();
     let b = agent_repo.register("test-lock-stop-b").await.unwrap();
@@ -330,7 +423,9 @@ async fn test_lock_release_all_for_agent() {
     // Cleanup
     let _ = lock_mgr.release_all_for_agent(b.agent_id).await;
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-lock-stop-a', 'test-lock-stop-b')")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -339,24 +434,36 @@ async fn test_orphan_candidates_filter_by_idle() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
     let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
 
-    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-orphan-fresh', 'test-orphan-stale')")
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "DELETE FROM agents WHERE agent_name IN ('test-orphan-fresh', 'test-orphan-stale')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("DELETE FROM repos WHERE name = 'test-orphan-repo'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let fresh = agent_repo.register("test-orphan-fresh").await.unwrap();
     let stale = agent_repo.register("test-orphan-stale").await.unwrap();
 
     // Back-date the stale agent so it crosses the idle threshold.
     sqlx::query("UPDATE agents SET updated_at = now() - interval '2 hours' WHERE agent_id = $1")
-        .bind(stale.agent_id).execute(&pool).await.unwrap();
+        .bind(stale.agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Minimal fixture: repo + task per agent + worker with a bogus path.
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (name, task_prefix) VALUES ('test-orphan-repo', 'test-orphan-repo') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1) ON CONFLICT DO NOTHING")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     for (aid, seq) in [(fresh.agent_id, 1), (stale.agent_id, 2)] {
         let task: (uuid::Uuid,) = sqlx::query_as(
             "INSERT INTO tasks (repo_id, seq, title, kind, assignee) VALUES ($1, $2, 'fixture', 'task', $3) RETURNING task_id"
@@ -368,16 +475,27 @@ async fn test_orphan_candidates_filter_by_idle() {
 
     // At a 1-hour idle threshold, only the stale agent should be returned.
     let cands = agent_repo.list_orphan_candidates(3600).await.unwrap();
-    assert!(cands.iter().any(|(id, _, _)| *id == stale.agent_id),
-        "stale agent should be a candidate at 1h threshold");
-    assert!(!cands.iter().any(|(id, _, _)| *id == fresh.agent_id),
-        "fresh agent should NOT be a candidate at 1h threshold");
+    assert!(
+        cands.iter().any(|(id, _, _)| *id == stale.agent_id),
+        "stale agent should be a candidate at 1h threshold"
+    );
+    assert!(
+        !cands.iter().any(|(id, _, _)| *id == fresh.agent_id),
+        "fresh agent should NOT be a candidate at 1h threshold"
+    );
 
     // Cleanup (cascades wipe tasks + workers).
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-orphan-fresh', 'test-orphan-stale')")
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM agents WHERE agent_name IN ('test-orphan-fresh', 'test-orphan-stale')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -395,18 +513,34 @@ async fn test_agent_rename() {
 
     // Happy path: rename succeeds, id preserved, lookup by new name works,
     // old name is gone.
-    agent_repo.rename(src.agent_id, "test-rename-dst").await.unwrap();
+    agent_repo
+        .rename(src.agent_id, "test-rename-dst")
+        .await
+        .unwrap();
     let found = agent_repo.get_by_name("test-rename-dst").await.unwrap();
     assert!(found.is_some(), "agent lookup by new name should succeed");
-    assert_eq!(found.unwrap().agent_id, src.agent_id, "agent_id must be preserved");
+    assert_eq!(
+        found.unwrap().agent_id,
+        src.agent_id,
+        "agent_id must be preserved"
+    );
     let gone = agent_repo.get_by_name("test-rename-src").await.unwrap();
     assert!(gone.is_none(), "old name should no longer resolve");
 
     // Collision path: renaming another agent into an occupied (name, persona)
     // slot must error with a unique-violation (SQLSTATE 23505).
-    let err = agent_repo.rename(other.agent_id, "test-rename-dst").await.unwrap_err();
-    let code = err.as_database_error().and_then(|d| d.code().map(|c| c.to_string()));
-    assert_eq!(code.as_deref(), Some("23505"), "collision should be unique_violation");
+    let err = agent_repo
+        .rename(other.agent_id, "test-rename-dst")
+        .await
+        .unwrap_err();
+    let code = err
+        .as_database_error()
+        .and_then(|d| d.code().map(|c| c.to_string()));
+    assert_eq!(
+        code.as_deref(),
+        Some("23505"),
+        "collision should be unique_violation"
+    );
 
     // Cleanup
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-rename-src', 'test-rename-dst', 'test-rename-collision')")
@@ -420,19 +554,28 @@ async fn test_scheduler_finalizes_terminal_run_closes_task() {
 
     // Use a fixture repo + task. Cleanup any prior runs of the test.
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-test'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-test', 'sched-test') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Create a task in_progress and insert a succeeded task_runs row.
     let task: (uuid::Uuid,) = sqlx::query_as(
         r#"INSERT INTO tasks (repo_id, seq, title, status)
            VALUES ($1, 1, 'sched fin test', 'in_progress')
            RETURNING task_id"#,
-    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+    )
+    .bind(repo.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     sqlx::query(
         r#"INSERT INTO task_runs (task_id, attempt, idempotency_key, state, output_commit_sha, ended_at)
@@ -447,18 +590,28 @@ async fn test_scheduler_finalizes_terminal_run_closes_task() {
         poison_threshold: 3,
     };
     let stats = ygg::scheduler::tick(&pool, &cfg).await.unwrap();
-    assert!(stats.finalized >= 1, "finalize_terminal_runs should close the task");
+    assert!(
+        stats.finalized >= 1,
+        "finalize_terminal_runs should close the task"
+    );
 
     let row: (String, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT status::text, close_reason, result_blob_ref FROM tasks WHERE task_id = $1",
-    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    )
+    .bind(task.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(row.0, "closed");
     assert!(row.1.unwrap().contains("succeeded"));
     assert_eq!(row.2.as_deref(), Some("deadbeef"));
 
     // Cleanup
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -467,17 +620,26 @@ async fn test_scheduler_schedules_runnable_task_to_ready() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-sched'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-sched', 'sched-sched') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let task: (uuid::Uuid,) = sqlx::query_as(
         r#"INSERT INTO tasks (repo_id, seq, title, status, runnable, approval_level)
            VALUES ($1, 1, 'sched runnable', 'open', TRUE, 'auto')
            RETURNING task_id"#,
-    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+    )
+    .bind(repo.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     let cfg = ygg::scheduler::SchedulerConfig {
         tick_interval: std::time::Duration::from_secs(1),
@@ -486,20 +648,34 @@ async fn test_scheduler_schedules_runnable_task_to_ready() {
         default_heartbeat_ttl_s: 300,
         poison_threshold: 3,
     };
-    let scheduled = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
-    assert!(scheduled >= 1, "runnable + auto-approved task should be scheduled");
+    let scheduled = ygg::scheduler::schedule_ready_tasks(&pool, &cfg)
+        .await
+        .unwrap();
+    assert!(
+        scheduled >= 1,
+        "runnable + auto-approved task should be scheduled"
+    );
 
     let state: String = sqlx::query_scalar(
         "SELECT state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt DESC LIMIT 1",
-    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    )
+    .bind(task.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(state, "ready");
 
     // A second tick shouldn't double-schedule (NOT EXISTS guard).
-    let scheduled2 = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
+    let scheduled2 = ygg::scheduler::schedule_ready_tasks(&pool, &cfg)
+        .await
+        .unwrap();
     assert_eq!(scheduled2, 0, "should not double-schedule");
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -509,10 +685,16 @@ async fn test_scheduler_advisory_lock_singleton() {
 
     let g1 = ygg::scheduler::acquire_advisory_lock(&pool).await.unwrap();
     let g2 = ygg::scheduler::acquire_advisory_lock(&pool).await;
-    assert!(g2.is_err(), "second acquire must fail while first guard is alive");
+    assert!(
+        g2.is_err(),
+        "second acquire must fail while first guard is alive"
+    );
     drop(g1);
     let g3 = ygg::scheduler::acquire_advisory_lock(&pool).await;
-    assert!(g3.is_ok(), "after dropping first guard, third acquire must succeed");
+    assert!(
+        g3.is_ok(),
+        "after dropping first guard, third acquire must succeed"
+    );
 }
 
 #[tokio::test]
@@ -521,12 +703,17 @@ async fn test_scheduler_reaps_expired_heartbeat() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-reap'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-reap', 'sched-reap') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let task: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'reap', 'in_progress') RETURNING task_id"
     ).bind(repo.0).fetch_one(&pool).await.unwrap();
@@ -537,16 +724,23 @@ async fn test_scheduler_reaps_expired_heartbeat() {
            VALUES ($1, 1, 'run:reap:1', 'running', now() - interval '10 minutes', 60, now() - interval '11 minutes')"#,
     ).bind(task.0).execute(&pool).await.unwrap();
 
-    let reaped = ygg::scheduler::reap_expired_heartbeats(&pool).await.unwrap();
+    let reaped = ygg::scheduler::reap_expired_heartbeats(&pool)
+        .await
+        .unwrap();
     assert_eq!(reaped, 1);
 
-    let state: String = sqlx::query_scalar(
-        "SELECT state::text FROM task_runs WHERE task_id = $1"
-    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    let state: String = sqlx::query_scalar("SELECT state::text FROM task_runs WHERE task_id = $1")
+        .bind(task.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(state, "crashed");
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -555,12 +749,17 @@ async fn test_scheduler_enforces_deadline() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-dl'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-dl', 'sched-dl') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let task: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'dl', 'in_progress') RETURNING task_id"
     ).bind(repo.0).fetch_one(&pool).await.unwrap();
@@ -572,14 +771,20 @@ async fn test_scheduler_enforces_deadline() {
 
     let cancelled = ygg::scheduler::enforce_deadlines(&pool).await.unwrap();
     assert_eq!(cancelled, 1);
-    let (state, reason): (String, String) = sqlx::query_as(
-        "SELECT state::text, reason::text FROM task_runs WHERE task_id = $1"
-    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    let (state, reason): (String, String) =
+        sqlx::query_as("SELECT state::text, reason::text FROM task_runs WHERE task_id = $1")
+            .bind(task.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(state, "cancelled");
     assert_eq!(reason, "timeout");
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -588,12 +793,17 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-retry'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-retry', 'sched-retry') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let task: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO tasks (repo_id, seq, title, status, runnable, max_attempts) VALUES ($1, 1, 'retry', 'in_progress', TRUE, 3) RETURNING task_id"
     ).bind(repo.0).fetch_one(&pool).await.unwrap();
@@ -606,7 +816,11 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
            VALUES ($1, 1, 'run:retry:1', 'failed', 'agent_error',
                    now() - interval '10 minutes',
                    '{"reason_code":"agent_error","message":"tests red"}'::jsonb, 3)"#,
-    ).bind(task.0).execute(&pool).await.unwrap();
+    )
+    .bind(task.0)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let cfg = ygg::scheduler::SchedulerConfig {
         tick_interval: std::time::Duration::from_secs(1),
@@ -620,16 +834,23 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
 
     // Original is now in 'retrying'; new attempt 2 exists.
     let states: Vec<(i32, String)> = sqlx::query_as(
-        "SELECT attempt, state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt"
-    ).bind(task.0).fetch_all(&pool).await.unwrap();
+        "SELECT attempt, state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt",
+    )
+    .bind(task.0)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(states.len(), 2);
     assert_eq!(states[0].1, "retrying");
     assert_eq!(states[1].1, "ready");
 
     // Previous-attempt thread-through.
-    let new_input: serde_json::Value = sqlx::query_scalar(
-        "SELECT input FROM task_runs WHERE task_id = $1 AND attempt = 2"
-    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    let new_input: serde_json::Value =
+        sqlx::query_scalar("SELECT input FROM task_runs WHERE task_id = $1 AND attempt = 2")
+            .bind(task.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let prev = new_input.get("previous_attempt").unwrap();
     assert_eq!(prev["attempt"], 1);
     assert_eq!(prev["error"]["reason_code"], "agent_error");
@@ -638,8 +859,11 @@ async fn test_scheduler_schedules_retry_with_previous_attempt() {
     let n2 = ygg::scheduler::schedule_retries(&pool, &cfg).await.unwrap();
     assert_eq!(n2, 0);
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -648,12 +872,17 @@ async fn test_scheduler_detect_loops_poisons_repeating_failures() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-loop'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-loop', 'sched-loop') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let task: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO tasks (repo_id, seq, title, status, max_attempts) VALUES ($1, 1, 'flaky', 'in_progress', 5) RETURNING task_id"
     ).bind(repo.0).fetch_one(&pool).await.unwrap();
@@ -676,18 +905,28 @@ async fn test_scheduler_detect_loops_poisons_repeating_failures() {
     assert_eq!(poisoned, 1);
 
     let status: String = sqlx::query_scalar("SELECT status::text FROM tasks WHERE task_id = $1")
-        .bind(task.0).fetch_one(&pool).await.unwrap();
+        .bind(task.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(status, "blocked");
 
     let states: Vec<(i32, String)> = sqlx::query_as(
-        "SELECT attempt, state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt"
-    ).bind(task.0).fetch_all(&pool).await.unwrap();
+        "SELECT attempt, state::text FROM task_runs WHERE task_id = $1 ORDER BY attempt",
+    )
+    .bind(task.0)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     for (_, s) in &states {
         assert_eq!(s, "poison");
     }
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -696,12 +935,17 @@ async fn test_scheduler_unpoison_reopens_task() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-unpo'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-unpo', 'sched-unpo') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let task: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'unpo', 'blocked') RETURNING task_id"
     ).bind(repo.0).fetch_one(&pool).await.unwrap();
@@ -712,15 +956,24 @@ async fn test_scheduler_unpoison_reopens_task() {
     ygg::scheduler::unpoison(&pool, task.0).await.unwrap();
 
     let status: String = sqlx::query_scalar("SELECT status::text FROM tasks WHERE task_id = $1")
-        .bind(task.0).fetch_one(&pool).await.unwrap();
+        .bind(task.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(status, "open");
-    let run_state: String = sqlx::query_scalar(
-        "SELECT state::text FROM task_runs WHERE task_id = $1"
-    ).bind(task.0).fetch_one(&pool).await.unwrap();
+    let run_state: String =
+        sqlx::query_scalar("SELECT state::text FROM task_runs WHERE task_id = $1")
+            .bind(task.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(run_state, "failed");
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -729,17 +982,26 @@ async fn test_scheduler_approval_gate_blocks_then_unblocks() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-appr'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-appr', 'sched-appr') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let task: (uuid::Uuid,) = sqlx::query_as(
         r#"INSERT INTO tasks (repo_id, seq, title, status, runnable, approval_level)
            VALUES ($1, 1, 'gated', 'open', TRUE, 'approve_plan')
            RETURNING task_id"#,
-    ).bind(repo.0).fetch_one(&pool).await.unwrap();
+    )
+    .bind(repo.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     let cfg = ygg::scheduler::SchedulerConfig {
         tick_interval: std::time::Duration::from_secs(1),
@@ -750,16 +1012,23 @@ async fn test_scheduler_approval_gate_blocks_then_unblocks() {
     };
 
     // Without approval, schedule_ready_tasks should NOT pick this up.
-    let n = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
+    let n = ygg::scheduler::schedule_ready_tasks(&pool, &cfg)
+        .await
+        .unwrap();
     assert_eq!(n, 0, "approval_level=approve_plan must block dispatch");
 
     // After approving, schedule should pick it up.
     ygg::scheduler::approve(&pool, task.0, None).await.unwrap();
-    let n = ygg::scheduler::schedule_ready_tasks(&pool, &cfg).await.unwrap();
+    let n = ygg::scheduler::schedule_ready_tasks(&pool, &cfg)
+        .await
+        .unwrap();
     assert_eq!(n, 1);
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -768,15 +1037,14 @@ async fn test_bench_runner_independent_parallel_n_with_fake_claude() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     // Use the in-tree fake claude binary so the test doesn't burn real tokens.
-    let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benches/fixtures/fake-claude.sh");
+    let fake =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/fixtures/fake-claude.sh");
     assert!(fake.exists(), "fake-claude.sh fixture must ship in-tree");
 
-    let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benches/scenarios");
-    let manifest = ygg::bench::manifest::LoadedManifest::load(
-        scenarios_dir.join("independent-parallel-n")
-    ).unwrap();
+    let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/scenarios");
+    let manifest =
+        ygg::bench::manifest::LoadedManifest::load(scenarios_dir.join("independent-parallel-n"))
+            .unwrap();
 
     let workspace = std::env::temp_dir().join(format!("ygg-bench-test-{}", uuid::Uuid::new_v4()));
     let cfg = ygg::bench::runner::RunnerConfig {
@@ -786,12 +1054,20 @@ async fn test_bench_runner_independent_parallel_n_with_fake_claude() {
     };
 
     // Use the ygg driver to exercise the parallel path.
-    let driver = ygg::bench::drivers::YggDriver { config: cfg.clone() };
-    let run_id = ygg::bench::runner::execute(&pool, &manifest, &driver, Some(42), &cfg).await.unwrap();
+    let driver = ygg::bench::drivers::YggDriver {
+        config: cfg.clone(),
+    };
+    let run_id = ygg::bench::runner::execute(&pool, &manifest, &driver, Some(42), &cfg)
+        .await
+        .unwrap();
 
     let repo = ygg::bench::BenchRepo::new(&pool);
     let bench = repo.get_run(run_id).await.unwrap().unwrap();
-    assert_eq!(bench.passed, Some(true), "fake claude should produce a passing run");
+    assert_eq!(
+        bench.passed,
+        Some(true),
+        "fake claude should produce a passing run"
+    );
     assert_eq!(bench.scenario, "independent-parallel-n");
 
     // All four task results must be marked passed.
@@ -804,14 +1080,25 @@ async fn test_bench_runner_independent_parallel_n_with_fake_claude() {
 
     // pass_power_k_for over k=1 should be 1.0 since this run passed.
     let p = ygg::cli::bench_cmd::pass_power_k_for(
-        &pool, "independent-parallel-n", ygg::bench::Baseline::Ygg, 1
-    ).await.unwrap();
-    assert!(p >= 1.0 - 1e-9, "single passed run should yield pass^1 = 1.0, got {p}");
+        &pool,
+        "independent-parallel-n",
+        ygg::bench::Baseline::Ygg,
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(
+        p >= 1.0 - 1e-9,
+        "single passed run should yield pass^1 = 1.0, got {p}"
+    );
 
     // Cleanup workspace.
     let _ = std::fs::remove_dir_all(&workspace);
-    sqlx::query("DELETE FROM bench_runs WHERE run_id = $1").bind(run_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM bench_runs WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -823,29 +1110,65 @@ async fn test_bench_diff_refuses_overlapping_cis() {
     // so their bootstrap CIs overlap. The diff verdict should be Inconclusive,
     // proving we refuse to declare a winner from noise.
     let repo = ygg::bench::BenchRepo::new(&pool);
-    let a = repo.create_run(
-        "test-overlap", ygg::bench::Baseline::VanillaSingle, 1,
-        "fake", "0", None,
-    ).await.unwrap();
-    let b = repo.create_run(
-        "test-overlap", ygg::bench::Baseline::Ygg, 1,
-        "fake", "0", None,
-    ).await.unwrap();
+    let a = repo
+        .create_run(
+            "test-overlap",
+            ygg::bench::Baseline::VanillaSingle,
+            1,
+            "fake",
+            "0",
+            None,
+        )
+        .await
+        .unwrap();
+    let b = repo
+        .create_run(
+            "test-overlap",
+            ygg::bench::Baseline::Ygg,
+            1,
+            "fake",
+            "0",
+            None,
+        )
+        .await
+        .unwrap();
 
     // Wall-clocks within ±2s (CIs definitely overlap).
     for (idx, sec) in [10, 11, 12, 11].iter().enumerate() {
-        repo.write_task_result(a.run_id, &ygg::bench::BenchTaskResult {
-            run_id: a.run_id, task_idx: idx as i32, passed: true,
-            wall_clock_s: *sec, tokens_in: None, tokens_out: None,
-            tokens_cache: None, usd: None, reopened: false,
-        }).await.unwrap();
+        repo.write_task_result(
+            a.run_id,
+            &ygg::bench::BenchTaskResult {
+                run_id: a.run_id,
+                task_idx: idx as i32,
+                passed: true,
+                wall_clock_s: *sec,
+                tokens_in: None,
+                tokens_out: None,
+                tokens_cache: None,
+                usd: None,
+                reopened: false,
+            },
+        )
+        .await
+        .unwrap();
     }
     for (idx, sec) in [11, 10, 12, 11].iter().enumerate() {
-        repo.write_task_result(b.run_id, &ygg::bench::BenchTaskResult {
-            run_id: b.run_id, task_idx: idx as i32, passed: true,
-            wall_clock_s: *sec, tokens_in: None, tokens_out: None,
-            tokens_cache: None, usd: None, reopened: false,
-        }).await.unwrap();
+        repo.write_task_result(
+            b.run_id,
+            &ygg::bench::BenchTaskResult {
+                run_id: b.run_id,
+                task_idx: idx as i32,
+                passed: true,
+                wall_clock_s: *sec,
+                tokens_in: None,
+                tokens_out: None,
+                tokens_cache: None,
+                usd: None,
+                reopened: false,
+            },
+        )
+        .await
+        .unwrap();
     }
     repo.finalize(a.run_id, true, None).await.unwrap();
     repo.finalize(b.run_id, true, None).await.unwrap();
@@ -859,11 +1182,15 @@ async fn test_bench_diff_refuses_overlapping_cis() {
     let (_, lo_a, hi_a) = ygg::bench::stats::bootstrap_mean_ci(&wall_a, 1000);
     let (_, lo_b, hi_b) = ygg::bench::stats::bootstrap_mean_ci(&wall_b, 1000);
     let v = ygg::bench::stats::ci_diff_verdict(lo_a, hi_a, lo_b, hi_b);
-    assert!(matches!(v, ygg::bench::stats::Verdict::Inconclusive),
-        "overlapping CIs must produce Inconclusive verdict; got {v:?}");
+    assert!(
+        matches!(v, ygg::bench::stats::Verdict::Inconclusive),
+        "overlapping CIs must produce Inconclusive verdict; got {v:?}"
+    );
 
     sqlx::query("DELETE FROM bench_runs WHERE scenario = 'test-overlap'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -874,7 +1201,9 @@ async fn test_task_create_runnable_default_by_kind() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'runnable-default'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'runnable-default', 'runnable-default') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
@@ -882,30 +1211,66 @@ async fn test_task_create_runnable_default_by_kind() {
     use ygg::models::task::{TaskCreate, TaskKind, TaskRepo};
     let task_repo = TaskRepo::new(&pool);
 
-    for kind in [TaskKind::Task, TaskKind::Bug, TaskKind::Feature, TaskKind::Chore] {
+    for kind in [
+        TaskKind::Task,
+        TaskKind::Bug,
+        TaskKind::Feature,
+        TaskKind::Chore,
+    ] {
         let kind_str = format!("{kind}");
-        let task = task_repo.create(repo.0, None, TaskCreate {
-            title: &format!("auto-runnable {kind_str}"),
-            kind: kind.clone(), priority: 2, ..Default::default()
-        }).await.unwrap();
-        let runnable: bool = sqlx::query_scalar(
-            "SELECT runnable FROM tasks WHERE task_id = $1"
-        ).bind(task.task_id).fetch_one(&pool).await.unwrap();
-        assert!(runnable, "kind={kind_str} should be runnable=TRUE by default");
+        let task = task_repo
+            .create(
+                repo.0,
+                None,
+                TaskCreate {
+                    title: &format!("auto-runnable {kind_str}"),
+                    kind: kind.clone(),
+                    priority: 2,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let runnable: bool = sqlx::query_scalar("SELECT runnable FROM tasks WHERE task_id = $1")
+            .bind(task.task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            runnable,
+            "kind={kind_str} should be runnable=TRUE by default"
+        );
     }
 
     // Epics: not runnable by default.
-    let epic = task_repo.create(repo.0, None, TaskCreate {
-        title: "manual epic", kind: TaskKind::Epic, priority: 1,
-        ..Default::default()
-    }).await.unwrap();
-    let runnable: bool = sqlx::query_scalar(
-        "SELECT runnable FROM tasks WHERE task_id = $1"
-    ).bind(epic.task_id).fetch_one(&pool).await.unwrap();
-    assert!(!runnable, "epics must stay manual unless they opt in to plan_strategy");
+    let epic = task_repo
+        .create(
+            repo.0,
+            None,
+            TaskCreate {
+                title: "manual epic",
+                kind: TaskKind::Epic,
+                priority: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let runnable: bool = sqlx::query_scalar("SELECT runnable FROM tasks WHERE task_id = $1")
+        .bind(epic.task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !runnable,
+        "epics must stay manual unless they opt in to plan_strategy"
+    );
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -913,13 +1278,11 @@ async fn test_bench_runner_contention_with_fake_claude() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
-    let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benches/fixtures/fake-claude.sh");
-    let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benches/scenarios");
-    let manifest = ygg::bench::manifest::LoadedManifest::load(
-        scenarios_dir.join("contention")
-    ).unwrap();
+    let fake =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/fixtures/fake-claude.sh");
+    let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/scenarios");
+    let manifest =
+        ygg::bench::manifest::LoadedManifest::load(scenarios_dir.join("contention")).unwrap();
 
     let workspace = std::env::temp_dir().join(format!("ygg-bench-cont-{}", uuid::Uuid::new_v4()));
     let cfg = ygg::bench::runner::RunnerConfig {
@@ -932,16 +1295,27 @@ async fn test_bench_runner_contention_with_fake_claude() {
     // scheduler-backed YggDriver with locks would also pass; the parallel
     // race-without-locks path is the negative test, requiring an explicit
     // mode flag — left for a follow-up.
-    let driver = ygg::bench::drivers::VanillaSingleDriver { config: cfg.clone() };
-    let run_id = ygg::bench::runner::execute(&pool, &manifest, &driver, None, &cfg).await.unwrap();
+    let driver = ygg::bench::drivers::VanillaSingleDriver {
+        config: cfg.clone(),
+    };
+    let run_id = ygg::bench::runner::execute(&pool, &manifest, &driver, None, &cfg)
+        .await
+        .unwrap();
 
     let repo = ygg::bench::BenchRepo::new(&pool);
     let bench = repo.get_run(run_id).await.unwrap().unwrap();
-    assert_eq!(bench.passed, Some(true), "sequential driver should land both bumps");
+    assert_eq!(
+        bench.passed,
+        Some(true),
+        "sequential driver should land both bumps"
+    );
 
     let _ = std::fs::remove_dir_all(&workspace);
-    sqlx::query("DELETE FROM bench_runs WHERE run_id = $1").bind(run_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM bench_runs WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -950,12 +1324,17 @@ async fn test_scheduler_backfill_idempotent() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     sqlx::query("DELETE FROM repos WHERE task_prefix = 'sched-bf'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let repo: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'sched-bf', 'sched-bf') RETURNING repo_id"
     ).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO task_seq (repo_id, next_seq) VALUES ($1, 1)")
-        .bind(repo.0).execute(&pool).await.unwrap();
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO tasks (repo_id, seq, title, status) VALUES ($1, 1, 'bf-ip', 'in_progress'), ($1, 2, 'bf-cl', 'closed')"
     ).bind(repo.0).execute(&pool).await.unwrap();
@@ -968,6 +1347,9 @@ async fn test_scheduler_backfill_idempotent() {
     assert_eq!(s2.in_progress_runs_created, 0);
     assert_eq!(s2.closed_runs_created, 0);
 
-    sqlx::query("DELETE FROM repos WHERE repo_id = $1").bind(repo.0)
-        .execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

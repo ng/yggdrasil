@@ -90,12 +90,15 @@ pub fn parse_session(path: &Path) -> Vec<Turn> {
             continue;
         }
 
-        let usage = msg.usage.map(|u| TokenUsage {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cache_read: u.cache_read_input_tokens,
-            cache_write: u.cache_creation_input_tokens,
-        }).unwrap_or_default();
+        let usage = msg
+            .usage
+            .map(|u| TokenUsage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_read: u.cache_read_input_tokens,
+                cache_write: u.cache_creation_input_tokens,
+            })
+            .unwrap_or_default();
 
         // Extract tool names from content array
         let tool_names = extract_tool_names(&msg.content);

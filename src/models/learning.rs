@@ -12,14 +12,14 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Learning {
-    pub learning_id:   Uuid,
-    pub repo_id:       Option<Uuid>,
-    pub file_glob:     Option<String>,
-    pub rule_id:       Option<String>,
-    pub text:          String,
-    pub context:       Option<String>,
-    pub created_by:    Option<Uuid>,
-    pub created_at:    DateTime<Utc>,
+    pub learning_id: Uuid,
+    pub repo_id: Option<Uuid>,
+    pub file_glob: Option<String>,
+    pub rule_id: Option<String>,
+    pub text: String,
+    pub context: Option<String>,
+    pub created_by: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
     pub applied_count: i32,
 }
 
@@ -28,7 +28,9 @@ pub struct LearningRepo<'a> {
 }
 
 impl<'a> LearningRepo<'a> {
-    pub fn new(pool: &'a PgPool) -> Self { Self { pool } }
+    pub fn new(pool: &'a PgPool) -> Self {
+        Self { pool }
+    }
 
     pub async fn create(
         &self,
@@ -45,7 +47,12 @@ impl<'a> LearningRepo<'a> {
                RETURNING learning_id, repo_id, file_glob, rule_id, text, context,
                          created_by, created_at, applied_count"#,
         )
-        .bind(repo_id).bind(file_glob).bind(rule_id).bind(text).bind(context).bind(created_by)
+        .bind(repo_id)
+        .bind(file_glob)
+        .bind(rule_id)
+        .bind(text)
+        .bind(context)
+        .bind(created_by)
         .fetch_one(self.pool)
         .await
     }
@@ -90,14 +97,20 @@ impl<'a> LearningRepo<'a> {
     }
 
     pub async fn increment_applied(&self, learning_id: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE learnings SET applied_count = applied_count + 1 WHERE learning_id = $1")
-            .bind(learning_id).execute(self.pool).await?;
+        sqlx::query(
+            "UPDATE learnings SET applied_count = applied_count + 1 WHERE learning_id = $1",
+        )
+        .bind(learning_id)
+        .execute(self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn delete(&self, learning_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM learnings WHERE learning_id = $1")
-            .bind(learning_id).execute(self.pool).await?;
+            .bind(learning_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 }

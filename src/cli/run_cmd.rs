@@ -6,8 +6,8 @@ use crate::models::event::{EventKind, EventRepo};
 use crate::models::repo::RepoRepo;
 use crate::models::task::TaskRepo;
 use crate::models::task_run::{
-    check_inline_size, idempotency_key_for, RunReason, RunState, TaskRun, TaskRunCreate,
-    TaskRunRepo,
+    RunReason, RunState, TaskRun, TaskRunCreate, TaskRunRepo, check_inline_size,
+    idempotency_key_for,
 };
 use uuid::Uuid;
 
@@ -36,21 +36,23 @@ pub async fn open_for_task(
     let prior = runs.latest(task_id).await?;
     let attempt = prior.as_ref().map(|p| p.attempt + 1).unwrap_or(1);
 
-    check_inline_size(&input, "input")
-        .map_err(|e| anyhow::anyhow!("oversize run input: {e}"))?;
+    check_inline_size(&input, "input").map_err(|e| anyhow::anyhow!("oversize run input: {e}"))?;
 
-    let mut run = runs.create(TaskRunCreate {
-        task_id,
-        attempt,
-        parent_run_id: prior.as_ref().map(|p| p.run_id),
-        input,
-        ..Default::default()
-    }).await?;
+    let mut run = runs
+        .create(TaskRunCreate {
+            task_id,
+            attempt,
+            parent_run_id: prior.as_ref().map(|p| p.run_id),
+            input,
+            ..Default::default()
+        })
+        .await?;
 
     // Manual claim path goes scheduled → running directly. The scheduler's
     // dispatch path uses scheduled → ready → running. Both end up the same
     // place for a heartbeating agent.
-    runs.set_state(run.run_id, RunState::Running, RunReason::Ok).await?;
+    runs.set_state(run.run_id, RunState::Running, RunReason::Ok)
+        .await?;
     run.state = RunState::Running;
 
     // Bind to agent + tasks.current_attempt_id in one statement so a half-
@@ -69,13 +71,11 @@ pub async fn open_for_task(
     .bind(agent_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
-        "UPDATE tasks SET current_attempt_id = $2, updated_at = now() WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .bind(run.run_id)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("UPDATE tasks SET current_attempt_id = $2, updated_at = now() WHERE task_id = $1")
+        .bind(task_id)
+        .bind(run.run_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     run.agent_id = agent_id;
@@ -122,12 +122,10 @@ pub async fn finalize_for_task(
     .await?;
 
     // Emit a run_terminal event so logs / dashboard / scheduler can react.
-    let repo_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT repo_id FROM tasks WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(pool)
-    .await?;
+    let repo_id = sqlx::query_scalar::<_, Uuid>("SELECT repo_id FROM tasks WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await?;
     let task_ref = sqlx::query_as::<_, (String, i32)>(
         r#"SELECT r.task_prefix, t.seq FROM tasks t
            JOIN repos r USING (repo_id) WHERE t.task_id = $1"#,
@@ -139,20 +137,22 @@ pub async fn finalize_for_task(
     .map(|(prefix, seq)| format!("{prefix}-{seq}"))
     .unwrap_or_else(|| task_id.to_string());
 
-    let _ = EventRepo::new(pool).emit(
-        EventKind::RunTerminal,
-        agent_name,
-        agent_id,
-        serde_json::json!({
-            "task_ref": task_ref,
-            "task_id": task_id,
-            "repo_id": repo_id,
-            "run_id": latest.run_id,
-            "attempt": latest.attempt,
-            "state": state.as_str(),
-            "reason": reason.as_str(),
-        }),
-    ).await;
+    let _ = EventRepo::new(pool)
+        .emit(
+            EventKind::RunTerminal,
+            agent_name,
+            agent_id,
+            serde_json::json!({
+                "task_ref": task_ref,
+                "task_id": task_id,
+                "repo_id": repo_id,
+                "run_id": latest.run_id,
+                "attempt": latest.attempt,
+                "state": state.as_str(),
+                "reason": reason.as_str(),
+            }),
+        )
+        .await;
 
     Ok(Some(latest))
 }
@@ -169,20 +169,23 @@ pub async fn claim_cli(
     let run = open_for_task(pool, task.task_id, agent_id, serde_json::json!({})).await?;
 
     let repo = RepoRepo::new(pool).get(task.repo_id).await?;
-    let task_ref = repo.as_ref()
+    let task_ref = repo
+        .as_ref()
         .map(|r| format!("{}-{}", r.task_prefix, task.seq))
         .unwrap_or_else(|| reference.to_string());
-    let _ = EventRepo::new(pool).emit(
-        EventKind::RunClaimed,
-        agent_name,
-        agent_id,
-        serde_json::json!({
-            "task_ref": task_ref,
-            "run_id": run.run_id,
-            "attempt": run.attempt,
-            "agent": agent_name,
-        }),
-    ).await;
+    let _ = EventRepo::new(pool)
+        .emit(
+            EventKind::RunClaimed,
+            agent_name,
+            agent_id,
+            serde_json::json!({
+                "task_ref": task_ref,
+                "run_id": run.run_id,
+                "attempt": run.attempt,
+                "agent": agent_name,
+            }),
+        )
+        .await;
 
     println!("{task_ref}: opened run #{} ({})", run.attempt, run.run_id);
     Ok(())
@@ -234,7 +237,7 @@ pub async fn finalize_cli(
     let res = finalize_for_task(pool, task.task_id, state, reason, agent_name, agent_id).await?;
     match res {
         Some(_) => println!("{reference}: run finalized → {state} ({reason})"),
-        None    => println!("{reference}: no run to finalize"),
+        None => println!("{reference}: no run to finalize"),
     }
     Ok(())
 }
@@ -242,7 +245,8 @@ pub async fn finalize_cli(
 /// `ygg run show <run-id>` — print one run's detail.
 pub async fn show_cli(pool: &sqlx::PgPool, run_id: Uuid) -> Result<(), anyhow::Error> {
     let run = TaskRunRepo::new(pool)
-        .get(run_id).await?
+        .get(run_id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("no run {run_id}"))?;
     print_run(&run);
     Ok(())
@@ -269,24 +273,52 @@ fn print_run(run: &TaskRun) {
     println!("run_id:           {}", run.run_id);
     println!("task_id:          {}", run.task_id);
     println!("attempt:          {}", run.attempt);
-    if let Some(p) = run.parent_run_id { println!("parent_run_id:    {p}"); }
+    if let Some(p) = run.parent_run_id {
+        println!("parent_run_id:    {p}");
+    }
     println!("state:            {} ({})", run.state, run.reason);
     println!("idempotency_key:  {}", run.idempotency_key);
     println!("scheduled_at:     {}", run.scheduled_at);
-    if let Some(t) = run.claimed_at   { println!("claimed_at:       {t}"); }
-    if let Some(t) = run.started_at   { println!("started_at:       {t}"); }
-    if let Some(t) = run.heartbeat_at { println!("heartbeat_at:     {t}"); }
-    if let Some(t) = run.ended_at     { println!("ended_at:         {t}"); }
-    if let Some(d) = run.deadline_at  { println!("deadline_at:      {d}"); }
-    if let Some(a) = run.agent_id     { println!("agent_id:         {a}"); }
-    if let Some(w) = run.worker_id    { println!("worker_id:        {w}"); }
-    if let Some(s) = run.session_id   { println!("session_id:       {s}"); }
+    if let Some(t) = run.claimed_at {
+        println!("claimed_at:       {t}");
+    }
+    if let Some(t) = run.started_at {
+        println!("started_at:       {t}");
+    }
+    if let Some(t) = run.heartbeat_at {
+        println!("heartbeat_at:     {t}");
+    }
+    if let Some(t) = run.ended_at {
+        println!("ended_at:         {t}");
+    }
+    if let Some(d) = run.deadline_at {
+        println!("deadline_at:      {d}");
+    }
+    if let Some(a) = run.agent_id {
+        println!("agent_id:         {a}");
+    }
+    if let Some(w) = run.worker_id {
+        println!("worker_id:        {w}");
+    }
+    if let Some(s) = run.session_id {
+        println!("session_id:       {s}");
+    }
     println!("max_attempts:     {}", run.max_attempts);
-    if let Some(sha) = &run.output_commit_sha { println!("commit:           {sha}"); }
-    if let Some(b)   = &run.output_branch     { println!("branch:           {b}"); }
-    if let Some(p)   = &run.output_pr_url     { println!("pr_url:           {p}"); }
-    if let Some(b)   = &run.output_blob_ref   { println!("output_blob:      {b}"); }
-    if let Some(f)   = &run.fingerprint       { println!("fingerprint:      {f}"); }
+    if let Some(sha) = &run.output_commit_sha {
+        println!("commit:           {sha}");
+    }
+    if let Some(b) = &run.output_branch {
+        println!("branch:           {b}");
+    }
+    if let Some(p) = &run.output_pr_url {
+        println!("pr_url:           {p}");
+    }
+    if let Some(b) = &run.output_blob_ref {
+        println!("output_blob:      {b}");
+    }
+    if let Some(f) = &run.fingerprint {
+        println!("fingerprint:      {f}");
+    }
 }
 
 fn print_run_row(run: &TaskRun) {
@@ -298,7 +330,8 @@ fn print_run_row(run: &TaskRun) {
         RunState::Retrying => YELLOW,
         _ => GRAY,
     };
-    let started = run.started_at
+    let started = run
+        .started_at
         .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| "—".to_string());
     let duration = match (run.started_at, run.ended_at) {
@@ -306,7 +339,8 @@ fn print_run_row(run: &TaskRun) {
         (Some(s), None) => format!("{}s+", (chrono::Utc::now() - s).num_seconds().max(0)),
         _ => "—".to_string(),
     };
-    let commit = run.output_commit_sha
+    let commit = run
+        .output_commit_sha
         .as_deref()
         .map(|s| &s[..s.len().min(10)])
         .unwrap_or("—");
@@ -326,7 +360,10 @@ async fn resolve_agent_id(
     agent_name: &str,
 ) -> Result<Option<Uuid>, anyhow::Error> {
     use crate::models::agent::AgentRepo;
-    Ok(AgentRepo::new(pool).get_by_name(agent_name).await?.map(|a| a.agent_id))
+    Ok(AgentRepo::new(pool)
+        .get_by_name(agent_name)
+        .await?
+        .map(|a| a.agent_id))
 }
 
 /// `ygg run capture-outcome [--agent X]` — Stop-hook handoff (yggdrasil-97).
@@ -399,21 +436,23 @@ pub async fn capture_outcome_cli(
     .execute(pool)
     .await?;
 
-    let _ = EventRepo::new(pool).emit(
-        EventKind::RunTerminal,
-        agent_name,
-        agent_id,
-        serde_json::json!({
-            "task_id": run.task_id,
-            "run_id": run.run_id,
-            "attempt": run.attempt,
-            "state": state.as_str(),
-            "reason": reason.as_str(),
-            "commit_sha": commit,
-            "branch": branch,
-            "captured_by": "stop_hook",
-        }),
-    ).await;
+    let _ = EventRepo::new(pool)
+        .emit(
+            EventKind::RunTerminal,
+            agent_name,
+            agent_id,
+            serde_json::json!({
+                "task_id": run.task_id,
+                "run_id": run.run_id,
+                "attempt": run.attempt,
+                "state": state.as_str(),
+                "reason": reason.as_str(),
+                "commit_sha": commit,
+                "branch": branch,
+                "captured_by": "stop_hook",
+            }),
+        )
+        .await;
 
     Ok(())
 }
@@ -424,10 +463,14 @@ fn capture_git_state(cwd: &std::path::Path) -> (Option<String>, Option<String>) 
         .current_dir(cwd)
         .output()
         .ok()
-        .and_then(|o| if o.status.success() {
-            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-        } else {
-            None
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
         })
         .filter(|s| !s.is_empty());
 
@@ -436,10 +479,14 @@ fn capture_git_state(cwd: &std::path::Path) -> (Option<String>, Option<String>) 
         .current_dir(cwd)
         .output()
         .ok()
-        .and_then(|o| if o.status.success() {
-            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-        } else {
-            None
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
         })
         .filter(|s| !s.is_empty() && s != "HEAD");
 
@@ -454,11 +501,16 @@ fn commit_after(cwd: &std::path::Path, sha: &str, started: chrono::DateTime<chro
         .args(["show", "-s", "--format=%aI", sha])
         .current_dir(cwd)
         .output();
-    let Ok(out) = output else { return false; };
-    if !out.status.success() { return false; }
+    let Ok(out) = output else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
     let date = String::from_utf8(out.stdout).unwrap_or_default();
     let date = date.trim();
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(date) else { return false; };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(date) else {
+        return false;
+    };
     parsed.with_timezone(&chrono::Utc) >= started
 }
-

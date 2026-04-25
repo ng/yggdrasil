@@ -10,10 +10,7 @@ use std::path::Path;
 use std::process::Command;
 use uuid::Uuid;
 
-pub async fn execute(
-    pool: &sqlx::PgPool,
-    agent_name: &str,
-) -> Result<(), anyhow::Error> {
+pub async fn execute(pool: &sqlx::PgPool, agent_name: &str) -> Result<(), anyhow::Error> {
     // Hard kill-switch for users who don't want the check.
     if std::env::var("YGG_STOP_CHECK")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
@@ -27,7 +24,8 @@ pub async fn execute(
 
     // Spawn-context detection. We only enforce on spawned workers — the
     // primary interactive session must never be blocked from stopping.
-    let spawn_env = std::env::var("YGG_SPAWNED").ok()
+    let spawn_env = std::env::var("YGG_SPAWNED")
+        .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
@@ -111,7 +109,9 @@ fn check_git_state(cwd: &Path, reasons: &mut Vec<String>) {
         .output()
     {
         if out.status.success() && !out.stdout.iter().all(|b| b.is_ascii_whitespace()) {
-            reasons.push("uncommitted changes in worktree — `git add -A && git commit -m \"...\"`".into());
+            reasons.push(
+                "uncommitted changes in worktree — `git add -A && git commit -m \"...\"`".into(),
+            );
         }
     }
 
@@ -122,9 +122,14 @@ fn check_git_state(cwd: &Path, reasons: &mut Vec<String>) {
         .output()
     {
         if out.status.success() {
-            let n: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
+            let n: u64 = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0);
             if n > 0 {
-                reasons.push(format!("{n} unpushed commit(s) on current branch — `git push`"));
+                reasons.push(format!(
+                    "{n} unpushed commit(s) on current branch — `git push`"
+                ));
             }
             return;
         }
@@ -139,7 +144,10 @@ fn check_git_state(cwd: &Path, reasons: &mut Vec<String>) {
             .output()
         {
             if out.status.success() {
-                let n: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
+                let n: u64 = String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
                 if n > 0 {
                     reasons.push(format!(
                         "{n} commit(s) on unpublished branch — `git push -u origin HEAD`"

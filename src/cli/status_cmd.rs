@@ -16,8 +16,20 @@ pub async fn execute(pool: &sqlx::PgPool, agent_name: Option<&str>) -> Result<()
         println!("  ID:       {}", agent.agent_id);
         println!("  State:    {}", agent.current_state);
         println!("  Pressure: {} tokens", agent.context_tokens);
-        println!("  Head:     {}", agent.head_node_id.map(|id| id.to_string()).unwrap_or_else(|| "none".into()));
-        println!("  Digest:   {}", agent.digest_id.map(|id| id.to_string()).unwrap_or_else(|| "none".into()));
+        println!(
+            "  Head:     {}",
+            agent
+                .head_node_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".into())
+        );
+        println!(
+            "  Digest:   {}",
+            agent
+                .digest_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".into())
+        );
         println!("  Updated:  {}", agent.updated_at);
 
         let lock_mgr = LockManager::new(pool, 300);
@@ -26,7 +38,11 @@ pub async fn execute(pool: &sqlx::PgPool, agent_name: Option<&str>) -> Result<()
             println!("  Locks:    none");
         } else {
             for lock in &locks {
-                println!("  Lock:     {} (expires {})", lock.resource_key, lock.expires_at.format("%H:%M:%S"));
+                println!(
+                    "  Lock:     {} (expires {})",
+                    lock.resource_key,
+                    lock.expires_at.format("%H:%M:%S")
+                );
             }
         }
     } else {
@@ -38,7 +54,10 @@ pub async fn execute(pool: &sqlx::PgPool, agent_name: Option<&str>) -> Result<()
             return Ok(());
         }
 
-        println!("{:<20} {:<15} {:<12} {:<20}", "NAME", "STATE", "PRESSURE", "UPDATED");
+        println!(
+            "{:<20} {:<15} {:<12} {:<20}",
+            "NAME", "STATE", "PRESSURE", "UPDATED"
+        );
         for agent in &agents {
             println!(
                 "{:<20} {:<15} {:<12} {:<20}",

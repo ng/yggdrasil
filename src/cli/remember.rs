@@ -63,16 +63,18 @@ pub async fn remember(
     } else {
         redacted_text.clone()
     };
-    let _ = EventRepo::new(pool).emit(
-        EventKind::Remembered,
-        agent_name,
-        Some(agent.agent_id),
-        serde_json::json!({
-            "snippet": snippet,
-            "tokens": token_count,
-            "repo_id": repo_id,
-        }),
-    ).await;
+    let _ = EventRepo::new(pool)
+        .emit(
+            EventKind::Remembered,
+            agent_name,
+            Some(agent.agent_id),
+            serde_json::json!({
+                "snippet": snippet,
+                "tokens": token_count,
+                "repo_id": repo_id,
+            }),
+        )
+        .await;
 
     println!("Remembered ({} tokens).", token_count);
     if let Some(rid) = repo_id {
@@ -90,43 +92,49 @@ pub async fn list(
     agent_name: Option<&str>,
     limit: i64,
 ) -> Result<(), anyhow::Error> {
-    let rows: Vec<(chrono::DateTime<chrono::Utc>, String, serde_json::Value)> = if let Some(name) = agent_name {
-        sqlx::query_as(
-            r#"SELECT n.created_at, a.agent_name, n.content
+    let rows: Vec<(chrono::DateTime<chrono::Utc>, String, serde_json::Value)> =
+        if let Some(name) = agent_name {
+            sqlx::query_as(
+                r#"SELECT n.created_at, a.agent_name, n.content
                FROM nodes n JOIN agents a ON a.agent_id = n.agent_id
                WHERE n.kind = 'directive'
                  AND (n.content->>'source' = 'ygg remember' OR n.content ? 'directive')
                  AND a.agent_name = $1
                ORDER BY n.created_at DESC
                LIMIT $2"#,
-        )
-        .bind(name)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_as(
-            r#"SELECT n.created_at, a.agent_name, n.content
+            )
+            .bind(name)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                r#"SELECT n.created_at, a.agent_name, n.content
                FROM nodes n JOIN agents a ON a.agent_id = n.agent_id
                WHERE n.kind = 'directive'
                  AND (n.content->>'source' = 'ygg remember' OR n.content ? 'directive')
                ORDER BY n.created_at DESC
                LIMIT $1"#,
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?
-    };
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        };
 
     if rows.is_empty() {
         println!("No remembered directives.");
         return Ok(());
     }
     for (ts, agent, content) in &rows {
-        let text = content.get("directive")
+        let text = content
+            .get("directive")
             .and_then(|v| v.as_str())
             .unwrap_or("(malformed directive)");
-        let snippet = if text.len() > 100 { format!("{}…", &text[..99]) } else { text.to_string() };
+        let snippet = if text.len() > 100 {
+            format!("{}…", &text[..99])
+        } else {
+            text.to_string()
+        };
         println!(
             "  [{}] {} — {}",
             ts.format("%Y-%m-%d %H:%M"),

@@ -1,23 +1,23 @@
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::Terminal;
+use ratatui::prelude::*;
+use sqlx::PgPool;
 use std::io;
 use std::time::Duration;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::execute;
-use ratatui::prelude::*;
-use ratatui::Terminal;
-use sqlx::PgPool;
 
 use crate::config::AppConfig;
 
-use super::dashboard::DashboardView;
 use super::dag_view::DagView;
+use super::dashboard::DashboardView;
 use super::eval_view::EvalView;
 use super::locks_view::LocksView;
-use super::runs_view::RunsView;
 use super::log_view::LogView;
 use super::memgraph_view::MemGraphView;
 use super::prompt_view::PromptView;
 use super::query_view::QueryView;
+use super::runs_view::RunsView;
 use super::tasks_view::TasksView;
 use super::trace_view::TraceView;
 
@@ -59,19 +59,19 @@ pub struct App {
     /// When Enter on the Workers panel fires, we defer the actual tmux
     /// attach until after ratatui's alternate-screen teardown to avoid
     /// a half-mode-switched terminal. Set here, read in `run` post-loop.
-    pub attach_pending: Option<(String, String)>,  // (session, window)
+    pub attach_pending: Option<(String, String)>, // (session, window)
 }
 
 /// Lightweight orchestration snapshot rendered on the right side of the
 /// global status strip. Cheap queries — every 500ms tick is fine.
 #[derive(Default, Clone)]
 pub struct OpsStats {
-    pub agents_alive: i64,     // != idle and updated in last 10m
-    pub agents_stuck: i64,     // active-state but updated > 10m ago
-    pub tasks_running: i64,    // tasks.status = in_progress
-    pub live_sessions: i64,    // sessions.ended_at IS NULL
+    pub agents_alive: i64,  // != idle and updated in last 10m
+    pub agents_stuck: i64,  // active-state but updated > 10m ago
+    pub tasks_running: i64, // tasks.status = in_progress
+    pub live_sessions: i64, // sessions.ended_at IS NULL
     pub ollama_ok: bool,
-    pub db_ms: u64,            // round-trip ping
+    pub db_ms: u64, // round-trip ping
 }
 
 impl App {
@@ -100,15 +100,24 @@ impl App {
 
     /// Pull the 3 most-recent events for the global bottom strip.
     pub async fn refresh_status_tail(&mut self, pool: &PgPool) {
-        let rows: Vec<(chrono::DateTime<chrono::Utc>, String, serde_json::Value)> =
-            sqlx::query_as(
-                "SELECT created_at, event_kind::text, payload
-                 FROM events ORDER BY created_at DESC LIMIT 3"
-            ).fetch_all(pool).await.unwrap_or_default();
-        self.status_tail = rows.into_iter().rev().map(|(t, k, p)| {
-            let ts = t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
-            (ts, k, short_status_detail(&p))
-        }).collect();
+        let rows: Vec<(chrono::DateTime<chrono::Utc>, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT created_at, event_kind::text, payload
+                 FROM events ORDER BY created_at DESC LIMIT 3",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        self.status_tail = rows
+            .into_iter()
+            .rev()
+            .map(|(t, k, p)| {
+                let ts = t
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string();
+                (ts, k, short_status_detail(&p))
+            })
+            .collect();
 
         // Orchestration snapshot. One roundtrip: agents live/stuck, tasks
         // running, sessions live. Ollama health is a bounded HTTP ping so
@@ -128,7 +137,10 @@ impl App {
               (SELECT COUNT(*) FROM tasks WHERE status = 'in_progress'),
               (SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL)
             "#,
-        ).fetch_one(pool).await.unwrap_or((0, 0, 0, 0));
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0, 0, 0, 0));
         self.ops_stats.agents_alive = alive;
         self.ops_stats.agents_stuck = stuck;
         self.ops_stats.tasks_running = running;
@@ -138,10 +150,10 @@ impl App {
         // Tight 150ms timeout — local Ollama answers in <20ms when
         // running; 150ms is plenty to catch "it's alive" without
         // stalling the refresh if it's down.
-        self.ops_stats.ollama_ok = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            reqwest_ping(),
-        ).await.unwrap_or(false);
+        self.ops_stats.ollama_ok =
+            tokio::time::timeout(std::time::Duration::from_millis(150), reqwest_ping())
+                .await
+                .unwrap_or(false);
     }
 
     pub async fn handle_key(&mut self, pool: &PgPool, code: KeyCode, modifiers: KeyModifiers) {
@@ -153,15 +165,18 @@ impl App {
                 KeyCode::Backspace => self.dag.add_pop(),
                 KeyCode::Enter => {
                     if let Some((parent, title)) = self.dag.add_commit() {
-                        let agent = std::env::var("YGG_AGENT_NAME").ok()
+                        let agent = std::env::var("YGG_AGENT_NAME")
+                            .ok()
                             .unwrap_or_else(|| self.agent_name.clone());
                         let result = match parent {
-                            Some(p) => crate::cli::plan_cmd::add(
-                                pool, &p, &title, None, None, &[], &agent,
-                            ).await.map(|_| format!("added under {p}")),
-                            None => crate::cli::plan_cmd::create(
-                                pool, &title, None, &agent,
-                            ).await.map(|t| format!("created epic seq={}", t.seq)),
+                            Some(p) => {
+                                crate::cli::plan_cmd::add(pool, &p, &title, None, None, &[], &agent)
+                                    .await
+                                    .map(|_| format!("added under {p}"))
+                            }
+                            None => crate::cli::plan_cmd::create(pool, &title, None, &agent)
+                                .await
+                                .map(|t| format!("created epic seq={}", t.seq)),
                         };
                         self.dag.flash = match result {
                             Ok(msg) => msg,
@@ -242,7 +257,8 @@ impl App {
                         }
                         let _ = self.dag.refresh(pool).await;
                     }
-                } else if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL)) {
+                } else if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL))
+                {
                     self.should_quit = true;
                 } else {
                     self.dag.delete_cancel();
@@ -259,7 +275,8 @@ impl App {
                         }
                         let _ = self.tasks.refresh(pool).await;
                     }
-                } else if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL)) {
+                } else if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL))
+                {
                     self.should_quit = true;
                 } else {
                     self.tasks.delete_cancel();
@@ -319,51 +336,54 @@ impl App {
             KeyCode::Char('r') if self.active_view == ActiveView::Tasks => {
                 // Run the selected task from Tasks pane. Mirrors DAG 'r'.
                 if let Some(task_ref) = self.tasks.selected_task_ref() {
-                    let agent = std::env::var("YGG_AGENT_NAME").ok()
+                    let agent = std::env::var("YGG_AGENT_NAME")
+                        .ok()
                         .unwrap_or_else(|| self.agent_name.clone());
                     let silent = |_: &str| {};
                     match crate::cli::plan_cmd::run_with_reporter(
-                        pool, &task_ref, &agent, false, &silent
-                    ).await {
+                        pool, &task_ref, &agent, false, &silent,
+                    )
+                    .await
+                    {
                         Ok(headline) => self.tasks.set_flash(headline),
                         Err(e) => self.tasks.set_flash(format!("run failed: {e}")),
                     }
                     let _ = self.tasks.refresh(pool).await;
                 }
             }
-            KeyCode::Char('r') if self.active_view == ActiveView::Dag
-                && !self.dag.add_mode() =>
-            {
+            KeyCode::Char('r') if self.active_view == ActiveView::Dag && !self.dag.add_mode() => {
                 if let Some(task_ref) = self.dag.selected_task_ref() {
                     let agent = std::env::var("YGG_AGENT_NAME")
                         .ok()
                         .unwrap_or_else(|| self.agent_name.clone());
                     let silent = |_: &str| {};
                     match crate::cli::plan_cmd::run_with_reporter(
-                        pool, &task_ref, &agent, false, &silent
-                    ).await {
+                        pool, &task_ref, &agent, false, &silent,
+                    )
+                    .await
+                    {
                         Ok(headline) => self.dag.flash = headline,
                         Err(e) => self.dag.flash = format!("run failed: {e}"),
                     }
                     let _ = self.dag.refresh(pool).await;
                 }
             }
-            KeyCode::Char('n') if self.active_view == ActiveView::Dag
-                && !self.dag.add_mode() =>
-            {
+            KeyCode::Char('n') if self.active_view == ActiveView::Dag && !self.dag.add_mode() => {
                 self.dag.add_begin();
             }
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
             }
-            KeyCode::Char('r') if self.active_view == ActiveView::Dashboard
-                && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
+            KeyCode::Char('r')
+                if self.active_view == ActiveView::Dashboard
+                    && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
             {
                 self.dashboard.rename_begin();
             }
-            KeyCode::Char('a') if self.active_view == ActiveView::Dashboard
-                && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
+            KeyCode::Char('a')
+                if self.active_view == ActiveView::Dashboard
+                    && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
             {
                 self.dashboard.archive_selected(pool).await;
             }
@@ -428,8 +448,7 @@ impl App {
                         // in the outer `run` loop — writing to a pending
                         // slot avoids half-mode-switched terminals.
                         if let Some(w) = self.dashboard.selected_worker().cloned() {
-                            self.attach_pending =
-                                Some((w.tmux_session, w.tmux_window));
+                            self.attach_pending = Some((w.tmux_session, w.tmux_window));
                             self.should_quit = true;
                         }
                     }
@@ -453,7 +472,9 @@ impl App {
             KeyCode::Esc => match self.active_view {
                 ActiveView::Dag if self.dag.detail_open => self.dag.detail_open = false,
                 ActiveView::Tasks if self.tasks.detail_open => self.tasks.detail_open = false,
-                ActiveView::MemGraph if self.memgraph.detail_open => self.memgraph.detail_open = false,
+                ActiveView::MemGraph if self.memgraph.detail_open => {
+                    self.memgraph.detail_open = false
+                }
                 _ => {}
             },
             _ => {}
@@ -508,17 +529,19 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),   // tab row
-                Constraint::Length(1),   // context-sensitive help row
-                Constraint::Min(0),      // active pane
-                Constraint::Length(3),   // global status strip (3 recent events)
+                Constraint::Length(1), // tab row
+                Constraint::Length(1), // context-sensitive help row
+                Constraint::Min(0),    // active pane
+                Constraint::Length(3), // global status strip (3 recent events)
             ])
             .split(area);
 
         let tab = |label: &str, active: bool| -> Span<'static> {
             if active {
-                Span::styled(format!(" {label} "),
-                    Style::default().fg(Color::Black).bg(Color::Cyan))
+                Span::styled(
+                    format!(" {label} "),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                )
             } else {
                 Span::styled(format!(" {label} "), Style::default().fg(Color::Gray))
             }
@@ -526,16 +549,16 @@ impl App {
 
         let tabs = vec![
             tab("[1] Dashboard", self.active_view == ActiveView::Dashboard),
-            tab("[2] DAG",       self.active_view == ActiveView::Dag),
-            tab("[3] Tasks",     self.active_view == ActiveView::Tasks),
-            tab("[4] Trace",     self.active_view == ActiveView::Trace),
-            tab("[5] Query",     self.active_view == ActiveView::Query),
-            tab("[6] Logs",      self.active_view == ActiveView::Logs),
-            tab("[7] Memgraph",  self.active_view == ActiveView::MemGraph),
-            tab("[8] Eval",      self.active_view == ActiveView::Eval),
-            tab("[9] Prompt",    self.active_view == ActiveView::Prompt),
-            tab("[0] Locks",     self.active_view == ActiveView::Locks),
-            tab("[R] Runs",      self.active_view == ActiveView::Runs),
+            tab("[2] DAG", self.active_view == ActiveView::Dag),
+            tab("[3] Tasks", self.active_view == ActiveView::Tasks),
+            tab("[4] Trace", self.active_view == ActiveView::Trace),
+            tab("[5] Query", self.active_view == ActiveView::Query),
+            tab("[6] Logs", self.active_view == ActiveView::Logs),
+            tab("[7] Memgraph", self.active_view == ActiveView::MemGraph),
+            tab("[8] Eval", self.active_view == ActiveView::Eval),
+            tab("[9] Prompt", self.active_view == ActiveView::Prompt),
+            tab("[0] Locks", self.active_view == ActiveView::Locks),
+            tab("[R] Runs", self.active_view == ActiveView::Runs),
         ];
         frame.render_widget(Line::from(tabs), chunks[0]);
 
@@ -545,7 +568,9 @@ impl App {
         );
         let pane_hint = match self.active_view {
             ActiveView::Dashboard => "S=session-scope",
-            ActiveView::Dag => "Enter=detail  r=run  n=add  ⌫=delete  s=sort  a=agent  f=focus  c=clear",
+            ActiveView::Dag => {
+                "Enter=detail  r=run  n=add  ⌫=delete  s=sort  a=agent  f=focus  c=clear"
+            }
             ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  r=run  ·  ⌫=delete",
             ActiveView::Trace => "↑↓ select",
             ActiveView::Query => "type then Enter  ·  Esc=leave",
@@ -558,23 +583,27 @@ impl App {
         };
         let hint_line = Line::from(vec![
             nav_span,
-            Span::styled(pane_hint.to_string(),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                pane_hint.to_string(),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ]);
         frame.render_widget(hint_line, chunks[1]);
 
         match self.active_view {
             ActiveView::Dashboard => self.dashboard.render(frame, chunks[2]),
-            ActiveView::Dag       => self.dag.render(frame, chunks[2]),
-            ActiveView::Tasks     => self.tasks.render(frame, chunks[2]),
-            ActiveView::Trace     => self.trace.render(frame, chunks[2]),
-            ActiveView::Query     => self.query.render(frame, chunks[2]),
-            ActiveView::Logs      => self.logs.render(frame, chunks[2]),
-            ActiveView::MemGraph  => self.memgraph.render(frame, chunks[2]),
-            ActiveView::Eval      => self.eval.render(frame, chunks[2]),
-            ActiveView::Prompt    => self.prompt.render(frame, chunks[2]),
-            ActiveView::Locks     => self.locks.render(frame, chunks[2]),
-            ActiveView::Runs      => self.runs.render(frame, chunks[2]),
+            ActiveView::Dag => self.dag.render(frame, chunks[2]),
+            ActiveView::Tasks => self.tasks.render(frame, chunks[2]),
+            ActiveView::Trace => self.trace.render(frame, chunks[2]),
+            ActiveView::Query => self.query.render(frame, chunks[2]),
+            ActiveView::Logs => self.logs.render(frame, chunks[2]),
+            ActiveView::MemGraph => self.memgraph.render(frame, chunks[2]),
+            ActiveView::Eval => self.eval.render(frame, chunks[2]),
+            ActiveView::Prompt => self.prompt.render(frame, chunks[2]),
+            ActiveView::Locks => self.locks.render(frame, chunks[2]),
+            ActiveView::Runs => self.runs.render(frame, chunks[2]),
         }
 
         // Global status strip — two columns: events left, orchestration
@@ -584,61 +613,85 @@ impl App {
             .constraints([Constraint::Min(40), Constraint::Length(34)])
             .split(chunks[3]);
 
-        let event_lines: Vec<Line> = self.status_tail.iter().map(|(ts, kind, detail)| {
-            let (glyph, color) = event_glyph(kind);
-            Line::from(vec![
-                Span::styled(ts.clone(), Style::default().fg(Color::DarkGray)),
-                Span::raw(" "),
-                Span::styled(format!("{glyph} "), Style::default().fg(color)),
-                Span::styled(format!("{kind:<18}"), Style::default().fg(color)),
-                Span::raw(" "),
-                Span::styled(detail.clone(), Style::default().fg(Color::Gray)),
-            ])
-        }).collect();
-        let events_panel = ratatui::widgets::Paragraph::new(event_lines)
-            .block(ratatui::widgets::Block::default()
+        let event_lines: Vec<Line> = self
+            .status_tail
+            .iter()
+            .map(|(ts, kind, detail)| {
+                let (glyph, color) = event_glyph(kind);
+                Line::from(vec![
+                    Span::styled(ts.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::styled(format!("{glyph} "), Style::default().fg(color)),
+                    Span::styled(format!("{kind:<18}"), Style::default().fg(color)),
+                    Span::raw(" "),
+                    Span::styled(detail.clone(), Style::default().fg(Color::Gray)),
+                ])
+            })
+            .collect();
+        let events_panel = ratatui::widgets::Paragraph::new(event_lines).block(
+            ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::TOP)
-                .title(" events "));
+                .title(" events "),
+        );
         frame.render_widget(events_panel, strip[0]);
 
         let s = &self.ops_stats;
         let ollama_style = if s.ollama_ok {
             Style::default().fg(Color::Green)
-        } else { Style::default().fg(Color::Red) };
+        } else {
+            Style::default().fg(Color::Red)
+        };
         let stuck_line = if s.agents_stuck > 0 {
             Line::from(vec![
-                Span::styled("  ⚠ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{} stuck", s.agents_stuck),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  ⚠ ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{} stuck", s.agents_stuck),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ])
         } else {
             Line::from(vec![
-                Span::styled("  ⚡ ollama ",
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled("  ⚡ ollama ", Style::default().fg(Color::DarkGray)),
                 Span::styled(if s.ollama_ok { "up" } else { "down" }, ollama_style),
-                Span::styled(format!("  db {}ms", s.db_ms),
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  db {}ms", s.db_ms),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ])
         };
         let stats_lines = vec![
             Line::from(vec![
                 Span::styled("  ● ", Style::default().fg(Color::Green)),
-                Span::styled(format!("{} live", s.agents_alive),
-                    Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" / {} sessions", s.live_sessions),
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} live", s.agents_alive),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" / {} sessions", s.live_sessions),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  ▶ ", Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{} tasks running", s.tasks_running),
-                    Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} tasks running", s.tasks_running),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
             ]),
             stuck_line,
         ];
-        let stats_panel = ratatui::widgets::Paragraph::new(stats_lines)
-            .block(ratatui::widgets::Block::default()
+        let stats_panel = ratatui::widgets::Paragraph::new(stats_lines).block(
+            ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::TOP)
-                .title(" orchestration "));
+                .title(" orchestration "),
+        );
         frame.render_widget(stats_panel, strip[1]);
     }
 }
@@ -646,24 +699,24 @@ impl App {
 /// Glyph + color for an event kind — mirrors src/cli/logs_cmd.rs::kind_style.
 fn event_glyph(kind: &str) -> (&'static str, Color) {
     match kind {
-        "node_written"         => ("●", Color::Green),
-        "lock_acquired"        => ("⚿", Color::Yellow),
-        "lock_released"        => ("○", Color::DarkGray),
-        "digest_written"       => ("◈", Color::Cyan),
-        "similarity_hit"       => ("≈", Color::Blue),
-        "correction_detected"  => ("✗", Color::Red),
-        "hook_fired"           => ("▸", Color::Yellow),
-        "embedding_call"       => ("⚡", Color::Cyan),
-        "task_created"         => ("✚", Color::Green),
-        "task_status_changed"  => ("◆", Color::Yellow),
-        "remembered"           => ("♦", Color::Blue),
-        "embedding_cache_hit"  => ("⚡", Color::Green),
-        "classifier_decision"  => ("⚖", Color::Cyan),
-        "scoring_decision"     => ("·", Color::Gray),
-        "redaction_applied"    => ("✂", Color::Red),
-        "hit_referenced"       => ("✓", Color::Green),
-        "agent_state_changed"  => ("↪", Color::Blue),
-        _                      => ("·", Color::Gray),
+        "node_written" => ("●", Color::Green),
+        "lock_acquired" => ("⚿", Color::Yellow),
+        "lock_released" => ("○", Color::DarkGray),
+        "digest_written" => ("◈", Color::Cyan),
+        "similarity_hit" => ("≈", Color::Blue),
+        "correction_detected" => ("✗", Color::Red),
+        "hook_fired" => ("▸", Color::Yellow),
+        "embedding_call" => ("⚡", Color::Cyan),
+        "task_created" => ("✚", Color::Green),
+        "task_status_changed" => ("◆", Color::Yellow),
+        "remembered" => ("♦", Color::Blue),
+        "embedding_cache_hit" => ("⚡", Color::Green),
+        "classifier_decision" => ("⚖", Color::Cyan),
+        "scoring_decision" => ("·", Color::Gray),
+        "redaction_applied" => ("✂", Color::Red),
+        "hit_referenced" => ("✓", Color::Green),
+        "agent_state_changed" => ("↪", Color::Blue),
+        _ => ("·", Color::Gray),
     }
 }
 
@@ -674,7 +727,9 @@ pub async fn reconcile_workers(pool: &PgPool) -> Result<(), anyhow::Error> {
     use crate::models::worker::{WorkerRepo, WorkerState};
     use std::collections::{HashMap, HashSet};
     let workers = WorkerRepo::new(pool).list_live().await.unwrap_or_default();
-    if workers.is_empty() { return Ok(()); }
+    if workers.is_empty() {
+        return Ok(());
+    }
 
     let mut by_session: HashMap<String, HashSet<String>> = HashMap::new();
     for w in &workers {
@@ -686,8 +741,10 @@ pub async fn reconcile_workers(pool: &PgPool) -> Result<(), anyhow::Error> {
             .output();
         let set = match out {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-                .lines().map(|s| s.trim().to_string()).collect(),
-            _ => HashSet::new(),  // session missing → treat all as gone
+                .lines()
+                .map(|s| s.trim().to_string())
+                .collect(),
+            _ => HashSet::new(), // session missing → treat all as gone
         };
         by_session.insert(session, set);
     }
@@ -695,37 +752,53 @@ pub async fn reconcile_workers(pool: &PgPool) -> Result<(), anyhow::Error> {
     let repo = WorkerRepo::new(pool);
     let mut n = 0;
     for w in workers {
-        let live = by_session.get(&w.tmux_session)
-            .map(|set| set.contains(&w.tmux_window)).unwrap_or(false);
+        let live = by_session
+            .get(&w.tmux_session)
+            .map(|set| set.contains(&w.tmux_window))
+            .unwrap_or(false);
         if !live {
-            let _ = repo.set_state(
-                w.worker_id, WorkerState::Abandoned,
-                Some("reconciled at TUI start — window absent"),
-            ).await;
+            let _ = repo
+                .set_state(
+                    w.worker_id,
+                    WorkerState::Abandoned,
+                    Some("reconciled at TUI start — window absent"),
+                )
+                .await;
             n += 1;
         }
     }
-    if n > 0 { tracing::info!(reconciled = n, "worker boot reconciliation"); }
+    if n > 0 {
+        tracing::info!(reconciled = n, "worker boot reconciliation");
+    }
     Ok(())
 }
 
 async fn reqwest_ping() -> bool {
-    let base = std::env::var("OLLAMA_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".into());
+    let base = std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
     let url = format!("{}/api/tags", base.trim_end_matches('/'));
-    reqwest::get(url).await.map(|r| r.status().is_success()).unwrap_or(false)
+    reqwest::get(url)
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 fn short_status_detail(p: &serde_json::Value) -> String {
     // One-line detail for the bottom status strip. Best-effort per kind.
-    if let Some(score) = p.get("total_score").or_else(|| p.get("similarity"))
+    if let Some(score) = p
+        .get("total_score")
+        .or_else(|| p.get("similarity"))
         .and_then(|v| v.as_f64())
     {
-        let src = p.get("source_agent").and_then(|v| v.as_str()).unwrap_or("?");
+        let src = p
+            .get("source_agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         let snip = p.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
         let s = if snip.chars().count() > 40 {
             snip.chars().take(40).collect::<String>() + "…"
-        } else { snip.to_string() };
+        } else {
+            snip.to_string()
+        };
         return format!("score={score:.2} from {src}  {s}");
     }
     if let Some(t) = p.get("turns").and_then(|v| v.as_i64()) {
@@ -740,7 +813,9 @@ fn short_status_detail(p: &serde_json::Value) -> String {
     if let Some(snip) = p.get("snippet").and_then(|v| v.as_str()) {
         let s = if snip.chars().count() > 60 {
             snip.chars().take(60).collect::<String>() + "…"
-        } else { snip.to_string() };
+        } else {
+            snip.to_string()
+        };
         return s;
     }
     String::new()
@@ -755,7 +830,8 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
     let mut terminal = Terminal::new(backend)?;
 
     let agent_name = std::env::var("YGG_AGENT_NAME").unwrap_or_else(|_| {
-        std::env::current_dir().ok()
+        std::env::current_dir()
+            .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| "ygg".to_string())
     });
@@ -796,15 +872,33 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
             app.dashboard.refresh(pool).await?;
             app.refresh_status_tail(pool).await;
             match app.active_view {
-                ActiveView::Dag     => { app.dag.refresh(pool).await?; }
-                ActiveView::Tasks   => { app.tasks.refresh(pool).await?; }
-                ActiveView::Trace   => { app.trace.refresh(pool).await?; }
-                ActiveView::Logs    => { app.logs.refresh(pool).await?; }
-                ActiveView::MemGraph => { app.memgraph.refresh(pool).await?; }
-                ActiveView::Eval    => { app.eval.refresh(pool).await?; }
-                ActiveView::Prompt  => { app.prompt.refresh(pool).await?; }
-                ActiveView::Locks   => { app.locks.refresh(pool, config.lock_ttl_secs).await?; }
-                ActiveView::Runs    => { app.runs.refresh(pool).await?; }
+                ActiveView::Dag => {
+                    app.dag.refresh(pool).await?;
+                }
+                ActiveView::Tasks => {
+                    app.tasks.refresh(pool).await?;
+                }
+                ActiveView::Trace => {
+                    app.trace.refresh(pool).await?;
+                }
+                ActiveView::Logs => {
+                    app.logs.refresh(pool).await?;
+                }
+                ActiveView::MemGraph => {
+                    app.memgraph.refresh(pool).await?;
+                }
+                ActiveView::Eval => {
+                    app.eval.refresh(pool).await?;
+                }
+                ActiveView::Prompt => {
+                    app.prompt.refresh(pool).await?;
+                }
+                ActiveView::Locks => {
+                    app.locks.refresh(pool, config.lock_ttl_secs).await?;
+                }
+                ActiveView::Runs => {
+                    app.runs.refresh(pool).await?;
+                }
                 _ => {}
             }
             last_refresh = Some(Instant::now());
@@ -816,7 +910,9 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
             }
         }
 
-        if app.should_quit { break; }
+        if app.should_quit {
+            break;
+        }
     }
 
     terminal::disable_raw_mode()?;
@@ -837,7 +933,15 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
             // hand the terminal over to tmux cleanly.
             use std::os::unix::process::CommandExt;
             let err = std::process::Command::new("tmux")
-                .args(["attach", "-t", &session, ";", "select-window", "-t", &target])
+                .args([
+                    "attach",
+                    "-t",
+                    &session,
+                    ";",
+                    "select-window",
+                    "-t",
+                    &target,
+                ])
                 .exec();
             // exec returns only on failure; print and continue.
             eprintln!("tmux attach failed: {err}");

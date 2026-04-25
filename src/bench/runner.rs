@@ -70,18 +70,20 @@ pub async fn execute(
     seed: Option<i64>,
     cfg: &RunnerConfig,
 ) -> Result<Uuid, anyhow::Error> {
-    let model = std::env::var("YGG_BENCH_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+    let model =
+        std::env::var("YGG_BENCH_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
 
     let repo = BenchRepo::new(pool);
-    let bench_run = repo.create_run(
-        &manifest.manifest.id,
-        driver.baseline(),
-        manifest.manifest.default_parallelism as i32,
-        &model,
-        &super::harness_sha(),
-        seed,
-    ).await?;
+    let bench_run = repo
+        .create_run(
+            &manifest.manifest.id,
+            driver.baseline(),
+            manifest.manifest.default_parallelism as i32,
+            &model,
+            &super::harness_sha(),
+            seed,
+        )
+        .await?;
 
     // Set up an isolated workspace and clone the seed_repo into it.
     let workspace = match &cfg.workspace_root {
@@ -95,13 +97,16 @@ pub async fn execute(
     init_seed_workspace(&manifest.seed_repo(), &workspace)?;
 
     let started = Instant::now();
-    let driver_result = driver.run(manifest, &workspace, &manifest.manifest.tasks).await;
+    let driver_result = driver
+        .run(manifest, &workspace, &manifest.manifest.tasks)
+        .await;
     let wall_clock_total_s = started.elapsed().as_secs() as i64;
 
     let outcomes = match driver_result {
         Ok(v) => v,
         Err(e) => {
-            repo.finalize(bench_run.run_id, false, Some(&format!("driver error: {e}"))).await?;
+            repo.finalize(bench_run.run_id, false, Some(&format!("driver error: {e}")))
+                .await?;
             return Err(e);
         }
     };
@@ -122,9 +127,18 @@ pub async fn execute(
         repo.write_task_result(bench_run.run_id, &result).await?;
         all_passed &= out.passed;
     }
-    repo.write_metric(bench_run.run_id, "wall_clock_total_s", wall_clock_total_s as f64).await?;
-    repo.write_metric(bench_run.run_id, "tasks_passed",
-        outcomes.iter().filter(|o| o.passed).count() as f64).await?;
+    repo.write_metric(
+        bench_run.run_id,
+        "wall_clock_total_s",
+        wall_clock_total_s as f64,
+    )
+    .await?;
+    repo.write_metric(
+        bench_run.run_id,
+        "tasks_passed",
+        outcomes.iter().filter(|o| o.passed).count() as f64,
+    )
+    .await?;
     repo.finalize(bench_run.run_id, all_passed, None).await?;
 
     // Run the deterministic grader on the final workspace state.
@@ -136,7 +150,8 @@ pub async fn execute(
             bench_run.run_id,
             false,
             Some("driver reported pass but grade.sh failed"),
-        ).await?;
+        )
+        .await?;
     }
     Ok(bench_run.run_id)
 }
@@ -160,10 +175,12 @@ fn init_seed_workspace(seed: &Path, dest: &Path) -> Result<(), anyhow::Error> {
         // Identity required for commits in CI environments.
         let _ = std::process::Command::new("git")
             .args(["config", "user.email", "bench@yggdrasil.local"])
-            .current_dir(dest).status();
+            .current_dir(dest)
+            .status();
         let _ = std::process::Command::new("git")
             .args(["config", "user.name", "ygg bench"])
-            .current_dir(dest).status();
+            .current_dir(dest)
+            .status();
         // Initial commit so the workspace has HEAD.
         // Exclude per-task clone dirs so wrapper commits don't accidentally
         // pull in the embedded .git directories of .ygg-{i} / .clone-{i}.
@@ -173,10 +190,12 @@ fn init_seed_workspace(seed: &Path, dest: &Path) -> Result<(), anyhow::Error> {
         )?;
         let _ = std::process::Command::new("git")
             .args(["add", "."])
-            .current_dir(dest).status();
+            .current_dir(dest)
+            .status();
         let _ = std::process::Command::new("git")
             .args(["commit", "-q", "-m", "bench: seed"])
-            .current_dir(dest).status();
+            .current_dir(dest)
+            .status();
     }
     Ok(())
 }
@@ -184,7 +203,9 @@ fn init_seed_workspace(seed: &Path, dest: &Path) -> Result<(), anyhow::Error> {
 fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        if entry.file_name() == ".gitkeep" { continue; }
+        if entry.file_name() == ".gitkeep" {
+            continue;
+        }
         let dst_path = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             std::fs::create_dir_all(&dst_path)?;

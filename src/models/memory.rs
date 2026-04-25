@@ -25,7 +25,11 @@ pub enum MemoryScope {
 
 impl MemoryScope {
     pub fn as_str(&self) -> &'static str {
-        match self { Self::Global => "global", Self::Repo => "repo", Self::Session => "session" }
+        match self {
+            Self::Global => "global",
+            Self::Repo => "repo",
+            Self::Session => "session",
+        }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -65,7 +69,9 @@ pub struct MemoryRepo<'a> {
 }
 
 impl<'a> MemoryRepo<'a> {
-    pub fn new(pool: &'a PgPool) -> Self { Self { pool } }
+    pub fn new(pool: &'a PgPool) -> Self {
+        Self { pool }
+    }
 
     pub async fn create(
         &self,
@@ -169,28 +175,31 @@ impl<'a> MemoryRepo<'a> {
         .fetch_all(self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| {
-            let scope_text: String = r.get("scope_text");
-            let scope = MemoryScope::parse(&scope_text).unwrap_or(MemoryScope::Global);
-            let distance: f64 = r.get("distance");
-            MemoryHit {
-                memory: Memory {
-                    memory_id: r.get("memory_id"),
-                    scope,
-                    repo_id: r.get("repo_id"),
-                    cc_session_id: r.get("cc_session_id"),
-                    agent_id: r.get("agent_id"),
-                    agent_name: r.get("agent_name"),
-                    text: r.get("text"),
-                    embedding: None,
-                    pinned: r.get("pinned"),
-                    expires_at: r.get("expires_at"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                },
-                similarity: (1.0 - distance).clamp(0.0, 1.0),
-            }
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let scope_text: String = r.get("scope_text");
+                let scope = MemoryScope::parse(&scope_text).unwrap_or(MemoryScope::Global);
+                let distance: f64 = r.get("distance");
+                MemoryHit {
+                    memory: Memory {
+                        memory_id: r.get("memory_id"),
+                        scope,
+                        repo_id: r.get("repo_id"),
+                        cc_session_id: r.get("cc_session_id"),
+                        agent_id: r.get("agent_id"),
+                        agent_name: r.get("agent_name"),
+                        text: r.get("text"),
+                        embedding: None,
+                        pinned: r.get("pinned"),
+                        expires_at: r.get("expires_at"),
+                        created_at: r.get("created_at"),
+                        updated_at: r.get("updated_at"),
+                    },
+                    similarity: (1.0 - distance).clamp(0.0, 1.0),
+                }
+            })
+            .collect())
     }
 
     /// All pinned memories visible in the current scope context. Used by the
@@ -242,27 +251,29 @@ impl<'a> MemoryRepo<'a> {
     }
 
     pub async fn set_pinned(&self, memory_id: Uuid, pinned: bool) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE memories SET pinned = $2, updated_at = now() WHERE memory_id = $1"
-        )
-        .bind(memory_id).bind(pinned)
-        .execute(self.pool).await?;
+        sqlx::query("UPDATE memories SET pinned = $2, updated_at = now() WHERE memory_id = $1")
+            .bind(memory_id)
+            .bind(pinned)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn expire_in(&self, memory_id: Uuid, secs: i64) -> Result<(), sqlx::Error> {
         let when = Utc::now() + Duration::seconds(secs);
-        sqlx::query(
-            "UPDATE memories SET expires_at = $2, updated_at = now() WHERE memory_id = $1"
-        )
-        .bind(memory_id).bind(when)
-        .execute(self.pool).await?;
+        sqlx::query("UPDATE memories SET expires_at = $2, updated_at = now() WHERE memory_id = $1")
+            .bind(memory_id)
+            .bind(when)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn delete(&self, memory_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM memories WHERE memory_id = $1")
-            .bind(memory_id).execute(self.pool).await?;
+            .bind(memory_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 }

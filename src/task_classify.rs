@@ -14,8 +14,8 @@ const TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct Suggestion {
-    pub kind: Option<String>,       // "task"|"bug"|"feature"|"chore"|"epic"
-    pub priority: Option<i16>,      // 0..=4
+    pub kind: Option<String>,  // "task"|"bug"|"feature"|"chore"|"epic"
+    pub priority: Option<i16>, // 0..=4
     pub labels: Vec<String>,
 }
 
@@ -23,8 +23,8 @@ pub async fn suggest(title: &str, description: Option<&str>) -> Option<Suggestio
     if std::env::var("YGG_TASK_CLASSIFY").ok().as_deref() == Some("off") {
         return None;
     }
-    let base_url = std::env::var("OLLAMA_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".into());
+    let base_url =
+        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
     let model = std::env::var("YGG_TASK_CLASSIFY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
 
     let body = format!(
@@ -50,31 +50,45 @@ pub async fn suggest(title: &str, description: Option<&str>) -> Option<Suggestio
         keep_alive: &'a str,
     }
     #[derive(Serialize)]
-    struct Opts { temperature: f32, num_predict: u32 }
+    struct Opts {
+        temperature: f32,
+        num_predict: u32,
+    }
     #[derive(Deserialize)]
-    struct Resp { response: String }
+    struct Resp {
+        response: String,
+    }
 
     let req = Req {
         model: &model,
         prompt: body,
         format: "json",
         stream: false,
-        options: Opts { temperature: 0.0, num_predict: 120 },
+        options: Opts {
+            temperature: 0.0,
+            num_predict: 120,
+        },
         keep_alive: "30m",
     };
 
     let http = reqwest::Client::new();
     let fut = async {
-        let resp = http.post(format!("{}/api/generate", base_url.trim_end_matches('/')))
-            .json(&req).send().await.ok()?;
-        if !resp.status().is_success() { return None; }
+        let resp = http
+            .post(format!("{}/api/generate", base_url.trim_end_matches('/')))
+            .json(&req)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
         resp.json::<Resp>().await.ok().map(|r| r.response)
     };
 
-    let raw = tokio::time::timeout(
-        std::time::Duration::from_millis(TIMEOUT_MS),
-        fut,
-    ).await.ok().flatten()?;
+    let raw = tokio::time::timeout(std::time::Duration::from_millis(TIMEOUT_MS), fut)
+        .await
+        .ok()
+        .flatten()?;
 
     parse_suggestion(&raw)
 }
@@ -99,7 +113,9 @@ fn parse_suggestion(raw: &str) -> Option<Suggestion> {
         // Handle "P2" or "2" strings.
         let trimmed = p_str.trim().trim_start_matches(['P', 'p']);
         if let Ok(n) = trimmed.parse::<i16>() {
-            if (0..=4).contains(&n) { out.priority = Some(n); }
+            if (0..=4).contains(&n) {
+                out.priority = Some(n);
+            }
         }
     }
 

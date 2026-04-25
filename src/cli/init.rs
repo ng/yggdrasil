@@ -1,11 +1,10 @@
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use indicatif::{ProgressBar, ProgressStyle};
 use tokio::process::Command;
 
 use crate::db;
-
 
 // Colors
 const D: &str = "\x1b[90m";
@@ -38,7 +37,10 @@ fn banner() {
     println!("      {TK}▐█▌{X}      {FR}^     ^{X}");
     println!("   {RT}▀▀▀▀█▀▀▀▀{X}");
     println!();
-    println!("  {O}{B}Y G G D R A S I L{X} {D}v{}{X}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "  {O}{B}Y G G D R A S I L{X} {D}v{}{X}",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
 }
 
@@ -122,13 +124,17 @@ fn prompt_skip(name: &str) -> bool {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         let config_dir = std::path::Path::new(&home).join(".config/ygg");
         let path = config_dir.join("skips.json");
-        let mut skips: Vec<String> = std::fs::read_to_string(&path).ok()
+        let mut skips: Vec<String> = std::fs::read_to_string(&path)
+            .ok()
             .and_then(|d| serde_json::from_str(&d).ok())
             .unwrap_or_default();
         let key = name.to_lowercase();
         if !skips.contains(&key) {
             skips.push(key);
-            let _ = std::fs::write(&path, serde_json::to_string_pretty(&skips).unwrap_or_default());
+            let _ = std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&skips).unwrap_or_default(),
+            );
         }
     }
     skip
@@ -136,48 +142,83 @@ fn prompt_skip(name: &str) -> bool {
 
 /// Find a binary by checking known paths, then PATH.
 fn find_bin(name: &str) -> Option<String> {
-    for dir in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin"] {
+    for dir in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+    ] {
         let p = format!("{dir}/{name}");
-        if Path::new(&p).exists() { return Some(p); }
+        if Path::new(&p).exists() {
+            return Some(p);
+        }
     }
     // Check HOME-relative paths
     if let Ok(home) = std::env::var("HOME") {
         for sub in [".local/bin", ".cargo/bin"] {
             let p = format!("{home}/{sub}/{name}");
-            if Path::new(&p).exists() { return Some(p); }
+            if Path::new(&p).exists() {
+                return Some(p);
+            }
         }
     }
     // Fallback: which
-    if let Ok(o) = std::process::Command::new("which").arg(name).stdout(Stdio::piped()).stderr(Stdio::null()).output() {
-        if o.status.success() { return Some(name.to_string()); }
+    if let Ok(o) = std::process::Command::new("which")
+        .arg(name)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if o.status.success() {
+            return Some(name.to_string());
+        }
     }
     None
 }
 
-async fn has(name: &str) -> bool { find_bin(name).is_some() }
+async fn has(name: &str) -> bool {
+    find_bin(name).is_some()
+}
 
 async fn run(cmd: &str, args: &[&str]) -> bool {
     let bin = find_bin(cmd).unwrap_or_else(|| cmd.to_string());
-    Command::new(&bin).args(args).stdout(Stdio::null()).stderr(Stdio::null())
-        .status().await.is_ok_and(|s| s.success())
+    Command::new(&bin)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
 }
 
 async fn run_show(cmd: &str, args: &[&str]) -> bool {
     let bin = find_bin(cmd).unwrap_or_else(|| cmd.to_string());
-    Command::new(&bin).args(args).status().await.is_ok_and(|s| s.success())
+    Command::new(&bin)
+        .args(args)
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
 }
 
 async fn port_open(port: u16) -> bool {
-    tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok()
+    tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .is_ok()
 }
 
 async fn host_port_open(host: &str, port: u16) -> bool {
-    tokio::net::TcpStream::connect(format!("{host}:{port}")).await.is_ok()
+    tokio::net::TcpStream::connect(format!("{host}:{port}"))
+        .await
+        .is_ok()
 }
 
 async fn wait_port(port: u16, secs: u64) -> bool {
     for _ in 0..secs {
-        if port_open(port).await { return true; }
+        if port_open(port).await {
+            return true;
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     false
@@ -186,7 +227,8 @@ async fn wait_port(port: u16, secs: u64) -> bool {
 /// Parse (user, host, port, password) from a postgres URL.
 /// Falls back to `fallback_user` when no userinfo is present.
 fn parse_pg_url_parts(url: &str, fallback_user: &str) -> (String, String, u16, Option<String>) {
-    let rest = url.strip_prefix("postgres://")
+    let rest = url
+        .strip_prefix("postgres://")
         .or_else(|| url.strip_prefix("postgresql://"))
         .unwrap_or(url);
     let (userinfo, hostdb) = rest.split_once('@').unwrap_or(("", rest));
@@ -212,38 +254,68 @@ async fn pg_createdb(user: &str, host: &str, port: u16, pass: Option<&str>) -> b
     let bin = find_bin("createdb").unwrap_or_else(|| "createdb".to_string());
     let mut cmd = Command::new(&bin);
     cmd.args(["-U", user, "-h", host, "-p", &port_s, "ygg"])
-       .stdout(Stdio::null()).stderr(Stdio::null());
-    if let Some(p) = pass { cmd.env("PGPASSWORD", p); }
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(p) = pass {
+        cmd.env("PGPASSWORD", p);
+    }
     cmd.status().await.is_ok_and(|s| s.success())
 }
 
 /// Run `psql -c "CREATE EXTENSION IF NOT EXISTS <ext>"` against the configured instance.
-async fn pg_enable_extension(user: &str, host: &str, port: u16, pass: Option<&str>, ext: &str) -> bool {
+async fn pg_enable_extension(
+    user: &str,
+    host: &str,
+    port: u16,
+    pass: Option<&str>,
+    ext: &str,
+) -> bool {
     let port_s = port.to_string();
     let sql = format!("CREATE EXTENSION IF NOT EXISTS {ext}");
     let bin = find_bin("psql").unwrap_or_else(|| "psql".to_string());
     let mut cmd = Command::new(&bin);
-    cmd.args(["-U", user, "-h", host, "-p", &port_s, "-d", "ygg", "-c", &sql, "-q"])
-       .stdout(Stdio::null()).stderr(Stdio::null());
-    if let Some(p) = pass { cmd.env("PGPASSWORD", p); }
+    cmd.args([
+        "-U", user, "-h", host, "-p", &port_s, "-d", "ygg", "-c", &sql, "-q",
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    if let Some(p) = pass {
+        cmd.env("PGPASSWORD", p);
+    }
     cmd.status().await.is_ok_and(|s| s.success())
 }
 
 /// Detect which postgresql@XX version is running via brew services or pg_config.
 async fn detect_pg_version() -> String {
     // Try pg_config first
-    if let Ok(output) = Command::new("pg_config").arg("--version").stdout(Stdio::piped()).stderr(Stdio::null()).output().await {
+    if let Ok(output) = Command::new("pg_config")
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
         if output.status.success() {
             let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
             // "PostgreSQL 16.4" → "postgresql@16"
-            if let Some(major) = ver.split_whitespace().nth(1).and_then(|v| v.split('.').next()) {
+            if let Some(major) = ver
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.split('.').next())
+            {
                 return format!("postgresql@{major}");
             }
         }
     }
 
     // Fallback: check which brew services are running
-    if let Ok(output) = Command::new("brew").args(["services", "list"]).stdout(Stdio::piped()).stderr(Stdio::null()).output().await {
+    if let Ok(output) = Command::new("brew")
+        .args(["services", "list"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
@@ -278,8 +350,12 @@ async fn detect_pg_version() -> String {
 /// Uses pg_config --bindir if available, falls back to known paths.
 async fn get_pg_bin_dir(pg_version: &str) -> Option<String> {
     // Try pg_config directly
-    if let Ok(output) = Command::new("pg_config").arg("--bindir")
-        .stdout(Stdio::piped()).stderr(Stdio::null()).output().await
+    if let Ok(output) = Command::new("pg_config")
+        .arg("--bindir")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
     {
         if output.status.success() {
             let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -293,7 +369,10 @@ async fn get_pg_bin_dir(pg_version: &str) -> Option<String> {
     let candidates = [
         format!("/opt/homebrew/opt/{pg_version}/bin"),
         format!("/usr/local/opt/{pg_version}/bin"),
-        format!("/usr/lib/postgresql/{}/bin", pg_version.trim_start_matches("postgresql@")),
+        format!(
+            "/usr/lib/postgresql/{}/bin",
+            pg_version.trim_start_matches("postgresql@")
+        ),
     ];
     for dir in candidates {
         if Path::new(&dir).exists() {
@@ -307,13 +386,27 @@ async fn get_pg_bin_dir(pg_version: &str) -> Option<String> {
 /// Build pgvector from git source using the system's pg_config.
 /// This bypasses brew's formula which only targets the latest 2 pg versions.
 async fn build_pgvector_from_source() -> bool {
-    let tmp = format!("{}/ygg-pgvector-build", std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into()));
+    let tmp = format!(
+        "{}/ygg-pgvector-build",
+        std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
+    );
 
     // Clean up any previous attempt
     let _ = std::fs::remove_dir_all(&tmp);
 
     // Clone
-    if !run_show("git", &["clone", "--depth", "1", "https://github.com/pgvector/pgvector.git", &tmp]).await {
+    if !run_show(
+        "git",
+        &[
+            "clone",
+            "--depth",
+            "1",
+            "https://github.com/pgvector/pgvector.git",
+            &tmp,
+        ],
+    )
+    .await
+    {
         return false;
     }
 
@@ -374,7 +467,11 @@ async fn save_skip(config_dir: &Path, name: &str) {
     if !skips.contains(&name) {
         skips.push(name);
     }
-    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&skips).unwrap_or_default()).await;
+    let _ = tokio::fs::write(
+        &path,
+        serde_json::to_string_pretty(&skips).unwrap_or_default(),
+    )
+    .await;
 }
 
 async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
@@ -385,7 +482,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     // Merge CLI skips with saved skips
     let saved_skips = load_saved_skips(&config_dir).await;
-    let all_skips: Vec<String> = skips.iter().cloned()
+    let all_skips: Vec<String> = skips
+        .iter()
+        .cloned()
         .chain(saved_skips.into_iter())
         .collect();
 
@@ -398,17 +497,32 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     let has_brew = has("brew").await;
     let has_apt = has("apt-get").await;
-    let pkg = if has_brew { "brew" } else if has_apt { "apt" } else { "—" };
+    let pkg = if has_brew {
+        "brew"
+    } else if has_apt {
+        "apt"
+    } else {
+        "—"
+    };
 
     // Detect system username via whoami (most reliable)
-    let sys_user = if let Ok(output) = Command::new("whoami").stdout(Stdio::piped()).stderr(Stdio::null()).output().await {
+    let sys_user = if let Ok(output) = Command::new("whoami")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
         if output.status.success() {
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         } else {
-            std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "postgres".into())
+            std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "postgres".into())
         }
     } else {
-        std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "postgres".into())
+        std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "postgres".into())
     };
 
     let default_db_url = format!("postgres://{sys_user}@localhost:5432/ygg");
@@ -435,13 +549,19 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         let url = if a.is_empty() || a == "y" || a == "yes" {
             default_db_url.clone()
         } else {
-            println!("  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:5432/ygg){X}");
+            println!(
+                "  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:5432/ygg){X}"
+            );
             print!("  {BR}│{X}  > ");
             io::stdout().flush().ok();
             let mut custom = String::new();
             io::stdin().lock().read_line(&mut custom).ok();
             let custom = custom.trim().to_string();
-            if custom.is_empty() { default_db_url.clone() } else { custom }
+            if custom.is_empty() {
+                default_db_url.clone()
+            } else {
+                custom
+            }
         };
 
         // Write config immediately so it's saved
@@ -462,7 +582,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     };
 
     // Always force the correct DATABASE_URL in env
-    unsafe { std::env::set_var("DATABASE_URL", &db_url); }
+    unsafe {
+        std::env::set_var("DATABASE_URL", &db_url);
+    }
 
     // Parse pg connection details — used for all createdb/psql calls so we
     // connect to the right host/port/user regardless of where postgres lives.
@@ -471,7 +593,14 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "384".into());
 
-    let db_show = db_url.find('@').and_then(|at| db_url[..at].rfind(':').map(|c| format!("{}:***@{}", &db_url[..c], &db_url[at+1..]))).unwrap_or_else(|| db_url.clone());
+    let db_show = db_url
+        .find('@')
+        .and_then(|at| {
+            db_url[..at]
+                .rfind(':')
+                .map(|c| format!("{}:***@{}", &db_url[..c], &db_url[at + 1..]))
+        })
+        .unwrap_or_else(|| db_url.clone());
 
     println!("  {D}pkg{X}     {pkg}");
     println!("  {D}pg{X}      {db_show}");
@@ -497,7 +626,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 ok(name, "installed");
             } else {
                 bad(name, "brew install failed");
-                if !prompt_skip(name) { std::process::exit(1); }
+                if !prompt_skip(name) {
+                    std::process::exit(1);
+                }
             }
         } else {
             // Can't auto-install without brew — tell user what to run
@@ -506,7 +637,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 hint(&format!("run: sudo apt-get install -y {name}"));
             }
             missing.push((name, brew_pkg));
-            if !prompt_skip(name) { std::process::exit(1); }
+            if !prompt_skip(name) {
+                std::process::exit(1);
+            }
         }
     }
 
@@ -523,11 +656,21 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                     ok("rtk", "installed");
                 } else {
                     bad("rtk", "brew install failed, trying install script...");
-                    offer_curl_install("rtk", "https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh").await;
+                    offer_curl_install(
+                        "rtk",
+                        "https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh",
+                    )
+                    .await;
                 }
-            } else if !prompt_skip("rtk") { std::process::exit(1); }
+            } else if !prompt_skip("rtk") {
+                std::process::exit(1);
+            }
         } else {
-            offer_curl_install("rtk", "https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh").await;
+            offer_curl_install(
+                "rtk",
+                "https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh",
+            )
+            .await;
         }
     } else {
         ok("rtk", "found");
@@ -554,7 +697,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 if has_brew {
                     hint("try: brew services restart postgresql@16");
                 }
-                if !prompt_skip("postgresql") { std::process::exit(1); }
+                if !prompt_skip("postgresql") {
+                    std::process::exit(1);
+                }
             }
         } else if has_brew {
             let pb = spin("brew install postgresql@16...");
@@ -567,11 +712,15 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 } else {
                     bad("postgresql", "installed but won't start");
                     hint("try: brew services restart postgresql@16");
-                    if !prompt_skip("postgresql") { std::process::exit(1); }
+                    if !prompt_skip("postgresql") {
+                        std::process::exit(1);
+                    }
                 }
             } else {
                 bad("postgresql", "brew install failed");
-                if !prompt_skip("postgresql") { std::process::exit(1); }
+                if !prompt_skip("postgresql") {
+                    std::process::exit(1);
+                }
             }
         } else {
             bad("postgresql", "not installed");
@@ -581,13 +730,17 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             } else {
                 hint("install: https://www.postgresql.org/download/");
             }
-            if !prompt_skip("postgresql") { std::process::exit(1); }
+            if !prompt_skip("postgresql") {
+                std::process::exit(1);
+            }
         }
     } else {
         // Remote postgres not reachable
         bad("postgresql", &format!("cannot reach {pg_host}:{pg_port}"));
         hint("check that your port-forward or remote host is accessible");
-        if !prompt_skip("postgresql") { std::process::exit(1); }
+        if !prompt_skip("postgresql") {
+            std::process::exit(1);
+        }
     }
 
     // database + pgvector (only if pg is up)
@@ -600,7 +753,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
 
         // Now check pgvector in the ygg database
-        let pgvector_ok = pg_enable_extension(&pg_user, &pg_host, pg_port, pg_pass.as_deref(), "vector").await;
+        let pgvector_ok =
+            pg_enable_extension(&pg_user, &pg_host, pg_port, pg_pass.as_deref(), "vector").await;
 
         if pgvector_ok {
             ok("pgvector", "enabled");
@@ -616,7 +770,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                     if let Some(pg_bin) = get_pg_bin_dir(&pg_version).await {
                         hint(&format!("using pg_config from: {pg_bin}"));
                         let current_path = std::env::var("PATH").unwrap_or_default();
-                        unsafe { std::env::set_var("PATH", format!("{pg_bin}:{current_path}")); }
+                        unsafe {
+                            std::env::set_var("PATH", format!("{pg_bin}:{current_path}"));
+                        }
                     }
 
                     // Build pgvector from source directly — brew formula
@@ -629,26 +785,44 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         run_show("brew", &["services", "restart", &pg_version]).await;
                         wait_port(5432, 10).await;
 
-                        if pg_enable_extension(&pg_user, &pg_host, pg_port, pg_pass.as_deref(), "vector").await {
+                        if pg_enable_extension(
+                            &pg_user,
+                            &pg_host,
+                            pg_port,
+                            pg_pass.as_deref(),
+                            "vector",
+                        )
+                        .await
+                        {
                             ok("pgvector", "built + enabled");
                         } else {
                             bad("pgvector", "built but can't enable");
                             hint("check: psql -d ygg -c \"CREATE EXTENSION vector\" 2>&1");
-                            if !prompt_skip("pgvector") { std::process::exit(1); }
+                            if !prompt_skip("pgvector") {
+                                std::process::exit(1);
+                            }
                         }
                     } else {
                         bad("pgvector", "build failed");
                         hint("requires: make, gcc/clang, postgresql server dev headers");
-                        if !prompt_skip("pgvector") { std::process::exit(1); }
+                        if !prompt_skip("pgvector") {
+                            std::process::exit(1);
+                        }
                     }
-                } else if !prompt_skip("pgvector") { std::process::exit(1); }
+                } else if !prompt_skip("pgvector") {
+                    std::process::exit(1);
+                }
             } else if has_apt {
                 hint("run: sudo apt-get install -y postgresql-16-pgvector");
                 hint("then: psql -d ygg -c 'CREATE EXTENSION vector'");
-                if !prompt_skip("pgvector") { std::process::exit(1); }
+                if !prompt_skip("pgvector") {
+                    std::process::exit(1);
+                }
             } else {
                 hint("install: https://github.com/pgvector/pgvector");
-                if !prompt_skip("pgvector") { std::process::exit(1); }
+                if !prompt_skip("pgvector") {
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -665,25 +839,44 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         let embedder = crate::embed::Embedder::default_ollama();
         let pb = spin("pulling all-minilm embedding model...");
         match embedder.pull_model().await {
-            Ok(()) => { pb.finish_and_clear(); ok("all-minilm", "pulled"); }
-            Err(e) => { pb.finish_and_clear(); bad("all-minilm", &format!("{e}")); }
+            Ok(()) => {
+                pb.finish_and_clear();
+                ok("all-minilm", "pulled");
+            }
+            Err(e) => {
+                pb.finish_and_clear();
+                bad("all-minilm", &format!("{e}"));
+            }
         }
 
         // Smoke test
         let pb = spin("testing embedding...");
         match embedder.embed("hello world").await {
-            Ok(_) => { pb.finish_and_clear(); ok("embedding", "ok (384d)"); }
-            Err(e) => { pb.finish_and_clear(); bad("embedding", &format!("{e}")); }
+            Ok(_) => {
+                pb.finish_and_clear();
+                ok("embedding", "ok (384d)");
+            }
+            Err(e) => {
+                pb.finish_and_clear();
+                bad("embedding", &format!("{e}"));
+            }
         }
     } else if has("ollama").await {
         ok("ollama", "installed");
         hint("starting ollama...");
-        Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+        Command::new("ollama")
+            .arg("serve")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok();
         if wait_port(11434, 10).await {
             ok("ollama", "started");
         } else {
             bad("ollama", "didn't start");
-            if !prompt_skip("ollama") { std::process::exit(1); }
+            if !prompt_skip("ollama") {
+                std::process::exit(1);
+            }
         }
     } else {
         bad("ollama", "not found");
@@ -694,7 +887,12 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 pb.finish_and_clear();
                 if installed {
                     ok("ollama", "installed");
-                    Command::new("ollama").arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+                    Command::new("ollama")
+                        .arg("serve")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .ok();
                     wait_port(11434, 10).await;
                 } else {
                     bad("ollama", "brew install failed");
@@ -726,8 +924,13 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             let pool = db::create_pool(&db_url).await?;
             db::run_migrations(&pool).await?;
             Ok::<(), anyhow::Error>(())
-        }.await {
-            Result::Ok(()) => { pb.finish_and_clear(); ok("migrations", "applied"); }
+        }
+        .await
+        {
+            Result::Ok(()) => {
+                pb.finish_and_clear();
+                ok("migrations", "applied");
+            }
             Err(e) => {
                 pb.finish_and_clear();
                 let err_str = format!("{e}");
@@ -741,7 +944,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                     if prompt_yes("reconfigure the database URL now?") {
                         use std::io::{self, BufRead, Write};
                         hint(&format!("your system user is: {sys_user}"));
-                        println!("  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:port/ygg){X}");
+                        println!(
+                            "  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:port/ygg){X}"
+                        );
                         print!("  {BR}│{X}  > ");
                         io::stdout().flush().ok();
                         let mut new_url = String::new();
@@ -774,7 +979,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                     hint(&format!("{e}"));
                 }
 
-                if !prompt_skip("migrations") { std::process::exit(1); }
+                if !prompt_skip("migrations") {
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -791,7 +998,11 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         // Install status bar script
         let status_dest = claude_dir.join("ygg-status.sh");
         tokio::fs::write(&status_dest, include_str!("../../scripts/ygg-status.sh")).await?;
-        Command::new("chmod").args(["+x", status_dest.to_str().unwrap()]).status().await.ok();
+        Command::new("chmod")
+            .args(["+x", status_dest.to_str().unwrap()])
+            .status()
+            .await
+            .ok();
         ok("ygg-status.sh", "installed");
 
         // Install hook scripts
@@ -799,15 +1010,31 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         tokio::fs::create_dir_all(&hooks_dir).await.ok();
 
         for (name, content) in [
-            ("session-start.sh", include_str!("../../scripts/hooks/session-start.sh")),
-            ("pre-tool-use.sh", include_str!("../../scripts/hooks/pre-tool-use.sh")),
-            ("prompt-submit.sh", include_str!("../../scripts/hooks/prompt-submit.sh")),
-            ("pre-compact.sh", include_str!("../../scripts/hooks/pre-compact.sh")),
+            (
+                "session-start.sh",
+                include_str!("../../scripts/hooks/session-start.sh"),
+            ),
+            (
+                "pre-tool-use.sh",
+                include_str!("../../scripts/hooks/pre-tool-use.sh"),
+            ),
+            (
+                "prompt-submit.sh",
+                include_str!("../../scripts/hooks/prompt-submit.sh"),
+            ),
+            (
+                "pre-compact.sh",
+                include_str!("../../scripts/hooks/pre-compact.sh"),
+            ),
             ("stop.sh", include_str!("../../scripts/hooks/stop.sh")),
         ] {
             let dest = hooks_dir.join(name);
             tokio::fs::write(&dest, content).await?;
-            Command::new("chmod").args(["+x", dest.to_str().unwrap()]).status().await.ok();
+            Command::new("chmod")
+                .args(["+x", dest.to_str().unwrap()])
+                .status()
+                .await
+                .ok();
         }
         ok("hook scripts", "installed");
 
@@ -815,9 +1042,18 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         let commands_dir = claude_dir.join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.ok();
         for (name, content) in [
-            ("ygg-status.md", include_str!("../../scripts/commands/ygg-status.md")),
-            ("ygg-spawn.md", include_str!("../../scripts/commands/ygg-spawn.md")),
-            ("ygg-lock.md", include_str!("../../scripts/commands/ygg-lock.md")),
+            (
+                "ygg-status.md",
+                include_str!("../../scripts/commands/ygg-status.md"),
+            ),
+            (
+                "ygg-spawn.md",
+                include_str!("../../scripts/commands/ygg-spawn.md"),
+            ),
+            (
+                "ygg-lock.md",
+                include_str!("../../scripts/commands/ygg-lock.md"),
+            ),
         ] {
             let dest = commands_dir.join(name);
             tokio::fs::write(&dest, content).await?;
@@ -845,7 +1081,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
         // Merge with existing settings if present
         let final_settings = if settings_path.exists() {
-            let existing = tokio::fs::read_to_string(&settings_path).await.unwrap_or_default();
+            let existing = tokio::fs::read_to_string(&settings_path)
+                .await
+                .unwrap_or_default();
             if let Ok(mut existing_json) = serde_json::from_str::<serde_json::Value>(&existing) {
                 // Merge hooks and statusLine into existing
                 if let Some(obj) = existing_json.as_object_mut() {
@@ -860,7 +1098,11 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             settings
         };
 
-        tokio::fs::write(&settings_path, serde_json::to_string_pretty(&final_settings)?).await?;
+        tokio::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&final_settings)?,
+        )
+        .await?;
         ok("claude settings.json", "hooks registered");
 
         hint("hooks will fire automatically in Claude Code sessions");
@@ -882,7 +1124,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                             ok(name, &action.to_string());
                         }
                     }
-                    Err(e) => { bad("project integration", &format!("{e}")); }
+                    Err(e) => {
+                        bad("project integration", &format!("{e}"));
+                    }
                 }
             }
         }

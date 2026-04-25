@@ -16,7 +16,13 @@ pub async fn execute(pool: &sqlx::PgPool, stale_secs: Option<u64>) -> Result<(),
     for agent in &orphaned {
         println!("  {} ({})", agent.agent_name, agent.current_state);
         println!("    last update: {}", agent.updated_at);
-        println!("    head node:   {}", agent.head_node_id.map(|id| id.to_string()).unwrap_or("none".into()));
+        println!(
+            "    head node:   {}",
+            agent
+                .head_node_id
+                .map(|id| id.to_string())
+                .unwrap_or("none".into())
+        );
     }
 
     println!();

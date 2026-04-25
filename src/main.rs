@@ -18,18 +18,28 @@ fn resolve_agent_arg(agent: Option<String>) -> String {
 /// without forcing a migration.
 fn parse_priority(s: &str) -> Result<i16, String> {
     let trimmed = s.trim();
-    let numeric = if let Some(rest) = trimmed.strip_prefix(['P', 'p']) { rest } else { trimmed };
-    let n: i16 = numeric.parse().map_err(|_| format!(
-        "priority must be 0..=4 or P0..P4 (got '{s}')"
-    ))?;
+    let numeric = if let Some(rest) = trimmed.strip_prefix(['P', 'p']) {
+        rest
+    } else {
+        trimmed
+    };
+    let n: i16 = numeric
+        .parse()
+        .map_err(|_| format!("priority must be 0..=4 or P0..P4 (got '{s}')"))?;
     if !(0..=4).contains(&n) {
-        return Err(format!("priority must be between 0 (critical) and 4 (backlog); got {n}"));
+        return Err(format!(
+            "priority must be between 0 (critical) and 4 (backlog); got {n}"
+        ));
     }
     Ok(n)
 }
 
 #[derive(Parser)]
-#[command(name = "ygg", version, about = "Yggdrasil — High-density agent orchestrator")]
+#[command(
+    name = "ygg",
+    version,
+    about = "Yggdrasil — High-density agent orchestrator"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -184,14 +194,20 @@ enum Commands {
 
     /// Purge stale rows from locks / sessions / memories / agents. Safe to cron.
     Reap {
-        #[arg(long)] locks: bool,
-        #[arg(long)] sessions: bool,
-        #[arg(long)] memories: bool,
+        #[arg(long)]
+        locks: bool,
+        #[arg(long)]
+        sessions: bool,
+        #[arg(long)]
+        memories: bool,
         /// Archive (not delete) agents with no activity in the window.
         /// Archived agents keep their history but disappear from live views.
-        #[arg(long)] agents: bool,
-        #[arg(long, default_value = "7")] older_than_days: i64,
-        #[arg(long)] dry_run: bool,
+        #[arg(long)]
+        agents: bool,
+        #[arg(long, default_value = "7")]
+        older_than_days: i64,
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Manage agent identities (list / archive / unarchive).
@@ -366,32 +382,44 @@ enum PlanAction {
     /// Create a plan (epic) in the current repo.
     Create {
         title: String,
-        #[arg(short, long)] description: Option<String>,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        description: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Add a child task under a plan, optionally with dependencies.
     Add {
         epic: String,
         title: String,
-        #[arg(short, long)] description: Option<String>,
-        #[arg(short, long)] kind: Option<String>,
-        #[arg(long, value_delimiter = ',')] deps: Vec<String>,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        description: Option<String>,
+        #[arg(short, long)]
+        kind: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        deps: Vec<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Execute a single task: worktree + claim + tmux + CC session.
     Run {
         task: String,
-        #[arg(long)] dry_run: bool,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Supervise an epic: walk deps, spawn CC sessions for ready tasks,
     /// poll for status changes, exit when no open tasks remain.
     Supervise {
         epic: String,
-        #[arg(short, long, default_value = "1")] parallelism: usize,
-        #[arg(long)] dry_run: bool,
-        #[arg(long, default_value = "5")] poll_secs: u64,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long, default_value = "1")]
+        parallelism: usize,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value = "5")]
+        poll_secs: u64,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Pause an epic's supervisor — no new tasks spawn until resumed.
     Pause { epic: String },
@@ -401,7 +429,8 @@ enum PlanAction {
     /// revert to open) and pause the epic. Recoverable.
     Abort {
         epic: String,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
 }
 
@@ -430,20 +459,26 @@ enum MsgAction {
     /// `--push` additionally interrupts the recipient via tmux send-keys
     /// for instant delivery (may disrupt a mid-thought turn).
     Send {
-        #[arg(long)] to: String,
-        #[arg(long)] from: Option<String>,
-        #[arg(long)] push: bool,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        push: bool,
         body: Vec<String>,
     },
     /// Show unread messages for this agent. `--all` ignores the cursor.
     Inbox {
-        #[arg(short, long)] agent: Option<String>,
-        #[arg(long)] all: bool,
+        #[arg(short, long)]
+        agent: Option<String>,
+        #[arg(long)]
+        all: bool,
     },
     /// Advance the cursor so inbox is empty until the next message arrives.
     /// Called by the prompt-submit hook after injection.
     MarkRead {
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
 }
 
@@ -466,9 +501,11 @@ enum RunAction {
     /// Start an agent run loop (preserved from the legacy top-level `ygg run`).
     Start {
         /// Agent name (creates or resumes)
-        #[arg(short, long)] name: String,
+        #[arg(short, long)]
+        name: String,
         /// Initial task description
-        #[arg(short, long)] task: Option<String>,
+        #[arg(short, long)]
+        task: Option<String>,
     },
     /// Open a run for the given task reference. Used by spawned agents whose
     /// SessionStart hook claims their bound task.
@@ -476,36 +513,39 @@ enum RunAction {
         /// Task reference (e.g. yggdrasil-142)
         task_ref: String,
         /// Override agent name (defaults to env / pwd basename).
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Bump heartbeat_at on a running run. Called by PreToolUse hook.
     Heartbeat {
         /// Specific run id (default: latest running run for this agent).
-        #[arg(long)] run_id: Option<String>,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Finalize a task's current run with the given terminal state.
     Finalize {
         task_ref: String,
         /// succeeded | failed | crashed | cancelled | poison
-        #[arg(long, default_value = "succeeded")] state: String,
+        #[arg(long, default_value = "succeeded")]
+        state: String,
         /// run_reason (default 'ok')
-        #[arg(long, default_value = "ok")] reason: String,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(long, default_value = "ok")]
+        reason: String,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Print one run's detail.
-    Show {
-        run_id: String,
-    },
+    Show { run_id: String },
     /// Print run history for a task.
-    List {
-        task_ref: String,
-    },
+    List { task_ref: String },
     /// Stop-hook handoff: capture commits + branch into the agent's latest
     /// running run, transition state heuristically (succeeded if a commit
     /// landed since started_at, else failed). Idempotent.
     CaptureOutcome {
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
 }
 
@@ -519,26 +559,26 @@ enum BenchAction {
         /// Scenario id (see `ygg bench list`).
         scenario: String,
         /// Baseline: vanilla-single | vanilla-tmux | ygg.
-        #[arg(long, default_value = "ygg")] baseline: String,
+        #[arg(long, default_value = "ygg")]
+        baseline: String,
         /// Override default parallelism for the scenario.
-        #[arg(long)] parallelism: Option<i32>,
+        #[arg(long)]
+        parallelism: Option<i32>,
         /// Model id passed through to the driver.
-        #[arg(long, default_value = "claude-sonnet-4-6")] model: String,
+        #[arg(long, default_value = "claude-sonnet-4-6")]
+        model: String,
         /// Optional seed (recorded for reproducibility audit; not yet used).
-        #[arg(long)] seed: Option<i64>,
+        #[arg(long)]
+        seed: Option<i64>,
     },
     /// Print a single bench run's summary.
-    Report {
-        run_id: String,
-    },
+    Report { run_id: String },
     /// Pairwise compare two runs of the same scenario.
-    Diff {
-        a: String,
-        b: String,
-    },
+    Diff { a: String, b: String },
     /// CI gate — run the tier's scenarios, exit non-zero on regression.
     Ci {
-        #[arg(long, default_value = "smoke")] tier: String,
+        #[arg(long, default_value = "smoke")]
+        tier: String,
     },
 }
 
@@ -546,7 +586,8 @@ enum BenchAction {
 enum AgentAction {
     /// List agents with last-activity age. By default hides archived.
     List {
-        #[arg(long)] all: bool,
+        #[arg(long)]
+        all: bool,
     },
     /// Archive an agent (hides from live views, keeps history).
     Archive { name: String },
@@ -554,14 +595,12 @@ enum AgentAction {
     Unarchive { name: String },
     /// Rename an agent. Preserves agent_id so events/nodes/sessions stay linked.
     /// Rejects if the new name already exists under the same persona.
-    Rename {
-        old: String,
-        new_name: String,
-    },
+    Rename { old: String, new_name: String },
     /// Show agents that would be archived by `ygg reap --agents` at the
     /// given staleness threshold. Never mutates.
     Stale {
-        #[arg(long, default_value = "14")] older_than_days: i64,
+        #[arg(long, default_value = "14")]
+        older_than_days: i64,
     },
 }
 
@@ -570,18 +609,23 @@ enum MemoryAction {
     /// Create a memory at the given scope (global / repo / session)
     Create {
         text: String,
-        #[arg(short, long, default_value = "global")] scope: String,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long, default_value = "global")]
+        scope: String,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// List memories, optionally filtered by scope
     List {
-        #[arg(short, long)] scope: Option<String>,
-        #[arg(long, default_value = "20")] limit: i64,
+        #[arg(short, long)]
+        scope: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: i64,
     },
     /// Semantic search across memories visible in the current scope
     Search {
         query: String,
-        #[arg(long, default_value = "10")] limit: i64,
+        #[arg(long, default_value = "10")]
+        limit: i64,
     },
     /// Pin a memory so it surfaces first in listings and retrieval
     Pin { id: String },
@@ -600,27 +644,37 @@ enum LearnAction {
         /// The learning text
         text: String,
         /// Apply to every repo, not just the current one
-        #[arg(long)] global: bool,
+        #[arg(long)]
+        global: bool,
         /// File-glob this learning applies to (e.g. "terraform/*.tf")
-        #[arg(long)] file_glob: Option<String>,
+        #[arg(long)]
+        file_glob: Option<String>,
         /// External rule id (e.g. "CKV_AWS_337", "clippy::too_many_lines")
-        #[arg(long)] rule_id: Option<String>,
+        #[arg(long)]
+        rule_id: Option<String>,
         /// Freeform provenance: PR link, commit hash, quote
-        #[arg(long)] context: Option<String>,
-        #[arg(short, long)] agent: Option<String>,
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// List learnings whose scope matches the given filters. No filters = all
     /// learnings visible from the current repo. Deterministic SQL match, not
     /// similarity search.
     List {
         /// A file path to test against each learning's file_glob
-        #[arg(long)] file: Option<String>,
+        #[arg(long)]
+        file: Option<String>,
         /// Exact rule_id match
-        #[arg(long)] rule_id: Option<String>,
+        #[arg(long)]
+        rule_id: Option<String>,
         /// Scan every repo (default: current repo + global)
-        #[arg(long)] all: bool,
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Delete a learning by id (full UUID or short prefix not supported yet)
     Delete { id: String },
@@ -648,8 +702,10 @@ enum LockAction {
     /// longer than `secs` (default 600 = 10 min) — useful for triaging
     /// abandoned leases.
     List {
-        #[arg(long)] stale: bool,
-        #[arg(long, default_value = "600")] stale_secs: i64,
+        #[arg(long)]
+        stale: bool,
+        #[arg(long, default_value = "600")]
+        stale_secs: i64,
     },
 }
 
@@ -662,122 +718,159 @@ enum TaskAction {
         title: String,
         // allow_hyphen_values so "-- item" / "* foo" etc. don't get silently
         // interpreted as new flags (yggdrasil-21).
-        #[arg(short, long, allow_hyphen_values = true)] description: Option<String>,
-        #[arg(short, long)] kind: Option<String>,
-        #[arg(short, long, value_parser = parse_priority)] priority: Option<i16>,
-        #[arg(long, allow_hyphen_values = true)] acceptance: Option<String>,
-        #[arg(long, allow_hyphen_values = true)] design: Option<String>,
-        #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
-        #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long, allow_hyphen_values = true)]
+        description: Option<String>,
+        #[arg(short, long)]
+        kind: Option<String>,
+        #[arg(short, long, value_parser = parse_priority)]
+        priority: Option<i16>,
+        #[arg(long, allow_hyphen_values = true)]
+        acceptance: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        design: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        notes: Option<String>,
+        #[arg(short, long, value_delimiter = ',')]
+        label: Vec<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
         /// Link to an external issue tracker (gh-123, jira-PROJ-42, URL, etc.)
-        #[arg(long)] external_ref: Option<String>,
+        #[arg(long)]
+        external_ref: Option<String>,
         /// Emit the created task(s) as JSON (for agent consumption)
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
         /// Parse a markdown file into a task tree (H1=epic, H2=feature, H3/4=task).
         /// Body under each header becomes the description. Parent→child dep edges
         /// are auto-linked so `ygg task ready` surfaces leaves first.
-        #[arg(short = 'f', long, value_name = "FILE")] file: Option<std::path::PathBuf>,
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: Option<std::path::PathBuf>,
         /// Read the description body from a file (single-task mode). Useful when
         /// agents write long specs and shell-escaping gets painful.
-        #[arg(long, value_name = "FILE")] body_file: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        body_file: Option<std::path::PathBuf>,
         /// Read the description body from stdin (single-task mode).
-        #[arg(long)] stdin: bool,
+        #[arg(long)]
+        stdin: bool,
     },
     /// List tasks (defaults to current repo; pass --all for every repo)
     List {
-        #[arg(long)] all: bool,
-        #[arg(short, long)] status: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(short, long)]
+        status: Option<String>,
         /// Filter to tasks with ALL of these labels (AND)
-        #[arg(short, long, value_delimiter = ',')] label: Vec<String>,
+        #[arg(short, long, value_delimiter = ',')]
+        label: Vec<String>,
         /// Filter to tasks with ANY of these labels (OR)
-        #[arg(long, value_delimiter = ',')] label_any: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        label_any: Vec<String>,
         /// Emit results as JSON array
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Show tasks with no unsatisfied blockers
     Ready {
         /// Emit results as JSON array
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Show tasks blocked by another open task
     Blocked {
         /// Emit results as JSON array
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Surface probable duplicate task pairs via pgvector cosine on the
     /// title+description embedding stored at create time.
     Dupes {
         /// Scan every repo (default: current repo only)
-        #[arg(long)] all: bool,
+        #[arg(long)]
+        all: bool,
         /// Minimum cosine similarity (0.0–1.0). Default 0.85 — high enough
         /// to keep false positives down, low enough to catch reworded dupes.
-        #[arg(long, default_value_t = 0.85)] min_similarity: f64,
+        #[arg(long, default_value_t = 0.85)]
+        min_similarity: f64,
         /// Max pairs to return
-        #[arg(long, default_value_t = 20)] limit: i64,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
         /// Emit results as JSON array
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Surface tasks that haven't been touched recently — useful for
     /// triage of abandoned in_progress claims.
     Stale {
         /// Age threshold in days (default 30)
-        #[arg(long, default_value_t = 30)] days: i32,
+        #[arg(long, default_value_t = 30)]
+        days: i32,
         /// Scan every repo instead of just the current one
-        #[arg(long)] all: bool,
+        #[arg(long)]
+        all: bool,
         /// Filter to a specific status (e.g. in_progress)
-        #[arg(short, long)] status: Option<String>,
+        #[arg(short, long)]
+        status: Option<String>,
         /// Emit results as JSON array
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Show a task by "<prefix>-<seq>" or UUID
     Show {
         reference: String,
         /// Emit the task as JSON (includes labels, deps, links)
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Update task fields
     Update {
         reference: String,
-        #[arg(long, allow_hyphen_values = true)] title: Option<String>,
-        #[arg(long, allow_hyphen_values = true)] description: Option<String>,
-        #[arg(long, value_parser = parse_priority)] priority: Option<i16>,
-        #[arg(long)] kind: Option<String>,
-        #[arg(long, allow_hyphen_values = true)] acceptance: Option<String>,
-        #[arg(long, allow_hyphen_values = true)] design: Option<String>,
-        #[arg(long, allow_hyphen_values = true)] notes: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        title: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        description: Option<String>,
+        #[arg(long, value_parser = parse_priority)]
+        priority: Option<i16>,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        acceptance: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        design: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        notes: Option<String>,
         /// Set the external ref. Pass empty string to clear.
-        #[arg(long)] external_ref: Option<String>,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(long)]
+        external_ref: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Claim a task (assignee + in_progress)
     Claim {
         reference: String,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Close a task
     Close {
         reference: String,
-        #[arg(short, long)] reason: Option<String>,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        reason: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Change a task's status
     Status {
         reference: String,
         status: String,
-        #[arg(short, long)] reason: Option<String>,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        reason: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Add a dependency: <task> depends on <blocker>
-    Dep {
-        task: String,
-        blocker: String,
-    },
+    Dep { task: String, blocker: String },
     /// Remove a dependency
-    Undep {
-        task: String,
-        blocker: String,
-    },
+    Undep { task: String, blocker: String },
     /// Label management (add/remove/list/list-all)
     Label {
         #[command(subcommand)]
@@ -801,44 +894,42 @@ enum TaskAction {
     },
     /// Count open/in_progress/blocked/closed
     Stats {
-        #[arg(long)] all: bool,
+        #[arg(long)]
+        all: bool,
         /// Emit stats as JSON
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Approve a task gated on approve_plan / approve_completion. Sets
     /// approved_at = now() so the scheduler can dispatch.
     Approve {
         reference: String,
-        #[arg(short, long)] agent: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
     },
     /// Clear poison state and let the scheduler retry. Resets the poisoned
     /// run to 'failed' and reopens the task.
-    Unpoison {
-        reference: String,
-    },
+    Unpoison { reference: String },
 }
 
 #[derive(Subcommand)]
 enum LabelAction {
     /// Attach a label to a task
-    Add {
-        reference: String,
-        label: String,
-    },
+    Add { reference: String, label: String },
     /// Remove a label from a task
-    Remove {
-        reference: String,
-        label: String,
-    },
+    Remove { reference: String, label: String },
     /// List labels on a specific task
     List {
         reference: String,
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// List every label in the current repo (or --all repos) with usage counts
     ListAll {
-        #[arg(long)] all: bool,
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -893,7 +984,12 @@ async fn main() -> anyhow::Result<()> {
                     .await;
             }
         }
-        Commands::Init { verbose, skip, reset, database_url } => {
+        Commands::Init {
+            verbose,
+            skip,
+            reset,
+            database_url,
+        } => {
             if reset {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                 let skips_path = std::path::Path::new(&home).join(".config/ygg/skips.json");
@@ -901,7 +997,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("Saved skip decisions cleared.");
             }
             if let Some(ref url) = database_url {
-                unsafe { std::env::set_var("DATABASE_URL", url); }
+                unsafe {
+                    std::env::set_var("DATABASE_URL", url);
+                }
             }
             ygg::cli::init::execute_with_options(verbose, &skip).await?;
         }
@@ -917,9 +1015,8 @@ async fn main() -> anyhow::Result<()> {
             match action {
                 RunAction::Start { name, task } => {
                     let session_id = ygg::status::new_session_id();
-                    ygg::cli::run::execute(
-                        &pool, &config, &name, task.as_deref(), &session_id,
-                    ).await?;
+                    ygg::cli::run::execute(&pool, &config, &name, task.as_deref(), &session_id)
+                        .await?;
                 }
                 RunAction::Claim { task_ref, agent } => {
                     let agent = resolve_agent_arg(agent);
@@ -928,14 +1025,22 @@ async fn main() -> anyhow::Result<()> {
                 RunAction::Heartbeat { run_id, agent } => {
                     let agent = resolve_agent_arg(agent);
                     let id = run_id
-                        .map(|s| uuid::Uuid::parse_str(&s)
-                            .map_err(|e| anyhow::anyhow!("invalid run-id: {e}")))
+                        .map(|s| {
+                            uuid::Uuid::parse_str(&s)
+                                .map_err(|e| anyhow::anyhow!("invalid run-id: {e}"))
+                        })
                         .transpose()?;
                     ygg::cli::run_cmd::heartbeat_cli(&pool, id, &agent).await?;
                 }
-                RunAction::Finalize { task_ref, state, reason, agent } => {
+                RunAction::Finalize {
+                    task_ref,
+                    state,
+                    reason,
+                    agent,
+                } => {
                     let agent = resolve_agent_arg(agent);
-                    ygg::cli::run_cmd::finalize_cli(&pool, &task_ref, &state, &reason, &agent).await?;
+                    ygg::cli::run_cmd::finalize_cli(&pool, &task_ref, &state, &reason, &agent)
+                        .await?;
                 }
                 RunAction::Show { run_id } => {
                     let id = uuid::Uuid::parse_str(&run_id)
@@ -1004,7 +1109,8 @@ async fn main() -> anyhow::Result<()> {
                     ygg::cli::interrupt_cmd::execute_take_over(&pool, &config, &agent).await?;
                 }
                 InterruptAction::HandBack { agent, summary } => {
-                    ygg::cli::interrupt_cmd::execute_hand_back(&pool, &config, &agent, &summary).await?;
+                    ygg::cli::interrupt_cmd::execute_hand_back(&pool, &config, &agent, &summary)
+                        .await?;
                 }
             }
         }
@@ -1013,20 +1119,39 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::status_cmd::execute(&pool, agent.as_deref()).await?;
         }
-        Commands::Logs { follow, tail, agent, kind, session } => {
+        Commands::Logs {
+            follow,
+            tail,
+            agent,
+            kind,
+            session,
+        } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             let kinds: Vec<String> = kind
-                .map(|k| k.split(',').map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()).collect())
+                .map(|k| {
+                    k.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default();
             ygg::cli::logs_cmd::execute(
-                &pool, follow, tail, agent.as_deref(),
+                &pool,
+                follow,
+                tail,
+                agent.as_deref(),
                 if kinds.is_empty() { None } else { Some(kinds) },
                 session.as_deref(),
-            ).await?;
+            )
+            .await?;
         }
-        Commands::Digest { agent, transcript, now, stop } => {
+        Commands::Digest {
+            agent,
+            transcript,
+            now,
+            stop,
+        } => {
             let agent_name = agent
                 .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
                 .unwrap_or_else(|| {
@@ -1040,22 +1165,29 @@ async fn main() -> anyhow::Result<()> {
 
             let path = match (transcript, now) {
                 (Some(p), _) => p,
-                (None, true) => {
-                    match ygg::cli::digest::find_latest_transcript() {
-                        Some(p) => p,
-                        None => { eprintln!("no Claude Code transcript found — run with --transcript <path>"); return Ok(()); }
+                (None, true) => match ygg::cli::digest::find_latest_transcript() {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("no Claude Code transcript found — run with --transcript <path>");
+                        return Ok(());
                     }
+                },
+                (None, false) => {
+                    eprintln!("pass --transcript <path> or --now");
+                    return Ok(());
                 }
-                (None, false) => { eprintln!("pass --transcript <path> or --now"); return Ok(()); }
             };
             ygg::cli::digest::execute(&pool, &config, &agent_name, &path).await?;
             // Mark the session ended when the Stop hook flow called us —
             // PreCompact continues the same session, so only Stop should end.
             if stop {
-                if let Ok(Some(a)) = ygg::models::agent::AgentRepo::new(&pool).get_by_name(&agent_name).await {
-                    if let Some(sid) = ygg::models::session::resolve_current_session(
-                        &pool, a.agent_id, None
-                    ).await {
+                if let Ok(Some(a)) = ygg::models::agent::AgentRepo::new(&pool)
+                    .get_by_name(&agent_name)
+                    .await
+                {
+                    if let Some(sid) =
+                        ygg::models::session::resolve_current_session(&pool, a.agent_id, None).await
+                    {
                         let _ = ygg::models::session::SessionRepo::new(&pool).end(sid).await;
                     }
                     // Release every lock this agent still holds — they were
@@ -1070,13 +1202,21 @@ async fn main() -> anyhow::Result<()> {
         Commands::Msg { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let default_agent = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
-                std::env::current_dir().ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .unwrap_or_else(|| "ygg".to_string())
-            });
+            let default_agent = || {
+                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                })
+            };
             match action {
-                MsgAction::Send { to, from, push, body } => {
+                MsgAction::Send {
+                    to,
+                    from,
+                    push,
+                    body,
+                } => {
                     let from_name = from.unwrap_or_else(default_agent);
                     let joined = body.join(" ");
                     if joined.trim().is_empty() {
@@ -1108,7 +1248,14 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::stop_check::execute(&pool, &agent_name).await?;
         }
-        Commands::Reap { locks, sessions, memories, agents, older_than_days, dry_run } => {
+        Commands::Reap {
+            locks,
+            sessions,
+            memories,
+            agents,
+            older_than_days,
+            dry_run,
+        } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             // Default to everything when no specific flag is set.
@@ -1122,9 +1269,17 @@ async fn main() -> anyhow::Result<()> {
                         "SELECT COUNT(*)::bigint FROM locks WHERE expires_at < now() - ($1 || ' days')::interval"
                     ).bind(older_than_days.to_string()).fetch_one(&pool).await.unwrap_or(0)
                 } else {
-                    sqlx::query(sql).bind(older_than_days.to_string()).execute(&pool).await?.rows_affected() as i64
+                    sqlx::query(sql)
+                        .bind(older_than_days.to_string())
+                        .execute(&pool)
+                        .await?
+                        .rows_affected() as i64
                 };
-                println!("locks:    {} {}", if dry_run { "would delete" } else { "deleted" }, n);
+                println!(
+                    "locks:    {} {}",
+                    if dry_run { "would delete" } else { "deleted" },
+                    n
+                );
                 total += n;
             }
             if all || sessions {
@@ -1141,23 +1296,33 @@ async fn main() -> anyhow::Result<()> {
                           WHERE ended_at IS NULL AND updated_at < now() - ($1 || ' days')::interval"
                     ).bind(older_than_days.to_string()).execute(&pool).await?.rows_affected() as i64
                 };
-                println!("sessions: {} {} abandoned (auto-closed)",
-                    if dry_run { "would close" } else { "closed" }, n_closed);
+                println!(
+                    "sessions: {} {} abandoned (auto-closed)",
+                    if dry_run { "would close" } else { "closed" },
+                    n_closed
+                );
                 total += n_closed;
             }
             if all || memories {
-                let n = if dry_run {
-                    sqlx::query_scalar::<_, i64>(
-                        "SELECT COUNT(*)::bigint FROM memories
-                          WHERE expires_at IS NOT NULL AND expires_at < now()"
-                    ).fetch_one(&pool).await.unwrap_or(0)
-                } else {
-                    sqlx::query(
+                let n =
+                    if dry_run {
+                        sqlx::query_scalar::<_, i64>(
+                            "SELECT COUNT(*)::bigint FROM memories
+                          WHERE expires_at IS NOT NULL AND expires_at < now()",
+                        )
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap_or(0)
+                    } else {
+                        sqlx::query(
                         "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < now()"
                     ).execute(&pool).await?.rows_affected() as i64
-                };
-                println!("memories: {} {} expired",
-                    if dry_run { "would delete" } else { "deleted" }, n);
+                    };
+                println!(
+                    "memories: {} {} expired",
+                    if dry_run { "would delete" } else { "deleted" },
+                    n
+                );
                 total += n;
             }
             if all || agents {
@@ -1172,12 +1337,20 @@ async fn main() -> anyhow::Result<()> {
                         let _ = repo.archive(a.agent_id).await;
                     }
                 }
-                println!("agents:   {} {} stale (no activity in {} days)",
+                println!(
+                    "agents:   {} {} stale (no activity in {} days)",
                     if dry_run { "would archive" } else { "archived" },
-                    n, older_than_days);
+                    n,
+                    older_than_days
+                );
                 for a in stale.iter().take(5) {
-                    println!("  · {}  ({})", a.agent_name,
-                        chrono::Utc::now().signed_duration_since(a.updated_at).num_days());
+                    println!(
+                        "  · {}  ({})",
+                        a.agent_name,
+                        chrono::Utc::now()
+                            .signed_duration_since(a.updated_at)
+                            .num_days()
+                    );
                 }
                 total += n;
             }
@@ -1189,41 +1362,61 @@ async fn main() -> anyhow::Result<()> {
             let repo = ygg::models::agent::AgentRepo::new(&pool);
             match action {
                 AgentAction::List { all } => {
-                    let agents = if all { repo.list_all().await? } else { repo.list().await? };
+                    let agents = if all {
+                        repo.list_all().await?
+                    } else {
+                        repo.list().await?
+                    };
                     if agents.is_empty() {
                         println!("no agents");
                     } else {
-                        println!("{:<24} {:<12} {:<10} {:<10}", "NAME", "PERSONA", "STATE", "AGE");
+                        println!(
+                            "{:<24} {:<12} {:<10} {:<10}",
+                            "NAME", "PERSONA", "STATE", "AGE"
+                        );
                         let now = chrono::Utc::now();
                         for a in agents {
                             let age_days = now.signed_duration_since(a.updated_at).num_days();
-                            let age = if age_days == 0 { "<1d".to_string() } else { format!("{age_days}d") };
+                            let age = if age_days == 0 {
+                                "<1d".to_string()
+                            } else {
+                                format!("{age_days}d")
+                            };
                             let persona = a.persona.as_deref().unwrap_or("—");
-                            println!("{:<24} {:<12} {:<10} {:<10}",
-                                a.agent_name, persona, a.current_state, age);
+                            println!(
+                                "{:<24} {:<12} {:<10} {:<10}",
+                                a.agent_name, persona, a.current_state, age
+                            );
                         }
                     }
                 }
                 AgentAction::Archive { name } => {
-                    let agent = repo.get_by_name(&name).await?
+                    let agent = repo
+                        .get_by_name(&name)
+                        .await?
                         .ok_or_else(|| anyhow::anyhow!("agent '{name}' not found"))?;
                     repo.archive(agent.agent_id).await?;
                     println!("archived '{name}'");
                 }
                 AgentAction::Unarchive { name } => {
-                    let agent = repo.get_by_name(&name).await?
+                    let agent = repo
+                        .get_by_name(&name)
+                        .await?
                         .ok_or_else(|| anyhow::anyhow!("agent '{name}' not found"))?;
                     repo.unarchive(agent.agent_id).await?;
                     println!("restored '{name}'");
                 }
                 AgentAction::Rename { old, new_name } => {
-                    let agent = repo.get_by_name(&old).await?
+                    let agent = repo
+                        .get_by_name(&old)
+                        .await?
                         .ok_or_else(|| anyhow::anyhow!("agent '{old}' not found"))?;
                     if old == new_name {
                         println!("noop: '{old}' already named that");
                     } else if let Err(e) = repo.rename(agent.agent_id, &new_name).await {
                         // 23505 = unique_violation; surface as friendly error.
-                        let msg = e.as_database_error()
+                        let msg = e
+                            .as_database_error()
                             .and_then(|d| d.code().map(|c| c.to_string()));
                         if msg.as_deref() == Some("23505") {
                             anyhow::bail!("agent '{new_name}' already exists (with same persona)");
@@ -1239,7 +1432,10 @@ async fn main() -> anyhow::Result<()> {
                     if stale.is_empty() {
                         println!("no stale agents (threshold: {older_than_days}d)");
                     } else {
-                        println!("{} stale agent(s) (no activity in {older_than_days}d):", stale.len());
+                        println!(
+                            "{} stale agent(s) (no activity in {older_than_days}d):",
+                            stale.len()
+                        );
                         let now = chrono::Utc::now();
                         for a in stale {
                             let age = now.signed_duration_since(a.updated_at).num_days();
@@ -1272,16 +1468,30 @@ async fn main() -> anyhow::Result<()> {
                 })
             };
             match action {
-                TaskAction::Create { title, description, kind, priority, acceptance, design, notes, label, agent, external_ref, json, file, body_file, stdin } => {
+                TaskAction::Create {
+                    title,
+                    description,
+                    kind,
+                    priority,
+                    acceptance,
+                    design,
+                    notes,
+                    label,
+                    agent,
+                    external_ref,
+                    json,
+                    file,
+                    body_file,
+                    stdin,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     // Mode dispatch — mutually exclusive.
                     if let Some(path) = file {
                         if !title.is_empty() {
                             anyhow::bail!("--file and a positional title are mutually exclusive");
                         }
-                        ygg::cli::task_cmd::create_from_markdown(
-                            &pool, &path, &agent_name, json,
-                        ).await?;
+                        ygg::cli::task_cmd::create_from_markdown(&pool, &path, &agent_name, json)
+                            .await?;
                     } else {
                         // Single-task mode. Body precedence: --stdin > --body-file > --description.
                         let body: Option<String> = if stdin {
@@ -1297,54 +1507,127 @@ async fn main() -> anyhow::Result<()> {
                         if title.is_empty() {
                             anyhow::bail!("title is required unless --file is used");
                         }
-                        ygg::cli::task_cmd::create(&pool, ygg::cli::task_cmd::CreateOpts {
-                            title: &title,
-                            description: body.as_deref(),
-                            kind: kind.as_deref(),
-                            priority,
-                            acceptance: acceptance.as_deref(),
-                            design: design.as_deref(),
-                            notes: notes.as_deref(),
-                            labels: &label,
-                            agent_name: &agent_name,
-                            external_ref: external_ref.as_deref(),
-                            json,
-                        }).await?;
+                        ygg::cli::task_cmd::create(
+                            &pool,
+                            ygg::cli::task_cmd::CreateOpts {
+                                title: &title,
+                                description: body.as_deref(),
+                                kind: kind.as_deref(),
+                                priority,
+                                acceptance: acceptance.as_deref(),
+                                design: design.as_deref(),
+                                notes: notes.as_deref(),
+                                labels: &label,
+                                agent_name: &agent_name,
+                                external_ref: external_ref.as_deref(),
+                                json,
+                            },
+                        )
+                        .await?;
                     }
                 }
-                TaskAction::List { all, status, label, label_any, json } => {
-                    ygg::cli::task_cmd::list(&pool, all, status.as_deref(), &label, &label_any, json).await?;
+                TaskAction::List {
+                    all,
+                    status,
+                    label,
+                    label_any,
+                    json,
+                } => {
+                    ygg::cli::task_cmd::list(
+                        &pool,
+                        all,
+                        status.as_deref(),
+                        &label,
+                        &label_any,
+                        json,
+                    )
+                    .await?;
                 }
-                TaskAction::Ready { json } => { ygg::cli::task_cmd::ready(&pool, json).await?; }
-                TaskAction::Blocked { json } => { ygg::cli::task_cmd::blocked(&pool, json).await?; }
-                TaskAction::Stale { days, all, status, json } => {
+                TaskAction::Ready { json } => {
+                    ygg::cli::task_cmd::ready(&pool, json).await?;
+                }
+                TaskAction::Blocked { json } => {
+                    ygg::cli::task_cmd::blocked(&pool, json).await?;
+                }
+                TaskAction::Stale {
+                    days,
+                    all,
+                    status,
+                    json,
+                } => {
                     ygg::cli::task_cmd::stale(&pool, days, all, status.as_deref(), json).await?;
                 }
-                TaskAction::Dupes { all, min_similarity, limit, json } => {
+                TaskAction::Dupes {
+                    all,
+                    min_similarity,
+                    limit,
+                    json,
+                } => {
                     ygg::cli::task_cmd::dupes(&pool, all, min_similarity, limit, json).await?;
                 }
-                TaskAction::Show { reference, json } => { ygg::cli::task_cmd::show(&pool, &reference, json).await?; }
-                TaskAction::Update { reference, title, description, priority, kind, acceptance, design, notes, external_ref, agent } => {
+                TaskAction::Show { reference, json } => {
+                    ygg::cli::task_cmd::show(&pool, &reference, json).await?;
+                }
+                TaskAction::Update {
+                    reference,
+                    title,
+                    description,
+                    priority,
+                    kind,
+                    acceptance,
+                    design,
+                    notes,
+                    external_ref,
+                    agent,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     // Empty-string external_ref clears the column; None leaves it alone.
-                    let ext_update = external_ref.as_deref().map(|s| if s.is_empty() { None } else { Some(s) });
-                    ygg::cli::task_cmd::update(&pool, &reference,
-                        title.as_deref(), description.as_deref(), priority, kind.as_deref(),
-                        acceptance.as_deref(), design.as_deref(), notes.as_deref(),
+                    let ext_update = external_ref
+                        .as_deref()
+                        .map(|s| if s.is_empty() { None } else { Some(s) });
+                    ygg::cli::task_cmd::update(
+                        &pool,
+                        &reference,
+                        title.as_deref(),
+                        description.as_deref(),
+                        priority,
+                        kind.as_deref(),
+                        acceptance.as_deref(),
+                        design.as_deref(),
+                        notes.as_deref(),
                         ext_update,
-                        &agent_name).await?;
+                        &agent_name,
+                    )
+                    .await?;
                 }
                 TaskAction::Claim { reference, agent } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     ygg::cli::task_cmd::claim(&pool, &reference, &agent_name).await?;
                 }
-                TaskAction::Close { reference, reason, agent } => {
+                TaskAction::Close {
+                    reference,
+                    reason,
+                    agent,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
-                    ygg::cli::task_cmd::close(&pool, &reference, reason.as_deref(), &agent_name).await?;
+                    ygg::cli::task_cmd::close(&pool, &reference, reason.as_deref(), &agent_name)
+                        .await?;
                 }
-                TaskAction::Status { reference, status, reason, agent } => {
+                TaskAction::Status {
+                    reference,
+                    status,
+                    reason,
+                    agent,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
-                    ygg::cli::task_cmd::set_status(&pool, &reference, &status, reason.as_deref(), &agent_name).await?;
+                    ygg::cli::task_cmd::set_status(
+                        &pool,
+                        &reference,
+                        &status,
+                        reason.as_deref(),
+                        &agent_name,
+                    )
+                    .await?;
                 }
                 TaskAction::Dep { task, blocker } => {
                     ygg::cli::task_cmd::add_dep(&pool, &task, &blocker).await?;
@@ -1379,7 +1662,8 @@ async fn main() -> anyhow::Result<()> {
                     let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;
                     let agent = resolve_agent_arg(agent);
                     let agent_id = ygg::models::agent::AgentRepo::new(&pool)
-                        .get_by_name(&agent).await?
+                        .get_by_name(&agent)
+                        .await?
                         .map(|a| a.agent_id);
                     ygg::scheduler::approve(&pool, task.task_id, agent_id).await?;
                     println!("{reference} approved");
@@ -1387,7 +1671,9 @@ async fn main() -> anyhow::Result<()> {
                 TaskAction::Unpoison { reference } => {
                     let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;
                     ygg::scheduler::unpoison(&pool, task.task_id).await?;
-                    println!("{reference} unpoisoned (status reset to open; latest run flipped failed)");
+                    println!(
+                        "{reference} unpoisoned (status reset to open; latest run flipped failed)"
+                    );
                 }
             }
         }
@@ -1410,50 +1696,53 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::eval_cmd::execute(&pool, hours).await?;
         }
-        Commands::Bench { action } => {
-            match action {
-                BenchAction::List => {
-                    ygg::cli::bench_cmd::list();
-                }
-                BenchAction::Run { scenario, baseline, parallelism, model, seed } => {
-                    let config = ygg::config::AppConfig::from_env()?;
-                    let pool = ygg::db::create_pool(&config.database_url).await?;
-                    let baseline: ygg::bench::Baseline = baseline.parse()
-                        .map_err(|e: String| anyhow::anyhow!(e))?;
-                    let parallelism = parallelism.unwrap_or_else(|| {
-                        ygg::bench::scenarios::find(&scenario)
-                            .map(|s| s.default_parallelism as i32)
-                            .unwrap_or(1)
-                    });
-                    ygg::cli::bench_cmd::run(
-                        &pool, &scenario, baseline, parallelism, &model, seed,
-                    ).await?;
-                }
-                BenchAction::Report { run_id } => {
-                    let id = uuid::Uuid::parse_str(&run_id)
-                        .map_err(|e| anyhow::anyhow!("invalid run-id: {e}"))?;
-                    let config = ygg::config::AppConfig::from_env()?;
-                    let pool = ygg::db::create_pool(&config.database_url).await?;
-                    ygg::cli::bench_cmd::report(&pool, id).await?;
-                }
-                BenchAction::Diff { a, b } => {
-                    let a = uuid::Uuid::parse_str(&a)
-                        .map_err(|e| anyhow::anyhow!("invalid run-id a: {e}"))?;
-                    let b = uuid::Uuid::parse_str(&b)
-                        .map_err(|e| anyhow::anyhow!("invalid run-id b: {e}"))?;
-                    let config = ygg::config::AppConfig::from_env()?;
-                    let pool = ygg::db::create_pool(&config.database_url).await?;
-                    ygg::cli::bench_cmd::diff(&pool, a, b).await?;
-                }
-                BenchAction::Ci { tier } => {
-                    let tier: ygg::bench::Tier = tier.parse()
-                        .map_err(|e: String| anyhow::anyhow!(e))?;
-                    let config = ygg::config::AppConfig::from_env()?;
-                    let pool = ygg::db::create_pool(&config.database_url).await?;
-                    ygg::cli::bench_cmd::ci(&pool, tier).await?;
-                }
+        Commands::Bench { action } => match action {
+            BenchAction::List => {
+                ygg::cli::bench_cmd::list();
             }
-        }
+            BenchAction::Run {
+                scenario,
+                baseline,
+                parallelism,
+                model,
+                seed,
+            } => {
+                let config = ygg::config::AppConfig::from_env()?;
+                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let baseline: ygg::bench::Baseline =
+                    baseline.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                let parallelism = parallelism.unwrap_or_else(|| {
+                    ygg::bench::scenarios::find(&scenario)
+                        .map(|s| s.default_parallelism as i32)
+                        .unwrap_or(1)
+                });
+                ygg::cli::bench_cmd::run(&pool, &scenario, baseline, parallelism, &model, seed)
+                    .await?;
+            }
+            BenchAction::Report { run_id } => {
+                let id = uuid::Uuid::parse_str(&run_id)
+                    .map_err(|e| anyhow::anyhow!("invalid run-id: {e}"))?;
+                let config = ygg::config::AppConfig::from_env()?;
+                let pool = ygg::db::create_pool(&config.database_url).await?;
+                ygg::cli::bench_cmd::report(&pool, id).await?;
+            }
+            BenchAction::Diff { a, b } => {
+                let a = uuid::Uuid::parse_str(&a)
+                    .map_err(|e| anyhow::anyhow!("invalid run-id a: {e}"))?;
+                let b = uuid::Uuid::parse_str(&b)
+                    .map_err(|e| anyhow::anyhow!("invalid run-id b: {e}"))?;
+                let config = ygg::config::AppConfig::from_env()?;
+                let pool = ygg::db::create_pool(&config.database_url).await?;
+                ygg::cli::bench_cmd::diff(&pool, a, b).await?;
+            }
+            BenchAction::Ci { tier } => {
+                let tier: ygg::bench::Tier =
+                    tier.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                let config = ygg::config::AppConfig::from_env()?;
+                let pool = ygg::db::create_pool(&config.database_url).await?;
+                ygg::cli::bench_cmd::ci(&pool, tier).await?;
+            }
+        },
         Commands::Scheduler { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
@@ -1485,14 +1774,16 @@ async fn main() -> anyhow::Result<()> {
             let agent_name = agent
                 .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
                 .unwrap_or_else(|| {
-                    std::env::current_dir().ok()
+                    std::env::current_dir()
+                        .ok()
                         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                         .unwrap_or_else(|| "ygg".to_string())
                 });
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let scenario = ygg::cli::recovery_cmd::Scenario::parse(&scenario)
-                .ok_or_else(|| anyhow::anyhow!("unknown scenario — use compact|skip-it|crash|all"))?;
+            let scenario = ygg::cli::recovery_cmd::Scenario::parse(&scenario).ok_or_else(|| {
+                anyhow::anyhow!("unknown scenario — use compact|skip-it|crash|all")
+            })?;
             ygg::cli::recovery_cmd::test(&pool, scenario, &agent_name).await?;
         }
         Commands::Bar => {
@@ -1503,36 +1794,74 @@ async fn main() -> anyhow::Result<()> {
         Commands::Plan { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let default_agent = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
-                std::env::current_dir().ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .unwrap_or_else(|| "ygg".to_string())
-            });
+            let default_agent = || {
+                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                })
+            };
             match action {
-                PlanAction::Create { title, description, agent } => {
+                PlanAction::Create {
+                    title,
+                    description,
+                    agent,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     let _ = ygg::cli::plan_cmd::create(
-                        &pool, &title, description.as_deref(), &agent_name,
-                    ).await?;
+                        &pool,
+                        &title,
+                        description.as_deref(),
+                        &agent_name,
+                    )
+                    .await?;
                 }
-                PlanAction::Add { epic, title, description, kind, deps, agent } => {
+                PlanAction::Add {
+                    epic,
+                    title,
+                    description,
+                    kind,
+                    deps,
+                    agent,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     let _ = ygg::cli::plan_cmd::add(
-                        &pool, &epic, &title, description.as_deref(),
-                        kind.as_deref(), &deps, &agent_name,
-                    ).await?;
+                        &pool,
+                        &epic,
+                        &title,
+                        description.as_deref(),
+                        kind.as_deref(),
+                        &deps,
+                        &agent_name,
+                    )
+                    .await?;
                 }
-                PlanAction::Run { task, dry_run, agent } => {
+                PlanAction::Run {
+                    task,
+                    dry_run,
+                    agent,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
-                    ygg::cli::plan_cmd::run(
-                        &pool, &task, &agent_name, dry_run,
-                    ).await?;
+                    ygg::cli::plan_cmd::run(&pool, &task, &agent_name, dry_run).await?;
                 }
-                PlanAction::Supervise { epic, parallelism, dry_run, poll_secs, agent } => {
+                PlanAction::Supervise {
+                    epic,
+                    parallelism,
+                    dry_run,
+                    poll_secs,
+                    agent,
+                } => {
                     let agent_name = agent.unwrap_or_else(default_agent);
                     ygg::cli::plan_cmd::supervise(
-                        &pool, &epic, &agent_name, parallelism.max(1), dry_run, poll_secs,
-                    ).await?;
+                        &pool,
+                        &epic,
+                        &agent_name,
+                        parallelism.max(1),
+                        dry_run,
+                        poll_secs,
+                    )
+                    .await?;
                 }
                 PlanAction::Pause { epic } => {
                     ygg::cli::plan_cmd::pause(&pool, &epic).await?;
@@ -1552,24 +1881,34 @@ async fn main() -> anyhow::Result<()> {
             // Mirrors the task-cmd resolver so `ygg worktree ensure ygg-abcd`
             // or `yggdrasil-42` both work.
             async fn resolve_id(pool: &sqlx::PgPool, r: &str) -> Result<uuid::Uuid, anyhow::Error> {
-                if let Ok(u) = uuid::Uuid::parse_str(r) { return Ok(u); }
+                if let Ok(u) = uuid::Uuid::parse_str(r) {
+                    return Ok(u);
+                }
                 let hex = r.strip_prefix("ygg-").unwrap_or(r);
                 if hex.len() >= 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
                     let m: Vec<uuid::Uuid> = sqlx::query_scalar(
-                        "SELECT task_id FROM tasks WHERE task_id::text LIKE $1 LIMIT 5"
-                    ).bind(format!("{hex}%")).fetch_all(pool).await?;
+                        "SELECT task_id FROM tasks WHERE task_id::text LIKE $1 LIMIT 5",
+                    )
+                    .bind(format!("{hex}%"))
+                    .fetch_all(pool)
+                    .await?;
                     match m.len() {
                         0 => {}
                         1 => return Ok(m[0]),
                         n => anyhow::bail!("ambiguous '{r}' ({n} matches)"),
                     }
                 }
-                let (prefix, seq) = r.rsplit_once('-').ok_or_else(
-                    || anyhow::anyhow!("expected <prefix>-<seq> or ygg-<hex>"))?;
+                let (prefix, seq) = r
+                    .rsplit_once('-')
+                    .ok_or_else(|| anyhow::anyhow!("expected <prefix>-<seq> or ygg-<hex>"))?;
                 let seq: i32 = seq.parse().map_err(|_| anyhow::anyhow!("bad seq: {seq}"))?;
-                let repo = ygg::models::repo::RepoRepo::new(pool).get_by_prefix(prefix).await?
+                let repo = ygg::models::repo::RepoRepo::new(pool)
+                    .get_by_prefix(prefix)
+                    .await?
                     .ok_or_else(|| anyhow::anyhow!("no repo '{prefix}'"))?;
-                let t = ygg::models::task::TaskRepo::new(pool).get_by_ref(repo.repo_id, seq).await?
+                let t = ygg::models::task::TaskRepo::new(pool)
+                    .get_by_ref(repo.repo_id, seq)
+                    .await?
                     .ok_or_else(|| anyhow::anyhow!("no task {r}"))?;
                 Ok(t.task_id)
             }
@@ -1581,7 +1920,11 @@ async fn main() -> anyhow::Result<()> {
                     println!("branch: {}", wt.branch);
                     println!("base:   {}", wt.base_path.display());
                 }
-                WorktreeAction::Rm { task, policy, force } => {
+                WorktreeAction::Rm {
+                    task,
+                    policy,
+                    force,
+                } => {
                     let id = resolve_id(&pool, &task).await?;
                     let policy = ygg::worktree::parse_policy(&policy)?;
                     ygg::worktree::teardown(&pool, id, policy, force).await?;
@@ -1601,12 +1944,17 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Forget { node, pattern, redact_all } => {
+        Commands::Forget {
+            node,
+            pattern,
+            redact_all,
+        } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             match (node, pattern, redact_all) {
                 (Some(id), _, _) => {
-                    let uuid: uuid::Uuid = id.parse().map_err(|_| anyhow::anyhow!("invalid UUID"))?;
+                    let uuid: uuid::Uuid =
+                        id.parse().map_err(|_| anyhow::anyhow!("invalid UUID"))?;
                     ygg::cli::forget_cmd::forget_node(&pool, uuid).await?;
                 }
                 (None, Some(pat), _) => {
@@ -1633,19 +1981,25 @@ async fn main() -> anyhow::Result<()> {
         Commands::Memory { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let agent_name_default = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
-                std::env::current_dir().ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .unwrap_or_else(|| "ygg".to_string())
-            });
+            let agent_name_default = || {
+                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                })
+            };
             // Allow an 8-char prefix or full UUID — memory IDs printed by `list` use the prefix.
             async fn parse_id(pool: &sqlx::PgPool, s: &str) -> Result<uuid::Uuid, anyhow::Error> {
-                if let Ok(u) = uuid::Uuid::parse_str(s) { return Ok(u); }
+                if let Ok(u) = uuid::Uuid::parse_str(s) {
+                    return Ok(u);
+                }
                 let matches: Vec<uuid::Uuid> = sqlx::query_scalar(
-                    "SELECT memory_id FROM memories WHERE memory_id::text LIKE $1"
+                    "SELECT memory_id FROM memories WHERE memory_id::text LIKE $1",
                 )
                 .bind(format!("{s}%"))
-                .fetch_all(pool).await?;
+                .fetch_all(pool)
+                .await?;
                 match matches.len() {
                     0 => Err(anyhow::anyhow!("no memory matches id prefix '{s}'")),
                     1 => Ok(matches[0]),
@@ -1654,15 +2008,17 @@ async fn main() -> anyhow::Result<()> {
             }
             match action {
                 MemoryAction::Create { text, scope, agent } => {
-                    let scope = ygg::models::memory::MemoryScope::parse(&scope)
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "scope must be one of: global, repo, session"
-                        ))?;
+                    let scope =
+                        ygg::models::memory::MemoryScope::parse(&scope).ok_or_else(|| {
+                            anyhow::anyhow!("scope must be one of: global, repo, session")
+                        })?;
                     let agent_name = agent.unwrap_or_else(agent_name_default);
                     ygg::cli::memory_cmd::create(&pool, &agent_name, scope, &text).await?;
                 }
                 MemoryAction::List { scope, limit } => {
-                    let scope = scope.as_deref().and_then(ygg::models::memory::MemoryScope::parse);
+                    let scope = scope
+                        .as_deref()
+                        .and_then(ygg::models::memory::MemoryScope::parse);
                     ygg::cli::memory_cmd::list(&pool, scope, limit).await?;
                 }
                 MemoryAction::Search { query, limit } => {
@@ -1689,24 +2045,51 @@ async fn main() -> anyhow::Result<()> {
         Commands::Learn { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let agent_name_default = || std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
-                std::env::current_dir().ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .unwrap_or_else(|| "ygg".to_string())
-            });
+            let agent_name_default = || {
+                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                })
+            };
             match action {
-                LearnAction::Create { text, global, file_glob, rule_id, context, agent, json } => {
+                LearnAction::Create {
+                    text,
+                    global,
+                    file_glob,
+                    rule_id,
+                    context,
+                    agent,
+                    json,
+                } => {
                     let agent_name = agent.unwrap_or_else(agent_name_default);
                     ygg::cli::learning_cmd::create(
-                        &pool, &text, global,
-                        file_glob.as_deref(), rule_id.as_deref(), context.as_deref(),
-                        &agent_name, json,
-                    ).await?;
+                        &pool,
+                        &text,
+                        global,
+                        file_glob.as_deref(),
+                        rule_id.as_deref(),
+                        context.as_deref(),
+                        &agent_name,
+                        json,
+                    )
+                    .await?;
                 }
-                LearnAction::List { file, rule_id, all, json } => {
+                LearnAction::List {
+                    file,
+                    rule_id,
+                    all,
+                    json,
+                } => {
                     ygg::cli::learning_cmd::list(
-                        &pool, file.as_deref(), rule_id.as_deref(), all, json,
-                    ).await?;
+                        &pool,
+                        file.as_deref(),
+                        rule_id.as_deref(),
+                        all,
+                        json,
+                    )
+                    .await?;
                 }
                 LearnAction::Delete { id } => {
                     let uuid = uuid::Uuid::parse_str(&id)
@@ -1718,27 +2101,39 @@ async fn main() -> anyhow::Result<()> {
         Commands::AgentTool { tool, agent } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let agent_name = agent.clone().or_else(|| std::env::var("YGG_AGENT_NAME").ok()).unwrap_or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .unwrap_or_else(|| "ygg".to_string())
-            });
+            let agent_name = agent
+                .clone()
+                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                });
             ygg::cli::agent_cmd::set_tool(&pool, &agent_name, &tool).await?;
         }
-        Commands::Remember { text, agent, list, limit } => {
+        Commands::Remember {
+            text,
+            agent,
+            list,
+            limit,
+        } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let agent_name = agent.clone().or_else(|| std::env::var("YGG_AGENT_NAME").ok()).unwrap_or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .unwrap_or_else(|| "ygg".to_string())
-            });
+            let agent_name = agent
+                .clone()
+                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                });
             if list {
                 ygg::cli::remember::list(&pool, agent.as_deref(), limit).await?;
             } else {
-                let text = text.ok_or_else(|| anyhow::anyhow!("provide text to remember, or pass --list"))?;
+                let text = text
+                    .ok_or_else(|| anyhow::anyhow!("provide text to remember, or pass --list"))?;
                 ygg::cli::remember::remember(&pool, &agent_name, &text).await?;
             }
         }

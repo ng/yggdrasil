@@ -21,15 +21,17 @@ pub async fn forget_node(pool: &sqlx::PgPool, node_id: Uuid) -> Result<(), anyho
     if res.rows_affected() == 0 {
         anyhow::bail!("node {node_id} not found");
     }
-    let _ = EventRepo::new(pool).emit(
-        EventKind::RedactionApplied,
-        "ygg-forget",
-        None,
-        serde_json::json!({
-            "action": "node_deleted",
-            "node_id": node_id,
-        }),
-    ).await;
+    let _ = EventRepo::new(pool)
+        .emit(
+            EventKind::RedactionApplied,
+            "ygg-forget",
+            None,
+            serde_json::json!({
+                "action": "node_deleted",
+                "node_id": node_id,
+            }),
+        )
+        .await;
     println!("Deleted node {node_id}.");
     Ok(())
 }
@@ -37,12 +39,11 @@ pub async fn forget_node(pool: &sqlx::PgPool, node_id: Uuid) -> Result<(), anyho
 pub async fn forget_pattern(pool: &sqlx::PgPool, substring: &str) -> Result<(), anyhow::Error> {
     // Pull candidates with the substring anywhere in their content,
     // redact each, update.
-    let rows: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, content FROM nodes WHERE content::text ILIKE $1",
-    )
-    .bind(format!("%{}%", substring))
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(Uuid, serde_json::Value)> =
+        sqlx::query_as("SELECT id, content FROM nodes WHERE content::text ILIKE $1")
+            .bind(format!("%{}%", substring))
+            .fetch_all(pool)
+            .await?;
 
     if rows.is_empty() {
         println!("No nodes matched.");
@@ -61,31 +62,35 @@ pub async fn forget_pattern(pool: &sqlx::PgPool, substring: &str) -> Result<(), 
         updated += 1;
     }
 
-    let _ = EventRepo::new(pool).emit(
-        EventKind::RedactionApplied,
-        "ygg-forget",
-        None,
-        serde_json::json!({
-            "action": "pattern_redaction",
-            "pattern": substring,
-            "nodes_affected": updated,
-        }),
-    ).await;
+    let _ = EventRepo::new(pool)
+        .emit(
+            EventKind::RedactionApplied,
+            "ygg-forget",
+            None,
+            serde_json::json!({
+                "action": "pattern_redaction",
+                "pattern": substring,
+                "nodes_affected": updated,
+            }),
+        )
+        .await;
 
     println!("Redacted substring in {updated} node(s).");
     Ok(())
 }
 
 pub async fn redact_all(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
-    let rows: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, content FROM nodes"
-    ).fetch_all(pool).await?;
+    let rows: Vec<(Uuid, serde_json::Value)> = sqlx::query_as("SELECT id, content FROM nodes")
+        .fetch_all(pool)
+        .await?;
 
     let mut total_secrets = 0u32;
     let mut nodes_affected = 0u32;
     for (id, content) in rows {
         let (scrubbed, report) = redaction::redact_json(content);
-        if report.is_clean() { continue; }
+        if report.is_clean() {
+            continue;
+        }
         sqlx::query("UPDATE nodes SET content = $2 WHERE id = $1")
             .bind(id)
             .bind(&scrubbed)
@@ -95,16 +100,18 @@ pub async fn redact_all(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         total_secrets += report.total;
     }
 
-    let _ = EventRepo::new(pool).emit(
-        EventKind::RedactionApplied,
-        "ygg-forget",
-        None,
-        serde_json::json!({
-            "action": "bulk_redaction",
-            "nodes_affected": nodes_affected,
-            "total_secrets": total_secrets,
-        }),
-    ).await;
+    let _ = EventRepo::new(pool)
+        .emit(
+            EventKind::RedactionApplied,
+            "ygg-forget",
+            None,
+            serde_json::json!({
+                "action": "bulk_redaction",
+                "nodes_affected": nodes_affected,
+                "total_secrets": total_secrets,
+            }),
+        )
+        .await;
 
     println!("Scanned all nodes · redacted {total_secrets} secret(s) in {nodes_affected} node(s).");
     Ok(())
@@ -119,10 +126,14 @@ fn replace_substring_in_json(mut v: serde_json::Value, pat: &str, repl: &str) ->
                 }
             }
             serde_json::Value::Array(arr) => {
-                for item in arr { walk(item, pat, repl); }
+                for item in arr {
+                    walk(item, pat, repl);
+                }
             }
             serde_json::Value::Object(obj) => {
-                for (_, val) in obj { walk(val, pat, repl); }
+                for (_, val) in obj {
+                    walk(val, pat, repl);
+                }
             }
             _ => {}
         }

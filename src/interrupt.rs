@@ -53,7 +53,11 @@ pub async fn take_over(
 
     // Transition to HumanOverride
     agent_repo
-        .transition(agent.agent_id, agent.current_state.clone(), AgentState::HumanOverride)
+        .transition(
+            agent.agent_id,
+            agent.current_state.clone(),
+            AgentState::HumanOverride,
+        )
         .await?;
 
     // Insert a human_override node
@@ -67,7 +71,9 @@ pub async fn take_over(
                 0,
             )
             .await?;
-        agent_repo.update_head(agent.agent_id, node.id, agent.context_tokens).await?;
+        agent_repo
+            .update_head(agent.agent_id, node.id, agent.context_tokens)
+            .await?;
     }
 
     // Focus the tmux window
@@ -118,7 +124,11 @@ pub async fn hand_back(
             )
             .await?;
         agent_repo
-            .update_head(agent.agent_id, node.id, agent.context_tokens + estimate_tokens(summary) as i32)
+            .update_head(
+                agent.agent_id,
+                node.id,
+                agent.context_tokens + estimate_tokens(summary) as i32,
+            )
             .await?;
     }
 

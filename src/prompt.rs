@@ -76,8 +76,14 @@ impl<'a> PromptBuilder<'a> {
         let directives = self.retrieve_directives(current_input, agent_id, 5).await?;
 
         let estimated_tokens = crate::executor::estimate_tokens(&system)
-            + context_nodes.iter().map(|n| n.token_count as usize).sum::<usize>()
-            + directives.iter().map(|n| n.token_count as usize).sum::<usize>()
+            + context_nodes
+                .iter()
+                .map(|n| n.token_count as usize)
+                .sum::<usize>()
+            + directives
+                .iter()
+                .map(|n| n.token_count as usize)
+                .sum::<usize>()
             + crate::executor::estimate_tokens(current_input);
 
         Ok(HighDensityPrompt {

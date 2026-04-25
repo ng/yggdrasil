@@ -53,20 +53,42 @@ static RX_CRED_ASSIGN: Lazy<Regex> = Lazy::new(|| {
 // PRECISION patterns — run by default. Order matters: more specific
 // patterns first (Anthropic before OpenAI prefix overlap).
 static PATTERNS_PRECISE: &[Pattern] = &[
-    Pattern { kind: "anthropic_key",  regex: &RX_ANTHROPIC   },
-    Pattern { kind: "openai_key",     regex: &RX_OPENAI      },
-    Pattern { kind: "aws_access_key", regex: &RX_AWS_ACCESS  },
-    Pattern { kind: "github_token",   regex: &RX_GITHUB      },
-    Pattern { kind: "slack_token",    regex: &RX_SLACK       },
-    Pattern { kind: "jwt",            regex: &RX_JWT         },
-    Pattern { kind: "private_key",    regex: &RX_PRIVATE_KEY },
+    Pattern {
+        kind: "anthropic_key",
+        regex: &RX_ANTHROPIC,
+    },
+    Pattern {
+        kind: "openai_key",
+        regex: &RX_OPENAI,
+    },
+    Pattern {
+        kind: "aws_access_key",
+        regex: &RX_AWS_ACCESS,
+    },
+    Pattern {
+        kind: "github_token",
+        regex: &RX_GITHUB,
+    },
+    Pattern {
+        kind: "slack_token",
+        regex: &RX_SLACK,
+    },
+    Pattern {
+        kind: "jwt",
+        regex: &RX_JWT,
+    },
+    Pattern {
+        kind: "private_key",
+        regex: &RX_PRIVATE_KEY,
+    },
 ];
 
 // STRICT patterns — gated behind YGG_REDACTION=strict. More aggressive,
 // more false positives, but catches env-var-style assignments.
-static PATTERNS_STRICT: &[Pattern] = &[
-    Pattern { kind: "credential_assignment", regex: &RX_CRED_ASSIGN },
-];
+static PATTERNS_STRICT: &[Pattern] = &[Pattern {
+    kind: "credential_assignment",
+    regex: &RX_CRED_ASSIGN,
+}];
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RedactionResult {
@@ -75,7 +97,9 @@ pub struct RedactionResult {
 }
 
 impl RedactionResult {
-    pub fn is_clean(&self) -> bool { self.total == 0 }
+    pub fn is_clean(&self) -> bool {
+        self.total == 0
+    }
 }
 
 /// Check the runtime mode. Returns (enabled, strict).
@@ -185,9 +209,8 @@ mod tests {
 
     #[test]
     fn catches_github_token() {
-        let (out, r) = redact_str(
-            "export GITHUB_TOKEN=ghp_0123456789abcdef0123456789abcdef01234567",
-        );
+        let (out, r) =
+            redact_str("export GITHUB_TOKEN=ghp_0123456789abcdef0123456789abcdef01234567");
         assert!(out.contains("[redacted:github_token]"));
         assert_eq!(r.total, 1);
     }
@@ -202,7 +225,8 @@ mod tests {
 
     #[test]
     fn catches_private_key_multiline() {
-        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAy...\n-----END RSA PRIVATE KEY-----";
+        let pem =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAy...\n-----END RSA PRIVATE KEY-----";
         let (out, r) = redact_str(pem);
         assert!(out.contains("[redacted:private_key]"));
         assert_eq!(r.total, 1);

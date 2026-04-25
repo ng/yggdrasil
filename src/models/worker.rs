@@ -23,30 +23,30 @@ pub enum WorkerState {
 impl WorkerState {
     pub fn glyph_color(&self) -> (&'static str, &'static str) {
         match self {
-            Self::Spawned        => ("◌", "dark_gray"),
-            Self::Running        => ("▶", "green"),
-            Self::Idle           => ("•", "gray"),
+            Self::Spawned => ("◌", "dark_gray"),
+            Self::Running => ("▶", "green"),
+            Self::Idle => ("•", "gray"),
             Self::NeedsAttention => ("⚠", "yellow"),
-            Self::Completed      => ("✓", "dark_gray"),
-            Self::Failed         => ("✗", "red"),
-            Self::Abandoned      => ("⊘", "dark_gray"),
+            Self::Completed => ("✓", "dark_gray"),
+            Self::Failed => ("✗", "red"),
+            Self::Abandoned => ("⊘", "dark_gray"),
         }
     }
 }
 
 #[derive(Debug, Clone, FromRow)]
 pub struct Worker {
-    pub worker_id:     Uuid,
-    pub task_id:       Uuid,
-    pub session_id:    Option<Uuid>,
-    pub tmux_session:  String,
-    pub tmux_window:   String,
+    pub worker_id: Uuid,
+    pub task_id: Uuid,
+    pub session_id: Option<Uuid>,
+    pub tmux_session: String,
+    pub tmux_window: String,
     pub worktree_path: String,
-    pub state:         WorkerState,
-    pub started_at:    DateTime<Utc>,
-    pub last_seen_at:  DateTime<Utc>,
-    pub ended_at:      Option<DateTime<Utc>>,
-    pub exit_reason:   Option<String>,
+    pub state: WorkerState,
+    pub started_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub exit_reason: Option<String>,
     #[sqlx(default)]
     pub branch_pushed: bool,
     #[sqlx(default)]
@@ -62,7 +62,9 @@ pub struct WorkerRepo<'a> {
 }
 
 impl<'a> WorkerRepo<'a> {
-    pub fn new(pool: &'a PgPool) -> Self { Self { pool } }
+    pub fn new(pool: &'a PgPool) -> Self {
+        Self { pool }
+    }
 
     /// Register a freshly-spawned worker. Caller provides the tmux target
     /// strings it just created; we keep the exact window name so the
@@ -96,7 +98,9 @@ impl<'a> WorkerRepo<'a> {
 
     pub async fn touch(&self, worker_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE workers SET last_seen_at = now() WHERE worker_id = $1")
-            .bind(worker_id).execute(self.pool).await?;
+            .bind(worker_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -123,7 +127,8 @@ impl<'a> WorkerRepo<'a> {
         .bind(branch_pushed)
         .bind(branch_merged)
         .bind(pr_url)
-        .execute(self.pool).await?;
+        .execute(self.pool)
+        .await?;
         Ok(())
     }
 
@@ -133,8 +138,10 @@ impl<'a> WorkerRepo<'a> {
         state: WorkerState,
         exit_reason: Option<&str>,
     ) -> Result<(), sqlx::Error> {
-        let terminal = matches!(state,
-            WorkerState::Completed | WorkerState::Failed | WorkerState::Abandoned);
+        let terminal = matches!(
+            state,
+            WorkerState::Completed | WorkerState::Failed | WorkerState::Abandoned
+        );
         sqlx::query(
             r#"
             UPDATE workers
@@ -145,8 +152,12 @@ impl<'a> WorkerRepo<'a> {
              WHERE worker_id = $1
             "#,
         )
-        .bind(worker_id).bind(&state).bind(terminal).bind(exit_reason)
-        .execute(self.pool).await?;
+        .bind(worker_id)
+        .bind(&state)
+        .bind(terminal)
+        .bind(exit_reason)
+        .execute(self.pool)
+        .await?;
         Ok(())
     }
 
@@ -191,6 +202,8 @@ impl<'a> WorkerRepo<'a> {
                       branch_pushed, branch_merged, pr_url, delivery_checked_at
                  FROM workers WHERE worker_id = $1"#,
         )
-        .bind(worker_id).fetch_optional(self.pool).await
+        .bind(worker_id)
+        .fetch_optional(self.pool)
+        .await
     }
 }

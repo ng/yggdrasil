@@ -35,17 +35,17 @@ pub enum EventKind {
 impl EventKind {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::NodeWritten       => "node_written",
-            Self::LockAcquired     => "lock_acquired",
-            Self::LockReleased     => "lock_released",
-            Self::DigestWritten    => "digest_written",
-            Self::SimilarityHit    => "similarity_hit",
+            Self::NodeWritten => "node_written",
+            Self::LockAcquired => "lock_acquired",
+            Self::LockReleased => "lock_released",
+            Self::DigestWritten => "digest_written",
+            Self::SimilarityHit => "similarity_hit",
             Self::CorrectionDetected => "correction",
-            Self::HookFired        => "hook_fired",
-            Self::EmbeddingCall    => "embedding_call",
-            Self::TaskCreated      => "task_created",
+            Self::HookFired => "hook_fired",
+            Self::EmbeddingCall => "embedding_call",
+            Self::TaskCreated => "task_created",
             Self::TaskStatusChanged => "task_status",
-            Self::Remembered       => "remembered",
+            Self::Remembered => "remembered",
             Self::EmbeddingCacheHit => "cache_hit",
             Self::ClassifierDecision => "classifier",
             Self::ScoringDecision => "scoring",
@@ -77,7 +77,9 @@ pub struct Event {
 /// export CLAUDE_SESSION_ID; spawn/inject/digest inherit it from the shell
 /// that invoked them. Missing env var => None, the column stays NULL.
 pub fn cc_session_id() -> Option<String> {
-    std::env::var("CLAUDE_SESSION_ID").ok().filter(|s| !s.is_empty())
+    std::env::var("CLAUDE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 pub struct EventRepo<'a> {
@@ -126,16 +128,21 @@ impl<'a> EventRepo<'a> {
                    FROM events WHERE created_at > $1 AND agent_name = $2
                    ORDER BY created_at ASC LIMIT $3"#,
             )
-            .bind(since).bind(name).bind(limit)
-            .fetch_all(self.pool).await
+            .bind(since)
+            .bind(name)
+            .bind(limit)
+            .fetch_all(self.pool)
+            .await
         } else {
             sqlx::query_as::<_, Event>(
                 r#"SELECT id, event_kind, agent_id, agent_name, payload, created_at
                    FROM events WHERE created_at > $1
                    ORDER BY created_at ASC LIMIT $2"#,
             )
-            .bind(since).bind(limit)
-            .fetch_all(self.pool).await
+            .bind(since)
+            .bind(limit)
+            .fetch_all(self.pool)
+            .await
         }
     }
 
@@ -151,15 +158,18 @@ impl<'a> EventRepo<'a> {
                    FROM events WHERE agent_name = $1
                    ORDER BY created_at DESC LIMIT $2"#,
             )
-            .bind(name).bind(limit)
-            .fetch_all(self.pool).await
+            .bind(name)
+            .bind(limit)
+            .fetch_all(self.pool)
+            .await
         } else {
             sqlx::query_as::<_, Event>(
                 r#"SELECT id, event_kind, agent_id, agent_name, payload, created_at
                    FROM events ORDER BY created_at DESC LIMIT $1"#,
             )
             .bind(limit)
-            .fetch_all(self.pool).await
+            .fetch_all(self.pool)
+            .await
         }
     }
 }

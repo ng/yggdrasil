@@ -64,8 +64,7 @@ impl RunsView {
         let where_clause = match self.filter {
             Filter::All => "TRUE",
             Filter::Live => "tr.state IN ('scheduled','ready','running','retrying')",
-            Filter::Terminal =>
-                "tr.state IN ('succeeded','failed','crashed','cancelled','poison')",
+            Filter::Terminal => "tr.state IN ('succeeded','failed','crashed','cancelled','poison')",
         };
 
         let sql = format!(
@@ -81,24 +80,48 @@ impl RunsView {
                 LIMIT 100"#,
         );
 
-        let rows: Vec<(String, i32, String, i32, String, String, Option<String>,
-                       Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>)> =
-            sqlx::query_as(&sql).fetch_all(pool).await?;
+        let rows: Vec<(
+            String,
+            i32,
+            String,
+            i32,
+            String,
+            String,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+        )> = sqlx::query_as(&sql).fetch_all(pool).await?;
 
-        self.rows = rows.into_iter().map(|(prefix, seq, title, attempt, state, reason,
-                                            agent_name, started_at, ended_at, commit)| {
-            RunRow {
-                task_ref: format!("{prefix}-{seq}"),
-                title,
-                attempt,
-                state,
-                reason,
-                agent_name,
-                started_at,
-                ended_at,
-                commit_sha: commit,
-            }
-        }).collect();
+        self.rows = rows
+            .into_iter()
+            .map(
+                |(
+                    prefix,
+                    seq,
+                    title,
+                    attempt,
+                    state,
+                    reason,
+                    agent_name,
+                    started_at,
+                    ended_at,
+                    commit,
+                )| {
+                    RunRow {
+                        task_ref: format!("{prefix}-{seq}"),
+                        title,
+                        attempt,
+                        state,
+                        reason,
+                        agent_name,
+                        started_at,
+                        ended_at,
+                        commit_sha: commit,
+                    }
+                },
+            )
+            .collect();
         if self.selected >= self.rows.len() && !self.rows.is_empty() {
             self.selected = self.rows.len() - 1;
         }
@@ -140,46 +163,56 @@ impl RunsView {
         ]);
 
         let now = Utc::now();
-        let rows: Vec<Row> = self.rows.iter().enumerate().map(|(i, r)| {
-            let (color, _) = state_style(&r.state);
-            let dur = match (r.started_at, r.ended_at) {
-                (Some(s), Some(e)) => format!("{}s", (e - s).num_seconds().max(0)),
-                (Some(s), None)    => format!("{}s+", (now - s).num_seconds().max(0)),
-                _ => "—".into(),
-            };
-            let commit = r.commit_sha.as_deref()
-                .map(|s| s.chars().take(10).collect::<String>())
-                .unwrap_or_default();
-            let agent = r.agent_name.as_deref().unwrap_or("—").to_string();
-            let row = Row::new(vec![
-                Cell::from(r.task_ref.clone()),
-                Cell::from(format!("#{}", r.attempt)),
-                Cell::from(r.state.clone()).style(Style::default().fg(color)),
-                Cell::from(r.reason.clone()).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(agent),
-                Cell::from(dur),
-                Cell::from(commit).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(r.title.clone()),
-            ]);
-            if i == self.selected {
-                row.style(Style::default().bg(Color::DarkGray))
-            } else {
-                row
-            }
-        }).collect();
+        let rows: Vec<Row> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let (color, _) = state_style(&r.state);
+                let dur = match (r.started_at, r.ended_at) {
+                    (Some(s), Some(e)) => format!("{}s", (e - s).num_seconds().max(0)),
+                    (Some(s), None) => format!("{}s+", (now - s).num_seconds().max(0)),
+                    _ => "—".into(),
+                };
+                let commit = r
+                    .commit_sha
+                    .as_deref()
+                    .map(|s| s.chars().take(10).collect::<String>())
+                    .unwrap_or_default();
+                let agent = r.agent_name.as_deref().unwrap_or("—").to_string();
+                let row = Row::new(vec![
+                    Cell::from(r.task_ref.clone()),
+                    Cell::from(format!("#{}", r.attempt)),
+                    Cell::from(r.state.clone()).style(Style::default().fg(color)),
+                    Cell::from(r.reason.clone()).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(agent),
+                    Cell::from(dur),
+                    Cell::from(commit).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(r.title.clone()),
+                ]);
+                if i == self.selected {
+                    row.style(Style::default().bg(Color::DarkGray))
+                } else {
+                    row
+                }
+            })
+            .collect();
 
-        let table = Table::new(rows, [
-            Constraint::Length(20),
-            Constraint::Length(4),
-            Constraint::Length(10),
-            Constraint::Length(18),
-            Constraint::Length(20),
-            Constraint::Length(8),
-            Constraint::Length(11),
-            Constraint::Min(20),
-        ])
-            .header(header)
-            .block(block);
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(20),
+                Constraint::Length(4),
+                Constraint::Length(10),
+                Constraint::Length(18),
+                Constraint::Length(20),
+                Constraint::Length(8),
+                Constraint::Length(11),
+                Constraint::Min(20),
+            ],
+        )
+        .header(header)
+        .block(block);
         frame.render_widget(table, area);
     }
 }
@@ -198,4 +231,7 @@ fn state_style(state: &str) -> (Color, &'static str) {
 }
 
 #[allow(dead_code)]
-fn _suppress_unused(p: &PgPool) -> &PgPool { let _: Uuid = Uuid::nil(); p }
+fn _suppress_unused(p: &PgPool) -> &PgPool {
+    let _: Uuid = Uuid::nil();
+    p
+}

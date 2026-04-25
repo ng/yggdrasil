@@ -39,7 +39,10 @@ impl<'a> RepoRepo<'a> {
             if let Some(existing) = self.get_by_url(url).await? {
                 if let Some(p) = local_path {
                     self.append_path(existing.repo_id, p).await?;
-                    return self.get(existing.repo_id).await.map(|r| r.expect("just updated"));
+                    return self
+                        .get(existing.repo_id)
+                        .await
+                        .map(|r| r.expect("just updated"));
                 }
                 return Ok(existing);
             }
@@ -49,7 +52,10 @@ impl<'a> RepoRepo<'a> {
         if let Some(existing) = self.get_by_prefix(task_prefix).await? {
             if let Some(p) = local_path {
                 self.append_path(existing.repo_id, p).await?;
-                return self.get(existing.repo_id).await.map(|r| r.expect("just updated"));
+                return self
+                    .get(existing.repo_id)
+                    .await
+                    .map(|r| r.expect("just updated"));
             }
             return Ok(existing);
         }

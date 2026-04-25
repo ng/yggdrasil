@@ -48,27 +48,41 @@ impl PromptView {
         }
     }
 
-    pub fn scroll_up(&mut self) { self.scroll = self.scroll.saturating_sub(3); }
-    pub fn scroll_down(&mut self) { self.scroll = self.scroll.saturating_add(3); }
+    pub fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(3);
+    }
+    pub fn scroll_down(&mut self) {
+        self.scroll = self.scroll.saturating_add(3);
+    }
 
     pub fn select_prev(&mut self) {
-        if self.pins.is_empty() { return; }
+        if self.pins.is_empty() {
+            return;
+        }
         let i = self.pin_state.selected().unwrap_or(0);
-        self.pin_state.select(Some(if i == 0 { self.pins.len() - 1 } else { i - 1 }));
+        self.pin_state
+            .select(Some(if i == 0 { self.pins.len() - 1 } else { i - 1 }));
     }
     pub fn select_next(&mut self) {
-        if self.pins.is_empty() { return; }
+        if self.pins.is_empty() {
+            return;
+        }
         let i = self.pin_state.selected().unwrap_or(0);
         self.pin_state.select(Some((i + 1) % self.pins.len()));
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
         self.loaded = true;
-        self.pins = MemoryRepo::new(pool).list_all_pinned().await.unwrap_or_default();
+        self.pins = MemoryRepo::new(pool)
+            .list_all_pinned()
+            .await
+            .unwrap_or_default();
         // Learnings: show every row (scope filtering happens at hook time,
         // not here — the inspector is a "see everything" surface).
         self.learnings = LearningRepo::new(pool)
-            .list_matching(None, None, None).await.unwrap_or_default();
+            .list_matching(None, None, None)
+            .await
+            .unwrap_or_default();
         let (path, contents) = load_memory_md();
         self.memory_md_path = path;
         self.memory_md = contents;
@@ -81,7 +95,11 @@ impl PromptView {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if !self.loaded {
             let para = Paragraph::new("Loading prompt context…")
-                .block(Block::default().borders(Borders::ALL).title(" Prompt inspector "))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Prompt inspector "),
+                )
                 .alignment(Alignment::Center);
             frame.render_widget(para, area);
             return;
@@ -105,8 +123,10 @@ impl PromptView {
     }
 
     fn render_pins(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(" Pinned memories ({}) — always injected via hook, scope-visible ",
-            self.pins.len());
+        let title = format!(
+            " Pinned memories ({}) — always injected via hook, scope-visible ",
+            self.pins.len()
+        );
 
         if self.pins.is_empty() {
             let lines = vec![
@@ -115,62 +135,83 @@ impl PromptView {
                 Line::from(""),
                 Line::from(vec![
                     Span::raw("  Create one with "),
-                    Span::styled("ygg memory create --scope global \"…\"",
-                        Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        "ygg memory create --scope global \"…\"",
+                        Style::default().fg(Color::Cyan),
+                    ),
                     Span::raw(", then "),
-                    Span::styled("ygg memory pin <id>",
-                        Style::default().fg(Color::Cyan)),
+                    Span::styled("ygg memory pin <id>", Style::default().fg(Color::Cyan)),
                     Span::raw("."),
                 ]),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled("  Pinned memories ride every UserPromptSubmit hook",
-                        Style::default().fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("  so they stay in attention as context grows.",
-                        Style::default().fg(Color::DarkGray)),
-                ]),
+                Line::from(vec![Span::styled(
+                    "  Pinned memories ride every UserPromptSubmit hook",
+                    Style::default().fg(Color::DarkGray),
+                )]),
+                Line::from(vec![Span::styled(
+                    "  so they stay in attention as context grows.",
+                    Style::default().fg(Color::DarkGray),
+                )]),
             ];
-            let para = Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(title));
+            let para =
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
             frame.render_widget(para, area);
             return;
         }
 
-        let items: Vec<ListItem> = self.pins.iter().map(|m| {
-            let (scope_color, scope_glyph) = match m.scope {
-                crate::models::memory::MemoryScope::Global  => (Color::Magenta, "◉"),
-                crate::models::memory::MemoryScope::Repo    => (Color::Cyan,    "▣"),
-                crate::models::memory::MemoryScope::Session => (Color::Yellow,  "◆"),
-            };
-            let age = humanize_age(m.created_at);
-            let id_short = &m.memory_id.to_string()[..8];
-            let snippet_max = area.width.saturating_sub(40).max(20) as usize;
-            let snippet = if m.text.chars().count() > snippet_max {
-                m.text.chars().take(snippet_max).collect::<String>() + "…"
-            } else { m.text.clone() };
+        let items: Vec<ListItem> = self
+            .pins
+            .iter()
+            .map(|m| {
+                let (scope_color, scope_glyph) = match m.scope {
+                    crate::models::memory::MemoryScope::Global => (Color::Magenta, "◉"),
+                    crate::models::memory::MemoryScope::Repo => (Color::Cyan, "▣"),
+                    crate::models::memory::MemoryScope::Session => (Color::Yellow, "◆"),
+                };
+                let age = humanize_age(m.created_at);
+                let id_short = &m.memory_id.to_string()[..8];
+                let snippet_max = area.width.saturating_sub(40).max(20) as usize;
+                let snippet = if m.text.chars().count() > snippet_max {
+                    m.text.chars().take(snippet_max).collect::<String>() + "…"
+                } else {
+                    m.text.clone()
+                };
 
-            ListItem::new(Line::from(vec![
-                Span::styled("  ★ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{scope_glyph} {:<7}", m.scope.as_str()),
-                    Style::default().fg(scope_color)),
-                Span::styled(format!(" {id_short}"), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!(" {age:>4}  "), Style::default().fg(Color::DarkGray)),
-                Span::raw(snippet),
-            ]))
-        }).collect();
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        "  ★ ",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{scope_glyph} {:<7}", m.scope.as_str()),
+                        Style::default().fg(scope_color),
+                    ),
+                    Span::styled(format!(" {id_short}"), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!(" {age:>4}  "), Style::default().fg(Color::DarkGray)),
+                    Span::raw(snippet),
+                ]))
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
         frame.render_stateful_widget(list, area, &mut self.pin_state);
     }
 
     fn render_learnings(&self, frame: &mut Frame, area: Rect) {
         let applied_sum: i32 = self.learnings.iter().map(|l| l.applied_count).sum();
-        let title = format!(" Learnings ({}) — deterministic scope-match  ·  {} applications ",
-            self.learnings.len(), applied_sum);
+        let title = format!(
+            " Learnings ({}) — deterministic scope-match  ·  {} applications ",
+            self.learnings.len(),
+            applied_sum
+        );
 
         if self.learnings.is_empty() {
             let lines = vec![
@@ -179,60 +220,82 @@ impl PromptView {
                 Line::from(""),
                 Line::from(vec![
                     Span::raw("  Create one with "),
-                    Span::styled("ygg learn create \"…\" --file-glob \"src/*.rs\" --rule-id …",
-                        Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        "ygg learn create \"…\" --file-glob \"src/*.rs\" --rule-id …",
+                        Style::default().fg(Color::Cyan),
+                    ),
                 ]),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled("  Scope tuple (repo, file_glob, rule_id) → text.",
-                        Style::default().fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("  Surfaces when a future task matches the scope.",
-                        Style::default().fg(Color::DarkGray)),
-                ]),
+                Line::from(vec![Span::styled(
+                    "  Scope tuple (repo, file_glob, rule_id) → text.",
+                    Style::default().fg(Color::DarkGray),
+                )]),
+                Line::from(vec![Span::styled(
+                    "  Surfaces when a future task matches the scope.",
+                    Style::default().fg(Color::DarkGray),
+                )]),
             ];
-            let para = Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(title));
+            let para =
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
             frame.render_widget(para, area);
             return;
         }
 
         let snippet_max = area.width.saturating_sub(44).max(20) as usize;
-        let items: Vec<ListItem> = self.learnings.iter().map(|l| {
-            let scope = match (&l.repo_id, &l.file_glob, &l.rule_id) {
-                (None, _, _)                   => "global".to_string(),
-                (Some(_), Some(g), Some(id))   => format!("{g} · {id}"),
-                (Some(_), Some(g), None)       => g.to_string(),
-                (Some(_), None,    Some(id))   => format!("rule={id}"),
-                (Some(_), None,    None)       => "repo".to_string(),
-            };
-            let scope_color = if l.repo_id.is_none() { Color::Magenta } else { Color::Cyan };
-            let applied = if l.applied_count > 0 {
-                format!(" ×{}", l.applied_count)
-            } else { String::new() };
-            let age = humanize_age(l.created_at);
-            let snippet = if l.text.chars().count() > snippet_max {
-                l.text.chars().take(snippet_max).collect::<String>() + "…"
-            } else { l.text.clone() };
+        let items: Vec<ListItem> = self
+            .learnings
+            .iter()
+            .map(|l| {
+                let scope = match (&l.repo_id, &l.file_glob, &l.rule_id) {
+                    (None, _, _) => "global".to_string(),
+                    (Some(_), Some(g), Some(id)) => format!("{g} · {id}"),
+                    (Some(_), Some(g), None) => g.to_string(),
+                    (Some(_), None, Some(id)) => format!("rule={id}"),
+                    (Some(_), None, None) => "repo".to_string(),
+                };
+                let scope_color = if l.repo_id.is_none() {
+                    Color::Magenta
+                } else {
+                    Color::Cyan
+                };
+                let applied = if l.applied_count > 0 {
+                    format!(" ×{}", l.applied_count)
+                } else {
+                    String::new()
+                };
+                let age = humanize_age(l.created_at);
+                let snippet = if l.text.chars().count() > snippet_max {
+                    l.text.chars().take(snippet_max).collect::<String>() + "…"
+                } else {
+                    l.text.clone()
+                };
 
-            ListItem::new(Line::from(vec![
-                Span::styled("  ◆ ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{scope:<24}"), Style::default().fg(scope_color)),
-                Span::styled(format!(" {age:>4}"), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{applied:<5}"),
-                    if l.applied_count > 0 {
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }),
-                Span::raw("  "),
-                Span::raw(snippet),
-            ]))
-        }).collect();
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        "  ◆ ",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("{scope:<24}"), Style::default().fg(scope_color)),
+                    Span::styled(format!(" {age:>4}"), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{applied:<5}"),
+                        if l.applied_count > 0 {
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                    Span::raw("  "),
+                    Span::raw(snippet),
+                ]))
+            })
+            .collect();
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title));
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(list, area);
     }
 
@@ -251,22 +314,25 @@ impl PromptView {
                     Span::styled("MEMORY.md", Style::default().fg(Color::Cyan)),
                     Span::raw(" found at:"),
                 ]),
-                Line::from(vec![
-                    Span::styled(format!("    {}", self.memory_md_path),
-                        Style::default().fg(Color::DarkGray)),
-                ]),
+                Line::from(vec![Span::styled(
+                    format!("    {}", self.memory_md_path),
+                    Style::default().fg(Color::DarkGray),
+                )]),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled("  Claude Code's harness writes this on its own; it loads",
-                        Style::default().fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("  into the system prompt at session start.",
-                        Style::default().fg(Color::DarkGray)),
-                ]),
+                Line::from(vec![Span::styled(
+                    "  Claude Code's harness writes this on its own; it loads",
+                    Style::default().fg(Color::DarkGray),
+                )]),
+                Line::from(vec![Span::styled(
+                    "  into the system prompt at session start.",
+                    Style::default().fg(Color::DarkGray),
+                )]),
             ]
         } else {
-            self.memory_md.lines().map(|l| Line::from(l.to_string())).collect()
+            self.memory_md
+                .lines()
+                .map(|l| Line::from(l.to_string()))
+                .collect()
         };
 
         let para = Paragraph::new(body)
@@ -297,8 +363,13 @@ fn load_memory_md() -> (String, String) {
 
 fn humanize_age(ts: DateTime<Utc>) -> String {
     let secs = (Utc::now() - ts).num_seconds().max(0);
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else { format!("{}d", secs / 86400) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }

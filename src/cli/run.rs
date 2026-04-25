@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::config::AppConfig;
-use crate::executor::{estimate_tokens, Executor};
+use crate::executor::{Executor, estimate_tokens};
 use crate::models::agent::{AgentRepo, AgentState};
 use crate::models::node::{NodeKind, NodeRepo};
 use crate::ollama::OllamaClient;
@@ -137,7 +137,9 @@ pub async fn execute(
                     0,
                 )
                 .await?;
-            agent_repo.update_head(agent_id, node.id, prompt.estimated_tokens as i32).await?;
+            agent_repo
+                .update_head(agent_id, node.id, prompt.estimated_tokens as i32)
+                .await?;
         }
 
         write_agent_status(session_id, "executing", task_desc, &agent_repo, agent_id).await;

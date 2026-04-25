@@ -238,10 +238,10 @@ pub fn install(cwd: &Path) -> Result<InstallReport, anyhow::Error> {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         let hash = block_hash(body);
         let action = match (classify(&existing, &hash), path.exists()) {
-            (FoundBlock::UpToDate, _)     => ActionTaken::Unchanged,
-            (FoundBlock::Stale, _)         => ActionTaken::Updated,
-            (FoundBlock::Missing, true)    => ActionTaken::Appended,
-            (FoundBlock::Missing, false)   => ActionTaken::Created,
+            (FoundBlock::UpToDate, _) => ActionTaken::Unchanged,
+            (FoundBlock::Stale, _) => ActionTaken::Updated,
+            (FoundBlock::Missing, true) => ActionTaken::Appended,
+            (FoundBlock::Missing, false) => ActionTaken::Created,
         };
         if !matches!(action, ActionTaken::Unchanged) {
             let new_content = install_block(&existing, body);
@@ -314,11 +314,11 @@ pub enum ActionTaken {
 impl std::fmt::Display for ActionTaken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Created   => write!(f, "created"),
-            Self::Appended  => write!(f, "block appended"),
-            Self::Updated   => write!(f, "block updated"),
+            Self::Created => write!(f, "created"),
+            Self::Appended => write!(f, "block appended"),
+            Self::Updated => write!(f, "block updated"),
             Self::Unchanged => write!(f, "up to date"),
-            Self::Removed   => write!(f, "block removed"),
+            Self::Removed => write!(f, "block removed"),
         }
     }
 }

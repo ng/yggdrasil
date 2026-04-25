@@ -144,17 +144,16 @@ impl<'a> SessionRepo<'a> {
     }
 
     pub async fn end(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE sessions SET ended_at = now() WHERE session_id = $1 AND ended_at IS NULL")
-            .bind(session_id)
-            .execute(self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET ended_at = now() WHERE session_id = $1 AND ended_at IS NULL",
+        )
+        .bind(session_id)
+        .execute(self.pool)
+        .await?;
         Ok(())
     }
 
-    pub async fn latest_for_agent(
-        &self,
-        agent_id: Uuid,
-    ) -> Result<Option<Session>, sqlx::Error> {
+    pub async fn latest_for_agent(&self, agent_id: Uuid) -> Result<Option<Session>, sqlx::Error> {
         sqlx::query_as::<_, Session>(
             r#"SELECT session_id, agent_id, repo_id, cc_session_id,
                       current_state, head_node_id, context_tokens,
@@ -176,7 +175,9 @@ impl<'a> SessionRepo<'a> {
             "SELECT agent_id, COUNT(*)::bigint
                FROM sessions
               WHERE ended_at IS NULL
-              GROUP BY agent_id"
-        ).fetch_all(self.pool).await
+              GROUP BY agent_id",
+        )
+        .fetch_all(self.pool)
+        .await
     }
 }

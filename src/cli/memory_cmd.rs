@@ -15,15 +15,15 @@ pub async fn create(
     let (repo_id, cc_session) = match scope {
         MemoryScope::Global => (None, None),
         MemoryScope::Repo => {
-            let r = resolve_cwd_repo(pool).await
+            let r = resolve_cwd_repo(pool)
+                .await
                 .map_err(|e| anyhow::anyhow!("scope=repo requires a registered repo: {e}"))?;
             (Some(r.repo_id), None)
         }
         MemoryScope::Session => {
-            let sid = crate::models::event::cc_session_id()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "scope=session requires CLAUDE_SESSION_ID — run inside a CC hook"
-                ))?;
+            let sid = crate::models::event::cc_session_id().ok_or_else(|| {
+                anyhow::anyhow!("scope=session requires CLAUDE_SESSION_ID — run inside a CC hook")
+            })?;
             (None, Some(sid))
         }
     };
@@ -33,23 +33,35 @@ pub async fn create(
     let embedder = Embedder::default_ollama();
     let vec = if embedder.health_check().await {
         embedder.embed(text).await.ok()
-    } else { None };
+    } else {
+        None
+    };
 
     let agent_id = find_agent_id(pool, agent_name).await;
-    let created = MemoryRepo::new(pool).create(
-        scope.clone(),
-        repo_id,
-        cc_session.as_deref(),
-        agent_id,
-        agent_name,
-        text,
-        vec.as_ref(),
-    ).await?;
+    let created = MemoryRepo::new(pool)
+        .create(
+            scope.clone(),
+            repo_id,
+            cc_session.as_deref(),
+            agent_id,
+            agent_name,
+            text,
+            vec.as_ref(),
+        )
+        .await?;
 
     let scope_label = scope.as_str();
-    let embed_note = if created.embedding.is_some() { "" } else { " (no embedding)" };
-    println!("[ygg memory] saved {} {}{}",
-        scope_label, short(&text, 70), embed_note);
+    let embed_note = if created.embedding.is_some() {
+        ""
+    } else {
+        " (no embedding)"
+    };
+    println!(
+        "[ygg memory] saved {} {}{}",
+        scope_label,
+        short(&text, 70),
+        embed_note
+    );
     Ok(())
 }
 
@@ -59,7 +71,9 @@ pub async fn list(
     limit: i64,
 ) -> Result<(), anyhow::Error> {
     let (repo_id, cc_session) = scope_context(pool, scope.as_ref()).await;
-    let rows = MemoryRepo::new(pool).list(scope, repo_id, cc_session.as_deref(), limit).await?;
+    let rows = MemoryRepo::new(pool)
+        .list(scope, repo_id, cc_session.as_deref(), limit)
+        .await?;
     if rows.is_empty() {
         println!("(no memories match that scope)");
         return Ok(());
@@ -67,20 +81,18 @@ pub async fn list(
     for m in rows {
         let pin = if m.pinned { "★" } else { " " };
         let age = humanize_age(m.created_at);
-        println!("{pin} [{}] {:<7} {:<10} {age}  {}",
+        println!(
+            "{pin} [{}] {:<7} {:<10} {age}  {}",
             &m.memory_id.to_string()[..8],
             m.scope.as_str(),
             short(&m.agent_name, 10),
-            short(&m.text, 80));
+            short(&m.text, 80)
+        );
     }
     Ok(())
 }
 
-pub async fn search(
-    pool: &sqlx::PgPool,
-    query: &str,
-    limit: i64,
-) -> Result<(), anyhow::Error> {
+pub async fn search(pool: &sqlx::PgPool, query: &str, limit: i64) -> Result<(), anyhow::Error> {
     let repo_id = resolve_cwd_repo(pool).await.ok().map(|r| r.repo_id);
     let cc_session = crate::models::event::cc_session_id();
 
@@ -90,7 +102,8 @@ pub async fn search(
     }
     let q_vec = embedder.embed(query).await?;
     let hits = MemoryRepo::new(pool)
-        .search(&q_vec, repo_id, cc_session.as_deref(), limit, 0.5).await?;
+        .search(&q_vec, repo_id, cc_session.as_deref(), limit, 0.5)
+        .await?;
     if hits.is_empty() {
         println!("(no matches — try --limit or a different query)");
         return Ok(());
@@ -98,18 +111,24 @@ pub async fn search(
     for h in hits {
         let pin = if h.memory.pinned { "★" } else { " " };
         let pct = (h.similarity * 100.0) as u32;
-        println!("{pin} [{}] {:>3}%  {:<7}  {}",
+        println!(
+            "{pin} [{}] {:>3}%  {:<7}  {}",
             &h.memory.memory_id.to_string()[..8],
             pct,
             h.memory.scope.as_str(),
-            short(&h.memory.text, 90));
+            short(&h.memory.text, 90)
+        );
     }
     Ok(())
 }
 
 pub async fn pin(pool: &sqlx::PgPool, memory_id: Uuid, pinned: bool) -> Result<(), anyhow::Error> {
     MemoryRepo::new(pool).set_pinned(memory_id, pinned).await?;
-    println!("[ygg memory] {} {}", if pinned { "pinned" } else { "unpinned" }, memory_id);
+    println!(
+        "[ygg memory] {} {}",
+        if pinned { "pinned" } else { "unpinned" },
+        memory_id
+    );
     Ok(())
 }
 
@@ -134,9 +153,7 @@ async fn scope_context(
             let r = resolve_cwd_repo(pool).await.ok();
             (r.map(|r| r.repo_id), None)
         }
-        Some(MemoryScope::Session) => {
-            (None, crate::models::event::cc_session_id())
-        }
+        Some(MemoryScope::Session) => (None, crate::models::event::cc_session_id()),
         _ => (None, None),
     }
 }
@@ -144,18 +161,28 @@ async fn scope_context(
 async fn find_agent_id(pool: &sqlx::PgPool, agent_name: &str) -> Option<Uuid> {
     sqlx::query_scalar("SELECT agent_id FROM agents WHERE agent_name = $1")
         .bind(agent_name)
-        .fetch_optional(pool).await.ok().flatten()
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn short(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { return s.to_string(); }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
     s.chars().take(max).collect::<String>() + "…"
 }
 
 fn humanize_age(ts: chrono::DateTime<chrono::Utc>) -> String {
     let secs = (chrono::Utc::now() - ts).num_seconds().max(0);
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else { format!("{}d", secs / 86400) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }

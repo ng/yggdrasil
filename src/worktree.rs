@@ -30,29 +30,27 @@ pub enum TeardownPolicy {
 
 #[derive(Debug, Clone)]
 pub struct Worktree {
-    pub task_ref: String,   // "yggdrasil-42"
-    pub branch: String,     // "ygg/yggdrasil-42"
+    pub task_ref: String, // "yggdrasil-42"
+    pub branch: String,   // "ygg/yggdrasil-42"
     pub path: PathBuf,
     pub base_path: PathBuf, // repo root we worktreed from
 }
 
 /// Create (or return existing) worktree for the given task. The caller is
 /// responsible for having at least one local_path recorded on the repo.
-pub async fn ensure(
-    pool: &sqlx::PgPool,
-    task_id: Uuid,
-) -> Result<Worktree, anyhow::Error> {
+pub async fn ensure(pool: &sqlx::PgPool, task_id: Uuid) -> Result<Worktree, anyhow::Error> {
     let (task, repo) = resolve(pool, task_id).await?;
     let task_ref = format!("{}-{}", repo.task_prefix, task.seq);
     let branch = format!("ygg/{task_ref}");
     let root = worktree_root()?;
     let path = root.join(&task_ref);
 
-    let base = primary_local_path(&repo)
-        .ok_or_else(|| anyhow::anyhow!(
+    let base = primary_local_path(&repo).ok_or_else(|| {
+        anyhow::anyhow!(
             "repo '{}' has no local_paths recorded — can't create worktree",
             repo.name
-        ))?;
+        )
+    })?;
 
     // Fast path: worktree already exists at our path (idempotent).
     if path.exists() && is_worktree_of(&base, &path) {
@@ -74,19 +72,42 @@ pub async fn ensure(
 
     // If the branch already exists (leftover from a prior run), just check
     // it out; otherwise create it.
-    let branch_exists = git(&base, &["show-ref", "--verify", "--quiet",
-                                     &format!("refs/heads/{branch}")]).is_ok();
+    let branch_exists = git(
+        &base,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok();
     let args: Vec<String> = if branch_exists {
-        vec!["worktree".into(), "add".into(),
-             path.to_string_lossy().into(), branch.clone()]
+        vec![
+            "worktree".into(),
+            "add".into(),
+            path.to_string_lossy().into(),
+            branch.clone(),
+        ]
     } else {
-        vec!["worktree".into(), "add".into(), "-b".into(), branch.clone(),
-             path.to_string_lossy().into(), base_commit]
+        vec![
+            "worktree".into(),
+            "add".into(),
+            "-b".into(),
+            branch.clone(),
+            path.to_string_lossy().into(),
+            base_commit,
+        ]
     };
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     git(&base, &args_ref)?;
 
-    Ok(Worktree { task_ref, branch, path, base_path: base })
+    Ok(Worktree {
+        task_ref,
+        branch,
+        path,
+        base_path: base,
+    })
 }
 
 /// Remove the worktree per policy. `Keep` is a no-op. `Delete` also deletes
@@ -98,7 +119,9 @@ pub async fn teardown(
     policy: TeardownPolicy,
     force: bool,
 ) -> Result<(), anyhow::Error> {
-    if policy == TeardownPolicy::Keep { return Ok(()); }
+    if policy == TeardownPolicy::Keep {
+        return Ok(());
+    }
 
     let (task, repo) = resolve(pool, task_id).await?;
     let task_ref = format!("{}-{}", repo.task_prefix, task.seq);
@@ -118,7 +141,9 @@ pub async fn teardown(
 
     let mut args: Vec<&str> = vec!["worktree", "remove"];
     let path_str = path.to_string_lossy().into_owned();
-    if force { args.push("--force"); }
+    if force {
+        args.push("--force");
+    }
     args.push(&path_str);
     git(&base, &args)?;
 
@@ -142,9 +167,13 @@ pub fn worktree_root() -> Result<PathBuf, anyhow::Error> {
 
 /// Lookup the task + its repo in one shot.
 async fn resolve(pool: &sqlx::PgPool, task_id: Uuid) -> Result<(Task, Repo), anyhow::Error> {
-    let task = TaskRepo::new(pool).get(task_id).await?
+    let task = TaskRepo::new(pool)
+        .get(task_id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("task {task_id} not found"))?;
-    let repo = RepoRepo::new(pool).get(task.repo_id).await?
+    let repo = RepoRepo::new(pool)
+        .get(task.repo_id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("repo {} not found", task.repo_id))?;
     Ok((task, repo))
 }
@@ -170,13 +199,20 @@ fn is_git_dir(p: &Path) -> bool {
 /// Ask the source repo whether `path` is already one of its worktrees. Used
 /// for idempotence — reuse rather than re-add.
 fn is_worktree_of(base: &Path, path: &Path) -> bool {
-    let Ok(list) = git_stdout(base, &["worktree", "list", "--porcelain"]) else { return false; };
+    let Ok(list) = git_stdout(base, &["worktree", "list", "--porcelain"]) else {
+        return false;
+    };
     let needle = path.to_string_lossy().to_string();
-    list.lines().any(|l| l.trim_start_matches("worktree ") == needle)
+    list.lines()
+        .any(|l| l.trim_start_matches("worktree ") == needle)
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<(), anyhow::Error> {
-    let out = Command::new("git").arg("-C").arg(cwd).args(args).output()
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
         .map_err(|e| anyhow::anyhow!("spawn git: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -186,7 +222,11 @@ fn git(cwd: &Path, args: &[&str]) -> Result<(), anyhow::Error> {
 }
 
 fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, anyhow::Error> {
-    let out = Command::new("git").arg("-C").arg(cwd).args(args).output()
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
         .map_err(|e| anyhow::anyhow!("spawn git: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

@@ -22,7 +22,9 @@ pub async fn execute(
     // Get or create the agent
     let agent = agent_repo.register(agent_name).await?;
     let agent_id = agent.agent_id;
-    agent_repo.transition(agent_id, AgentState::Idle, AgentState::Executing).await?;
+    agent_repo
+        .transition(agent_id, AgentState::Idle, AgentState::Executing)
+        .await?;
 
     let session_id = crate::status::new_session_id();
     tracing::info!(agent = agent_name, agent_id = %agent_id, "observer started");
@@ -50,7 +52,10 @@ pub async fn execute(
     }
 
     // Cleanup
-    agent_repo.transition(agent_id, AgentState::Executing, AgentState::Idle).await.ok();
+    agent_repo
+        .transition(agent_id, AgentState::Executing, AgentState::Idle)
+        .await
+        .ok();
     status::remove_status(&session_id).await;
     tracing::info!(agent = agent_name, "observer stopped");
 
@@ -67,7 +72,9 @@ async fn find_latest_transcript() -> Option<PathBuf> {
     let mut dirs = tokio::fs::read_dir(&claude_dir).await.ok()?;
     while let Ok(Some(entry)) = dirs.next_entry().await {
         let path = entry.path();
-        if !path.is_dir() { continue; }
+        if !path.is_dir() {
+            continue;
+        }
 
         let mut files = match tokio::fs::read_dir(&path).await {
             Ok(f) => f,
@@ -114,7 +121,9 @@ async fn tail_transcript(
     loop {
         match lines.next_line().await? {
             Some(line) => {
-                if line.trim().is_empty() { continue; }
+                if line.trim().is_empty() {
+                    continue;
+                }
 
                 let msg: serde_json::Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
@@ -122,7 +131,11 @@ async fn tail_transcript(
                 };
 
                 // Dedup by message UUID
-                let msg_id = msg.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let msg_id = msg
+                    .get("uuid")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if !msg_id.is_empty() && !seen_ids.insert(msg_id.clone()) {
                     continue;
                 }
@@ -135,15 +148,14 @@ async fn tail_transcript(
                 };
 
                 // Extract token count from usage block
-                let tokens = msg.get("usage")
+                let tokens = msg
+                    .get("usage")
                     .and_then(|u| {
                         let input = u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
                         let output = u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
                         Some((input + output) as i32)
                     })
-                    .unwrap_or_else(|| {
-                        estimate_tokens(&line) as i32
-                    });
+                    .unwrap_or_else(|| estimate_tokens(&line) as i32);
 
                 // Extract tool_use blocks and create separate ToolCall nodes
                 let tool_nodes = extract_tool_uses(&msg);
@@ -153,7 +165,9 @@ async fn tail_transcript(
                 let parent_id = agent.head_node_id;
 
                 // Insert the main message node
-                let node = node_repo.insert(parent_id, agent_id, kind, msg.clone(), tokens).await?;
+                let node = node_repo
+                    .insert(parent_id, agent_id, kind, msg.clone(), tokens)
+                    .await?;
                 let mut head_id = node.id;
                 let mut total_tokens = agent.context_tokens + tokens;
                 node_count += 1;
@@ -164,26 +178,37 @@ async fn tail_transcript(
                         "command": tool_name,
                         "input": tool_input,
                     });
-                    let tool_node = node_repo.insert(
-                        Some(head_id), agent_id, NodeKind::ToolCall, content,
-                        estimate_tokens(&tool_input.to_string()) as i32,
-                    ).await?;
+                    let tool_node = node_repo
+                        .insert(
+                            Some(head_id),
+                            agent_id,
+                            NodeKind::ToolCall,
+                            content,
+                            estimate_tokens(&tool_input.to_string()) as i32,
+                        )
+                        .await?;
                     head_id = tool_node.id;
                     total_tokens += estimate_tokens(&tool_input.to_string()) as i32;
                 }
 
                 // Update agent head
-                agent_repo.update_head(agent_id, head_id, total_tokens).await?;
+                agent_repo
+                    .update_head(agent_id, head_id, total_tokens)
+                    .await?;
 
                 // Update status bar
-                let _ = status::write_status(session_id, &AgentStatus {
-                    state: "executing".to_string(),
-                    locks: "none".to_string(),
-                    pressure: total_tokens as u32,
-                    task: agent_name.to_string(),
-                    nodes: node_count,
-                    tokens_hr: 0,
-                }).await;
+                let _ = status::write_status(
+                    session_id,
+                    &AgentStatus {
+                        state: "executing".to_string(),
+                        locks: "none".to_string(),
+                        pressure: total_tokens as u32,
+                        task: agent_name.to_string(),
+                        nodes: node_count,
+                        tokens_hr: 0,
+                    },
+                )
+                .await;
             }
             None => {
                 // End of file — wait for more data (tail -f)
@@ -193,7 +218,10 @@ async fn tail_transcript(
                 if let Some(agent) = agent_repo.get(agent_id).await? {
                     match agent.current_state {
                         AgentState::HumanOverride | AgentState::Shutdown => {
-                            tracing::info!("agent state changed to {}, stopping observer", agent.current_state);
+                            tracing::info!(
+                                "agent state changed to {}, stopping observer",
+                                agent.current_state
+                            );
                             break;
                         }
                         _ => {}
@@ -224,7 +252,10 @@ fn extract_tool_uses(msg: &serde_json::Value) -> Vec<(String, serde_json::Value)
         .filter_map(|item| {
             if item.get("type")?.as_str()? == "tool_use" {
                 let name = item.get("name")?.as_str()?.to_string();
-                let input = item.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                let input = item
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 Some((name, input))
             } else {
                 None

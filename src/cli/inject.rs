@@ -1,9 +1,9 @@
 use crate::config::AppConfig;
 use crate::embed::Embedder;
+use crate::lock::LockManager;
 use crate::models::agent::{AgentRepo, AgentState};
 use crate::models::event::{EventKind, EventRepo};
 use crate::models::node::{NodeKind, NodeRepo};
-use crate::lock::LockManager;
 
 use tracing::{debug, info, warn};
 
@@ -26,8 +26,13 @@ pub async fn execute(
     let node_repo = NodeRepo::new(pool);
     let event_repo = EventRepo::new(pool);
 
-    let persona = std::env::var("YGG_AGENT_PERSONA").ok().filter(|s| !s.is_empty());
-    let agent = match agent_repo.get_by_name_persona(agent_name, persona.as_deref()).await? {
+    let persona = std::env::var("YGG_AGENT_PERSONA")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let agent = match agent_repo
+        .get_by_name_persona(agent_name, persona.as_deref())
+        .await?
+    {
         Some(a) => a,
         None => {
             debug!("inject: agent '{}' not registered — skipping", agent_name);
@@ -43,17 +48,20 @@ pub async fn execute(
     // Mark the agent as actively working now that a user prompt has landed.
     // Per-session row is the truth; agents row is maintained for single-
     // session display. Fire-and-forget: stale state is worse than missing.
-    let session_id = crate::models::session::resolve_current_session(
-        pool, agent.agent_id, None
-    ).await;
+    let session_id =
+        crate::models::session::resolve_current_session(pool, agent.agent_id, None).await;
     if let Some(sid) = session_id {
         if let Err(e) = crate::models::session::SessionRepo::new(pool)
-            .force_state(sid, AgentState::Executing, None).await
+            .force_state(sid, AgentState::Executing, None)
+            .await
         {
             warn!("inject: session force_state failed: {e}");
         }
     }
-    if let Err(e) = agent_repo.force_state(agent.agent_id, AgentState::Executing, None).await {
+    if let Err(e) = agent_repo
+        .force_state(agent.agent_id, AgentState::Executing, None)
+        .await
+    {
         warn!("inject: force_state failed: {e}");
     }
 
@@ -86,10 +94,13 @@ pub async fn execute(
             let hyde = crate::hyde::Hyde::from_env();
             let hyde_expansion = if hyde.is_enabled() {
                 hyde.expand(prompt).await
-            } else { None };
+            } else {
+                None
+            };
 
-            let embed_source: String = hyde_expansion.clone()
-                .map(|e| format!("{prompt}\n\n{e}"))  // Combine for both embedding + tsvector
+            let embed_source: String = hyde_expansion
+                .clone()
+                .map(|e| format!("{prompt}\n\n{e}")) // Combine for both embedding + tsvector
                 .unwrap_or_else(|| prompt.to_string());
 
             // Truncate to ~1500 chars — all-minilm has a 256-token limit
@@ -98,45 +109,61 @@ pub async fn execute(
             } else {
                 &embed_source
             };
-            debug!("inject: embedding {} chars{}",
+            debug!(
+                "inject: embedding {} chars{}",
                 query_text.len(),
-                if hyde_expansion.is_some() { " (HyDE-expanded)" } else { "" });
+                if hyde_expansion.is_some() {
+                    " (HyDE-expanded)"
+                } else {
+                    ""
+                }
+            );
 
             let embed_start = std::time::Instant::now();
             let embed_result = embedder.embed_cached(pool, query_text).await;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
 
             let cached = matches!(&embed_result, Ok((_, true)));
-            let _ = event_repo.emit(
-                if cached { EventKind::EmbeddingCacheHit } else { EventKind::EmbeddingCall },
-                agent_name,
-                Some(agent.agent_id),
-                serde_json::json!({
-                    "model": "all-minilm",
-                    "input_chars": query_text.len(),
-                    "latency_ms": embed_ms,
-                    "success": embed_result.is_ok(),
-                    "purpose": "prompt_embed",
-                    "cached": cached,
-                }),
-            ).await;
+            let _ = event_repo
+                .emit(
+                    if cached {
+                        EventKind::EmbeddingCacheHit
+                    } else {
+                        EventKind::EmbeddingCall
+                    },
+                    agent_name,
+                    Some(agent.agent_id),
+                    serde_json::json!({
+                        "model": "all-minilm",
+                        "input_chars": query_text.len(),
+                        "latency_ms": embed_ms,
+                        "success": embed_result.is_ok(),
+                        "purpose": "prompt_embed",
+                        "cached": cached,
+                    }),
+                )
+                .await;
 
             match embed_result {
                 Err(e) => warn!("inject: embed failed ({embed_ms}ms): {e}"),
                 Ok((query_vec, _was_cached)) => {
                     // Write this prompt as a UserMessage node and advance head_node_id
-                    let node = node_repo.insert(
-                        agent.head_node_id,
-                        agent.agent_id,
-                        NodeKind::UserMessage,
-                        serde_json::json!({ "text": prompt }),
-                        estimate_tokens(prompt),
-                    ).await?;
+                    let node = node_repo
+                        .insert(
+                            agent.head_node_id,
+                            agent.agent_id,
+                            NodeKind::UserMessage,
+                            serde_json::json!({ "text": prompt }),
+                            estimate_tokens(prompt),
+                        )
+                        .await?;
 
                     node_repo.set_embedding(node.id, query_vec.clone()).await?;
 
                     let new_tokens = agent.context_tokens + node.token_count;
-                    agent_repo.update_head(agent.agent_id, node.id, new_tokens).await?;
+                    agent_repo
+                        .update_head(agent.agent_id, node.id, new_tokens)
+                        .await?;
 
                     info!(
                         "inject: wrote node {} ({}tok), head advanced",
@@ -151,17 +178,19 @@ pub async fn execute(
                         redacted_prompt.clone()
                     };
                     let snippet: &str = &snippet;
-                    let _ = event_repo.emit(
-                        EventKind::NodeWritten,
-                        agent_name,
-                        Some(agent.agent_id),
-                        serde_json::json!({
-                            "node_id": node.id,
-                            "kind": "user_message",
-                            "tokens": node.token_count,
-                            "snippet": snippet,
-                        }),
-                    ).await;
+                    let _ = event_repo
+                        .emit(
+                            EventKind::NodeWritten,
+                            agent_name,
+                            Some(agent.agent_id),
+                            serde_json::json!({
+                                "node_id": node.id,
+                                "kind": "user_message",
+                                "tokens": node.token_count,
+                                "snippet": snippet,
+                            }),
+                        )
+                        .await;
 
                     // Hybrid retrieval (yggdrasil-8): union pgvector top-k
                     // with tsvector full-text top-k via reciprocal rank
@@ -174,7 +203,9 @@ pub async fn execute(
                     {
                         Ok(h) => h,
                         Err(e) => {
-                            debug!("inject: hybrid search failed ({e}), falling back to vector-only");
+                            debug!(
+                                "inject: hybrid search failed ({e}), falling back to vector-only"
+                            );
                             node_repo
                                 .similarity_search_global(&query_vec, &kinds, 8, 0.6)
                                 .await?
@@ -186,12 +217,16 @@ pub async fn execute(
                     for hit in &hits {
                         debug!(
                             "inject: hit agent={} dist={:.3} sim={:.3} kind={:?}",
-                            hit.agent_name, hit.distance, hit.similarity(), hit.kind
+                            hit.agent_name,
+                            hit.distance,
+                            hit.similarity(),
+                            hit.kind
                         );
                     }
 
                     // Exclude the node we just wrote (distance ≈ 0), surface the rest
-                    let mut candidates: Vec<crate::models::node::SearchHit> = hits.into_iter()
+                    let mut candidates: Vec<crate::models::node::SearchHit> = hits
+                        .into_iter()
                         .filter(|h| h.id != node.id && h.distance > 0.01)
                         .collect();
 
@@ -206,10 +241,15 @@ pub async fn execute(
                     //   YGG_DISCLOSURE_COOLDOWN_SECS   (legacy time fallback)
                     //   YGG_DISCLOSURE_MODE = tokens|time|both (default both)
                     let cooldown_tokens: i64 = std::env::var("YGG_DISCLOSURE_COOLDOWN_TOKENS")
-                        .ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(4000);
                     let cooldown_secs: i64 = std::env::var("YGG_DISCLOSURE_COOLDOWN_SECS")
-                        .ok().and_then(|v| v.parse().ok()).unwrap_or(1800);
-                    let mode = std::env::var("YGG_DISCLOSURE_MODE").unwrap_or_else(|_| "both".into());
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(1800);
+                    let mode =
+                        std::env::var("YGG_DISCLOSURE_MODE").unwrap_or_else(|_| "both".into());
 
                     if !candidates.is_empty() && (cooldown_tokens > 0 || cooldown_secs > 0) {
                         let cand_ids: Vec<uuid::Uuid> = candidates.iter().map(|c| c.id).collect();
@@ -276,18 +316,23 @@ pub async fn execute(
                     let hit_repo_ids: Vec<Option<uuid::Uuid>> = if candidate_ids.is_empty() {
                         vec![]
                     } else {
-                        let rows: Vec<(uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
-                            "SELECT id, repo_id FROM nodes WHERE id = ANY($1)"
-                        )
-                        .bind(&candidate_ids)
-                        .fetch_all(pool)
-                        .await
-                        .unwrap_or_default();
-                        candidate_ids.iter().map(|id| {
-                            rows.iter().find(|(rid, _)| rid == id).and_then(|(_, repo)| *repo)
-                        }).collect()
+                        let rows: Vec<(uuid::Uuid, Option<uuid::Uuid>)> =
+                            sqlx::query_as("SELECT id, repo_id FROM nodes WHERE id = ANY($1)")
+                                .bind(&candidate_ids)
+                                .fetch_all(pool)
+                                .await
+                                .unwrap_or_default();
+                        candidate_ids
+                            .iter()
+                            .map(|id| {
+                                rows.iter()
+                                    .find(|(rid, _)| rid == id)
+                                    .and_then(|(_, repo)| *repo)
+                            })
+                            .collect()
                     };
-                    let current_repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool).await
+                    let current_repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool)
+                        .await
                         .ok()
                         .map(|r| r.repo_id);
 
@@ -305,74 +350,92 @@ pub async fn execute(
                     // while preserving the drop-reason breakdown that ygg eval
                     // needs.
                     for (hit, sd) in candidates.iter().zip(scored.iter()) {
-                        if !sd.dropped { continue; }
+                        if !sd.dropped {
+                            continue;
+                        }
                         let snippet = extract_snippet_around(&hit.content, Some(query_text));
-                        let _ = event_repo.emit(
-                            EventKind::ScoringDecision,
-                            agent_name,
-                            Some(agent.agent_id),
-                            serde_json::json!({
-                                "source_agent": hit.agent_name,
-                                "kind": format!("{:?}", hit.kind).to_lowercase(),
-                                "similarity": hit.similarity(),
-                                "components": sd.scores,
-                                "kept": false,
-                                "drop_reason": sd.drop_reason,
-                                "snippet": snippet,
-                            }),
-                        ).await;
+                        let _ = event_repo
+                            .emit(
+                                EventKind::ScoringDecision,
+                                agent_name,
+                                Some(agent.agent_id),
+                                serde_json::json!({
+                                    "source_agent": hit.agent_name,
+                                    "kind": format!("{:?}", hit.kind).to_lowercase(),
+                                    "similarity": hit.similarity(),
+                                    "components": sd.scores,
+                                    "kept": false,
+                                    "drop_reason": sd.drop_reason,
+                                    "snippet": snippet,
+                                }),
+                            )
+                            .await;
                     }
 
                     // Optional LLM classifier overlay — only runs on the
                     // survivors. Default off; set YGG_CLASSIFIER=on.
                     let classifier = crate::classifier::Classifier::from_env();
-                    let survivor_indices: Vec<usize> = scored.iter().enumerate()
+                    let survivor_indices: Vec<usize> = scored
+                        .iter()
+                        .enumerate()
                         .filter(|(_, s)| !s.dropped)
                         .map(|(i, _)| i)
                         .collect();
-                    let survivor_snippets: Vec<String> = survivor_indices.iter()
+                    let survivor_snippets: Vec<String> = survivor_indices
+                        .iter()
                         .map(|&i| extract_snippet(&candidates[i].content))
                         .collect();
-                    let classifier_decisions = if classifier.is_enabled() && !survivor_snippets.is_empty() {
-                        let refs: Vec<&str> = survivor_snippets.iter().map(String::as_str).collect();
-                        Some(classifier.classify_batch(prompt, &refs).await)
-                    } else {
-                        None
-                    };
+                    let classifier_decisions =
+                        if classifier.is_enabled() && !survivor_snippets.is_empty() {
+                            let refs: Vec<&str> =
+                                survivor_snippets.iter().map(String::as_str).collect();
+                            Some(classifier.classify_batch(prompt, &refs).await)
+                        } else {
+                            None
+                        };
 
                     // Build sorted emission order: kept candidates by score descending.
                     let mut emit_order: Vec<usize> = survivor_indices.clone();
                     emit_order.sort_by(|&a, &b| {
-                        scored[b].scores.total.partial_cmp(&scored[a].scores.total).unwrap_or(std::cmp::Ordering::Equal)
+                        scored[b]
+                            .scores
+                            .total
+                            .partial_cmp(&scored[a].scores.total)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     });
 
                     for (pos_in_survivors, &i) in emit_order.iter().enumerate() {
                         let hit = &candidates[i];
                         // If classifier is enabled and dropped this one, skip.
-                        let classifier_kept = classifier_decisions.as_ref()
+                        let classifier_kept = classifier_decisions
+                            .as_ref()
                             .and_then(|d| {
                                 let j = survivor_indices.iter().position(|&k| k == i)?;
                                 d.get(j).map(|dec| dec.kept || dec.bypassed)
                             })
                             .unwrap_or(true);
-                        if !classifier_kept { continue; }
+                        if !classifier_kept {
+                            continue;
+                        }
 
                         let age = format_age(hit.created_at);
                         let snippet = extract_snippet_around(&hit.content, Some(query_text));
                         let _ = pos_in_survivors; // reserved for future rank-aware logging
-                        let _ = event_repo.emit(
-                            EventKind::SimilarityHit,
-                            agent_name,
-                            Some(agent.agent_id),
-                            serde_json::json!({
-                                "source_agent": hit.agent_name,
-                                "source_node_id": hit.id,
-                                "distance": hit.distance,
-                                "similarity": hit.similarity(),
-                                "total_score": scored[i].scores.total,
-                                "snippet": snippet,
-                            }),
-                        ).await;
+                        let _ = event_repo
+                            .emit(
+                                EventKind::SimilarityHit,
+                                agent_name,
+                                Some(agent.agent_id),
+                                serde_json::json!({
+                                    "source_agent": hit.agent_name,
+                                    "source_node_id": hit.id,
+                                    "distance": hit.distance,
+                                    "similarity": hit.similarity(),
+                                    "total_score": scored[i].scores.total,
+                                    "snippet": snippet,
+                                }),
+                            )
+                            .await;
                         output.push(format!(
                             "[{} · {} · {}] {}",
                             strength_label(scored[i].scores.total),
@@ -395,7 +458,9 @@ pub async fn execute(
     // pinning is surviving similarity-retrieval's dropout + attention decay
     // as context grows); then similarity-matched non-pinned memories fill in
     // relevant-but-not-sticky context.
-    let repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool).await.ok()
+    let repo_id = crate::cli::task_cmd::resolve_cwd_repo(pool)
+        .await
+        .ok()
         .map(|r| r.repo_id);
     let cc_sid = crate::models::event::cc_session_id();
     let memory_repo = crate::models::memory::MemoryRepo::new(pool);
@@ -404,16 +469,18 @@ pub async fn execute(
         .list_pinned_visible(repo_id, cc_sid.as_deref())
         .await
         .unwrap_or_default();
-    let mut pinned_ids: std::collections::HashSet<uuid::Uuid> =
-        std::collections::HashSet::new();
+    let mut pinned_ids: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
     for m in &pinned {
         pinned_ids.insert(m.memory_id);
         let snip = if m.text.chars().count() > 200 {
             m.text.chars().take(200).collect::<String>() + "…"
-        } else { m.text.clone() };
+        } else {
+            m.text.clone()
+        };
         output.push(format!(
             "[ygg memory | ★ pinned · {}] {}",
-            m.scope.as_str(), snip
+            m.scope.as_str(),
+            snip
         ));
     }
 
@@ -427,14 +494,20 @@ pub async fn execute(
                     .unwrap_or_default();
                 for m in mems {
                     // Pinned ones already emitted above — don't double-print.
-                    if pinned_ids.contains(&m.memory.memory_id) { continue; }
+                    if pinned_ids.contains(&m.memory.memory_id) {
+                        continue;
+                    }
                     let sim = (m.similarity * 100.0) as u32;
                     let snip = if m.memory.text.chars().count() > 140 {
                         m.memory.text.chars().take(140).collect::<String>() + "…"
-                    } else { m.memory.text.clone() };
+                    } else {
+                        m.memory.text.clone()
+                    };
                     output.push(format!(
                         "[ygg memory | · {} | sim={}%] {}",
-                        m.memory.scope.as_str(), sim, snip
+                        m.memory.scope.as_str(),
+                        sim,
+                        snip
                     ));
                 }
             }
@@ -477,7 +550,8 @@ fn extract_snippet(content: &serde_json::Value) -> String {
 /// match (query-centered snippet — yggdrasil-15); otherwise we take the
 /// head of the string.
 fn extract_snippet_around(content: &serde_json::Value, query: Option<&str>) -> String {
-    let text = content.get("text")
+    let text = content
+        .get("text")
         .or_else(|| content.get("directive"))
         .or_else(|| content.get("summary"))
         .and_then(|v| v.as_str())
@@ -495,11 +569,26 @@ fn extract_snippet_around(content: &serde_json::Value, query: Option<&str>) -> S
         let hay_lower = text.to_lowercase();
         let mut best: Option<usize> = None;
         for word in q.split(|c: char| !c.is_alphanumeric()) {
-            if word.len() < 4 { continue; }
+            if word.len() < 4 {
+                continue;
+            }
             let w = word.to_lowercase();
-            if matches!(w.as_str(),
-                "what" | "when" | "where" | "which" | "with" | "from" | "does" | "this" | "that" | "have" | "will"
-            ) { continue; }
+            if matches!(
+                w.as_str(),
+                "what"
+                    | "when"
+                    | "where"
+                    | "which"
+                    | "with"
+                    | "from"
+                    | "does"
+                    | "this"
+                    | "that"
+                    | "have"
+                    | "will"
+            ) {
+                continue;
+            }
             if let Some(pos) = hay_lower.find(&w) {
                 best = Some(best.map(|b| b.min(pos)).unwrap_or(pos));
             }
@@ -510,8 +599,13 @@ fn extract_snippet_around(content: &serde_json::Value, query: Option<&str>) -> S
             let start = pos.saturating_sub(half);
             let end = (start + WINDOW).min(text.len());
             // Adjust start/end to UTF-8 char boundaries.
-            let start = (0..=start).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-            let end = (end..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+            let start = (0..=start)
+                .rev()
+                .find(|i| text.is_char_boundary(*i))
+                .unwrap_or(0);
+            let end = (end..=text.len())
+                .find(|i| text.is_char_boundary(*i))
+                .unwrap_or(text.len());
             let prefix = if start > 0 { "…" } else { "" };
             let suffix = if end < text.len() { "…" } else { "" };
             return format!("{prefix}{}{suffix}", &text[start..end]);
@@ -519,7 +613,10 @@ fn extract_snippet_around(content: &serde_json::Value, query: Option<&str>) -> S
     }
 
     // Fallback: head of the string.
-    let cut = (0..=117).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+    let cut = (0..=117)
+        .rev()
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(0);
     format!("{}…", &text[..cut])
 }
 
@@ -527,17 +624,27 @@ fn extract_snippet_around(content: &serde_json::Value, query: Option<&str>) -> S
 /// Labels chosen to make "why was this surfaced?" legible without requiring
 /// the reader to know the cosine distribution or weight tuning.
 fn strength_label(total: f64) -> &'static str {
-    if total >= 0.6       { "strong recall" }
-    else if total >= 0.3  { "recall" }
-    else                  { "faint recall" }
+    if total >= 0.6 {
+        "strong recall"
+    } else if total >= 0.3 {
+        "recall"
+    } else {
+        "faint recall"
+    }
 }
 
 fn format_age(ts: chrono::DateTime<chrono::Utc>) -> String {
     let secs = (chrono::Utc::now() - ts).num_seconds();
-    if secs < 60 { return format!("{secs}s ago"); }
+    if secs < 60 {
+        return format!("{secs}s ago");
+    }
     let mins = secs / 60;
-    if mins < 60 { return format!("{mins}m ago"); }
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
     let hours = mins / 60;
-    if hours < 24 { return format!("{hours}h ago"); }
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
     format!("{}d ago", hours / 24)
 }

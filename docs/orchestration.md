@@ -8,6 +8,42 @@ A single long-lived `ygg scheduler` daemon is the only writer of task-execution 
 
 ## The actors
 
+```mermaid
+flowchart TD
+    subgraph S["ygg scheduler (Rust daemon, one per host)"]
+        SCH[authority for task_runs state transitions<br/>no LLM calls, ever]
+    end
+
+    subgraph PG["Postgres"]
+        T[(tasks)]
+        TR[(task_runs<br/><i>writer: scheduler only*</i>)]
+        L[(locks)]
+        E[(events)]
+        BR[(blob refs)]
+    end
+
+    subgraph TM["tmux session: yggdrasil"]
+        A1[claude agent-A<br/>task-142]
+        A2[claude agent-B<br/>task-143]
+        A3[claude agent-C<br/>task-144]
+        A4[claude agent-D<br/>task-145]
+    end
+
+    HUM([humans / ygg task CLI]) --> T
+    HK([pre-tool-use hook]) --> L
+    HKE([all hooks]) --> E
+
+    S -- NOTIFY / 1-5s tick --> PG
+    S -- spawn --> TM
+    A1 --> |"commits / locks / events / messages"| PG
+    A2 --> PG
+    A3 --> PG
+    A4 --> PG
+    A1 -.-> |"hooks: SessionStart, UserPromptSubmit,<br/>PreToolUse, Stop, PreCompact"| HKE
+```
+
+Legacy ASCII rendering, for terminals without mermaid support:
+
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ ygg scheduler (Rust daemon, one per host)                      │
@@ -47,6 +83,29 @@ A single long-lived `ygg scheduler` daemon is the only writer of task-execution 
 (*) `Stop` hook writes outcome fields on the run row; the scheduler treats those as input and is the only one that advances `state` past `running`.
 
 ## The nine states of a task run
+
+```mermaid
+stateDiagram-v2
+    [*] --> scheduled
+    scheduled --> ready: deps satisfied
+    scheduled --> cancelled: cancel
+    ready --> running: claim (SKIP LOCKED)
+    ready --> cancelled: cancel
+    running --> succeeded: agent succeeded
+    running --> failed: agent reports failure
+    running --> crashed: heartbeat expired / tmux gone
+    running --> cancelled: deadline / interrupt
+    failed --> retrying: attempt < max && backoff elapsed
+    crashed --> retrying: attempt < max && backoff elapsed
+    failed --> poison: attempt = max OR fingerprint loop
+    crashed --> poison: attempt = max OR fingerprint loop
+    retrying --> scheduled: new attempt row
+    succeeded --> [*]
+    cancelled --> [*]
+    poison --> [*]: requires ygg task unpoison
+```
+
+The legacy ASCII rendering follows for terminals without mermaid support:
 
 ```
        ┌───────────┐   scheduler picks              ┌───────────┐

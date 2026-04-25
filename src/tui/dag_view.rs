@@ -15,14 +15,26 @@ use crate::models::repo::{Repo, RepoRepo};
 use crate::models::task::{Task, TaskKind, TaskRepo, TaskStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DagSort { Priority, Kind, Recent }
+pub enum DagSort {
+    Priority,
+    Kind,
+    Recent,
+}
 
 impl DagSort {
     fn label(&self) -> &'static str {
-        match self { Self::Priority => "priority", Self::Kind => "kind", Self::Recent => "recent" }
+        match self {
+            Self::Priority => "priority",
+            Self::Kind => "kind",
+            Self::Recent => "recent",
+        }
     }
     fn next(&self) -> Self {
-        match self { Self::Priority => Self::Kind, Self::Kind => Self::Recent, Self::Recent => Self::Priority }
+        match self {
+            Self::Priority => Self::Kind,
+            Self::Kind => Self::Recent,
+            Self::Recent => Self::Priority,
+        }
     }
 }
 
@@ -69,7 +81,11 @@ pub struct DagView {
 }
 
 pub enum RenderRow {
-    RepoHeader { prefix: String, name: String, open_count: usize },
+    RepoHeader {
+        prefix: String,
+        name: String,
+        open_count: usize,
+    },
     Task {
         task: Task,
         prefix: String,
@@ -84,8 +100,12 @@ impl DagView {
         let mut st = ListState::default();
         st.select(Some(0));
         Self {
-            rows: vec![], state: st, repo_name: String::new(),
-            last_status: String::new(), detail_open: false, sort: DagSort::Priority,
+            rows: vec![],
+            state: st,
+            repo_name: String::new(),
+            last_status: String::new(),
+            detail_open: false,
+            sort: DagSort::Priority,
             agent_filter: AgentFilter::All,
             subtree_focus: None,
             known_assignees: Vec::new(),
@@ -103,13 +123,18 @@ impl DagView {
     pub fn set_agent(&mut self, _name: String) {}
 
     pub fn scroll_up(&mut self) {
-        if self.rows.is_empty() { return; }
+        if self.rows.is_empty() {
+            return;
+        }
         let i = self.state.selected().unwrap_or(0);
-        self.state.select(Some(if i == 0 { self.rows.len() - 1 } else { i - 1 }));
+        self.state
+            .select(Some(if i == 0 { self.rows.len() - 1 } else { i - 1 }));
     }
 
     pub fn scroll_down(&mut self) {
-        if self.rows.is_empty() { return; }
+        if self.rows.is_empty() {
+            return;
+        }
         let i = self.state.selected().unwrap_or(0);
         self.state.select(Some((i + 1) % self.rows.len()));
     }
@@ -132,8 +157,9 @@ impl DagView {
             AgentFilter::Specific(cur) => {
                 let idx = self.known_assignees.iter().position(|(id, _)| id == cur);
                 match idx {
-                    Some(i) if i + 1 < self.known_assignees.len() =>
-                        AgentFilter::Specific(self.known_assignees[i + 1].0),
+                    Some(i) if i + 1 < self.known_assignees.len() => {
+                        AgentFilter::Specific(self.known_assignees[i + 1].0)
+                    }
                     _ => AgentFilter::Unassigned,
                 }
             }
@@ -144,9 +170,15 @@ impl DagView {
     /// Toggle subtree-focus on the currently selected task. Second press on
     /// the same row clears focus; pressing on a different row replaces it.
     pub fn toggle_subtree_focus(&mut self) {
-        let Some((task, prefix)) = self.selected_task() else { return; };
-        let label = format!("{}-{} {}", prefix, task.seq,
-            task.title.chars().take(40).collect::<String>());
+        let Some((task, prefix)) = self.selected_task() else {
+            return;
+        };
+        let label = format!(
+            "{}-{} {}",
+            prefix,
+            task.seq,
+            task.title.chars().take(40).collect::<String>()
+        );
         match self.subtree_focus {
             Some(id) if id == task.task_id => {
                 self.subtree_focus = None;
@@ -171,7 +203,9 @@ impl DagView {
         match &self.agent_filter {
             AgentFilter::All => {}
             AgentFilter::Specific(id) => {
-                let name = self.known_assignees.iter()
+                let name = self
+                    .known_assignees
+                    .iter()
                     .find(|(a, _)| a == id)
                     .map(|(_, n)| n.clone())
                     .unwrap_or_else(|| id.to_string()[..8].to_string());
@@ -182,7 +216,11 @@ impl DagView {
         if !self.focus_label.is_empty() {
             parts.push(format!("focus={}", self.focus_label));
         }
-        if parts.is_empty() { String::new() } else { format!("  ·  {}", parts.join("  ·  ")) }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  ·  {}", parts.join("  ·  "))
+        }
     }
 
     /// Toggle the detail overlay for the selected task row. Does nothing for
@@ -206,7 +244,8 @@ impl DagView {
     /// task_id + display label ("yggdrasil-42") for the selected row, if any.
     /// app.rs uses this for the backspace-delete confirm flow.
     pub fn selected_task_id(&self) -> Option<(Uuid, String)> {
-        self.selected_task().map(|(t, p)| (t.task_id, format!("{p}-{}", t.seq)))
+        self.selected_task()
+            .map(|(t, p)| (t.task_id, format!("{p}-{}", t.seq)))
     }
 
     /// Arm delete confirmation for the currently selected task. Next key must
@@ -214,7 +253,9 @@ impl DagView {
     pub fn delete_begin(&mut self) {
         self.pending_delete = self.selected_task_id();
     }
-    pub fn delete_cancel(&mut self) { self.pending_delete = None; }
+    pub fn delete_cancel(&mut self) {
+        self.pending_delete = None;
+    }
     pub fn take_pending_delete(&mut self) -> Option<Uuid> {
         self.pending_delete.take().map(|(id, _)| id)
     }
@@ -227,12 +268,26 @@ impl DagView {
 
     /// Inline-input overlay state for 'n' (add child). When active, key
     /// events flow into `add_buffer` and Enter commits a new task.
-    pub fn add_mode(&self) -> bool { self.add_active }
-    pub fn add_begin(&mut self) { self.add_active = true; self.add_buffer.clear(); }
-    pub fn add_cancel(&mut self) { self.add_active = false; self.add_buffer.clear(); }
-    pub fn add_push(&mut self, c: char) { self.add_buffer.push(c); }
-    pub fn add_pop(&mut self) { self.add_buffer.pop(); }
-    pub fn add_buffer(&self) -> &str { &self.add_buffer }
+    pub fn add_mode(&self) -> bool {
+        self.add_active
+    }
+    pub fn add_begin(&mut self) {
+        self.add_active = true;
+        self.add_buffer.clear();
+    }
+    pub fn add_cancel(&mut self) {
+        self.add_active = false;
+        self.add_buffer.clear();
+    }
+    pub fn add_push(&mut self, c: char) {
+        self.add_buffer.push(c);
+    }
+    pub fn add_pop(&mut self) {
+        self.add_buffer.pop();
+    }
+    pub fn add_buffer(&self) -> &str {
+        &self.add_buffer
+    }
 
     /// Returns (parent_ref_if_task, title). Caller feeds this into
     /// plan_cmd::add — if parent is None, use a top-level create.
@@ -240,7 +295,9 @@ impl DagView {
         let title = self.add_buffer.trim().to_string();
         self.add_active = false;
         self.add_buffer.clear();
-        if title.is_empty() { return None; }
+        if title.is_empty() {
+            return None;
+        }
         let parent = self.selected_task_ref();
         Some((parent, title))
     }
@@ -257,7 +314,9 @@ impl DagView {
         let repos = RepoRepo::new(pool).list().await.unwrap_or_default();
 
         // All open tasks across every repo, keyed by repo_id.
-        let unfiltered_open: Vec<Task> = TaskRepo::new(pool).list(None, None).await
+        let unfiltered_open: Vec<Task> = TaskRepo::new(pool)
+            .list(None, None)
+            .await
             .unwrap_or_default()
             .into_iter()
             .filter(|t| t.status != TaskStatus::Closed)
@@ -266,9 +325,8 @@ impl DagView {
         if unfiltered_open.is_empty() {
             self.rows.clear();
             self.known_assignees.clear();
-            self.last_status = format!(
-                "no open tasks in any of {} registered repo(s)", repos.len()
-            );
+            self.last_status =
+                format!("no open tasks in any of {} registered repo(s)", repos.len());
             self.state.select(None);
             return Ok(());
         }
@@ -280,10 +338,13 @@ impl DagView {
         let mut owner_ids: HashSet<Uuid> = HashSet::new();
         for t in &unfiltered_open {
             let owner = t.assignee.or(t.created_by);
-            if let Some(id) = owner { owner_ids.insert(id); }
+            if let Some(id) = owner {
+                owner_ids.insert(id);
+            }
         }
         let all_agents = AgentRepo::new(pool).list().await.unwrap_or_default();
-        let mut assignees: Vec<(Uuid, String)> = all_agents.into_iter()
+        let mut assignees: Vec<(Uuid, String)> = all_agents
+            .into_iter()
             .filter(|a| owner_ids.contains(&a.agent_id))
             .map(|a| (a.agent_id, a.agent_name))
             .collect();
@@ -297,10 +358,12 @@ impl DagView {
         let every_id: Vec<Uuid> = unfiltered_open.iter().map(|t| t.task_id).collect();
         let edges_all: Vec<(Uuid, Uuid)> = sqlx::query_as::<_, (Uuid, Uuid)>(
             "SELECT task_id, blocker_id FROM task_deps
-             WHERE task_id = ANY($1) OR blocker_id = ANY($1)"
+             WHERE task_id = ANY($1) OR blocker_id = ANY($1)",
         )
         .bind(&every_id)
-        .fetch_all(pool).await.unwrap_or_default();
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
         // Apply filters. Subtree focus comes first — it restricts the
         // universe of visible task_ids, then agent filter narrows further.
@@ -313,7 +376,9 @@ impl DagView {
             let mut keep: HashSet<Uuid> = HashSet::new();
             let mut frontier = vec![root];
             while let Some(id) = frontier.pop() {
-                if !keep.insert(id) { continue; }
+                if !keep.insert(id) {
+                    continue;
+                }
                 if let Some(children) = descendants.get(&id) {
                     frontier.extend(children.iter().copied());
                 }
@@ -321,7 +386,8 @@ impl DagView {
             allowed = Some(keep);
         }
 
-        let all_open: Vec<Task> = unfiltered_open.into_iter()
+        let all_open: Vec<Task> = unfiltered_open
+            .into_iter()
             .filter(|t| {
                 let owner = t.assignee.or(t.created_by);
                 match &self.agent_filter {
@@ -330,15 +396,18 @@ impl DagView {
                     AgentFilter::Unassigned => owner.is_none(),
                 }
             })
-            .filter(|t| allowed.as_ref().map(|s| s.contains(&t.task_id)).unwrap_or(true))
+            .filter(|t| {
+                allowed
+                    .as_ref()
+                    .map(|s| s.contains(&t.task_id))
+                    .unwrap_or(true)
+            })
             .collect();
 
         if all_open.is_empty() {
             self.rows.clear();
             let filter_desc = self.filter_description();
-            self.last_status = format!(
-                "no tasks match the current filters{}", filter_desc
-            );
+            self.last_status = format!("no tasks match the current filters{}", filter_desc);
             self.state.select(None);
             return Ok(());
         }
@@ -358,7 +427,8 @@ impl DagView {
         }
 
         // Stable repo order: by name asc.
-        let mut repo_order: Vec<&Repo> = repos.iter()
+        let mut repo_order: Vec<&Repo> = repos
+            .iter()
             .filter(|r| by_repo.contains_key(&r.repo_id))
             .collect();
         repo_order.sort_by(|a, b| a.name.cmp(&b.name));
@@ -379,20 +449,30 @@ impl DagView {
             let mut roots: Vec<&Task> = if let Some(focus) = self.subtree_focus {
                 tasks.iter().filter(|t| t.task_id == focus).collect()
             } else {
-                tasks.iter().filter(|t| {
-                    let no_blockers = blockers_of.get(&t.task_id)
-                        .map(|bs| bs.iter().all(|b| !by_id.contains_key(b)))
-                        .unwrap_or(true);
-                    matches!(t.kind, TaskKind::Epic) || no_blockers
-                }).collect()
+                tasks
+                    .iter()
+                    .filter(|t| {
+                        let no_blockers = blockers_of
+                            .get(&t.task_id)
+                            .map(|bs| bs.iter().all(|b| !by_id.contains_key(b)))
+                            .unwrap_or(true);
+                        matches!(t.kind, TaskKind::Epic) || no_blockers
+                    })
+                    .collect()
             };
             sort_tasks(&mut roots, self.sort);
 
             let mut visited: HashSet<Uuid> = HashSet::new();
             for r in &roots {
                 walk(
-                    r.task_id, 0, &repo.task_prefix, &children_of, &by_id,
-                    &mut visited, &mut rows, self.sort,
+                    r.task_id,
+                    0,
+                    &repo.task_prefix,
+                    &children_of,
+                    &by_id,
+                    &mut visited,
+                    &mut rows,
+                    self.sort,
                 );
             }
             // Cycle orphans and anything we missed.
@@ -422,10 +502,15 @@ impl DagView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(" Task graph — {} open across all repos  ·  sort: {}  (s=sort · a=agent · f=focus · c=clear){} ",
-            self.rows.iter().filter(|r| matches!(r, RenderRow::Task { .. })).count(),
+        let title = format!(
+            " Task graph — {} open across all repos  ·  sort: {}  (s=sort · a=agent · f=focus · c=clear){} ",
+            self.rows
+                .iter()
+                .filter(|r| matches!(r, RenderRow::Task { .. }))
+                .count(),
             self.sort.label(),
-            self.filter_description());
+            self.filter_description()
+        );
 
         if !self.loaded {
             render_dag_loading(frame, area, &title);
@@ -439,17 +524,24 @@ impl DagView {
                 Line::from(""),
                 Line::from(vec![
                     Span::raw("  Try "),
-                    Span::styled("ygg task create \"...\" --kind task --priority 2",
-                        Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        "ygg task create \"...\" --kind task --priority 2",
+                        Style::default().fg(Color::Cyan),
+                    ),
                     Span::raw(" from inside a project."),
                 ]),
                 Line::from(""),
                 if !self.last_status.is_empty() {
                     Line::from(vec![
                         Span::styled("  · ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(self.last_status.clone(), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            self.last_status.clone(),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ])
-                } else { Line::from("") },
+                } else {
+                    Line::from("")
+                },
             ];
             let para = ratatui::widgets::Paragraph::new(lines)
                 .block(Block::default().borders(Borders::ALL).title(title));
@@ -457,102 +549,147 @@ impl DagView {
             return;
         }
 
-        let items: Vec<ListItem> = self.rows.iter().map(|r| match r {
-            RenderRow::RepoHeader { prefix, name, open_count } => {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("  ▸ {name}"),
-                        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  ({prefix}, {open_count} open)"),
-                        Style::default().fg(Color::DarkGray)),
-                ]))
-            }
-            RenderRow::Task { task: t, prefix, depth, is_root: _, n_children } => {
-                let indent = "  ".repeat(depth + 1);
-                let connector = if *depth == 0 { "" } else { "└─ " };
+        let items: Vec<ListItem> = self
+            .rows
+            .iter()
+            .map(|r| match r {
+                RenderRow::RepoHeader {
+                    prefix,
+                    name,
+                    open_count,
+                } => ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  ▸ {name}"),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  ({prefix}, {open_count} open)"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])),
+                RenderRow::Task {
+                    task: t,
+                    prefix,
+                    depth,
+                    is_root: _,
+                    n_children,
+                } => {
+                    let indent = "  ".repeat(depth + 1);
+                    let connector = if *depth == 0 { "" } else { "└─ " };
 
-                let (kind_color, kind_glyph) = match t.kind {
-                    TaskKind::Epic    => (Color::Magenta, "◉"),
-                    TaskKind::Feature => (Color::Cyan,    "✚"),
-                    TaskKind::Bug     => (Color::Red,     "🐞"),
-                    TaskKind::Chore   => (Color::DarkGray,"·"),
-                    TaskKind::Task    => (Color::White,   "○"),
-                };
+                    let (kind_color, kind_glyph) = match t.kind {
+                        TaskKind::Epic => (Color::Magenta, "◉"),
+                        TaskKind::Feature => (Color::Cyan, "✚"),
+                        TaskKind::Bug => (Color::Red, "🐞"),
+                        TaskKind::Chore => (Color::DarkGray, "·"),
+                        TaskKind::Task => (Color::White, "○"),
+                    };
 
-                // Run-state glyph: not-started / active / blocked / done.
-                // "Open" means filed but nothing has worked on it yet —
-                // reads as empty-circle, not hourglass (which implies
-                // work in flight). Running tasks get bold + a filled
-                // arrow so they visibly stand out.
-                let (status_color, status_label, run_glyph, glyph_bold) = match t.status {
-                    TaskStatus::Open       => (Color::DarkGray, "open", "◯", false),
-                    TaskStatus::InProgress => (Color::Green,    "wip ", "▶", true),
-                    TaskStatus::Blocked    => (Color::Red,      "blkd", "⏸", false),
-                    TaskStatus::Closed     => {
-                        let failed = t.close_reason.as_deref()
-                            .map(|r| r.to_lowercase().contains("fail"))
-                            .unwrap_or(false);
-                        if failed { (Color::Red, "fail", "✗", false) }
-                        else { (Color::DarkGray, "done", "✓", false) }
-                    }
-                };
+                    // Run-state glyph: not-started / active / blocked / done.
+                    // "Open" means filed but nothing has worked on it yet —
+                    // reads as empty-circle, not hourglass (which implies
+                    // work in flight). Running tasks get bold + a filled
+                    // arrow so they visibly stand out.
+                    let (status_color, status_label, run_glyph, glyph_bold) = match t.status {
+                        TaskStatus::Open => (Color::DarkGray, "open", "◯", false),
+                        TaskStatus::InProgress => (Color::Green, "wip ", "▶", true),
+                        TaskStatus::Blocked => (Color::Red, "blkd", "⏸", false),
+                        TaskStatus::Closed => {
+                            let failed = t
+                                .close_reason
+                                .as_deref()
+                                .map(|r| r.to_lowercase().contains("fail"))
+                                .unwrap_or(false);
+                            if failed {
+                                (Color::Red, "fail", "✗", false)
+                            } else {
+                                (Color::DarkGray, "done", "✓", false)
+                            }
+                        }
+                    };
 
-                let prio_style = match t.priority {
-                    0 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    1 => Style::default().fg(Color::Yellow),
-                    2 => Style::default().fg(Color::White),
-                    _ => Style::default().fg(Color::DarkGray),
-                };
+                    let prio_style = match t.priority {
+                        0 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        1 => Style::default().fg(Color::Yellow),
+                        2 => Style::default().fg(Color::White),
+                        _ => Style::default().fg(Color::DarkGray),
+                    };
 
-                let children_badge = if *n_children > 0 {
-                    format!(" {}↓", n_children)
-                } else { String::new() };
+                    let children_badge = if *n_children > 0 {
+                        format!(" {}↓", n_children)
+                    } else {
+                        String::new()
+                    };
 
-                let id = format!("{}-{}", prefix, t.seq);
-                let age = humanize_age(t.updated_at);
-                // Older rows dim the age so the eye lands on fresh work first;
-                // a week+ gets a Yellow nudge so the "stale" case is obvious.
-                let age_style = {
-                    let secs = (chrono::Utc::now() - t.updated_at).num_seconds().max(0);
-                    if secs >= 7 * 86400 { Style::default().fg(Color::Yellow) }
-                    else if secs >= 86400 { Style::default().fg(Color::DarkGray) }
-                    else { Style::default().fg(Color::Gray) }
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::raw(indent),
-                    Span::raw(connector),
-                    Span::styled(format!("{run_glyph} "),
-                        if glyph_bold {
-                            Style::default().fg(status_color).add_modifier(Modifier::BOLD)
+                    let id = format!("{}-{}", prefix, t.seq);
+                    let age = humanize_age(t.updated_at);
+                    // Older rows dim the age so the eye lands on fresh work first;
+                    // a week+ gets a Yellow nudge so the "stale" case is obvious.
+                    let age_style = {
+                        let secs = (chrono::Utc::now() - t.updated_at).num_seconds().max(0);
+                        if secs >= 7 * 86400 {
+                            Style::default().fg(Color::Yellow)
+                        } else if secs >= 86400 {
+                            Style::default().fg(Color::DarkGray)
                         } else {
-                            Style::default().fg(status_color)
-                        }),
-                    Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
-                    Span::styled(status_label, Style::default().fg(status_color)),
-                    Span::raw(" "),
-                    Span::styled(format!("P{}", t.priority), prio_style),
-                    Span::raw(" "),
-                    Span::styled(id, Style::default().fg(Color::DarkGray)),
-                    Span::raw("  "),
-                    Span::styled(truncate(&t.title, 70),
-                        if matches!(t.status, TaskStatus::InProgress) {
-                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                        } else { Style::default() }),
-                    Span::styled(children_badge, Style::default().fg(Color::Cyan)),
-                    Span::styled(format!("  {age}"), age_style),
-                ]))
-            }
-        }).collect();
+                            Style::default().fg(Color::Gray)
+                        }
+                    };
+
+                    ListItem::new(Line::from(vec![
+                        Span::raw(indent),
+                        Span::raw(connector),
+                        Span::styled(
+                            format!("{run_glyph} "),
+                            if glyph_bold {
+                                Style::default()
+                                    .fg(status_color)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(status_color)
+                            },
+                        ),
+                        Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
+                        Span::styled(status_label, Style::default().fg(status_color)),
+                        Span::raw(" "),
+                        Span::styled(format!("P{}", t.priority), prio_style),
+                        Span::raw(" "),
+                        Span::styled(id, Style::default().fg(Color::DarkGray)),
+                        Span::raw("  "),
+                        Span::styled(
+                            truncate(&t.title, 70),
+                            if matches!(t.status, TaskStatus::InProgress) {
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                        Span::styled(children_badge, Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("  {age}"), age_style),
+                    ]))
+                }
+            })
+            .collect();
 
         let title = if let Some((_, label)) = &self.pending_delete {
             format!("{title}  ·  DELETE {label}? y / any=cancel")
         } else if !self.flash.is_empty() {
             format!("{title}  ·  {}", self.flash)
-        } else { title };
+        } else {
+            title
+        };
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
         frame.render_stateful_widget(list, area, &mut self.state);
 
         // Detail overlay floats over the list when toggled on.
@@ -564,8 +701,12 @@ impl DagView {
 
         // Inline-input overlay for 'n' (add child). Centered, small.
         if self.add_active {
-            render_add_overlay(frame, area, &self.add_buffer,
-                self.selected_task_ref().as_deref());
+            render_add_overlay(
+                frame,
+                area,
+                &self.add_buffer,
+                self.selected_task_ref().as_deref(),
+            );
         }
     }
 }
@@ -575,7 +716,12 @@ fn render_add_overlay(frame: &mut Frame, area: Rect, buffer: &str, parent: Optio
     let h = 6u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect { x, y, width: w, height: h };
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
     frame.render_widget(ratatui::widgets::Clear, popup);
 
     let hint = match parent {
@@ -587,14 +733,19 @@ fn render_add_overlay(frame: &mut Frame, area: Rect, buffer: &str, parent: Optio
         Line::from(vec![
             Span::raw("  "),
             Span::styled("▸ ", Style::default().fg(Color::Cyan)),
-            Span::styled(buffer.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                buffer.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Color::Cyan)),
         ]),
     ];
-    let para = ratatui::widgets::Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL)
+    let para = ratatui::widgets::Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
             .title(hint)
-            .border_style(Style::default().fg(Color::Cyan)));
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
     frame.render_widget(para, popup);
 }
 
@@ -604,7 +755,12 @@ pub fn render_detail_overlay(frame: &mut Frame, area: Rect, task: &Task, prefix:
     let popup_h = area.height.saturating_sub(4).min(24);
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect { x, y, width: popup_w, height: popup_h };
+    let popup = Rect {
+        x,
+        y,
+        width: popup_w,
+        height: popup_h,
+    };
 
     frame.render_widget(ratatui::widgets::Clear, popup);
 
@@ -614,40 +770,69 @@ pub fn render_detail_overlay(frame: &mut Frame, area: Rect, task: &Task, prefix:
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled(format!(" {id} "),
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {id} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             Span::styled(&task.title, Style::default().add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(vec![
-            Span::styled(format!("  {kind} · P{} · {status}", task.priority),
-                Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from(vec![Span::styled(
+            format!("  {kind} · P{} · {status}", task.priority),
+            Style::default().fg(Color::DarkGray),
+        )]),
         Line::from(""),
     ];
 
     if !task.description.is_empty() {
-        lines.push(Line::from(Span::styled("description",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
-        for l in task.description.lines() { lines.push(Line::from(format!("  {l}"))); }
+        lines.push(Line::from(Span::styled(
+            "description",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for l in task.description.lines() {
+            lines.push(Line::from(format!("  {l}")));
+        }
         lines.push(Line::from(""));
     }
     if let Some(a) = task.acceptance.as_ref().filter(|s| !s.is_empty()) {
-        lines.push(Line::from(Span::styled("acceptance",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
-        for l in a.lines() { lines.push(Line::from(format!("  {l}"))); }
+        lines.push(Line::from(Span::styled(
+            "acceptance",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for l in a.lines() {
+            lines.push(Line::from(format!("  {l}")));
+        }
         lines.push(Line::from(""));
     }
     if let Some(d) = task.design.as_ref().filter(|s| !s.is_empty()) {
-        lines.push(Line::from(Span::styled("design",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
-        for l in d.lines() { lines.push(Line::from(format!("  {l}"))); }
+        lines.push(Line::from(Span::styled(
+            "design",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for l in d.lines() {
+            lines.push(Line::from(format!("  {l}")));
+        }
         lines.push(Line::from(""));
     }
     if let Some(n) = task.notes.as_ref().filter(|s| !s.is_empty()) {
-        lines.push(Line::from(Span::styled("notes",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
-        for l in n.lines() { lines.push(Line::from(format!("  {l}"))); }
+        lines.push(Line::from(Span::styled(
+            "notes",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for l in n.lines() {
+            lines.push(Line::from(format!("  {l}")));
+        }
     }
 
     let block = Block::default()
@@ -670,8 +855,12 @@ fn walk(
     rows: &mut Vec<RenderRow>,
     sort: DagSort,
 ) {
-    if !visited.insert(id) { return; }
-    let Some(task) = by_id.get(&id).copied() else { return; };
+    if !visited.insert(id) {
+        return;
+    }
+    let Some(task) = by_id.get(&id).copied() else {
+        return;
+    };
     let children = children_of.get(&id).cloned().unwrap_or_default();
     let n_children = children.iter().filter(|c| by_id.contains_key(c)).count();
 
@@ -683,12 +872,23 @@ fn walk(
         n_children,
     });
 
-    let mut sorted: Vec<&Task> = children.iter()
-        .filter_map(|c| by_id.get(c).copied()).collect();
+    let mut sorted: Vec<&Task> = children
+        .iter()
+        .filter_map(|c| by_id.get(c).copied())
+        .collect();
     sort_tasks(&mut sorted, sort);
 
     for child in sorted {
-        walk(child.task_id, depth + 1, prefix, children_of, by_id, visited, rows, sort);
+        walk(
+            child.task_id,
+            depth + 1,
+            prefix,
+            children_of,
+            by_id,
+            visited,
+            rows,
+            sort,
+        );
     }
 }
 
@@ -711,29 +911,41 @@ fn kind_order(k: &TaskKind) -> u8 {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { return s.to_string(); }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
     let cut: String = s.chars().take(max).collect();
     format!("{cut}…")
 }
 
 fn humanize_age(ts: chrono::DateTime<chrono::Utc>) -> String {
     let secs = (chrono::Utc::now() - ts).num_seconds().max(0);
-    if secs < 60 { format!("{secs}s") }
-    else if secs < 3600 { format!("{}m", secs / 60) }
-    else if secs < 86400 { format!("{}h", secs / 3600) }
-    else if secs < 7 * 86400 { format!("{}d", secs / 86400) }
-    else { format!("{}w", secs / (7 * 86400)) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else if secs < 7 * 86400 {
+        format!("{}d", secs / 86400)
+    } else {
+        format!("{}w", secs / (7 * 86400))
+    }
 }
 
 /// Painted while the first refresh is in flight. A tiny epic-with-three-children
 /// ASCII DAG makes it obvious what's being fetched.
 fn render_dag_loading(frame: &mut Frame, area: Rect, title: &str) {
-    let dim  = Style::default().fg(Color::DarkGray);
-    let epic = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let epic = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
     let feat = Style::default().fg(Color::Cyan);
-    let tsk  = Style::default().fg(Color::White);
-    let chr  = Style::default().fg(Color::DarkGray);
-    let hint = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+    let tsk = Style::default().fg(Color::White);
+    let chr = Style::default().fg(Color::DarkGray);
+    let hint = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC);
 
     let art: Vec<Line> = vec![
         Line::from(""),
@@ -761,10 +973,11 @@ fn render_dag_loading(frame: &mut Frame, area: Rect, title: &str) {
         Line::from(Span::styled("growing the task graph…", hint)),
     ];
 
-    let block = Block::default().borders(Borders::ALL).title(title.to_string());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title.to_string());
     let para = ratatui::widgets::Paragraph::new(art)
         .block(block)
         .alignment(Alignment::Center);
     frame.render_widget(para, area);
 }
-

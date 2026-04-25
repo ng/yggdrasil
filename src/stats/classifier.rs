@@ -42,9 +42,10 @@ pub fn classify(tool_names: &[String]) -> TaskCategory {
         return TaskCategory::Coding;
     }
 
-    if tool_names.iter().any(|t| {
-        t.contains("test") || t.contains("Test")
-    }) {
+    if tool_names
+        .iter()
+        .any(|t| t.contains("test") || t.contains("Test"))
+    {
         return TaskCategory::Testing;
     }
 
@@ -52,9 +53,11 @@ pub fn classify(tool_names: &[String]) -> TaskCategory {
         return TaskCategory::Exploration;
     }
 
-    if has("Bash") && tool_names.iter().any(|t| {
-        t.contains("git") || t.contains("gh ")
-    }) {
+    if has("Bash")
+        && tool_names
+            .iter()
+            .any(|t| t.contains("git") || t.contains("gh "))
+    {
         return TaskCategory::Git;
     }
 
@@ -95,7 +98,11 @@ pub fn classify_from_text(text: &str) -> TaskCategory {
     if lower.contains("deploy") || lower.contains("build") || lower.contains("ci") {
         return TaskCategory::BuildDeploy;
     }
-    if lower.contains("git") || lower.contains("commit") || lower.contains("merge") || lower.contains("pr ") {
+    if lower.contains("git")
+        || lower.contains("commit")
+        || lower.contains("merge")
+        || lower.contains("pr ")
+    {
         return TaskCategory::Git;
     }
 
