@@ -203,11 +203,17 @@ pub async fn heartbeat_cli(
     let id = match run_id {
         Some(id) => id,
         None => {
-            // Pick the most recent running run for this agent.
-            let agent_id = resolve_agent_id(pool, agent_name).await?;
+            // yggdrasil-110: refuse to heartbeat a NULL agent_id. `IS NOT
+            // DISTINCT FROM NULL` matches every NULL row, so an unresolvable
+            // agent_name would heartbeat some *other* agent's run.
+            let agent_id = resolve_agent_id(pool, agent_name).await?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "agent {agent_name} not found; pass --run-id <uuid> to heartbeat explicitly"
+                )
+            })?;
             sqlx::query_scalar::<_, Uuid>(
                 r#"SELECT run_id FROM task_runs
-                   WHERE state = 'running' AND agent_id IS NOT DISTINCT FROM $1
+                   WHERE state = 'running' AND agent_id = $1
                    ORDER BY started_at DESC LIMIT 1"#,
             )
             .bind(agent_id)
@@ -377,13 +383,19 @@ pub async fn capture_outcome_cli(
     agent_name: &str,
     cwd: Option<std::path::PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let agent_id = resolve_agent_id(pool, agent_name).await?;
+    // yggdrasil-110: same NULL-cross-contamination issue as heartbeat. If the
+    // agent_name doesn't resolve, silently no-op rather than potentially
+    // capturing some other agent's run via `IS NOT DISTINCT FROM NULL`.
+    // Stop-hook tolerance: prefer skipping over blocking agent shutdown.
+    let Some(agent_id) = resolve_agent_id(pool, agent_name).await? else {
+        return Ok(());
+    };
 
     // Find the latest running run for this agent. SKIP LOCKED so a concurrent
     // scheduler tick doesn't deadlock with us.
     let run: Option<TaskRun> = sqlx::query_as::<_, TaskRun>(
         r#"SELECT * FROM task_runs
-           WHERE state = 'running' AND agent_id IS NOT DISTINCT FROM $1
+           WHERE state = 'running' AND agent_id = $1
            ORDER BY started_at DESC NULLS LAST, scheduled_at DESC
            LIMIT 1
            FOR UPDATE SKIP LOCKED"#,
@@ -440,7 +452,7 @@ pub async fn capture_outcome_cli(
         .emit(
             EventKind::RunTerminal,
             agent_name,
-            agent_id,
+            Some(agent_id),
             serde_json::json!({
                 "task_id": run.task_id,
                 "run_id": run.run_id,

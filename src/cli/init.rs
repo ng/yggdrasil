@@ -1162,3 +1162,32 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    /// yggdrasil-107: hook drift regression. The PreToolUse hook MUST bump
+    /// `task_runs.heartbeat_at` so the scheduler doesn't reap live agents as
+    /// crashed (yggdrasil-99). Drop this line from scripts/hooks and the
+    /// scheduler stops working as soon as a user runs `ygg init`.
+    #[test]
+    fn pre_tool_use_hook_includes_heartbeat() {
+        let content = include_str!("../../scripts/hooks/pre-tool-use.sh");
+        assert!(
+            content.contains("ygg run heartbeat"),
+            "pre-tool-use.sh must invoke `ygg run heartbeat` (see yggdrasil-99); installed hooks come from this file"
+        );
+    }
+
+    /// yggdrasil-107: same drift class. Stop hook owns the run-terminal
+    /// transition + commit/branch capture (yggdrasil-97). If this line goes
+    /// missing, runs never finalize and the scheduler reaper has to clean up
+    /// (slower, lossier).
+    #[test]
+    fn stop_hook_includes_capture_outcome() {
+        let content = include_str!("../../scripts/hooks/stop.sh");
+        assert!(
+            content.contains("ygg run capture-outcome"),
+            "stop.sh must invoke `ygg run capture-outcome` (see yggdrasil-97)"
+        );
+    }
+}

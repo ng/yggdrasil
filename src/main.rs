@@ -910,6 +910,15 @@ enum TaskAction {
     /// Clear poison state and let the scheduler retry. Resets the poisoned
     /// run to 'failed' and reopens the task.
     Unpoison { reference: String },
+    /// Toggle the `runnable` flag — controls whether the scheduler will
+    /// auto-spawn an agent for this task. Default is on; pass --off to
+    /// disable. yggdrasil-108.
+    Runnable {
+        reference: String,
+        /// Disable scheduler dispatch for this task.
+        #[arg(long)]
+        off: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1673,6 +1682,21 @@ async fn main() -> anyhow::Result<()> {
                     ygg::scheduler::unpoison(&pool, task.task_id).await?;
                     println!(
                         "{reference} unpoisoned (status reset to open; latest run flipped failed)"
+                    );
+                }
+                TaskAction::Runnable { reference, off } => {
+                    let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;
+                    let new_value = !off;
+                    sqlx::query(
+                        "UPDATE tasks SET runnable = $1, updated_at = now() WHERE task_id = $2",
+                    )
+                    .bind(new_value)
+                    .bind(task.task_id)
+                    .execute(&pool)
+                    .await?;
+                    println!(
+                        "{reference} runnable={}",
+                        if new_value { "TRUE" } else { "FALSE" }
                     );
                 }
             }
