@@ -8,6 +8,7 @@ pub mod locks_view;
 pub mod log_view;
 pub mod memgraph_view;
 pub mod motion;
+pub mod pane_filter;
 pub mod prompt_view;
 pub mod query_view;
 pub mod run_grid;
