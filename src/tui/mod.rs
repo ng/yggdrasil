@@ -3,6 +3,7 @@ pub mod attention;
 pub mod calendar_heatmap;
 pub mod dag_view;
 pub mod dashboard;
+pub mod drill_stack;
 pub mod eval_view;
 pub mod help;
 pub mod locks_view;
