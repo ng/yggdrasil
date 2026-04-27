@@ -17,6 +17,7 @@ pub mod pane_filter;
 pub mod prompt_view;
 pub mod query_view;
 pub mod run_grid;
+pub mod run_river;
 pub mod runs_view;
 pub mod saved_views;
 pub mod smooth_gauge;
