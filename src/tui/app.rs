@@ -1,3 +1,4 @@
+use chrono::Timelike;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
@@ -200,6 +201,44 @@ pub struct OpsStats {
     pub live_sessions: i64, // sessions.ended_at IS NULL
     pub ollama_ok: bool,
     pub db_ms: u64, // round-trip ping
+
+    /// yggdrasil-148: rolling burn rate. `agent_stats.period` is
+    /// hour-bucketed (see `src/stats/tracker.rs`), so the finest-grain
+    /// rate we can derive is "current hour so far". Treat the partial
+    /// hour as a rolling window: extrapolate to per-minute by dividing
+    /// by minutes elapsed since the top of the hour.
+    pub tokens_per_min: f64,
+    pub cost_today_usd: f64,
+    pub tokens_today: i64,
+}
+
+/// yggdrasil-148: hide cost displays during screencasts / demos. Honors
+/// the same truthy values as the other YGG_TUI_NO_* knobs.
+pub fn cost_hidden() -> bool {
+    matches!(
+        std::env::var("YGG_TUI_NO_COST").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+/// Rate-from-bucketed-counter helper. The hour-bucketed `agent_stats`
+/// table can only tell us "tokens since the top of the hour"; to get
+/// tokens/min we divide by minutes elapsed since the bucket boundary.
+/// Floor at 1 minute so a freshly-started session reads its first
+/// hour's tokens as a per-minute rate without dividing by zero.
+pub fn tokens_per_minute(hour_tokens: i64, minutes_into_hour: u32) -> f64 {
+    let denom = minutes_into_hour.max(1) as f64;
+    hour_tokens as f64 / denom
+}
+
+/// Compact "tokens/min" formatter. Rates above 1k humanize to `1.2k/min`
+/// so the orchestration panel column stays narrow.
+pub fn format_tokens_per_min(rate: f64) -> String {
+    if rate >= 1000.0 {
+        format!("{:.1}k tok/min", rate / 1000.0)
+    } else {
+        format!("{:.0} tok/min", rate)
+    }
 }
 
 /// yggdrasil-152: cell-level "value changed" flash. After a refresh, any
@@ -348,6 +387,12 @@ impl App {
             live_sessions: sessions,
             ollama_ok: self.ops_stats.ollama_ok,
             db_ms: db_start.elapsed().as_millis() as u64,
+            // Burn-rate fields are populated below once the cost-hidden
+            // gate clears; carry forward the previous tick's values
+            // until then so the flash decorator doesn't fire spuriously.
+            tokens_per_min: self.ops_stats.tokens_per_min,
+            cost_today_usd: self.ops_stats.cost_today_usd,
+            tokens_today: self.ops_stats.tokens_today,
         };
         self.flash.mark_changes(&prev, &next, 2);
         self.ops_stats = next;
@@ -361,6 +406,36 @@ impl App {
             tokio::time::timeout(std::time::Duration::from_millis(150), reqwest_ping())
                 .await
                 .unwrap_or(false);
+
+        // yggdrasil-148: burn-rate snapshot. One round-trip pulls the
+        // current-hour tokens (for tokens/min extrapolation) and the
+        // since-midnight UTC totals (for "today" cost + tokens).
+        if !cost_hidden() {
+            let burn: Option<(i64, f64, i64)> = sqlx::query_as(
+                r#"
+                SELECT
+                  COALESCE((SELECT SUM(input_tokens + output_tokens)::bigint
+                            FROM agent_stats
+                            WHERE period = date_trunc('hour', now())), 0),
+                  COALESCE((SELECT SUM(estimated_cost)::float8
+                            FROM agent_stats
+                            WHERE period >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'), 0.0),
+                  COALESCE((SELECT SUM(input_tokens + output_tokens)::bigint
+                            FROM agent_stats
+                            WHERE period >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'), 0)
+                "#,
+            )
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+            if let Some((hour_tokens, today_cost, today_tokens)) = burn {
+                let minutes_in: u32 = chrono::Utc::now().minute();
+                self.ops_stats.tokens_per_min = tokens_per_minute(hour_tokens, minutes_in);
+                self.ops_stats.cost_today_usd = today_cost;
+                self.ops_stats.tokens_today = today_tokens;
+            }
+        }
     }
 
     pub async fn handle_key(&mut self, pool: &PgPool, code: KeyCode, modifiers: KeyModifiers) {
@@ -981,7 +1056,7 @@ impl App {
         // yggdrasil-150: 10-glyph sparkline of recent alive-count history,
         // appended to the "● live" row so liveness trend is one glance.
         let alive_spark = self.alive_history.glyphs(10);
-        let stats_lines = vec![
+        let mut stats_lines = vec![
             Line::from(vec![
                 Span::styled("  ● ", Style::default().fg(Color::Green)),
                 Span::styled(
@@ -1012,6 +1087,22 @@ impl App {
             ]),
             stuck_line,
         ];
+        // yggdrasil-148: append the burn-rate line when cost displays
+        // are not hidden. Stays in the orchestration panel so the chrome
+        // doesn't grow another row.
+        if !cost_hidden() {
+            stats_lines.push(Line::from(vec![
+                Span::styled("  $ ", Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    format_tokens_per_min(s.tokens_per_min),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · today ${:.2}", s.cost_today_usd),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
         if !narrow {
             let stats_panel = ratatui::widgets::Paragraph::new(stats_lines).block(
                 ratatui::widgets::Block::default()
