@@ -930,6 +930,29 @@ enum TaskAction {
         #[arg(long)]
         json: bool,
     },
+    /// Move a task to the trash. Hidden from list/ready/blocked/dupes
+    /// until restored or hard-deleted by `ygg task purge`.
+    Delete { reference: String },
+    /// Pull a task back out of the trash.
+    Restore { reference: String },
+    /// List tasks currently in the trash.
+    Trash {
+        /// Scan every repo (default: current repo only).
+        #[arg(long)]
+        all: bool,
+        /// Emit results as JSON array.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hard-delete trashed tasks older than `days`. Intended for cron;
+    /// safe to run interactively. Default 30 days.
+    Purge {
+        #[arg(long, default_value_t = 30)]
+        days: i32,
+        /// Purge across every repo (default: current repo only).
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1697,6 +1720,18 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TaskAction::Lint { all, json } => {
                     ygg::cli::task_cmd::lint(&pool, all, json).await?;
+                }
+                TaskAction::Delete { reference } => {
+                    ygg::cli::task_cmd::delete(&pool, &reference).await?;
+                }
+                TaskAction::Restore { reference } => {
+                    ygg::cli::task_cmd::restore(&pool, &reference).await?;
+                }
+                TaskAction::Trash { all, json } => {
+                    ygg::cli::task_cmd::trash(&pool, all, json).await?;
+                }
+                TaskAction::Purge { days, all } => {
+                    ygg::cli::task_cmd::purge(&pool, days, all).await?;
                 }
                 TaskAction::Runnable { reference, off } => {
                     let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;

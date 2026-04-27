@@ -272,6 +272,7 @@ impl<'a> TaskRepo<'a> {
                FROM tasks
                WHERE ($1::UUID IS NULL OR repo_id = $1)
                  AND ($2::text[] IS NULL OR array_length($2, 1) IS NULL OR status::text = ANY($2))
+                 AND deleted_at IS NULL
                ORDER BY status, priority, seq"#,
         )
         .bind(repo_id)
@@ -295,10 +296,13 @@ impl<'a> TaskRepo<'a> {
             FROM tasks t
             WHERE t.repo_id = $1
               AND t.status IN ('open', 'in_progress')
+              AND t.deleted_at IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM task_deps d
                   JOIN tasks b ON b.task_id = d.blocker_id
-                  WHERE d.task_id = t.task_id AND b.status <> 'closed'
+                  WHERE d.task_id = t.task_id
+                    AND b.status <> 'closed'
+                    AND b.deleted_at IS NULL
               )
             ORDER BY t.priority, t.seq
             "#,
@@ -321,6 +325,7 @@ impl<'a> TaskRepo<'a> {
             FROM tasks
             WHERE ($1::UUID IS NULL OR repo_id = $1)
               AND status <> 'closed'
+              AND deleted_at IS NULL
               AND updated_at < now() - make_interval(days => $2)
             ORDER BY updated_at ASC, priority, seq
             "#,
@@ -343,6 +348,8 @@ impl<'a> TaskRepo<'a> {
             WHERE t.repo_id = $1
               AND t.status <> 'closed'
               AND b.status <> 'closed'
+              AND t.deleted_at IS NULL
+              AND b.deleted_at IS NULL
             ORDER BY t.priority, t.seq
             "#,
         )
@@ -627,6 +634,7 @@ impl<'a> TaskRepo<'a> {
              AND ($1::UUID IS NULL OR (a.repo_id = $1 AND b.repo_id = $1))
              AND (a.embedding <=> b.embedding) < $2
              AND a.status <> 'closed' AND b.status <> 'closed'
+             AND a.deleted_at IS NULL AND b.deleted_at IS NULL
             ORDER BY (a.embedding <=> b.embedding) ASC
             LIMIT $3
             "#,
@@ -780,6 +788,77 @@ impl<'a> TaskRepo<'a> {
             .execute(self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Soft-delete a task: stamp deleted_at = now() so list/ready/blocked
+    /// stop returning it. Already-deleted rows are touched again so the
+    /// 30-day purge clock resets — useful when a user restores then
+    /// re-deletes. Returns whether the row exists.
+    pub async fn soft_delete(&self, task_id: Uuid) -> Result<bool, sqlx::Error> {
+        let n = sqlx::query(
+            "UPDATE tasks SET deleted_at = now(), updated_at = now() WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .execute(self.pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Pull a task back from the trash. Returns whether anything changed —
+    /// `false` for a missing row or a row that was never deleted.
+    pub async fn restore(&self, task_id: Uuid) -> Result<bool, sqlx::Error> {
+        let n = sqlx::query(
+            r#"UPDATE tasks
+               SET deleted_at = NULL,
+                   updated_at = now()
+               WHERE task_id = $1 AND deleted_at IS NOT NULL"#,
+        )
+        .bind(task_id)
+        .execute(self.pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// List tasks that are in the trash. Scoped to `repo_id`, or global
+    /// when None. Newest-trashed first so a human reviewing what to restore
+    /// or purge sees recent moves at the top.
+    pub async fn list_trashed(&self, repo_id: Option<Uuid>) -> Result<Vec<Task>, sqlx::Error> {
+        sqlx::query_as::<_, Task>(
+            r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
+                      kind, status, priority, created_by, assignee, human_flag,
+                      created_at, updated_at, closed_at, close_reason, relevance, external_ref
+               FROM tasks
+               WHERE deleted_at IS NOT NULL
+                 AND ($1::UUID IS NULL OR repo_id = $1)
+               ORDER BY deleted_at DESC, seq"#,
+        )
+        .bind(repo_id)
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// Hard-delete every trashed row whose `deleted_at` is older than
+    /// `older_than_days`. Returns the number of rows removed. FK cascades
+    /// take care of dependent task_deps / task_events / etc rows.
+    pub async fn purge_older_than(
+        &self,
+        older_than_days: i32,
+        repo_id: Option<Uuid>,
+    ) -> Result<u64, sqlx::Error> {
+        let n = sqlx::query(
+            r#"DELETE FROM tasks
+               WHERE deleted_at IS NOT NULL
+                 AND deleted_at < now() - make_interval(days => $1)
+                 AND ($2::UUID IS NULL OR repo_id = $2)"#,
+        )
+        .bind(older_than_days)
+        .bind(repo_id)
+        .execute(self.pool)
+        .await?
+        .rows_affected();
+        Ok(n)
     }
 
     pub async fn stats(&self, repo_id: Option<Uuid>) -> Result<TaskStats, sqlx::Error> {
