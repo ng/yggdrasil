@@ -16,6 +16,7 @@ pub mod motion;
 pub mod multi_select;
 pub mod palette;
 pub mod pane_filter;
+pub mod pip;
 pub mod prompt_view;
 pub mod query_view;
 pub mod retry_collapse;
