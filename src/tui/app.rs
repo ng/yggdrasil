@@ -56,6 +56,8 @@ pub struct App {
     pub status_tail: Vec<(String, String, String)>, // (hh:mm:ss, kind, one-line detail)
     /// Right-hand-side orchestration stats (filled each refresh tick).
     pub ops_stats: OpsStats,
+    /// Per-cell flash state for value changes between refreshes (yggdrasil-152).
+    pub flash: FlashState,
     /// When Enter on the Workers panel fires, we defer the actual tmux
     /// attach until after ratatui's alternate-screen teardown to avoid
     /// a half-mode-switched terminal. Set here, read in `run` post-loop.
@@ -129,7 +131,7 @@ impl SparkBuffer {
 
 /// Lightweight orchestration snapshot rendered on the right side of the
 /// global status strip. Cheap queries — every 500ms tick is fine.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 pub struct OpsStats {
     pub agents_alive: i64,  // != idle and updated in last 10m
     pub agents_stuck: i64,  // active-state but updated > 10m ago
@@ -137,6 +139,71 @@ pub struct OpsStats {
     pub live_sessions: i64, // sessions.ended_at IS NULL
     pub ollama_ok: bool,
     pub db_ms: u64, // round-trip ping
+}
+
+/// yggdrasil-152: cell-level "value changed" flash. After a refresh, any
+/// number that moved between previous and current snapshots gets painted
+/// REVERSED for `flash_frames` paint passes, then settles back. Cheap
+/// per-pane fanout for any future panes that want this effect — start
+/// with the ops panel, expand later.
+///
+/// Disable globally with `YGG_TUI_NO_FLASH=1`.
+#[derive(Default, Clone)]
+pub struct FlashState {
+    pub agents_alive: u8,
+    pub agents_stuck: u8,
+    pub tasks_running: u8,
+    pub live_sessions: u8,
+}
+
+impl FlashState {
+    /// Bump the cells that differ from `prev`. Default 2 frames at the
+    /// pre-existing 500ms tick = ~1s of inverted paint, the sweet spot
+    /// where the eye catches it without it feeling laggy.
+    pub fn mark_changes(&mut self, prev: &OpsStats, next: &OpsStats, frames: u8) {
+        let frames = if flash_disabled() { 0 } else { frames };
+        if prev.agents_alive != next.agents_alive {
+            self.agents_alive = frames;
+        }
+        if prev.agents_stuck != next.agents_stuck {
+            self.agents_stuck = frames;
+        }
+        if prev.tasks_running != next.tasks_running {
+            self.tasks_running = frames;
+        }
+        if prev.live_sessions != next.live_sessions {
+            self.live_sessions = frames;
+        }
+    }
+
+    /// Saturating decrement on every paint pass; cells return to their
+    /// quiet style once the counter hits zero.
+    pub fn tick_paint(&mut self) {
+        self.agents_alive = self.agents_alive.saturating_sub(1);
+        self.agents_stuck = self.agents_stuck.saturating_sub(1);
+        self.tasks_running = self.tasks_running.saturating_sub(1);
+        self.live_sessions = self.live_sessions.saturating_sub(1);
+    }
+
+    pub fn is_flashing_alive(&self) -> bool {
+        self.agents_alive > 0
+    }
+    pub fn is_flashing_stuck(&self) -> bool {
+        self.agents_stuck > 0
+    }
+    pub fn is_flashing_tasks(&self) -> bool {
+        self.tasks_running > 0
+    }
+    pub fn is_flashing_sessions(&self) -> bool {
+        self.live_sessions > 0
+    }
+}
+
+fn flash_disabled() -> bool {
+    matches!(
+        std::env::var("YGG_TUI_NO_FLASH").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
 }
 
 impl App {
@@ -159,6 +226,7 @@ impl App {
             query_focus: false,
             status_tail: Vec::new(),
             ops_stats: OpsStats::default(),
+            flash: FlashState::default(),
             attach_pending: None,
             alive_history: SparkBuffer::new(SPARK_HISTORY_LEN),
         }
@@ -207,11 +275,20 @@ impl App {
         .fetch_one(pool)
         .await
         .unwrap_or((0, 0, 0, 0));
-        self.ops_stats.agents_alive = alive;
-        self.ops_stats.agents_stuck = stuck;
-        self.ops_stats.tasks_running = running;
-        self.ops_stats.live_sessions = sessions;
-        self.ops_stats.db_ms = db_start.elapsed().as_millis() as u64;
+        // yggdrasil-152: snapshot prev → next so the renderer flashes any
+        // moved cells. Two paint passes ≈ ~1s of inverted highlight at the
+        // existing 500ms refresh tick.
+        let prev = self.ops_stats.clone();
+        let next = OpsStats {
+            agents_alive: alive,
+            agents_stuck: stuck,
+            tasks_running: running,
+            live_sessions: sessions,
+            ollama_ok: self.ops_stats.ollama_ok,
+            db_ms: db_start.elapsed().as_millis() as u64,
+        };
+        self.flash.mark_changes(&prev, &next, 2);
+        self.ops_stats = next;
         // yggdrasil-150: feed the in-panel sparkline.
         self.alive_history.push(alive.max(0) as u64);
 
@@ -778,6 +855,16 @@ impl App {
         } else {
             Style::default().fg(Color::Red)
         };
+        // yggdrasil-152: REVERSED for two paint passes when the cell value
+        // moved between refreshes. Helper closure so each cell adds the
+        // modifier conditionally without scattering the same style match.
+        let with_flash = |base: Style, flashing: bool| -> Style {
+            if flashing {
+                base.add_modifier(Modifier::REVERSED)
+            } else {
+                base
+            }
+        };
         let stuck_line = if s.agents_stuck > 0 {
             Line::from(vec![
                 Span::styled(
@@ -788,9 +875,12 @@ impl App {
                 ),
                 Span::styled(
                     format!("{} stuck", s.agents_stuck),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    with_flash(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                        self.flash.is_flashing_stuck(),
+                    ),
                 ),
             ])
         } else {
@@ -811,19 +901,28 @@ impl App {
                 Span::styled("  ● ", Style::default().fg(Color::Green)),
                 Span::styled(
                     format!("{} live", s.agents_alive),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    with_flash(
+                        Style::default().add_modifier(Modifier::BOLD),
+                        self.flash.is_flashing_alive(),
+                    ),
                 ),
                 Span::styled(format!(" {alive_spark}"), Style::default().fg(Color::Green)),
                 Span::styled(
                     format!(" / {} sessions", s.live_sessions),
-                    Style::default().fg(Color::DarkGray),
+                    with_flash(
+                        Style::default().fg(Color::DarkGray),
+                        self.flash.is_flashing_sessions(),
+                    ),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("  ▶ ", Style::default().fg(Color::Cyan)),
                 Span::styled(
                     format!("{} tasks running", s.tasks_running),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    with_flash(
+                        Style::default().add_modifier(Modifier::BOLD),
+                        self.flash.is_flashing_tasks(),
+                    ),
                 ),
             ]),
             stuck_line,
@@ -836,6 +935,9 @@ impl App {
             );
             frame.render_widget(stats_panel, strip[1]);
         }
+        // Decay the flash counters after the paint that consumed them. One
+        // flash mark = N full paints, regardless of refresh cadence.
+        self.flash.tick_paint();
     }
 }
 
