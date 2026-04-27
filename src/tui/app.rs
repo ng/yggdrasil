@@ -80,6 +80,42 @@ pub struct App {
     /// Help overlay state (yggdrasil-132). Toggled by `?`; while open
     /// every key but `?` and Esc is intercepted.
     pub help: super::help::HelpOverlay,
+    /// Repo-vs-all scope (yggdrasil-134). Many panes default to current
+    /// repo; toggling to All exposes cross-repo state. Stored centrally
+    /// so panes share the same scope rather than each tracking its own.
+    pub scope: Scope,
+}
+
+/// Which slice of the database the panes filter to. `Repo` is the
+/// current cwd's registered repo (the default — most users care only
+/// about today's work); `All` widens every cwd-scoped query to global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Repo,
+    All,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self::Repo
+    }
+}
+
+impl Scope {
+    pub fn toggle(&mut self) {
+        *self = match self {
+            Self::Repo => Self::All,
+            Self::All => Self::Repo,
+        };
+    }
+
+    /// Short label for the chrome ("repo" / "all").
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Repo => "repo",
+            Self::All => "all",
+        }
+    }
 }
 
 impl App {
@@ -368,6 +404,7 @@ impl App {
             toasts: Vec::new(),
             detail_overlay: None,
             help: super::help::HelpOverlay::default(),
+            scope: Scope::default(),
         }
     }
 
@@ -788,6 +825,13 @@ impl App {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
             }
+            // yggdrasil-134: global repo/all scope toggle. Outside the
+            // dashboard (which has its own session-scope on 'S'), 'S'
+            // flips between current-repo and all-repos for any pane
+            // that consults App.scope.
+            KeyCode::Char('S') => {
+                self.scope.toggle();
+            }
             KeyCode::Char('r')
                 if self.active_view == ActiveView::Dashboard
                     && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
@@ -1057,6 +1101,14 @@ impl App {
                 "↑↓ select  ·  rows=tasks  ·  cols=recent attempts (newest left)"
             }
         };
+        // yggdrasil-134: scope chip on the right of the help row makes
+        // the current scope (repo / all) and the toggle key visible.
+        let scope_chip = Span::styled(
+            format!("  scope: {}  S=toggle  ?=help", self.scope.label()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
         let hint_line = Line::from(vec![
             nav_span,
             Span::styled(
@@ -1065,6 +1117,7 @@ impl App {
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::ITALIC),
             ),
+            scope_chip,
         ]);
         frame.render_widget(hint_line, chunks[1]);
 
