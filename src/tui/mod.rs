@@ -1,4 +1,5 @@
 pub mod app;
+pub mod calendar_heatmap;
 pub mod dag_view;
 pub mod dashboard;
 pub mod eval_view;
