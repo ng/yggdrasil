@@ -26,6 +26,7 @@ pub mod run_river;
 pub mod runs_view;
 pub mod saved_views;
 pub mod smooth_gauge;
+pub mod spinner;
 pub mod task_view;
 pub mod tasks_view;
 pub mod trace_view;
