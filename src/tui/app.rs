@@ -157,6 +157,29 @@ impl App {
     }
 
     pub async fn handle_key(&mut self, pool: &PgPool, code: KeyCode, modifiers: KeyModifiers) {
+        // yggdrasil-155: Tasks-pane inline rename — capture all keys for
+        // the input buffer. Esc cancels, Enter commits, Backspace pops,
+        // ctrl-c quits. Sits ahead of every other handler so the buffer
+        // can't be drained by global keys.
+        if self.active_view == ActiveView::Tasks && self.tasks.rename_mode() {
+            match code {
+                KeyCode::Esc => self.tasks.rename_cancel(),
+                KeyCode::Backspace => self.tasks.rename_pop(),
+                KeyCode::Enter => {
+                    if let Err(e) = self.tasks.rename_commit(pool).await {
+                        self.tasks.flash = format!("rename failed: {e}");
+                    }
+                    let _ = self.tasks.refresh(pool).await;
+                }
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.should_quit = true;
+                }
+                KeyCode::Char(c) => self.tasks.rename_push(c),
+                _ => {}
+            }
+            return;
+        }
+
         // DAG add-mode ('n' input overlay) captures most keys. Takes
         // precedence over Query focus since they never overlap.
         if self.active_view == ActiveView::Dag && self.dag.add_mode() {
@@ -332,6 +355,12 @@ impl App {
             KeyCode::Char('c') if self.active_view == ActiveView::Dag => {
                 self.dag.clear_filters();
                 let _ = self.dag.refresh(pool).await;
+            }
+            // yggdrasil-155: lazygit-style inline rename of the selected
+            // task's title. 'r' is already taken (run-task), so 'e' for
+            // edit-title — discoverable via the help row's hint.
+            KeyCode::Char('e') if self.active_view == ActiveView::Tasks => {
+                self.tasks.rename_begin();
             }
             KeyCode::Char('r') if self.active_view == ActiveView::Tasks => {
                 // Run the selected task from Tasks pane. Mirrors DAG 'r'.
@@ -571,7 +600,7 @@ impl App {
             ActiveView::Dag => {
                 "Enter=detail  r=run  n=add  ⌫=delete  s=sort  a=agent  f=focus  c=clear"
             }
-            ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  r=run  ·  ⌫=delete",
+            ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  e=rename  ·  r=run  ·  ⌫=delete",
             ActiveView::Trace => "↑↓ select",
             ActiveView::Query => "type then Enter  ·  Esc=leave",
             ActiveView::Logs => "f=filter  Enter=detail",
