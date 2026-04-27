@@ -209,16 +209,11 @@ impl EvalView {
             n => format!("{n}h"),
         };
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(8), // retrieval
-                Constraint::Length(7), // classifier + cache
-                Constraint::Length(9), // savings (window + lifetime)
-                Constraint::Length(5), // activity
-                Constraint::Min(0),    // drop reasons
-            ])
-            .split(area);
+        // yggdrasil-157: ratatui-macros::vertical! cuts the boilerplate.
+        // Constraint slots: retrieval / classifier+cache / savings /
+        // activity / drop-reasons (fills remaining).
+        use ratatui_macros::vertical;
+        let chunks = vertical![==8, ==7, ==9, ==5, >=0].split(area);
 
         let ref_rate = if self.hits > 0 {
             (self.referenced as f64 / self.hits as f64 * 100.0) as i64

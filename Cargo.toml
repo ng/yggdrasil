@@ -69,6 +69,17 @@ anyhow = "1"
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"
+# Officially-blessed ratatui ecosystem (yggdrasil-157):
+# - ratatui-macros: cuts layout/constraint boilerplate
+# - ansi-to-tui: render captured agent stdout (with SGR codes) as Text
+# - tui-popup: reusable centered overlay primitive
+# - tui-input: headless single-line input (used by palette + inline rename)
+# - crokey: declarative crossterm key-combo parsing for keybind registry
+ratatui-macros = "0.6"
+ansi-to-tui = "7"
+tui-popup = "0.6"
+tui-input = "0.11"
+crokey = "1"
 
 # Progress / spinners
 indicatif = "0.17"
