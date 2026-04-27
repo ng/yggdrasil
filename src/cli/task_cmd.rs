@@ -851,6 +851,99 @@ pub async fn link(
     Ok(())
 }
 
+/// Soft-delete a task: stamp deleted_at = now() so it stops appearing in
+/// list/ready/blocked/dupes. Idempotent: re-deleting a trashed task
+/// touches deleted_at (resets the purge clock).
+pub async fn delete(pool: &sqlx::PgPool, reference: &str) -> Result<(), anyhow::Error> {
+    let t = resolve_task(pool, reference).await?;
+    let existed = TaskRepo::new(pool).soft_delete(t.task_id).await?;
+    if existed {
+        println!("{reference} → trashed (restore with `ygg task restore {reference}`)");
+    } else {
+        anyhow::bail!("{reference}: not found");
+    }
+    Ok(())
+}
+
+/// Pull a task back from the trash.
+pub async fn restore(pool: &sqlx::PgPool, reference: &str) -> Result<(), anyhow::Error> {
+    let t = resolve_task(pool, reference).await?;
+    let changed = TaskRepo::new(pool).restore(t.task_id).await?;
+    if changed {
+        println!("{reference} → restored");
+    } else {
+        println!("{reference}: not in trash");
+    }
+    Ok(())
+}
+
+/// List trashed tasks (scope: current repo or --all). The `ygg task list`
+/// view stays clean; trash is its own pane.
+pub async fn trash(pool: &sqlx::PgPool, all_repos: bool, json: bool) -> Result<(), anyhow::Error> {
+    let repo_id = if all_repos {
+        None
+    } else {
+        Some(resolve_cwd_repo(pool).await?.repo_id)
+    };
+    let rows = TaskRepo::new(pool).list_trashed(repo_id).await?;
+
+    let prefixes: std::collections::HashMap<Uuid, String> = if rows.is_empty() {
+        Default::default()
+    } else {
+        let ids: Vec<Uuid> = rows.iter().map(|t| t.repo_id).collect();
+        let pairs: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT repo_id, task_prefix FROM repos WHERE repo_id = ANY($1)")
+                .bind(&ids)
+                .fetch_all(pool)
+                .await?;
+        pairs.into_iter().collect()
+    };
+
+    if json {
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "ref": format!(
+                        "{}-{}",
+                        prefixes.get(&t.repo_id).map(String::as_str).unwrap_or("?"),
+                        t.seq
+                    ),
+                    "title": t.title,
+                    "status": t.status.to_string(),
+                    "kind": t.kind.to_string(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("trash is empty");
+        return Ok(());
+    }
+    println!("{} trashed task(s):", rows.len());
+    for t in &rows {
+        let prefix = prefixes.get(&t.repo_id).map(String::as_str).unwrap_or("?");
+        println!("  {prefix}-{}  [{}]  {}", t.seq, t.status, t.title);
+    }
+    Ok(())
+}
+
+/// Hard-delete every trashed task whose deleted_at is older than `days`.
+/// Intended for cron / launchd; safe to run interactively. Default 30 days.
+pub async fn purge(pool: &sqlx::PgPool, days: i32, all_repos: bool) -> Result<(), anyhow::Error> {
+    let repo_id = if all_repos {
+        None
+    } else {
+        Some(resolve_cwd_repo(pool).await?.repo_id)
+    };
+    let n = TaskRepo::new(pool).purge_older_than(days, repo_id).await?;
+    println!("purged {n} trashed task(s) older than {days}d");
+    Ok(())
+}
+
 pub async fn stats(pool: &sqlx::PgPool, all_repos: bool, json: bool) -> Result<(), anyhow::Error> {
     let repo_id = if all_repos {
         None
