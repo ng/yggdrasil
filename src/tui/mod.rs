@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod drill_stack;
 pub mod eval_view;
 pub mod help;
+pub mod lock_gantt;
 pub mod locks_view;
 pub mod log_view;
 pub mod memgraph_view;
