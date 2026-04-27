@@ -18,6 +18,7 @@ use super::log_view::LogView;
 use super::memgraph_view::MemGraphView;
 use super::prompt_view::PromptView;
 use super::query_view::QueryView;
+use super::run_grid::RunGridView;
 use super::runs_view::RunsView;
 use super::tasks_view::TasksView;
 use super::trace_view::TraceView;
@@ -35,6 +36,7 @@ pub enum ActiveView {
     Prompt,
     Locks,
     Runs,
+    RunGrid,
 }
 
 pub struct App {
@@ -51,6 +53,7 @@ pub struct App {
     pub prompt: PromptView,
     pub locks: LocksView,
     pub runs: RunsView,
+    pub run_grid: RunGridView,
     pub agent_name: String,
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
@@ -351,6 +354,7 @@ impl App {
             prompt: PromptView::new(),
             locks: LocksView::new(),
             runs: RunsView::new(),
+            run_grid: RunGridView::new(),
             agent_name,
             query_focus: false,
             status_tail: Vec::new(),
@@ -658,6 +662,7 @@ impl App {
             KeyCode::Char('9') => self.set_view(ActiveView::Prompt),
             KeyCode::Char('0') => self.set_view(ActiveView::Locks),
             KeyCode::Char('R') => self.set_view(ActiveView::Runs),
+            KeyCode::Char('G') => self.set_view(ActiveView::RunGrid),
             // yggdrasil-151: open the detail overlay populated from the
             // current pane's selected row. Per-pane adapters: Tasks
             // shows the full title + description + acceptance + design
@@ -806,6 +811,7 @@ impl App {
                 ActiveView::Prompt => self.prompt.select_prev(),
                 ActiveView::Locks => self.locks.select_prev(),
                 ActiveView::Runs => self.runs.select_prev(),
+                ActiveView::RunGrid => self.run_grid.select_prev(),
                 _ => {}
             },
             KeyCode::Down => match self.active_view {
@@ -821,6 +827,7 @@ impl App {
                 ActiveView::Prompt => self.prompt.select_next(),
                 ActiveView::Locks => self.locks.select_next(),
                 ActiveView::Runs => self.runs.select_next(),
+                ActiveView::RunGrid => self.run_grid.select_next(),
                 _ => {}
             },
             KeyCode::PageUp if self.active_view == ActiveView::Prompt => {
@@ -889,13 +896,14 @@ impl App {
             ActiveView::Eval => ActiveView::Prompt,
             ActiveView::Prompt => ActiveView::Locks,
             ActiveView::Locks => ActiveView::Runs,
-            ActiveView::Runs => ActiveView::Dashboard,
+            ActiveView::Runs => ActiveView::RunGrid,
+            ActiveView::RunGrid => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::Runs,
+            ActiveView::Dashboard => ActiveView::RunGrid,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
@@ -906,6 +914,7 @@ impl App {
             ActiveView::Prompt => ActiveView::Eval,
             ActiveView::Locks => ActiveView::Prompt,
             ActiveView::Runs => ActiveView::Locks,
+            ActiveView::RunGrid => ActiveView::Runs,
         };
         self.set_view(prev);
     }
@@ -982,6 +991,7 @@ impl App {
                 ("9", ActiveView::Prompt),
                 ("0", ActiveView::Locks),
                 ("R", ActiveView::Runs),
+                ("G", ActiveView::RunGrid),
             ]
             .iter()
             .map(|(k, v)| tab(k, self.active_view == *v))
@@ -999,6 +1009,7 @@ impl App {
                 tab("[9] Prompt", self.active_view == ActiveView::Prompt),
                 tab("[0] Locks", self.active_view == ActiveView::Locks),
                 tab("[R] Runs", self.active_view == ActiveView::Runs),
+                tab("[G] Grid", self.active_view == ActiveView::RunGrid),
             ]
         };
         frame.render_widget(Line::from(tabs), chunks[0]);
@@ -1021,6 +1032,9 @@ impl App {
             ActiveView::Prompt => "↑↓ pins · PgUp/PgDn scroll MEMORY.md",
             ActiveView::Locks => "↑↓ select  ·  r=release",
             ActiveView::Runs => "↑↓ select  ·  f=cycle filter (all/live/terminal)",
+            ActiveView::RunGrid => {
+                "↑↓ select  ·  rows=tasks  ·  cols=recent attempts (newest left)"
+            }
         };
         let hint_line = Line::from(vec![
             nav_span,
@@ -1045,6 +1059,7 @@ impl App {
             ActiveView::Prompt => self.prompt.render(frame, chunks[2]),
             ActiveView::Locks => self.locks.render(frame, chunks[2]),
             ActiveView::Runs => self.runs.render(frame, chunks[2]),
+            ActiveView::RunGrid => self.run_grid.render(frame, chunks[2]),
         }
 
         // Render any pending toasts above the persistent status strip.
@@ -1469,6 +1484,9 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                 }
                 ActiveView::Runs => {
                     app.runs.refresh(pool).await?;
+                }
+                ActiveView::RunGrid => {
+                    app.run_grid.refresh(pool).await?;
                 }
                 _ => {}
             }

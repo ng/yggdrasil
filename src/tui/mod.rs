@@ -8,6 +8,7 @@ pub mod memgraph_view;
 pub mod motion;
 pub mod prompt_view;
 pub mod query_view;
+pub mod run_grid;
 pub mod runs_view;
 pub mod smooth_gauge;
 pub mod task_view;
