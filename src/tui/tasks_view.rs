@@ -32,6 +32,11 @@ pub struct TasksView {
     /// Carries the display label so the confirm prompt stays accurate
     /// even if the selection moves.
     pub pending_delete: Option<(Uuid, String)>,
+    /// yggdrasil-155: inline rename buffer. `Some((task_id, edited_title))`
+    /// while the user is editing the selected row's title in place; commit
+    /// writes back via TaskRepo::update, cancel discards. None means the
+    /// pane is in normal nav mode.
+    pub rename: Option<(Uuid, String)>,
 }
 
 impl TasksView {
@@ -46,7 +51,71 @@ impl TasksView {
             flash: String::new(),
             detail_open: false,
             pending_delete: None,
+            rename: None,
         }
+    }
+
+    pub fn rename_mode(&self) -> bool {
+        self.rename.is_some()
+    }
+
+    /// Begin renaming the selected task. Pre-populates the buffer with
+    /// the current title so the user can edit rather than retype. No-op
+    /// when the selection isn't on a Task row.
+    pub fn rename_begin(&mut self) {
+        let Some(i) = self.state.selected() else {
+            return;
+        };
+        if let Some(TaskRow::Task { task, .. }) = self.rows.get(i) {
+            self.rename = Some((task.task_id, task.title.clone()));
+        }
+    }
+
+    pub fn rename_cancel(&mut self) {
+        self.rename = None;
+    }
+
+    pub fn rename_push(&mut self, c: char) {
+        if let Some((_, buf)) = &mut self.rename {
+            buf.push(c);
+        }
+    }
+
+    pub fn rename_pop(&mut self) {
+        if let Some((_, buf)) = &mut self.rename {
+            buf.pop();
+        }
+    }
+
+    pub fn rename_buffer(&self) -> Option<&str> {
+        self.rename.as_ref().map(|(_, b)| b.as_str())
+    }
+
+    /// Commit the rename to the database and clear the buffer. Reload
+    /// happens on the caller's next refresh tick.
+    pub async fn rename_commit(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
+        let Some((task_id, title)) = self.rename.take() else {
+            return Ok(());
+        };
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            // Empty title would clear the row entirely; treat empty as
+            // cancel rather than silently nuking the title.
+            self.flash = "rename cancelled (empty)".into();
+            return Ok(());
+        }
+        TaskRepo::new(pool)
+            .update(
+                task_id,
+                None,
+                crate::models::task::TaskUpdate {
+                    title: Some(trimmed),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.flash = format!("renamed to {trimmed}");
+        Ok(())
     }
 
     /// task_id + display label ("yggdrasil-42") for the selected row, if any.
