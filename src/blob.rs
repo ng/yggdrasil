@@ -73,6 +73,27 @@ impl BlobStore {
         Ok(Self { root })
     }
 
+    /// Default global root: `$YGG_BLOB_DIR` if set, else
+    /// `$XDG_DATA_HOME/yggdrasil` if set, else `~/.local/share/yggdrasil`.
+    /// Falls back to `/tmp/yggdrasil` if home discovery fails.
+    pub fn default_root() -> PathBuf {
+        if let Ok(p) = std::env::var("YGG_BLOB_DIR") {
+            return PathBuf::from(p);
+        }
+        if let Ok(p) = std::env::var("XDG_DATA_HOME") {
+            return PathBuf::from(p).join("yggdrasil");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(".local/share/yggdrasil");
+        }
+        PathBuf::from("/tmp/yggdrasil")
+    }
+
+    /// Open the default global blob store.
+    pub fn open_default() -> Result<Self, BlobError> {
+        Self::new(Self::default_root())
+    }
+
     fn path_for(&self, r: &BlobRef) -> PathBuf {
         let s = r.as_str();
         self.root.join(&s[0..2]).join(&s[2..4]).join(&s[4..])
