@@ -23,7 +23,7 @@ pub enum AttemptCell {
 
 /// Compact mirror of `RunState` keyed for rendering. Kept narrow on
 /// purpose — the grid is a glance view; the Runs pane carries detail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GridState {
     Scheduled,
     Ready,
@@ -208,6 +208,19 @@ impl RunGridView {
             return;
         }
 
+        // Split area: table on top, single-line legend on the bottom.
+        // The table's Block carries its own borders, so the legend
+        // line sits flush below the bottom border.
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Min(3),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .split(area);
+        let table_area = chunks[0];
+        let legend_area = chunks[1];
+
         let header = {
             let mut cells: Vec<Cell> = vec![
                 Cell::from("task").style(Style::default().fg(Color::DarkGray)),
@@ -257,8 +270,42 @@ impl RunGridView {
             )
             .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-        frame.render_stateful_widget(table, area, &mut self.state);
+        frame.render_stateful_widget(table, table_area, &mut self.state);
+        frame.render_widget(legend_paragraph(), legend_area);
     }
+}
+
+/// Glyph + label pairs — single source of truth for the legend so the
+/// chrome and the GridState::style() picker can't drift.
+pub const LEGEND_ENTRIES: &[(GridState, &str)] = &[
+    (GridState::Succeeded, "ok"),
+    (GridState::Retrying, "retry"),
+    (GridState::Failed, "fail"),
+    (GridState::Crashed, "crash"),
+    (GridState::Running, "run"),
+    (GridState::Ready, "ready"),
+    (GridState::Scheduled, "queued"),
+    (GridState::Cancelled, "cancel"),
+    (GridState::Poison, "poison"),
+];
+
+fn legend_paragraph() -> Paragraph<'static> {
+    let mut spans: Vec<ratatui::text::Span<'static>> = vec![ratatui::text::Span::styled(
+        " legend ",
+        Style::default().fg(Color::DarkGray),
+    )];
+    for (state, label) in LEGEND_ENTRIES {
+        let (glyph, color) = state.style();
+        spans.push(ratatui::text::Span::styled(
+            format!("{glyph} "),
+            Style::default().fg(color),
+        ));
+        spans.push(ratatui::text::Span::styled(
+            format!("{label}  "),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Paragraph::new(ratatui::text::Line::from(spans))
 }
 
 fn truncate(s: &str, n: usize) -> String {
