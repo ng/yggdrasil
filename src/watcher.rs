@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::config::AppConfig;
 use crate::lock::LockManager;
-use crate::models::agent::{AgentRepo, AgentState};
+use crate::models::event::{EventKind, EventRepo};
 use crate::models::worker::{Worker, WorkerRepo, WorkerState};
 
 /// Background watcher daemon.
@@ -166,12 +166,16 @@ impl Watcher {
         Ok(count)
     }
 
-    /// Auto-recover agents stuck in an active state with no recent
-    /// updates. Previously this transitioned to Error — too aggressive;
-    /// nothing was broken, just forgotten. Now lands in Idle with a
-    /// "stale-recovery" reason in the state-change event payload so the
-    /// dashboard transition timeline shows why it moved.
-    async fn flag_stale_agents(&self) -> Result<u64, anyhow::Error> {
+    /// Surface agents stuck in an active state with no recent updates as
+    /// `agent_stale_warning` events. Observation-only: the watcher must not
+    /// transition agent or run state itself. The scheduler is the single
+    /// writer of `task_runs.state = 'crashed'` via the heartbeat-reap path
+    /// (yggdrasil-140), and any agent-state recovery follows from the
+    /// scheduler's run terminal events, not from a parallel watcher pass.
+    /// Previous versions force-transitioned the agent to Idle here, which
+    /// risked split-brain with the scheduler's reap of the same agent's
+    /// in-flight run.
+    pub async fn flag_stale_agents(&self) -> Result<u64, anyhow::Error> {
         let stale_threshold = (self.config.lock_ttl_secs * 2) as i64;
 
         let stale_agents: Vec<_> = sqlx::query_as::<_, crate::models::agent::AgentWorkflow>(
@@ -188,27 +192,33 @@ impl Watcher {
         .fetch_all(&self.pool)
         .await?;
 
-        let agent_repo = AgentRepo::new(&self.pool);
+        let events = EventRepo::new(&self.pool);
         let mut count = 0u64;
-
         for agent in stale_agents {
             tracing::warn!(
                 agent = %agent.agent_name,
                 last_update = %agent.updated_at,
-                "auto-recovering stale agent"
+                "agent_stale_warning"
             );
-            // force_state bypasses the OCC transition check and emits
-            // an agent_state_changed event. No `tool` metadata so the
-            // dashboard won't mistake it for an in-flight tool call.
-            if let Err(e) = agent_repo
-                .force_state(agent.agent_id, AgentState::Idle, None)
+            let payload = serde_json::json!({
+                "agent_id": agent.agent_id,
+                "current_state": agent.current_state,
+                "last_update": agent.updated_at,
+                "stale_threshold_secs": stale_threshold,
+            });
+            if let Err(e) = events
+                .emit(
+                    EventKind::AgentStaleWarning,
+                    &agent.agent_name,
+                    Some(agent.agent_id),
+                    payload,
+                )
                 .await
             {
-                tracing::warn!(error = %e, "force_state failed during auto-recover");
+                tracing::warn!(error = %e, "failed to emit agent_stale_warning event");
             }
             count += 1;
         }
-
         Ok(count)
     }
 }

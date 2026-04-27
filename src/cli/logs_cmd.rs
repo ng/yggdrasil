@@ -192,6 +192,7 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
         EventKind::RunRetry => (YELLOW, "↻"),
         EventKind::SchedulerTick => (DIM, "·"),
         EventKind::SchedulerError => (RED, "!"),
+        EventKind::AgentStaleWarning => (YELLOW, "⌛"),
     }
 }
 
@@ -415,6 +416,14 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
         EventKind::SchedulerError => {
             let msg = p["error"].as_str().unwrap_or("");
             format!("{RED}{}{RESET}", truncate(msg, 70))
+        }
+        EventKind::AgentStaleWarning => {
+            let state = p["current_state"].as_str().unwrap_or("?");
+            let last = p["last_update"].as_str().unwrap_or("");
+            format!(
+                "{YELLOW}stale {state}{RESET} {DIM}last={}{RESET}",
+                truncate(last, 25)
+            )
         }
     }
 }
