@@ -70,6 +70,35 @@ pub struct App {
     pub alive_history: SparkBuffer,
     /// Pending toasts (yggdrasil-153). Each render expires stale ones.
     pub toasts: Vec<Toast>,
+    /// k9s-style floating detail overlay (yggdrasil-151). `Some(_)` means
+    /// the overlay is open and intercepts navigation keys; `None` means
+    /// the underlying pane handles input normally.
+    pub detail_overlay: Option<DetailOverlay>,
+}
+
+impl App {
+    /// Open the detail overlay over the current pane.
+    pub fn open_detail(&mut self, title: impl Into<String>, body: impl Into<String>) {
+        self.detail_overlay = Some(DetailOverlay {
+            title: title.into(),
+            body: body.into(),
+        });
+    }
+
+    /// Close the overlay if open. No-op when nothing is showing.
+    pub fn close_detail(&mut self) {
+        self.detail_overlay = None;
+    }
+}
+
+/// yggdrasil-151: floating detail overlay (k9s `:describe` pattern). The
+/// overlay floats over the current pane, dimming the background, and Esc
+/// returns to the exact row. Distinct from drill-stack, which *replaces*
+/// the pane.
+#[derive(Debug, Clone)]
+pub struct DetailOverlay {
+    pub title: String,
+    pub body: String,
 }
 
 /// How many recent samples to keep for in-panel sparklines. 30 samples
@@ -330,6 +359,7 @@ impl App {
             attach_pending: None,
             alive_history: SparkBuffer::new(SPARK_HISTORY_LEN),
             toasts: Vec::new(),
+            detail_overlay: None,
         }
     }
 
@@ -591,6 +621,21 @@ impl App {
             _ => {}
         }
 
+        // yggdrasil-151: when the floating detail overlay is open, almost
+        // every key is intercepted — only Esc (close) and ctrl-c (quit)
+        // pass through. This stops navigation/scroll/refresh keys from
+        // mutating panes the user is trying to read about.
+        if self.detail_overlay.is_some() {
+            match code {
+                KeyCode::Esc => self.close_detail(),
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -613,6 +658,39 @@ impl App {
             KeyCode::Char('9') => self.set_view(ActiveView::Prompt),
             KeyCode::Char('0') => self.set_view(ActiveView::Locks),
             KeyCode::Char('R') => self.set_view(ActiveView::Runs),
+            // yggdrasil-151: open the detail overlay populated from the
+            // current pane's selected row. Per-pane adapters: Tasks
+            // shows the full title + description + acceptance + design
+            // + notes. Other panes can wire `open_detail(...)` as
+            // followups.
+            KeyCode::Char('d') if self.active_view == ActiveView::Tasks => {
+                if let Some((task, prefix)) = self.tasks.selected_task() {
+                    let title = format!("{prefix}-{} · {}", task.seq, task.title);
+                    let mut body = String::new();
+                    if !task.description.is_empty() {
+                        body.push_str(&task.description);
+                        body.push_str("\n\n");
+                    }
+                    if let Some(a) = &task.acceptance {
+                        body.push_str("Acceptance:\n");
+                        body.push_str(a);
+                        body.push_str("\n\n");
+                    }
+                    if let Some(d) = &task.design {
+                        body.push_str("Design:\n");
+                        body.push_str(d);
+                        body.push_str("\n\n");
+                    }
+                    if let Some(n) = &task.notes {
+                        body.push_str("Notes:\n");
+                        body.push_str(n);
+                    }
+                    if body.trim().is_empty() {
+                        body = "(no description, acceptance, design, or notes)".into();
+                    }
+                    self.open_detail(title, body);
+                }
+            }
             KeyCode::Char('f') if self.active_view == ActiveView::Runs => {
                 self.runs.cycle_filter();
                 let _ = self.runs.refresh(pool).await;
@@ -934,7 +1012,7 @@ impl App {
             ActiveView::Dag => {
                 "Enter=detail  r=run  n=add  ⌫=delete  s=sort  a=agent  f=focus  c=clear"
             }
-            ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  e=rename  ·  r=run  ·  ⌫=delete",
+            ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  d=overlay  ·  e=rename  ·  r=run  ·  ⌫=delete",
             ActiveView::Trace => "↑↓ select",
             ActiveView::Query => "type then Enter  ·  Esc=leave",
             ActiveView::Logs => "f=filter  Enter=detail",
@@ -1114,6 +1192,12 @@ impl App {
         // Decay the flash counters after the paint that consumed them. One
         // flash mark = N full paints, regardless of refresh cadence.
         self.flash.tick_paint();
+
+        // yggdrasil-151: detail overlay paints last so it sits on top of
+        // everything else. Esc handler in the key dispatcher closes it.
+        if let Some(overlay) = &self.detail_overlay {
+            render_detail_overlay(frame, area, overlay);
+        }
     }
 }
 
@@ -1146,6 +1230,41 @@ fn render_toasts(frame: &mut Frame, area: Rect, toasts: &[Toast]) {
         .collect();
     let para = ratatui::widgets::Paragraph::new(lines);
     frame.render_widget(para, area);
+}
+
+/// Carve a centered rectangle out of `outer`, capping each dimension at
+/// the supplied percentages. 80%/80% leaves a margin around the overlay
+/// so the underlying pane is still partially visible.
+fn centered_rect(outer: Rect, pct_x: u16, pct_y: u16) -> Rect {
+    let h = outer.height.saturating_mul(pct_y) / 100;
+    let w = outer.width.saturating_mul(pct_x) / 100;
+    let x = outer.x + outer.width.saturating_sub(w) / 2;
+    let y = outer.y + outer.height.saturating_sub(h) / 2;
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
+}
+
+/// Render the detail overlay over the entire frame. Uses the `Clear`
+/// widget so the underlying pane's pixels are wiped where the overlay
+/// sits, then paints a bordered Paragraph on top.
+fn render_detail_overlay(frame: &mut Frame, area: Rect, overlay: &DetailOverlay) {
+    let rect = centered_rect(area, 80, 80);
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .title(format!(" {} ", overlay.title))
+        .title_bottom(Line::from(vec![Span::styled(
+            "  Esc=close  ",
+            Style::default().fg(Color::DarkGray),
+        )]));
+    let para = ratatui::widgets::Paragraph::new(overlay.body.clone())
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(para, rect);
 }
 
 /// Glyph + color for an event kind — mirrors src/cli/logs_cmd.rs::kind_style.
