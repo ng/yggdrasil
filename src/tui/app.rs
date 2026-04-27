@@ -84,6 +84,15 @@ pub struct App {
     /// repo; toggling to All exposes cross-repo state. Stored centrally
     /// so panes share the same scope rather than each tracking its own.
     pub scope: Scope,
+    /// Cascade ripple queue (yggdrasil-166). When a task closes (or
+    /// any signature event) fires, push a ripple keyed by task_ref;
+    /// pane renderers consult `is_active_for_distance` to decide
+    /// whether to paint REVERSED on a row offset.
+    pub ripples: super::motion::RippleQueue,
+    /// Set of run-terminal event ids already converted into ripples.
+    /// Prevents the same `RunTerminal` showing up in successive
+    /// `status_tail` snapshots from re-pushing.
+    pub seen_terminal_keys: std::collections::HashSet<u64>,
 }
 
 /// Which slice of the database the panes filter to. `Repo` is the
@@ -405,6 +414,8 @@ impl App {
             detail_overlay: None,
             help: super::help::HelpOverlay::default(),
             scope: Scope::default(),
+            ripples: super::motion::RippleQueue::default(),
+            seen_terminal_keys: std::collections::HashSet::new(),
         }
     }
 
@@ -417,6 +428,27 @@ impl App {
         .fetch_all(pool)
         .await
         .unwrap_or_default();
+
+        // yggdrasil-166: push a cascade ripple for any new run_terminal
+        // event we haven't seen before. The seen-set is keyed on the
+        // (created_at, task_ref) hash so a second tick that pulls the
+        // same row doesn't double-fire.
+        for (t, k, p) in &rows {
+            if k == "run_terminal" {
+                let task_ref = p["task_ref"].as_str().unwrap_or("?");
+                let key = ripple_key(t, task_ref);
+                if self.seen_terminal_keys.insert(key) {
+                    self.ripples.push(key);
+                }
+            }
+        }
+        // Cap the seen-set so a long-running TUI doesn't accumulate
+        // hashes forever. The window is the same as the rolling sparkline
+        // (30) since events expire from status_tail much sooner.
+        if self.seen_terminal_keys.len() > 256 {
+            self.seen_terminal_keys.clear();
+        }
+
         self.status_tail = rows
             .into_iter()
             .rev()
@@ -1281,6 +1313,10 @@ impl App {
         // Decay the flash counters after the paint that consumed them. One
         // flash mark = N full paints, regardless of refresh cadence.
         self.flash.tick_paint();
+        // yggdrasil-166: decay the cascade-ripple queue alongside the flash
+        // counter so signature-event animations expire on the same paint
+        // budget as cell flashes.
+        self.ripples.tick_paint();
 
         // yggdrasil-151: detail overlay paints last so it sits on top of
         // everything else. Esc handler in the key dispatcher closes it.
@@ -1465,6 +1501,17 @@ async fn reqwest_ping() -> bool {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Stable hash for "this run_terminal event came from this task at this
+/// time." The cascade-ripple queue dedupes by this key so a second tick
+/// that pulls the same row doesn't re-trigger the ripple.
+pub fn ripple_key(when: &chrono::DateTime<chrono::Utc>, task_ref: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    when.timestamp_nanos_opt().unwrap_or(0).hash(&mut hasher);
+    task_ref.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn short_status_detail(p: &serde_json::Value) -> String {
