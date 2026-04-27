@@ -60,6 +60,71 @@ pub struct App {
     /// attach until after ratatui's alternate-screen teardown to avoid
     /// a half-mode-switched terminal. Set here, read in `run` post-loop.
     pub attach_pending: Option<(String, String)>, // (session, window)
+    /// Rolling history of `agents_alive` over the last
+    /// `SPARK_HISTORY_LEN` refreshes (yggdrasil-150). Rendered as a
+    /// Unicode block sparkline in the orchestration panel so liveness
+    /// trend is visible at a glance.
+    pub alive_history: SparkBuffer,
+}
+
+/// How many recent samples to keep for in-panel sparklines. 30 samples
+/// at the existing 500ms refresh tick = 15 s of history, the sweet spot
+/// between "useful trend" and "fits on a single 10-glyph cell".
+pub const SPARK_HISTORY_LEN: usize = 30;
+
+/// yggdrasil-150: bounded ring buffer feeding a Unicode block sparkline.
+/// Pushes drop the oldest sample when the cap is reached. `glyphs(width)`
+/// renders the last `width` samples normalized against the largest value
+/// in the buffer; an empty or all-zero buffer renders to spaces.
+#[derive(Debug, Clone)]
+pub struct SparkBuffer {
+    pub samples: std::collections::VecDeque<u64>,
+    pub cap: usize,
+}
+
+impl SparkBuffer {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            samples: std::collections::VecDeque::with_capacity(cap),
+            cap,
+        }
+    }
+
+    pub fn push(&mut self, value: u64) {
+        if self.samples.len() == self.cap {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(value);
+    }
+
+    /// Render the most recent `width` samples as Unicode block glyphs.
+    /// Empty buffer returns `width` spaces so the sparkline never shifts
+    /// the surrounding layout.
+    pub fn glyphs(&self, width: usize) -> String {
+        const LEVELS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        if width == 0 {
+            return String::new();
+        }
+        if self.samples.is_empty() {
+            return " ".repeat(width);
+        }
+        let take_n = width.min(self.samples.len());
+        let pad_n = width - take_n;
+        let max = *self.samples.iter().max().unwrap_or(&0).max(&1);
+        let start = self.samples.len() - take_n;
+        let mut out = " ".repeat(pad_n);
+        for &v in self.samples.iter().skip(start) {
+            // Map [0..=max] → [0..=8] glyph index. saturating_mul keeps
+            // pathological max=u64::MAX cases from panicking.
+            let idx = if max == 0 {
+                0
+            } else {
+                ((v.saturating_mul(8)) / max).min(8) as usize
+            };
+            out.push(LEVELS[idx]);
+        }
+        out
+    }
 }
 
 /// Lightweight orchestration snapshot rendered on the right side of the
@@ -95,6 +160,7 @@ impl App {
             status_tail: Vec::new(),
             ops_stats: OpsStats::default(),
             attach_pending: None,
+            alive_history: SparkBuffer::new(SPARK_HISTORY_LEN),
         }
     }
 
@@ -146,6 +212,8 @@ impl App {
         self.ops_stats.tasks_running = running;
         self.ops_stats.live_sessions = sessions;
         self.ops_stats.db_ms = db_start.elapsed().as_millis() as u64;
+        // yggdrasil-150: feed the in-panel sparkline.
+        self.alive_history.push(alive.max(0) as u64);
 
         // Tight 150ms timeout — local Ollama answers in <20ms when
         // running; 150ms is plenty to catch "it's alive" without
@@ -666,6 +734,9 @@ impl App {
                 ),
             ])
         };
+        // yggdrasil-150: 10-glyph sparkline of recent alive-count history,
+        // appended to the "● live" row so liveness trend is one glance.
+        let alive_spark = self.alive_history.glyphs(10);
         let stats_lines = vec![
             Line::from(vec![
                 Span::styled("  ● ", Style::default().fg(Color::Green)),
@@ -673,6 +744,7 @@ impl App {
                     format!("{} live", s.agents_alive),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(format!(" {alive_spark}"), Style::default().fg(Color::Green)),
                 Span::styled(
                     format!(" / {} sessions", s.live_sessions),
                     Style::default().fg(Color::DarkGray),
