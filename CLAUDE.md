@@ -99,6 +99,11 @@ status" hangs). Use `make install` — it copies to a sibling tmp path, atomic
 this and the installed binary hangs, run `make reinstall` to re-sign without
 rebuilding.
 
+**DB pool sizing:** `YGG_DB_POOL` overrides the sqlx pool's
+`max_connections` (default 32). Bump it when running fleets >50 agents;
+the scheduler, watcher, TUI, and per-agent hooks all draw from this
+pool, and connection-wait latency manifests as spurious tick lag.
+
 ## Architecture Overview
 
 - **src/models/**: `agent` (state machine), `node` (DAG ledger with embeddings), `event` (live stream).
