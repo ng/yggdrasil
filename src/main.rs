@@ -238,9 +238,22 @@ enum Commands {
         /// Remove the managed block (and delete the file if that's all that remains)
         #[arg(long)]
         remove: bool,
-        /// Target directory (defaults to current working directory)
+        /// Target directory (defaults to current working directory).
+        /// Overrides --global when both are passed.
         #[arg(long)]
         path: Option<String>,
+        /// Install at the user-global Claude Code level (~/.claude). The
+        /// directive applies to every Claude Code session for this user.
+        /// Skips AGENTS.md unless --also-agents is set, and refuses if
+        /// the current cwd already carries a managed block (would
+        /// double-fire the directives).
+        #[arg(long, conflicts_with = "path")]
+        global: bool,
+        /// When --global, also install ~/.claude/AGENTS.md. Default off
+        /// because most non-Claude agents don't read that path; when
+        /// they do, opt in explicitly.
+        #[arg(long)]
+        also_agents: bool,
     },
 
     /// Aggregate events into an effectiveness report over a time window
@@ -1750,18 +1763,78 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Integrate { remove, path } => {
-            let cwd = path
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+        Commands::Integrate {
+            remove,
+            path,
+            global,
+            also_agents,
+        } => {
+            // Resolve target directory + opts. --global pins to ~/.claude
+            // and (by default) only touches CLAUDE.md. Explicit --path
+            // overrides --global; clap already enforces "not both."
+            let (target, opts, mode_label) = if let Some(p) = path {
+                (
+                    std::path::PathBuf::from(p),
+                    ygg::cli::init_project::IntegrateOpts::default(),
+                    "path",
+                )
+            } else if global {
+                let home = std::env::var("HOME")
+                    .map_err(|_| anyhow::anyhow!("--global requires $HOME to be set"))?;
+                let target = std::path::PathBuf::from(home).join(".claude");
+                // Refuse on conflict: if cwd has its own managed block
+                // already, installing globally would double-fire every
+                // directive (~/.claude/CLAUDE.md loads first).
+                if !remove {
+                    let cwd = std::env::current_dir().expect("cwd");
+                    if ygg::cli::init_project::has_managed_block(&cwd) {
+                        anyhow::bail!(
+                            "cwd ({}) already carries a managed Yggdrasil block; \
+                             --global would double-fire the directives.\n\
+                             Run `ygg integrate --remove` from cwd first, then re-run \
+                             `ygg integrate --global`.",
+                            cwd.display()
+                        );
+                    }
+                }
+                let opts = ygg::cli::init_project::IntegrateOpts {
+                    skip_agents_md: !also_agents,
+                };
+                (target, opts, "global")
+            } else {
+                (
+                    std::env::current_dir().expect("cwd"),
+                    ygg::cli::init_project::IntegrateOpts::default(),
+                    "cwd",
+                )
+            };
+
             if remove {
-                let report = ygg::cli::init_project::remove(&cwd)?;
-                println!("Removing Yggdrasil integration block in {}:", cwd.display());
+                let report = ygg::cli::init_project::remove_with(&target, opts)?;
+                println!(
+                    "Removing Yggdrasil integration block in {} ({mode_label}):",
+                    target.display()
+                );
                 ygg::cli::init_project::print_report(&report);
             } else {
-                let report = ygg::cli::init_project::install(&cwd)?;
-                println!("Yggdrasil integration in {}:", cwd.display());
+                let report = ygg::cli::init_project::install_with(&target, opts)?;
+                println!(
+                    "Yggdrasil integration in {} ({mode_label}):",
+                    target.display()
+                );
                 ygg::cli::init_project::print_report(&report);
+                if global {
+                    println!();
+                    println!("note: ~/.claude/CLAUDE.md loads BEFORE any project CLAUDE.md.");
+                    println!(
+                        "      The directives now apply to every Claude Code session for this user."
+                    );
+                    if !also_agents {
+                        println!(
+                            "      AGENTS.md was skipped; pass --also-agents if you want non-Claude tools to see it too."
+                        );
+                    }
+                }
             }
         }
         Commands::Eval { hours } => {
