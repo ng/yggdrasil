@@ -18,6 +18,7 @@ pub mod pane_filter;
 pub mod prompt_view;
 pub mod query_view;
 pub mod retry_collapse;
+pub mod ridgeline;
 pub mod run_grid;
 pub mod run_river;
 pub mod runs_view;
