@@ -208,6 +208,41 @@ pub fn check_inline_size(payload: &serde_json::Value, field: &str) -> Result<(),
     Ok(())
 }
 
+/// Where a payload should land after the size gate runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadSink {
+    /// Under the cap — write to the JSONB column directly.
+    Inline(serde_json::Value),
+    /// Over the cap — write to the blob store; row gets a 64-char ref.
+    Blob {
+        blob_ref: String,
+        original_bytes: usize,
+    },
+}
+
+/// One-stop router for any task_runs JSONB payload (output / error / future
+/// per-step checkpoints). Serializes once, checks against `MAX_INLINE_PAYLOAD_BYTES`,
+/// and either returns the value for inline write or persists to the blob
+/// store and returns a content-addressed reference. Every writer of those
+/// columns goes through this so the size discipline can't drift between
+/// call sites.
+pub fn route_payload(
+    payload: &serde_json::Value,
+    store: &crate::blob::BlobStore,
+) -> Result<PayloadSink, String> {
+    let serialized = serde_json::to_vec(payload).map_err(|e| format!("serializing: {e}"))?;
+    if serialized.len() <= MAX_INLINE_PAYLOAD_BYTES {
+        return Ok(PayloadSink::Inline(payload.clone()));
+    }
+    let blob_ref = store
+        .put(&serialized)
+        .map_err(|e| format!("blob put: {e}"))?;
+    Ok(PayloadSink::Blob {
+        blob_ref: blob_ref.as_str().to_string(),
+        original_bytes: serialized.len(),
+    })
+}
+
 pub struct TaskRunRepo<'a> {
     pool: &'a PgPool,
 }
@@ -286,6 +321,94 @@ impl<'a> TaskRunRepo<'a> {
         .execute(self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Write `output` (JSONB) for a run, routing through the size gate. Small
+    /// payloads land in the column; large ones land in the blob store and the
+    /// 64-char `output_blob_ref` is set instead. The two columns are mutually
+    /// exclusive on this writer's writes, so readers can `COALESCE` over them
+    /// without ambiguity.
+    pub async fn write_output(
+        &self,
+        run_id: Uuid,
+        payload: &serde_json::Value,
+        store: &crate::blob::BlobStore,
+    ) -> Result<PayloadSink, sqlx::Error> {
+        let sink = route_payload(payload, store).map_err(|e| sqlx::Error::Protocol(e.into()))?;
+        match &sink {
+            PayloadSink::Inline(value) => {
+                sqlx::query(
+                    r#"UPDATE task_runs
+                       SET output = $2,
+                           output_blob_ref = NULL,
+                           updated_at = now()
+                       WHERE run_id = $1"#,
+                )
+                .bind(run_id)
+                .bind(value)
+                .execute(self.pool)
+                .await?;
+            }
+            PayloadSink::Blob { blob_ref, .. } => {
+                sqlx::query(
+                    r#"UPDATE task_runs
+                       SET output = NULL,
+                           output_blob_ref = $2,
+                           updated_at = now()
+                       WHERE run_id = $1"#,
+                )
+                .bind(run_id)
+                .bind(blob_ref)
+                .execute(self.pool)
+                .await?;
+            }
+        }
+        Ok(sink)
+    }
+
+    /// Same gate for `error`. Errors that exceed the cap are rare in practice
+    /// (they're usually short messages) but agent-tool transcripts attached
+    /// for debugging can spike, so the same routing applies.
+    pub async fn write_error(
+        &self,
+        run_id: Uuid,
+        payload: &serde_json::Value,
+        store: &crate::blob::BlobStore,
+    ) -> Result<PayloadSink, sqlx::Error> {
+        let sink = route_payload(payload, store).map_err(|e| sqlx::Error::Protocol(e.into()))?;
+        match &sink {
+            PayloadSink::Inline(value) => {
+                sqlx::query(
+                    "UPDATE task_runs SET error = $2, updated_at = now() WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .bind(value)
+                .execute(self.pool)
+                .await?;
+            }
+            PayloadSink::Blob { blob_ref, .. } => {
+                // Error spillover is rare enough that we don't have a dedicated
+                // error_blob_ref column; reuse output_blob_ref with an
+                // {"blob_ref": "..."} stub in `error` so readers know where to
+                // look. If errors start spilling regularly, add a column.
+                let stub = serde_json::json!({
+                    "spilled_to_blob": blob_ref,
+                });
+                sqlx::query(
+                    r#"UPDATE task_runs
+                       SET error = $2,
+                           output_blob_ref = COALESCE(output_blob_ref, $3),
+                           updated_at = now()
+                       WHERE run_id = $1"#,
+                )
+                .bind(run_id)
+                .bind(&stub)
+                .bind(blob_ref)
+                .execute(self.pool)
+                .await?;
+            }
+        }
+        Ok(sink)
     }
 
     /// Set the run's state. Caller is responsible for ensuring the transition
