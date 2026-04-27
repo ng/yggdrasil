@@ -5,6 +5,7 @@ pub mod calendar_heatmap;
 pub mod dag_box;
 pub mod dag_view;
 pub mod dashboard;
+pub mod disclosure_governor;
 pub mod drill_stack;
 pub mod eval_view;
 pub mod help;
