@@ -1,6 +1,8 @@
 //! Regression tests for run-grid state parsing + glyph mapping (yggdrasil-146).
 
-use ygg::tui::run_grid::{AttemptCell, GridState, MAX_ATTEMPT_COLS, MAX_TASK_ROWS, RunGridView};
+use ygg::tui::run_grid::{
+    AttemptCell, GridState, LEGEND_ENTRIES, MAX_ATTEMPT_COLS, MAX_TASK_ROWS, RunGridView,
+};
 
 #[test]
 fn grid_state_parse_round_trips_known_states() {
@@ -58,6 +60,25 @@ fn select_next_clamps_to_last_row_when_short() {
     v.select_next();
     v.select_prev();
     assert!(v.rows.is_empty());
+}
+
+#[test]
+fn legend_covers_every_grid_state_variant() {
+    use std::collections::HashSet;
+    let in_legend: HashSet<GridState> = LEGEND_ENTRIES.iter().map(|(s, _)| *s).collect();
+    for s in [
+        GridState::Scheduled,
+        GridState::Ready,
+        GridState::Running,
+        GridState::Succeeded,
+        GridState::Failed,
+        GridState::Crashed,
+        GridState::Cancelled,
+        GridState::Retrying,
+        GridState::Poison,
+    ] {
+        assert!(in_legend.contains(&s), "legend missing entry for {s:?}");
+    }
 }
 
 #[test]
