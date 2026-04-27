@@ -230,11 +230,29 @@ fn remove_block(content: &str) -> String {
     }
 }
 
-/// Public entry point. Target files are `<cwd>/CLAUDE.md` and `<cwd>/AGENTS.md`.
-pub fn install(cwd: &Path) -> Result<InstallReport, anyhow::Error> {
+/// Options that control which files `install` / `remove` touch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IntegrateOpts {
+    /// When `true`, skip writing AGENTS.md. Used by `--global` so the
+    /// directives only land in `~/.claude/CLAUDE.md`. Local installs
+    /// default this to `false`.
+    pub skip_agents_md: bool,
+}
+
+/// Public entry point. Target files are `<dir>/CLAUDE.md` and (unless
+/// `opts.skip_agents_md`) `<dir>/AGENTS.md`.
+pub fn install(dir: &Path) -> Result<InstallReport, anyhow::Error> {
+    install_with(dir, IntegrateOpts::default())
+}
+
+pub fn install_with(dir: &Path, opts: IntegrateOpts) -> Result<InstallReport, anyhow::Error> {
     let mut report = InstallReport::default();
-    for (filename, body) in [("CLAUDE.md", CLAUDE_BLOCK), ("AGENTS.md", AGENTS_BLOCK)] {
-        let path = cwd.join(filename);
+    let mut targets: Vec<(&str, &str)> = vec![("CLAUDE.md", CLAUDE_BLOCK)];
+    if !opts.skip_agents_md {
+        targets.push(("AGENTS.md", AGENTS_BLOCK));
+    }
+    for (filename, body) in targets {
+        let path = dir.join(filename);
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         let hash = block_hash(body);
         let action = match (classify(&existing, &hash), path.exists()) {
@@ -244,6 +262,13 @@ pub fn install(cwd: &Path) -> Result<InstallReport, anyhow::Error> {
             (FoundBlock::Missing, false) => ActionTaken::Created,
         };
         if !matches!(action, ActionTaken::Unchanged) {
+            // mkdir -p the parent so `--global` works on a fresh
+            // machine where `~/.claude` doesn't exist yet.
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
             let new_content = install_block(&existing, body);
             std::fs::write(&path, new_content)?;
         }
@@ -252,10 +277,18 @@ pub fn install(cwd: &Path) -> Result<InstallReport, anyhow::Error> {
     Ok(report)
 }
 
-pub fn remove(cwd: &Path) -> Result<InstallReport, anyhow::Error> {
+pub fn remove(dir: &Path) -> Result<InstallReport, anyhow::Error> {
+    remove_with(dir, IntegrateOpts::default())
+}
+
+pub fn remove_with(dir: &Path, opts: IntegrateOpts) -> Result<InstallReport, anyhow::Error> {
     let mut report = InstallReport::default();
-    for filename in ["CLAUDE.md", "AGENTS.md"] {
-        let path = cwd.join(filename);
+    let mut targets: Vec<&str> = vec!["CLAUDE.md"];
+    if !opts.skip_agents_md {
+        targets.push("AGENTS.md");
+    }
+    for filename in targets {
+        let path = dir.join(filename);
         if !path.exists() {
             report.files.push((path, ActionTaken::Unchanged));
             continue;
@@ -277,6 +310,17 @@ pub fn remove(cwd: &Path) -> Result<InstallReport, anyhow::Error> {
         report.files.push((path, action));
     }
     Ok(report)
+}
+
+/// True iff a managed Yggdrasil block exists in `<dir>/CLAUDE.md`.
+/// `--global` consults this on cwd to refuse installing globally when
+/// the directives would double-fire from a per-project block.
+pub fn has_managed_block(dir: &Path) -> bool {
+    let path = dir.join("CLAUDE.md");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    find_block(&content).is_some()
 }
 
 /// Check whether either target file already exists and has content outside
