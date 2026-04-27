@@ -26,4 +26,5 @@ pub mod smooth_gauge;
 pub mod task_view;
 pub mod tasks_view;
 pub mod trace_view;
+pub mod treemap;
 pub mod widgets;
