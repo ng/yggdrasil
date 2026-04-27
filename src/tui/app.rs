@@ -77,6 +77,9 @@ pub struct App {
     /// the overlay is open and intercepts navigation keys; `None` means
     /// the underlying pane handles input normally.
     pub detail_overlay: Option<DetailOverlay>,
+    /// Help overlay state (yggdrasil-132). Toggled by `?`; while open
+    /// every key but `?` and Esc is intercepted.
+    pub help: super::help::HelpOverlay,
 }
 
 impl App {
@@ -364,6 +367,7 @@ impl App {
             alive_history: SparkBuffer::new(SPARK_HISTORY_LEN),
             toasts: Vec::new(),
             detail_overlay: None,
+            help: super::help::HelpOverlay::default(),
         }
     }
 
@@ -625,6 +629,20 @@ impl App {
             _ => {}
         }
 
+        // yggdrasil-132: help overlay open intercepts every key except
+        // ? (toggle close) and ctrl-c (quit). Sits ahead of the detail
+        // overlay gate so ? always closes whichever overlay is on top.
+        if self.help.open {
+            match code {
+                KeyCode::Esc | KeyCode::Char('?') => self.help.close(),
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // yggdrasil-151: when the floating detail overlay is open, almost
         // every key is intercepted — only Esc (close) and ctrl-c (quit)
         // pass through. This stops navigation/scroll/refresh keys from
@@ -645,6 +663,7 @@ impl App {
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
+            KeyCode::Char('?') => self.help.toggle(),
             KeyCode::Backspace if self.active_view == ActiveView::Dag => {
                 self.dag.delete_begin();
             }
@@ -1023,7 +1042,9 @@ impl App {
             ActiveView::Dag => {
                 "Enter=detail  r=run  n=add  ⌫=delete  s=sort  a=agent  f=focus  c=clear"
             }
-            ActiveView::Tasks => "↑↓ select  ·  Enter=detail  ·  d=overlay  ·  e=rename  ·  r=run  ·  ⌫=delete",
+            ActiveView::Tasks => {
+                "↑↓ select  ·  Enter=detail  ·  d=overlay  ·  e=rename  ·  r=run  ·  ⌫=delete"
+            }
             ActiveView::Trace => "↑↓ select",
             ActiveView::Query => "type then Enter  ·  Esc=leave",
             ActiveView::Logs => "f=filter  Enter=detail",
@@ -1212,6 +1233,31 @@ impl App {
         // everything else. Esc handler in the key dispatcher closes it.
         if let Some(overlay) = &self.detail_overlay {
             render_detail_overlay(frame, area, overlay);
+        }
+        // yggdrasil-132: help overlay paints over everything (including
+        // detail overlay) when toggled, so `?` is the universal "what
+        // can I press?" answer regardless of state.
+        if self.help.open {
+            super::help::render(area, frame.buffer_mut(), self.active_view_label());
+        }
+    }
+
+    /// Stable, human-readable label for the active view; used by the
+    /// help overlay to look up pane-specific keybindings.
+    fn active_view_label(&self) -> &'static str {
+        match self.active_view {
+            ActiveView::Dashboard => "Dashboard",
+            ActiveView::Dag => "Dag",
+            ActiveView::Tasks => "Tasks",
+            ActiveView::Trace => "Trace",
+            ActiveView::Query => "Query",
+            ActiveView::Logs => "Logs",
+            ActiveView::MemGraph => "MemGraph",
+            ActiveView::Eval => "Eval",
+            ActiveView::Prompt => "Prompt",
+            ActiveView::Locks => "Locks",
+            ActiveView::Runs => "Runs",
+            ActiveView::RunGrid => "RunGrid",
         }
     }
 }
