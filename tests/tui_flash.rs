@@ -10,6 +10,11 @@ fn ops(alive: i64, stuck: i64, tasks: i64, sessions: i64) -> OpsStats {
         live_sessions: sessions,
         ollama_ok: true,
         db_ms: 0,
+        // Burn-rate fields (yggdrasil-148): not exercised by these
+        // tests; default to zero so the struct literal stays complete.
+        tokens_per_min: 0.0,
+        cost_today_usd: 0.0,
+        tokens_today: 0,
     }
 }
 
