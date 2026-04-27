@@ -2,6 +2,7 @@ pub mod app;
 pub mod arc_diagram;
 pub mod attention;
 pub mod calendar_heatmap;
+pub mod dag_box;
 pub mod dag_view;
 pub mod dashboard;
 pub mod drill_stack;
