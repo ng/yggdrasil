@@ -515,6 +515,71 @@ impl<'a> TaskRepo<'a> {
         Ok(())
     }
 
+    /// Walk task_deps following blocker edges and surface every cycle the
+    /// graph already contains. Each returned vec is one cycle in order
+    /// (without the duplicate closing vertex), canonicalized so its smallest
+    /// UUID appears first; identical rotations of the same cycle dedupe.
+    pub async fn find_cycles(&self, repo_id: Option<Uuid>) -> Result<Vec<Vec<Uuid>>, sqlx::Error> {
+        let rows: Vec<(Vec<Uuid>,)> = sqlx::query_as(
+            r#"
+            WITH RECURSIVE walk(start_tid, tid, path, has_cycle) AS (
+                SELECT d.task_id, d.blocker_id,
+                       ARRAY[d.task_id, d.blocker_id], FALSE
+                FROM task_deps d
+                JOIN tasks t ON t.task_id = d.task_id
+                WHERE $1::UUID IS NULL OR t.repo_id = $1
+                UNION ALL
+                SELECT w.start_tid, d.blocker_id,
+                       w.path || d.blocker_id,
+                       d.blocker_id = ANY(w.path)
+                FROM walk w
+                JOIN task_deps d ON d.task_id = w.tid
+                WHERE NOT w.has_cycle AND array_length(w.path, 1) < 100
+            )
+            SELECT path FROM walk WHERE has_cycle
+            "#,
+        )
+        .bind(repo_id)
+        .fetch_all(self.pool)
+        .await?;
+
+        let mut seen: std::collections::HashSet<Vec<Uuid>> = Default::default();
+        let mut cycles: Vec<Vec<Uuid>> = Vec::new();
+        for (path,) in rows {
+            // Path comes back as [v0, v1, ..., vk] where vk == some earlier vi.
+            // Slice to the cycle proper: [vi, v_{i+1}, ..., v_{k-1}].
+            let last = match path.last() {
+                Some(u) => *u,
+                None => continue,
+            };
+            let start_idx = match path.iter().position(|u| *u == last) {
+                Some(i) => i,
+                None => continue,
+            };
+            if start_idx + 1 >= path.len() {
+                continue;
+            }
+            let cycle = &path[start_idx..path.len() - 1];
+            if cycle.is_empty() {
+                continue;
+            }
+            // Canonicalize: rotate so the smallest UUID is first.
+            let min_idx = cycle
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, u)| *u)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let mut canon = cycle[min_idx..].to_vec();
+            canon.extend_from_slice(&cycle[..min_idx]);
+            if seen.insert(canon.clone()) {
+                cycles.push(canon);
+            }
+        }
+        cycles.sort();
+        Ok(cycles)
+    }
+
     pub async fn remove_dep(&self, task_id: Uuid, blocker_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM task_deps WHERE task_id = $1 AND blocker_id = $2")
             .bind(task_id)

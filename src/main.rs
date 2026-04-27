@@ -919,6 +919,17 @@ enum TaskAction {
         #[arg(long)]
         off: bool,
     },
+    /// Walk task_deps and surface any pre-existing cycles. add_dep
+    /// already rejects new cycles; this catches rows that pre-date the
+    /// guard or were inserted via raw SQL. Exit non-zero on any cycle.
+    Lint {
+        /// Scan every repo (default: current repo only).
+        #[arg(long)]
+        all: bool,
+        /// Emit cycles as a JSON array of task-ref arrays.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1683,6 +1694,9 @@ async fn main() -> anyhow::Result<()> {
                     println!(
                         "{reference} unpoisoned (status reset to open; latest run flipped failed)"
                     );
+                }
+                TaskAction::Lint { all, json } => {
+                    ygg::cli::task_cmd::lint(&pool, all, json).await?;
                 }
                 TaskAction::Runnable { reference, off } => {
                     let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;

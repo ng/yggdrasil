@@ -851,6 +851,70 @@ pub async fn link(
     Ok(())
 }
 
+/// Walk task_deps and report any dependency cycles. Adds-ons to add_dep's
+/// already-present cycle guard catch any pre-existing rows (e.g. data
+/// imported before the guard landed, or rows inserted via raw SQL).
+pub async fn lint(pool: &sqlx::PgPool, all_repos: bool, json: bool) -> Result<(), anyhow::Error> {
+    let repo_id = if all_repos {
+        None
+    } else {
+        Some(resolve_cwd_repo(pool).await?.repo_id)
+    };
+    let cycles = TaskRepo::new(pool).find_cycles(repo_id).await?;
+
+    // Resolve every task_id we'll print into a "<prefix>-<seq>" string in one
+    // batch so a 50-cycle report doesn't issue 50N queries.
+    let mut all_ids: Vec<Uuid> = cycles.iter().flatten().copied().collect();
+    all_ids.sort();
+    all_ids.dedup();
+    let refs: std::collections::HashMap<Uuid, String> = if all_ids.is_empty() {
+        Default::default()
+    } else {
+        let rows: Vec<(Uuid, String, i32)> = sqlx::query_as(
+            r#"SELECT t.task_id, r.task_prefix, t.seq
+               FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+               WHERE t.task_id = ANY($1)"#,
+        )
+        .bind(&all_ids)
+        .fetch_all(pool)
+        .await?;
+        rows.into_iter()
+            .map(|(id, prefix, seq)| (id, format!("{prefix}-{seq}")))
+            .collect()
+    };
+
+    if json {
+        let payload: Vec<Vec<&str>> = cycles
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .map(|id| refs.get(id).map(String::as_str).unwrap_or("?"))
+                    .collect()
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if cycles.is_empty() {
+        println!("no cycles");
+        return Ok(());
+    }
+
+    println!("found {} cycle(s) in task_deps:", cycles.len());
+    for cycle in &cycles {
+        let parts: Vec<&str> = cycle
+            .iter()
+            .map(|id| refs.get(id).map(String::as_str).unwrap_or("?"))
+            .collect();
+        // Append the start vertex so the loop is visually closed.
+        let first = parts.first().copied().unwrap_or("?");
+        println!("  cycle: {} → {first}", parts.join(" → "));
+    }
+    // Non-zero exit so scripts can chain `ygg task lint && ...`.
+    std::process::exit(1);
+}
+
 pub async fn stats(pool: &sqlx::PgPool, all_repos: bool, json: bool) -> Result<(), anyhow::Error> {
     let repo_id = if all_repos {
         None
