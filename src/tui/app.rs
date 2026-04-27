@@ -524,8 +524,20 @@ impl App {
     /// Paint the whole TUI into `frame`. Extracted so the run loop can call it
     /// both before and after a refresh — painting before refresh lets each
     /// view's own "loading" state be visible while the DB query blocks.
+    /// Test-only entry point so integration tests can exercise the layout
+    /// against `TestBackend` without spinning up a Postgres connection.
+    /// Production code goes through `run` → `draw`.
+    #[doc(hidden)]
+    pub fn draw_for_test(&mut self, frame: &mut Frame) {
+        self.draw(frame)
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        // yggdrasil-156: narrow-terminal collapse. Below 100 cols the wide
+        // `[1] Dashboard [2] DAG …` row wraps and the right-hand ops-stats
+        // panel crowds out the event tail. Drop both to compact equivalents.
+        let narrow = area.width < NARROW_TERMINAL_THRESHOLD;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -547,19 +559,41 @@ impl App {
             }
         };
 
-        let tabs = vec![
-            tab("[1] Dashboard", self.active_view == ActiveView::Dashboard),
-            tab("[2] DAG", self.active_view == ActiveView::Dag),
-            tab("[3] Tasks", self.active_view == ActiveView::Tasks),
-            tab("[4] Trace", self.active_view == ActiveView::Trace),
-            tab("[5] Query", self.active_view == ActiveView::Query),
-            tab("[6] Logs", self.active_view == ActiveView::Logs),
-            tab("[7] Memgraph", self.active_view == ActiveView::MemGraph),
-            tab("[8] Eval", self.active_view == ActiveView::Eval),
-            tab("[9] Prompt", self.active_view == ActiveView::Prompt),
-            tab("[0] Locks", self.active_view == ActiveView::Locks),
-            tab("[R] Runs", self.active_view == ActiveView::Runs),
-        ];
+        let tabs: Vec<Span<'static>> = if narrow {
+            // Compact tabs: just the activator digit/letter. The full label
+            // moves to the help row's pane_hint, which already shows the
+            // active view's affordances.
+            [
+                ("1", ActiveView::Dashboard),
+                ("2", ActiveView::Dag),
+                ("3", ActiveView::Tasks),
+                ("4", ActiveView::Trace),
+                ("5", ActiveView::Query),
+                ("6", ActiveView::Logs),
+                ("7", ActiveView::MemGraph),
+                ("8", ActiveView::Eval),
+                ("9", ActiveView::Prompt),
+                ("0", ActiveView::Locks),
+                ("R", ActiveView::Runs),
+            ]
+            .iter()
+            .map(|(k, v)| tab(k, self.active_view == *v))
+            .collect()
+        } else {
+            vec![
+                tab("[1] Dashboard", self.active_view == ActiveView::Dashboard),
+                tab("[2] DAG", self.active_view == ActiveView::Dag),
+                tab("[3] Tasks", self.active_view == ActiveView::Tasks),
+                tab("[4] Trace", self.active_view == ActiveView::Trace),
+                tab("[5] Query", self.active_view == ActiveView::Query),
+                tab("[6] Logs", self.active_view == ActiveView::Logs),
+                tab("[7] Memgraph", self.active_view == ActiveView::MemGraph),
+                tab("[8] Eval", self.active_view == ActiveView::Eval),
+                tab("[9] Prompt", self.active_view == ActiveView::Prompt),
+                tab("[0] Locks", self.active_view == ActiveView::Locks),
+                tab("[R] Runs", self.active_view == ActiveView::Runs),
+            ]
+        };
         frame.render_widget(Line::from(tabs), chunks[0]);
 
         let nav_span = Span::styled(
@@ -606,11 +640,17 @@ impl App {
             ActiveView::Runs => self.runs.render(frame, chunks[2]),
         }
 
-        // Global status strip — two columns: events left, orchestration
-        // stats right. Right panel is a compact "is anything live" signal.
+        // Global status strip — two columns at wide widths (events left,
+        // orchestration stats right); single-column at narrow widths so the
+        // 34-col ops panel doesn't crowd out the event tail. yggdrasil-156.
+        let strip_constraints: &[Constraint] = if narrow {
+            &[Constraint::Min(0)]
+        } else {
+            &[Constraint::Min(40), Constraint::Length(34)]
+        };
         let strip = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(40), Constraint::Length(34)])
+            .constraints(strip_constraints)
             .split(chunks[3]);
 
         let event_lines: Vec<Line> = self
@@ -687,14 +727,21 @@ impl App {
             ]),
             stuck_line,
         ];
-        let stats_panel = ratatui::widgets::Paragraph::new(stats_lines).block(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::TOP)
-                .title(" orchestration "),
-        );
-        frame.render_widget(stats_panel, strip[1]);
+        if !narrow {
+            let stats_panel = ratatui::widgets::Paragraph::new(stats_lines).block(
+                ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::TOP)
+                    .title(" orchestration "),
+            );
+            frame.render_widget(stats_panel, strip[1]);
+        }
     }
 }
+
+/// Width threshold below which the global TUI chrome collapses to a
+/// single-column compact form. Picked empirically: 100 cols is the
+/// narrowest the wide tab row + 34-col ops panel render without overlap.
+pub const NARROW_TERMINAL_THRESHOLD: u16 = 100;
 
 /// Glyph + color for an event kind — mirrors src/cli/logs_cmd.rs::kind_style.
 fn event_glyph(kind: &str) -> (&'static str, Color) {
