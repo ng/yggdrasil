@@ -128,3 +128,70 @@ pub fn motion_disabled() -> bool {
         Some("1") | Some("true") | Some("yes") | Some("on")
     )
 }
+
+/// Live cascade-ripple state (yggdrasil-166). When a "signature event"
+/// fires (today: a task closes), one of these gets pushed onto a small
+/// queue. `tick_paint` decrements the countdown; rendered cells consult
+/// `is_active_for_distance` to decide whether to paint REVERSED.
+///
+/// The queue is bounded — at most `MAX_RIPPLES` simultaneous ripples
+/// run; any more get dropped from the front when a new one arrives.
+/// The cap of 4 plays nicely with the tick budget without smearing
+/// into strobing noise.
+#[derive(Debug, Clone, Default)]
+pub struct RippleQueue {
+    pub ripples: Vec<Ripple>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ripple {
+    /// Stable identifier for "what triggered this" — usually a task_ref
+    /// hash so a new event on the same task refreshes rather than
+    /// stacking.
+    pub origin_key: u64,
+    pub frames_remaining: u8,
+}
+
+/// Soft cap on simultaneous ripples. Prevents a `task close` storm
+/// from turning the whole table into a strobe; older ripples drop off
+/// the front when a new one is pushed past the cap.
+pub const MAX_RIPPLES: usize = 4;
+
+impl RippleQueue {
+    /// Push a new ripple keyed by `origin_key`. If a ripple with the
+    /// same key is already running, refresh its countdown rather than
+    /// stacking — same logical event, same animation.
+    pub fn push(&mut self, origin_key: u64) {
+        if motion_disabled() {
+            return;
+        }
+        if let Some(existing) = self.ripples.iter_mut().find(|r| r.origin_key == origin_key) {
+            existing.frames_remaining = RIPPLE_FRAMES;
+            return;
+        }
+        self.ripples.push(Ripple {
+            origin_key,
+            frames_remaining: RIPPLE_FRAMES,
+        });
+        if self.ripples.len() > MAX_RIPPLES {
+            self.ripples.remove(0);
+        }
+    }
+
+    /// Saturating-decrement every active ripple; drop expired ones.
+    pub fn tick_paint(&mut self) {
+        for r in self.ripples.iter_mut() {
+            r.frames_remaining = r.frames_remaining.saturating_sub(1);
+        }
+        self.ripples.retain(|r| r.frames_remaining > 0);
+    }
+
+    /// True iff any active ripple wants `distance` to be highlighted on
+    /// this paint pass. Rendered cells call this with their row index
+    /// relative to the ripple's origin.
+    pub fn is_active_for_distance(&self, distance: usize) -> bool {
+        self.ripples
+            .iter()
+            .any(|r| ripple_active_at(distance, r.frames_remaining))
+    }
+}
