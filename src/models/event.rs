@@ -30,6 +30,7 @@ pub enum EventKind {
     RunRetry,
     SchedulerTick,
     SchedulerError,
+    AgentStaleWarning,
 }
 
 impl EventKind {
@@ -59,6 +60,7 @@ impl EventKind {
             Self::RunRetry => "run_retry",
             Self::SchedulerTick => "scheduler_tick",
             Self::SchedulerError => "scheduler_error",
+            Self::AgentStaleWarning => "agent_stale_warning",
         }
     }
 }
