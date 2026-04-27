@@ -67,6 +67,8 @@ pub struct App {
     /// Unicode block sparkline in the orchestration panel so liveness
     /// trend is visible at a glance.
     pub alive_history: SparkBuffer,
+    /// Pending toasts (yggdrasil-153). Each render expires stale ones.
+    pub toasts: Vec<Toast>,
 }
 
 /// How many recent samples to keep for in-panel sparklines. 30 samples
@@ -128,6 +130,65 @@ impl SparkBuffer {
         out
     }
 }
+
+impl App {
+    /// Push a transient toast onto the stack. Renders above the status
+    /// strip until `ttl` elapses or `TOAST_MAX_VISIBLE` newer toasts have
+    /// landed.
+    pub fn push_toast(&mut self, msg: impl Into<String>, severity: ToastSeverity, ttl: Duration) {
+        self.toasts.push(Toast {
+            msg: msg.into(),
+            severity,
+            expires_at: std::time::Instant::now() + ttl,
+        });
+    }
+
+    /// Drop expired toasts and clamp to the most recent
+    /// `TOAST_MAX_VISIBLE`. Called inline before rendering and exposed for
+    /// testability.
+    pub fn prune_toasts(&mut self) {
+        let now = std::time::Instant::now();
+        self.toasts.retain(|t| t.expires_at > now);
+        if self.toasts.len() > TOAST_MAX_VISIBLE {
+            let drop = self.toasts.len() - TOAST_MAX_VISIBLE;
+            self.toasts.drain(..drop);
+        }
+    }
+
+    /// Number of toast rows the layout should reserve right now. 0 when
+    /// nothing is pending; capped at TOAST_MAX_VISIBLE.
+    pub fn visible_toast_rows(&self) -> u16 {
+        self.toasts.len().min(TOAST_MAX_VISIBLE) as u16
+    }
+}
+
+/// yggdrasil-153: transient toast strip above the persistent status bar.
+/// Helix's two-row pattern — persistent state below, fading event echoes
+/// above. Used for "lock acquired src/foo.rs", scheduler errors, hook
+/// drift warnings — anything worth surfacing without stealing a pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastSeverity {
+    Info,
+    Success,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub msg: String,
+    pub severity: ToastSeverity,
+    pub expires_at: std::time::Instant,
+}
+
+/// Default time-to-live for a toast. 3 s matches Helix's transient row
+/// and is long enough to read a short line without lingering.
+pub const TOAST_DEFAULT_TTL: Duration = Duration::from_secs(3);
+
+/// Cap on simultaneously-visible toasts. Older ones fall off the top of
+/// the queue. Keeps the strip from eating an unbounded number of rows
+/// when many events fire in a tick.
+pub const TOAST_MAX_VISIBLE: usize = 3;
 
 /// Lightweight orchestration snapshot rendered on the right side of the
 /// global status strip. Cheap queries — every 500ms tick is fine.
@@ -229,6 +290,7 @@ impl App {
             flash: FlashState::default(),
             attach_pending: None,
             alive_history: SparkBuffer::new(SPARK_HISTORY_LEN),
+            toasts: Vec::new(),
         }
     }
 
@@ -707,20 +769,38 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        // yggdrasil-153: drop expired toasts before computing the layout
+        // so reserved row count and rendered content agree.
+        self.prune_toasts();
+        let toast_rows = self.visible_toast_rows();
+
         let area = frame.area();
         // yggdrasil-156: narrow-terminal collapse. Below 100 cols the wide
         // `[1] Dashboard [2] DAG …` row wraps and the right-hand ops-stats
         // panel crowds out the event tail. Drop both to compact equivalents.
         let narrow = area.width < NARROW_TERMINAL_THRESHOLD;
+        // yggdrasil-153: reserve toast rows above the status strip when
+        // any toasts are pending; otherwise the layout matches the
+        // pre-toast tab/hint/main/strip shape exactly.
+        let mut constraints: Vec<Constraint> = vec![
+            Constraint::Length(1), // tab row
+            Constraint::Length(1), // context-sensitive help row
+            Constraint::Min(0),    // active pane
+        ];
+        if toast_rows > 0 {
+            constraints.push(Constraint::Length(toast_rows));
+        }
+        constraints.push(Constraint::Length(3)); // global status strip
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // tab row
-                Constraint::Length(1), // context-sensitive help row
-                Constraint::Min(0),    // active pane
-                Constraint::Length(3), // global status strip (3 recent events)
-            ])
+            .constraints(constraints)
             .split(area);
+        let strip_idx = chunks.len() - 1;
+        let toast_idx = if toast_rows > 0 {
+            Some(strip_idx - 1)
+        } else {
+            None
+        };
 
         let tab = |label: &str, active: bool| -> Span<'static> {
             if active {
@@ -814,6 +894,11 @@ impl App {
             ActiveView::Runs => self.runs.render(frame, chunks[2]),
         }
 
+        // Render any pending toasts above the persistent status strip.
+        if let Some(idx) = toast_idx {
+            render_toasts(frame, chunks[idx], &self.toasts);
+        }
+
         // Global status strip — two columns at wide widths (events left,
         // orchestration stats right); single-column at narrow widths so the
         // 34-col ops panel doesn't crowd out the event tail. yggdrasil-156.
@@ -825,7 +910,7 @@ impl App {
         let strip = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(strip_constraints)
-            .split(chunks[3]);
+            .split(chunks[strip_idx]);
 
         let event_lines: Vec<Line> = self
             .status_tail
@@ -945,6 +1030,32 @@ impl App {
 /// single-column compact form. Picked empirically: 100 cols is the
 /// narrowest the wide tab row + 34-col ops panel render without overlap.
 pub const NARROW_TERMINAL_THRESHOLD: u16 = 100;
+
+/// Render the current toast queue stacked oldest-on-top into `area`.
+/// Caller is responsible for sizing `area` to `app.visible_toast_rows()`
+/// rows. Newer toasts get the bottom row (closest to the status strip)
+/// so the most recent message sits where eyes land first.
+fn render_toasts(frame: &mut Frame, area: Rect, toasts: &[Toast]) {
+    let visible: Vec<&Toast> = toasts.iter().rev().take(TOAST_MAX_VISIBLE).collect();
+    let lines: Vec<Line> = visible
+        .iter()
+        .rev()
+        .map(|t| {
+            let (glyph, color) = match t.severity {
+                ToastSeverity::Info => ("·", Color::Gray),
+                ToastSeverity::Success => ("✓", Color::Green),
+                ToastSeverity::Warn => ("⚠", Color::Yellow),
+                ToastSeverity::Error => ("✗", Color::Red),
+            };
+            Line::from(vec![
+                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                Span::styled(t.msg.clone(), Style::default().fg(color)),
+            ])
+        })
+        .collect();
+    let para = ratatui::widgets::Paragraph::new(lines);
+    frame.render_widget(para, area);
+}
 
 /// Glyph + color for an event kind — mirrors src/cli/logs_cmd.rs::kind_style.
 fn event_glyph(kind: &str) -> (&'static str, Color) {
