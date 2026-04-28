@@ -70,8 +70,13 @@ pub async fn send_inner(
         .await?;
     }
 
-    // Detect whether the recipient has a live tmux window.
-    let has_window = recipient_exists && TmuxManager::has_agent_window(to_agent_name).await;
+    // Detect whether the recipient has a live tmux window. Propagate tmux
+    // errors so transient failures don't trigger a spurious spawn.
+    let has_window = if recipient_exists {
+        TmuxManager::has_agent_window(to_agent_name).await?
+    } else {
+        false
+    };
 
     if has_window {
         println!("sent to {to_agent_name}");
@@ -88,10 +93,11 @@ pub async fn send_inner(
         let config = AppConfig::from_env()?;
         let task_prompt = format!("[message from {from_agent_name}] {body}");
         println!("spawning '{to_agent_name}' (inactive) …");
-        super::spawn::execute(pool, &config, &task_prompt, Some(to_agent_name)).await?;
+        let spawn_result =
+            super::spawn::execute(pool, &config, &task_prompt, Some(to_agent_name)).await;
 
-        // If the recipient didn't exist before, re-lookup so we can record
-        // the message event against the newly registered agent.
+        // Record the message event even if spawn partially failed (the agent
+        // row may already exist from spawn::execute's register call).
         if !recipient_exists {
             if let Some(new_agent) = repo.get_by_name(to_agent_name).await? {
                 sqlx::query(
@@ -106,6 +112,7 @@ pub async fn send_inner(
                 .await?;
             }
         }
+        spawn_result?;
     }
 
     Ok(())
