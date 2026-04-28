@@ -21,6 +21,7 @@ pub struct Learning {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub applied_count: i32,
+    pub scope_tags: serde_json::Value,
 }
 
 pub struct LearningRepo<'a> {
@@ -40,12 +41,13 @@ impl<'a> LearningRepo<'a> {
         text: &str,
         context: Option<&str>,
         created_by: Option<Uuid>,
+        scope_tags: &serde_json::Value,
     ) -> Result<Learning, sqlx::Error> {
         sqlx::query_as::<_, Learning>(
-            r#"INSERT INTO learnings (repo_id, file_glob, rule_id, text, context, created_by)
-               VALUES ($1, $2, $3, $4, $5, $6)
+            r#"INSERT INTO learnings (repo_id, file_glob, rule_id, text, context, created_by, scope_tags)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
                RETURNING learning_id, repo_id, file_glob, rule_id, text, context,
-                         created_by, created_at, applied_count"#,
+                         created_by, created_at, applied_count, scope_tags"#,
         )
         .bind(repo_id)
         .bind(file_glob)
@@ -53,6 +55,7 @@ impl<'a> LearningRepo<'a> {
         .bind(text)
         .bind(context)
         .bind(created_by)
+        .bind(scope_tags)
         .fetch_one(self.pool)
         .await
     }
@@ -61,30 +64,35 @@ impl<'a> LearningRepo<'a> {
     /// "any"; a learning with `file_glob IS NULL` counts as "applies to any
     /// file in this repo" and is always included when `repo_id` matches
     /// (or when the learning itself is global).
+    ///
+    /// `agent_name` / `task_kind`: when non-None, exclude learnings whose
+    /// scope_tags constrain that dimension to a *different* value. Learnings
+    /// with no constraint on that dimension (key absent or null) always pass.
     pub async fn list_matching(
         &self,
         repo_id: Option<Uuid>,
         file_path: Option<&str>,
         rule_id: Option<&str>,
+        agent_name: Option<&str>,
+        task_kind: Option<&str>,
     ) -> Result<Vec<Learning>, sqlx::Error> {
-        // file_glob uses SQL LIKE after `*`-to-`%` + `?`-to-`_` substitution
-        // (glob → LIKE). Done in the query via translate() to keep the
-        // matcher in the DB. Restrict to scopes that either have no glob
-        // (applies everywhere in the repo) or whose translated pattern
-        // matches the provided file_path.
         sqlx::query_as::<_, Learning>(
             r#"
             SELECT learning_id, repo_id, file_glob, rule_id, text, context,
-                   created_by, created_at, applied_count
+                   created_by, created_at, applied_count, scope_tags
             FROM learnings
             WHERE ($1::UUID IS NULL OR repo_id IS NULL OR repo_id = $1)
               AND ($2::TEXT IS NULL
                    OR file_glob IS NULL
                    OR $2 LIKE translate(file_glob, '*?', '%_'))
               AND ($3::TEXT IS NULL OR rule_id = $3)
+              AND (scope_tags->>'agent' IS NULL
+                   OR $4::TEXT IS NULL
+                   OR scope_tags->>'agent' = $4)
+              AND (scope_tags->>'kind' IS NULL
+                   OR $5::TEXT IS NULL
+                   OR scope_tags->>'kind' = $5)
             ORDER BY
-              -- Most-specific first: rule_id + file_glob, then rule_id, then
-              -- file_glob, then repo-only, then global.
               (rule_id IS NOT NULL)::int + (file_glob IS NOT NULL)::int DESC,
               created_at DESC
             "#,
@@ -92,6 +100,8 @@ impl<'a> LearningRepo<'a> {
         .bind(repo_id)
         .bind(file_path)
         .bind(rule_id)
+        .bind(agent_name)
+        .bind(task_kind)
         .fetch_all(self.pool)
         .await
     }

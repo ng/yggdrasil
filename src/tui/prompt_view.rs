@@ -80,7 +80,7 @@ impl PromptView {
         // Learnings: show every row (scope filtering happens at hook time,
         // not here — the inspector is a "see everything" surface).
         self.learnings = LearningRepo::new(pool)
-            .list_matching(None, None, None)
+            .list_matching(None, None, None, None, None)
             .await
             .unwrap_or_default();
         let (path, contents) = load_memory_md();

@@ -655,8 +655,15 @@ pub async fn claim(
         text.push_str(n);
     }
     let files = crate::cli::learning_cmd::extract_file_mentions(&text);
-    if let Ok(lines) =
-        crate::cli::learning_cmd::surface_for_files(pool, Some(t.repo_id), &files).await
+    let kind_str = t.kind.to_string();
+    if let Ok(lines) = crate::cli::learning_cmd::surface_for_files(
+        pool,
+        Some(t.repo_id),
+        &files,
+        Some(agent_name),
+        Some(&kind_str),
+    )
+    .await
     {
         for line in lines {
             println!("{line}");

@@ -695,6 +695,9 @@ enum LearnAction {
         context: Option<String>,
         #[arg(short, long)]
         agent: Option<String>,
+        /// Scope tag: global, agent=<name>, kind=<task-kind>. Repeatable.
+        #[arg(long, value_name = "SCOPE")]
+        scope: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -2255,9 +2258,11 @@ async fn main() -> anyhow::Result<()> {
                     rule_id,
                     context,
                     agent,
+                    scope,
                     json,
                 } => {
                     let agent_name = agent.unwrap_or_else(agent_name_default);
+                    let scope_tags = ygg::cli::learning_cmd::parse_scope_tags(&scope);
                     ygg::cli::learning_cmd::create(
                         &pool,
                         &text,
@@ -2266,6 +2271,7 @@ async fn main() -> anyhow::Result<()> {
                         rule_id.as_deref(),
                         context.as_deref(),
                         &agent_name,
+                        &scope_tags,
                         json,
                     )
                     .await?;
