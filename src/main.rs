@@ -2262,7 +2262,7 @@ async fn main() -> anyhow::Result<()> {
                     json,
                 } => {
                     let agent_name = agent.unwrap_or_else(agent_name_default);
-                    let scope_tags = ygg::cli::learning_cmd::parse_scope_tags(&scope);
+                    let scope_tags = ygg::cli::learning_cmd::parse_scope_tags(&scope)?;
                     ygg::cli::learning_cmd::create(
                         &pool,
                         &text,

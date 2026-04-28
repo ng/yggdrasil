@@ -9,30 +9,35 @@ use crate::cli::task_cmd::resolve_cwd_repo;
 use crate::models::learning::LearningRepo;
 use uuid::Uuid;
 
-pub fn parse_scope_tags(scopes: &[String]) -> serde_json::Value {
+pub fn parse_scope_tags(scopes: &[String]) -> Result<serde_json::Value, anyhow::Error> {
     let mut map = serde_json::Map::new();
     for s in scopes {
         if s == "global" {
             continue;
         }
-        if let Some((key, val)) = s.split_once('=') {
+        if let Some((raw_key, raw_val)) = s.split_once('=') {
+            let key = raw_key.trim();
+            let val = raw_val.trim();
+            if val.is_empty() {
+                anyhow::bail!("invalid --scope '{s}': value cannot be empty");
+            }
             match key {
                 "agent" | "kind" => {
                     map.insert(key.to_string(), serde_json::Value::String(val.to_string()));
                 }
                 _ => {
-                    eprintln!(
-                        "warning: unknown scope key '{key}', expected agent=<name> or kind=<task-kind>"
+                    anyhow::bail!(
+                        "invalid --scope key '{key}', expected agent=<name> or kind=<task-kind>"
                     );
                 }
             }
         } else {
-            eprintln!(
-                "warning: unrecognized scope '{s}', expected global, agent=<name>, or kind=<task-kind>"
+            anyhow::bail!(
+                "invalid --scope '{s}', expected global, agent=<name>, or kind=<task-kind>"
             );
         }
     }
-    serde_json::Value::Object(map)
+    Ok(serde_json::Value::Object(map))
 }
 
 pub async fn create(
@@ -288,26 +293,44 @@ mod tests {
 
     #[test]
     fn parse_scope_tags_global() {
-        let tags = parse_scope_tags(&["global".to_string()]);
+        let tags = parse_scope_tags(&["global".to_string()]).unwrap();
         assert_eq!(tags, serde_json::json!({}));
     }
 
     #[test]
     fn parse_scope_tags_agent() {
-        let tags = parse_scope_tags(&["agent=linter".to_string()]);
+        let tags = parse_scope_tags(&["agent=linter".to_string()]).unwrap();
         assert_eq!(tags, serde_json::json!({"agent": "linter"}));
     }
 
     #[test]
     fn parse_scope_tags_kind() {
-        let tags = parse_scope_tags(&["kind=bug".to_string()]);
+        let tags = parse_scope_tags(&["kind=bug".to_string()]).unwrap();
         assert_eq!(tags, serde_json::json!({"kind": "bug"}));
     }
 
     #[test]
     fn parse_scope_tags_combined() {
-        let tags = parse_scope_tags(&["agent=ci".to_string(), "kind=feature".to_string()]);
+        let tags = parse_scope_tags(&["agent=ci".to_string(), "kind=feature".to_string()]).unwrap();
         assert_eq!(tags, serde_json::json!({"agent": "ci", "kind": "feature"}));
+    }
+
+    #[test]
+    fn parse_scope_tags_unknown_key_errors() {
+        let err = parse_scope_tags(&["agnt=foo".to_string()]);
+        assert!(err.is_err(), "unknown key should fail");
+    }
+
+    #[test]
+    fn parse_scope_tags_no_equals_errors() {
+        let err = parse_scope_tags(&["bogus".to_string()]);
+        assert!(err.is_err(), "token without '=' should fail");
+    }
+
+    #[test]
+    fn parse_scope_tags_empty_value_errors() {
+        let err = parse_scope_tags(&["agent=".to_string()]);
+        assert!(err.is_err(), "empty value should fail");
     }
 
     #[test]
