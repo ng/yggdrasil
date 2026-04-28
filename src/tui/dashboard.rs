@@ -26,7 +26,6 @@ pub struct DashboardView {
     // Pulse numbers
     prompts_1h: i64,
     digests_1h: i64,
-    hits_1h: i64,
     cache_hits_24h: i64,
     cache_total_24h: i64,
     redactions_24h: i64,
@@ -135,7 +134,6 @@ impl DashboardView {
             agent_name_by_id: HashMap::new(),
             prompts_1h: 0,
             digests_1h: 0,
-            hits_1h: 0,
             cache_hits_24h: 0,
             cache_total_24h: 0,
             redactions_24h: 0,
@@ -396,26 +394,35 @@ impl DashboardView {
         let since_24h = Utc::now() - CDuration::hours(24);
         let sid = self.current_session_id.clone();
 
-        let (p1h, d1h, h1h): (i64, i64, i64) = if let Some(sid) = sid.as_deref() {
+        // Prompts come from the UserPromptSubmit hook fire — survives
+        // ADR 0015's YGG_INJECT=off default. Digests still emit.
+        // Recalls (`similarity_hit`) are retrieval-only and dropped per
+        // ADR 0015.
+        let (p1h, d1h): (i64, i64) = if let Some(sid) = sid.as_deref() {
             sqlx::query_as(
                 r#"SELECT
-                     COUNT(*) FILTER (WHERE event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'digest_written'),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
-                   FROM events WHERE cc_session_id = $1"#
-            ).bind(sid).fetch_one(pool).await.unwrap_or((0, 0, 0))
+                     COUNT(*) FILTER (WHERE event_kind::text = 'hook_fired' AND payload->>'hook' = 'UserPromptSubmit'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'digest_written')
+                   FROM events WHERE cc_session_id = $1"#,
+            )
+            .bind(sid)
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0, 0))
         } else {
             sqlx::query_as(
                 r#"SELECT
-                     COUNT(*) FILTER (WHERE event_kind::text = 'node_written' AND payload->>'kind' = 'user_message'),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'digest_written'),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
-                   FROM events WHERE created_at >= $1"#
-            ).bind(since_1h).fetch_one(pool).await.unwrap_or((0, 0, 0))
+                     COUNT(*) FILTER (WHERE event_kind::text = 'hook_fired' AND payload->>'hook' = 'UserPromptSubmit'),
+                     COUNT(*) FILTER (WHERE event_kind::text = 'digest_written')
+                   FROM events WHERE created_at >= $1"#,
+            )
+            .bind(since_1h)
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0, 0))
         };
         self.prompts_1h = p1h;
         self.digests_1h = d1h;
-        self.hits_1h = h1h;
 
         let (ch24, cc24, r24): (i64, i64, i64) = if let Some(sid) = sid.as_deref() {
             sqlx::query_as(
@@ -1239,10 +1246,7 @@ impl DashboardView {
             Line::from(vec![
                 Span::styled(counter_label, Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!(
-                        "{} prompts · {} digests · {} recalls",
-                        self.prompts_1h, self.digests_1h, self.hits_1h
-                    ),
+                    format!("{} prompts · {} digests", self.prompts_1h, self.digests_1h),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
             ]),
