@@ -21,8 +21,52 @@ case "$OS" in
     *)      echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
+# Atomic install + macOS codesign + verify. Mirrors `make install`.
+# `cp $src $PREFIX/ygg` directly is what bit yggdrasil-175: on macOS,
+# overwriting a path whose previous binary is in the Gatekeeper cache
+# silently SIGKILLs the next invocation. Always go through a sibling
+# `.next` path → atomic mv → codesign --force → 5 s `--version` smoke.
+install_atomic() {
+    local src="$1"
+    mkdir -p "$PREFIX"
+    cp "$src" "$PREFIX/ygg.next"
+    chmod +x "$PREFIX/ygg.next"
+    mv -f "$PREFIX/ygg.next" "$PREFIX/ygg"
+    if [ "$OS" = "darwin" ]; then
+        codesign --force -s - "$PREFIX/ygg" >/dev/null 2>&1 || true
+    fi
+    # 5 s --version smoke. Hard timeout via perl so a wedged binary
+    # can't hang the install.
+    if command -v perl >/dev/null 2>&1; then
+        if ! perl -e '
+            eval {
+                local $SIG{ALRM} = sub { die "timeout\n" };
+                alarm 5;
+                my $pid = open(my $fh, "-|", $ARGV[0], "--version") or die $!;
+                my $line = <$fh>;
+                alarm 0;
+                close $fh;
+                exit 1 unless defined $line && $line =~ /^ygg /;
+            };
+            exit 1 if $@;
+        ' "$PREFIX/ygg"; then
+            echo "FAIL: $PREFIX/ygg --version did not return cleanly within 5s." >&2
+            echo "      symptom: SIGKILL or hang. on macOS this means the codesign cache" >&2
+            echo "      for the previous binary at this path was invalidated. re-run" >&2
+            echo "      this script (a clean re-sign happens above) or:" >&2
+            echo "        cd $(pwd) && make reinstall" >&2
+            exit 1
+        fi
+    else
+        # No perl: best-effort check, no timeout. Caller will see hang.
+        "$PREFIX/ygg" --version >/dev/null 2>&1 || {
+            echo "FAIL: $PREFIX/ygg --version did not exit cleanly." >&2
+            exit 1
+        }
+    fi
+}
+
 echo "Installing ygg for ${OS}/${ARCH}..."
-mkdir -p "$PREFIX"
 
 # Check for prebuilt binary from GitHub releases
 LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4 || true)
@@ -31,8 +75,8 @@ if [ -n "$LATEST" ]; then
     URL="https://github.com/${REPO}/releases/download/${LATEST}/ygg-${TARGET}"
     echo "Downloading ${LATEST}..."
     curl -fsSL -o /tmp/ygg "$URL"
-    chmod +x /tmp/ygg
-    mv /tmp/ygg "$PREFIX/ygg"
+    install_atomic /tmp/ygg
+    rm -f /tmp/ygg
     echo "ygg ${LATEST} installed to ${PREFIX}/ygg"
 else
     # No release found — build from source
@@ -53,7 +97,7 @@ else
     git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR/ygg"
     cd "$TMPDIR/ygg"
     cargo build --release
-    cp target/release/ygg "$PREFIX/ygg"
+    install_atomic target/release/ygg
     rm -rf "$TMPDIR"
     echo "ygg installed to ${PREFIX}/ygg (built from source)"
 fi
