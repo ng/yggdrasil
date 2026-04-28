@@ -31,14 +31,23 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     let j: serde_json::Value =
         serde_json::from_str(&input).unwrap_or_else(|_| serde_json::Value::Null);
 
-    let pct = j
-        .pointer("/context_window/used_percentage")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0) as i64;
     let cost_usd = j
         .pointer("/cost/total_cost_usd")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
+    let model_label = j
+        .pointer("/model/display_name")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            j.pointer("/model/id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
+    // Effort level lives in ~/.claude/settings.json (e.g. "xhigh"); CC's
+    // statusLine JSON doesn't reliably expose it. Read once per refresh —
+    // small file, infrequent invocation.
+    let effort = read_effort_level();
     // Claude Code's statusLine JSON doesn't reliably expose token_usage
     // under one path. Try several known spellings, then fall back to a
     // transcript-byte-size estimate (~4 chars per token). This way tokens
@@ -92,26 +101,39 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
 
     // Context + tokens are the same dimension (how full is the window), so
     // merge them into one segment. Color climbs neutral → yellow → red as
-    // pressure rises. The numeric part itself also gets the color so it's
-    // obvious at a glance when you're deep in the window.
+    // pressure rises. Use absolute knees, not percent-of-cap — the cap
+    // detection upstream isn't 100% reliable, and degradation research is
+    // independent of the model's hard limit. Matches dashboard ctx_color.
     let red = "\x1b[38;5;203m";
-    let (bar_color, value_style) = if pct >= 90 {
+    let orange = "\x1b[38;5;208m";
+    let (bar_color, value_style) = if tok_total >= 500_000 {
         (red, format!("{red}{BOLD}"))
-    } else if pct >= 75 {
+    } else if tok_total >= 300_000 {
+        (orange, format!("{orange}{BOLD}"))
+    } else if tok_total >= 200_000 {
         (YELL, format!("{YELL}{BOLD}"))
-    } else if pct >= 50 {
-        (CYAN, format!("{CYAN}{BOLD}"))
     } else {
         (GREEN, format!("{BOLD}"))
     };
-    let tok_suffix = if tok_total > 0 {
-        format!(" {DIM}({}){RESET}", format_tokens(tok_total))
+    let ctx_value = if tok_total > 0 {
+        format_tokens(tok_total)
     } else {
-        String::new()
+        "—".to_string()
     };
     segments.push(format!(
-        "{bar_color}▊{RESET} {DIM}ctx{RESET} {value_style}{pct}%{RESET}{tok_suffix}"
+        "{bar_color}▊{RESET} {DIM}ctx{RESET} {value_style}{ctx_value}{RESET}"
     ));
+
+    // Model + effort: low-noise context for "what am I running right now."
+    if let Some(m) = model_label {
+        let suffix = effort
+            .as_deref()
+            .map(|e| format!(" {DIM}{e}{RESET}"))
+            .unwrap_or_default();
+        segments.push(format!("{CYAN}{m}{RESET}{suffix}"));
+    } else if let Some(e) = effort.as_deref() {
+        segments.push(format!("{DIM}{e}{RESET}"));
+    }
 
     // Session cost — 2dp. Label as "spend" so it reads as verb-action.
     if cost_usd > 0.0 {
@@ -144,6 +166,19 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
 
     println!("{}", segments.join(" · "));
     Ok(())
+}
+
+/// Pull the user's `effortLevel` (e.g. "xhigh") from
+/// `~/.claude/settings.json`. Best-effort — returns None if the file
+/// is missing, malformed, or the field is absent.
+fn read_effort_level() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::PathBuf::from(home).join(".claude/settings.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("effortLevel")
+        .and_then(|x| x.as_str())
+        .map(String::from)
 }
 
 /// Render a delta as a trend glyph. `delta` is the signed change (new - old
