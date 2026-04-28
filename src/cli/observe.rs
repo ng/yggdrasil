@@ -38,15 +38,34 @@ pub async fn execute(
             tail_transcript(pool, config, &path, agent_id, agent_name, &session_id).await?;
         }
         None => {
-            tracing::info!("no transcript found, polling for new sessions...");
-            // Poll until a transcript appears
-            loop {
+            // Bounded poll. If Claude never appears (e.g. spawn sent the
+            // start command to a non-existent pane, or the user closed
+            // the CC pane before it opened), exit cleanly instead of
+            // hanging forever in a tmux pane nobody's watching.
+            // Override with YGG_OBSERVE_WAIT_SECS for slow startups.
+            let wait_secs: u64 = std::env::var("YGG_OBSERVE_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60);
+            tracing::info!(
+                wait_secs,
+                "no transcript found, polling for new sessions..."
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs);
+            let mut found = false;
+            while std::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if let Some(path) = find_latest_transcript().await {
                     tracing::info!(path = %path.display(), "transcript found, tailing");
                     tail_transcript(pool, config, &path, agent_id, agent_name, &session_id).await?;
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                eprintln!(
+                    "ygg observe: no Claude Code transcript appeared within {wait_secs}s — exiting"
+                );
             }
         }
     }

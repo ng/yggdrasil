@@ -52,48 +52,74 @@ impl TmuxManager {
     }
 
     /// Create a new window for a task with a split pane for status.
-    pub async fn create_task_window(task_name: &str) -> Result<(), crate::YggError> {
+    /// Returns `(left_pane_id, right_pane_id)` as tmux `@N` pane IDs.
+    /// We use pane IDs rather than `<window>.<index>` because the user
+    /// may have `pane-base-index 1` set in `.tmux.conf`, in which case
+    /// `.0` doesn't exist and send-keys silently fails.
+    pub async fn create_task_window(task_name: &str) -> Result<(String, String), crate::YggError> {
         Self::ensure_session().await?;
 
-        // Create new window
-        let status = Command::new("tmux")
-            .args(["new-window", "-t", SESSION_NAME, "-n", task_name])
-            .status()
+        // Create new window, capture the active pane's stable id.
+        let out = Command::new("tmux")
+            .args([
+                "new-window",
+                "-t",
+                SESSION_NAME,
+                "-n",
+                task_name,
+                "-P",
+                "-F",
+                "#{pane_id}",
+            ])
+            .output()
             .await
             .map_err(|e| crate::YggError::Tmux(format!("new-window failed: {e}")))?;
-
-        if !status.success() {
+        if !out.status.success() {
             return Err(crate::YggError::Tmux(format!(
                 "failed to create window '{task_name}'"
             )));
         }
+        let left_pane = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if left_pane.is_empty() {
+            return Err(crate::YggError::Tmux(
+                "tmux new-window returned no pane id".into(),
+            ));
+        }
 
-        // Split pane for status sidebar (20% right)
-        Command::new("tmux")
+        // Split that pane and capture the new pane's id too.
+        let out = Command::new("tmux")
             .args([
                 "split-window",
                 "-t",
-                &format!("{SESSION_NAME}:{task_name}"),
+                &left_pane,
                 "-h",
                 "-l",
                 "20%",
+                "-P",
+                "-F",
+                "#{pane_id}",
             ])
-            .status()
+            .output()
             .await
             .map_err(|e| crate::YggError::Tmux(format!("split-pane failed: {e}")))?;
+        if !out.status.success() {
+            return Err(crate::YggError::Tmux("failed to split pane".into()));
+        }
+        let right_pane = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if right_pane.is_empty() {
+            return Err(crate::YggError::Tmux(
+                "tmux split-window returned no pane id".into(),
+            ));
+        }
 
-        // Select the main pane (left)
+        // Focus the main pane (left).
         Command::new("tmux")
-            .args([
-                "select-pane",
-                "-t",
-                &format!("{SESSION_NAME}:{task_name}.0"),
-            ])
+            .args(["select-pane", "-t", &left_pane])
             .status()
             .await
             .ok();
 
-        Ok(())
+        Ok((left_pane, right_pane))
     }
 
     /// Send keys to a specific pane.

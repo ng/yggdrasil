@@ -25,26 +25,24 @@ pub async fn execute(
     let agent = agent_repo.register(&agent_name).await?;
     println!("  Agent ID: {}", agent.agent_id);
 
-    // Ensure tmux session + create task window
+    // Ensure tmux session + create task window. The helper returns pane
+    // *ids* (tmux's stable @N references) rather than positional .0/.1
+    // — the latter break under `pane-base-index 1` in .tmux.conf.
     TmuxManager::ensure_session().await?;
-    TmuxManager::create_task_window(&agent_name).await?;
+    let (left_pane, right_pane) = TmuxManager::create_task_window(&agent_name).await?;
 
-    // Start Claude Code in the main pane (pane 0) with the task as prompt
-    // Claude Code reads from the project dir where it can access .claude/ settings
+    // Start Claude Code in the main (left) pane with the task as prompt.
     let claude_cmd = format!("claude --prompt '{}'", shell_escape(task),);
+    TmuxManager::send_keys(&left_pane, &claude_cmd).await?;
 
-    TmuxManager::send_keys(&format!("ygg:{agent_name}.0"), &claude_cmd).await?;
-
-    // Start the ygg observer in the sidebar pane (pane 1)
-    // This watches the Claude Code JSONL transcript and feeds into the DAG
+    // Start the ygg observer in the sidebar (right) pane. It tails the
+    // Claude Code JSONL transcript and ingests turns into the DAG.
     let ygg_bin = std::env::current_exe()
         .unwrap_or_else(|_| "ygg".into())
         .to_string_lossy()
         .to_string();
-
     let observe_cmd = format!("{} observe --agent {}", ygg_bin, shell_escape(&agent_name),);
-
-    TmuxManager::send_keys(&format!("ygg:{agent_name}.1"), &observe_cmd).await?;
+    TmuxManager::send_keys(&right_pane, &observe_cmd).await?;
 
     println!("  Agent '{agent_name}' spawned in tmux");
     println!("  ├─ pane 0: Claude Code (agent)");
