@@ -11,93 +11,7 @@ use crate::models::agent::{AgentRepo, AgentWorkflow};
 
 const PRESSURE_TTL: Duration = Duration::from_secs(5);
 
-/// Actual context-window tokens for the given agent, extracted from the
-/// latest `usage` block in its Claude Code transcript. This is the same
-/// number CC's own status line shows: cache_read + cache_creation + output.
-/// Falls back to a file-size estimate only if no usage block is found.
-fn agent_pressure_tokens(agent_name: &str) -> Option<i64> {
-    let home = std::env::var("HOME").ok()?;
-    let projects = std::path::PathBuf::from(&home).join(".claude/projects");
-    if !projects.exists() {
-        return None;
-    }
-    let entries = std::fs::read_dir(&projects).ok()?;
-    let needle = format!("-{agent_name}");
-    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
-            continue;
-        };
-        if !name.ends_with(&needle) {
-            continue;
-        }
-        let Ok(inner) = std::fs::read_dir(entry.path()) else {
-            continue;
-        };
-        for f in inner.flatten() {
-            if f.path().extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let mt = f.metadata().ok().and_then(|m| m.modified().ok());
-            if let Some(t) = mt {
-                match &best {
-                    None => best = Some((t, f.path())),
-                    Some((bt, _)) if t > *bt => best = Some((t, f.path())),
-                    _ => {}
-                }
-            }
-        }
-    }
-    let (_, path) = best?;
-
-    if let Some(tokens) = parse_last_usage_tokens(&path) {
-        return Some(tokens);
-    }
-    // Only fall back if we couldn't find any usage entry — 30 bytes/token
-    // is closer to reality for JSONL than the old 10 (those were 5-6x high).
-    let bytes = std::fs::metadata(&path).ok()?.len() as i64;
-    Some(bytes / 30)
-}
-
-/// Walk the JSONL from end to start looking for the last `usage` object
-/// and sum the fields that count against the context window.
-fn parse_last_usage_tokens(path: &std::path::Path) -> Option<i64> {
-    // Read the last 200KB — usage blocks are always near the tail, and we
-    // avoid reading multi-MB transcripts in full on every refresh.
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let tail_start = len.saturating_sub(200_000);
-    file.seek(SeekFrom::Start(tail_start)).ok()?;
-    let mut buf = String::new();
-    file.take(200_000).read_to_string(&mut buf).ok()?;
-
-    // Scan lines in reverse order for the first JSON with a usable usage block.
-    for line in buf.lines().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        // Usage can appear nested under message.usage (assistant entries) or
-        // at the top level, depending on the record shape.
-        let usage = v.pointer("/message/usage").or_else(|| v.pointer("/usage"));
-        let Some(u) = usage else { continue };
-        let cr = u
-            .get("cache_read_input_tokens")
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0);
-        let cc = u
-            .get("cache_creation_input_tokens")
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0);
-        let inp = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-        let out = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-        let total = cr + cc + inp + out;
-        if total > 0 {
-            return Some(total);
-        }
-    }
-    None
-}
+use super::ctx_usage::{SOFT_HARD_WARN, agent_context_usage, ctx_color, humanize_tokens};
 
 /// Dashboard view — system pulse at top, agents in the middle,
 /// meaningful locks table at bottom.
@@ -132,9 +46,10 @@ pub struct DashboardView {
     pub worker_sel: usize,
     pub focus: DashboardFocus,
 
-    /// Transcript-file-size pressure cache. Reading ~/.claude/projects on
-    /// every 500ms render is expensive; cache per-agent for PRESSURE_TTL.
-    pressure_cache: HashMap<String, (Instant, Option<i64>)>,
+    /// Per-agent context-tokens cache: (tokens, hard_cap). Re-scanning
+    /// ~/.claude/projects/*.jsonl on every 500ms render is expensive,
+    /// so cache for PRESSURE_TTL.
+    pressure_cache: HashMap<String, (Instant, Option<(i64, i64)>)>,
 
     /// When on, pulse queries filter to the most-recent cc_session_id.
     /// Toggled with `S` on the dashboard pane.
@@ -394,14 +309,14 @@ impl DashboardView {
         self.session_scoped = !self.session_scoped;
     }
 
-    fn cached_pressure(&mut self, agent_name: &str) -> Option<i64> {
+    fn cached_pressure(&mut self, agent_name: &str) -> Option<(i64, i64)> {
         let now = Instant::now();
         if let Some((t, v)) = self.pressure_cache.get(agent_name) {
             if now.duration_since(*t) < PRESSURE_TTL {
                 return *v;
             }
         }
-        let v = agent_pressure_tokens(agent_name);
+        let v = agent_context_usage(agent_name);
         self.pressure_cache.insert(agent_name.to_string(), (now, v));
         v
     }
@@ -1163,33 +1078,31 @@ impl DashboardView {
 
     fn render_alerts(&mut self, frame: &mut Frame, area: Rect) {
         let mut alerts: Vec<Span> = Vec::new();
-        let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1_000_000);
 
-        // High pressure agents (>=90%)
+        // Context alerts. Soft knee (300K, "past degradation") = warn,
+        // hard knee (>=80% of model's actual cap) = block. Mixing soft +
+        // hard means a 1M-cap session at 400K still surfaces — by the
+        // hard-cap math it's only 40%, but recall is already hurting.
         let agent_names: Vec<String> = self.agents.iter().map(|a| a.agent_name.clone()).collect();
         for name in &agent_names {
-            if let Some(tokens) = self.cached_pressure(name) {
-                if limit > 0 {
-                    let pct = ((tokens as f64 / limit as f64) * 100.0) as u32;
-                    if pct >= 90 {
-                        alerts.push(Span::styled(
-                            format!(" ⛔ {name} {pct}% "),
-                            Style::default()
-                                .fg(Color::White)
-                                .bg(Color::Red)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        alerts.push(Span::raw("  "));
-                    } else if pct >= 75 {
-                        alerts.push(Span::styled(
-                            format!(" ⚠ {name} {pct}% "),
-                            Style::default().fg(Color::Black).bg(Color::Yellow),
-                        ));
-                        alerts.push(Span::raw("  "));
-                    }
+            if let Some((tokens, hard)) = self.cached_pressure(name) {
+                let near_hard = (hard as f64 * 0.80) as i64;
+                if tokens >= near_hard {
+                    let pct = ((tokens as f64 / hard as f64) * 100.0) as u32;
+                    alerts.push(Span::styled(
+                        format!(" ⛔ {name} {} ({pct}%) ", humanize_tokens(tokens)),
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::Red)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    alerts.push(Span::raw("  "));
+                } else if tokens >= SOFT_HARD_WARN {
+                    alerts.push(Span::styled(
+                        format!(" ⚠ {name} {} ", humanize_tokens(tokens)),
+                        Style::default().fg(Color::Black).bg(Color::Yellow),
+                    ));
+                    alerts.push(Span::raw("  "));
                 }
             }
         }
@@ -1395,7 +1308,7 @@ impl DashboardView {
                     .add_modifier(Modifier::BOLD),
             ),
             Cell::from("STATE"),
-            Cell::from("PRESSURE"),
+            Cell::from("CTX"),
             Cell::from("24H"),
             Cell::from("UPDATED"),
         ])
@@ -1412,7 +1325,7 @@ impl DashboardView {
 
         // Pre-compute cached pressure per agent — we can't call &mut self
         // inside the iter closure below.
-        let mut pressure_by_name: HashMap<String, Option<i64>> = HashMap::new();
+        let mut pressure_by_name: HashMap<String, Option<(i64, i64)>> = HashMap::new();
         let agent_names: Vec<String> = self.agents.iter().map(|a| a.agent_name.clone()).collect();
         for n in &agent_names {
             pressure_by_name.insert(n.clone(), self.cached_pressure(n));
@@ -1475,35 +1388,25 @@ impl DashboardView {
                     state_color
                 };
 
-                // Pressure comes from the TRANSCRIPT file size, not our
-                // agents.context_tokens counter (which only reflects nodes WE
-                // write and drifts badly). Falls through to — if no transcript
-                // is findable for this agent.
-                let limit: i64 = std::env::var("YGG_CONTEXT_LIMIT")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1_000_000);
+                // CTX comes from the live `usage` block in the agent's CC
+                // transcript (cache_read + cache_creation + input + output).
+                // The bar fills against the model's hard cap (1M when
+                // context-1m beta is observed, else 200K), but the *color*
+                // also reflects soft-degradation knees at 200K/300K so a
+                // 1M-cap session past 300K still warns.
                 let (pressure_bar, pressure_color) =
                     match pressure_by_name.get(&agent.agent_name).copied().flatten() {
-                        Some(tokens) if limit > 0 => {
-                            let pct = ((tokens as f64 / limit as f64) * 100.0).min(999.0) as u32;
+                        Some((tokens, hard_cap)) if hard_cap > 0 => {
+                            let pct = ((tokens as f64 / hard_cap as f64) * 100.0).min(999.0) as u32;
                             let blocks = (pct / 10).min(10) as usize;
-                            let color = if pct >= 90 {
-                                Color::Red
-                            } else if pct >= 75 {
-                                Color::Yellow
-                            } else if pct >= 50 {
-                                Color::Cyan
-                            } else {
-                                Color::Green
-                            };
+                            let color = ctx_color(tokens, hard_cap);
                             (
                                 format!(
-                                    "{}{} {}% ({}K)",
+                                    "{}{} {}/{}",
                                     "█".repeat(blocks),
                                     "░".repeat(10 - blocks),
-                                    pct,
-                                    tokens / 1000
+                                    humanize_tokens(tokens),
+                                    humanize_tokens(hard_cap),
                                 ),
                                 color,
                             )
@@ -1535,12 +1438,29 @@ impl DashboardView {
                     base
                 };
 
+                // Idle rows are dormant — sat there for hours, no live
+                // turn happening. Dim the whole row so a yellow CTX bar
+                // on an idle session doesn't compete visually with an
+                // actually-working agent in trouble.
+                let is_idle = matches!(agent.current_state, crate::models::agent::AgentState::Idle);
+                let (name_color, state_fg, ctx_fg, spark_fg) = if is_idle {
+                    (
+                        Color::DarkGray,
+                        Color::DarkGray,
+                        Color::DarkGray,
+                        Color::DarkGray,
+                    )
+                } else {
+                    (Color::Reset, state_color, pressure_color, Color::Cyan)
+                };
+
                 Row::new(vec![
-                    Cell::from(name_cell),
-                    Cell::from(state_label).style(Style::default().fg(state_color)),
-                    Cell::from(pressure_bar).style(Style::default().fg(pressure_color)),
-                    Cell::from(sparkline).style(Style::default().fg(Color::Cyan)),
-                    Cell::from(humanize_since(agent.updated_at)),
+                    Cell::from(name_cell).style(Style::default().fg(name_color)),
+                    Cell::from(state_label).style(Style::default().fg(state_fg)),
+                    Cell::from(pressure_bar).style(Style::default().fg(ctx_fg)),
+                    Cell::from(sparkline).style(Style::default().fg(spark_fg)),
+                    Cell::from(humanize_since(agent.updated_at))
+                        .style(Style::default().fg(name_color)),
                 ])
                 .style(style)
             })
