@@ -112,7 +112,7 @@ pool, and connection-wait latency manifests as spurious tick lag.
 - **migrations/**: Postgres schema with `pgvector` + `uuid-ossp`.
 - **Hooks** in `~/.claude/ygg-hooks/` → call `ygg` subcommands at Claude Code lifecycle events.
 
-<!-- BEGIN YGG INTEGRATION v:1 hash:78de7785 -->
+<!-- BEGIN YGG INTEGRATION v:2 hash:1a3cd45e -->
 ## Yggdrasil Agent Coordination
 
 This project uses **Yggdrasil** (`ygg`) for cross-session memory, resource
@@ -127,14 +127,72 @@ each user prompt (`[ygg memory | <agent> | <age> | sim=<n>%]`).
 ```bash
 ygg task ready                              # Unblocked tasks in the current repo
 ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywhere)
-ygg task create "title" --kind <task|bug|feature|chore|epic> --priority <0-4>
-                                            # Priority: 0=critical 1=high 2=med 3=low 4=backlog.
-                                            # Accepts "P0".."P4" too. NOT "high"/"medium"/"low".
+ygg task create "title" --kind <k> --priority <0-4>   # See priority/kind values below
 ygg task claim <ref>                        # Take a task (assign + in_progress)
 ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
 ygg task close <ref> [--reason "..."]       # Complete a task
 ygg task dep <task> <blocker>               # Record dependency
 ygg remember "..."                          # Durable note; similarity retriever can surface later
+```
+
+### Task field values (important — no guessing)
+
+- `--priority <0..4>` — **0 = critical, 1 = high, 2 = medium, 3 = low, 4 = backlog**.
+  Also accepts `P0`..`P4`. Do NOT pass strings like "high" / "medium" / "low".
+- `--kind <task|bug|feature|chore|epic>` — one of these five. Default is `task`.
+- `--status <open|in_progress|blocked|closed>` — for filtering / transitions.
+- `--label <a,b,c>` — comma-separated labels. Repeatable.
+- `<ref>` is either `<prefix>-<N>` (e.g. `yggdrasil-42`) or a UUID.
+
+### Ticket body structure
+
+Tickets are read by other agents picking up the work. Bodies have **four
+sections in this order**, separated by blank lines. No PR-prose walls.
+
+1. **Why** — one sentence. The trigger or observation that justifies the
+   work. Cite the source: `Adversarial review:`, `Codebase audit:`,
+   `Bench scenario X:`, `Research thread Y:`, `Incident on <date>:`.
+2. **What** — one sentence. The concrete change. Use imperative voice.
+3. **Acceptance:** — a bulleted list of testable conditions. Each bullet
+   is something an autonomous agent can verify when claiming the task as
+   done. Avoid vague verbs ("improve", "consider"); pin SHAs, file paths,
+   commands, numeric thresholds.
+4. **Refs:** *(optional)* — research thread tag, related ticket
+   (`yggdrasil-NN`), external URL, ADR number.
+
+Example:
+
+```text
+Adversarial review: src/db.rs max_connections(10) starves a fleet of
+50+ active agents.
+
+Bump default to 32 and accept YGG_DB_POOL env override.
+
+Acceptance:
+- src/db.rs default = 32; YGG_DB_POOL parses to u32, falls back on error
+- CLAUDE.md documents the knob in the Build & Test section
+- cargo check --all-targets clean
+
+Refs: yggdrasil-141, adversarial-review note 2026-04-23
+```
+
+### Terse for AI-tracking fields
+
+When writing content that only agents consume — `ygg task create`
+titles/descriptions/acceptance/design/notes, `ygg remember`,
+`ygg memory create` — be terse. Drop filler (really/just/basically/
+actually/very). Drop articles (`a`/`an`/`the`) when meaning survives.
+Prefer one sentence per field where content allows. **Preserve
+verbatim**: identifiers (snake_case, CamelCase), paths, commands,
+numbers, URLs, and modal keywords (always/never/must/should/cannot/
+don't/may/shall).
+
+Does **NOT** apply to commit messages, PR descriptions, code comments,
+or chat responses — those are human-facing and full fidelity is correct.
+
+Example:
+```bash
+ygg task create "fix migration ordering" --kind bug --priority 1 --label migrations,sqlx
 
 ygg status                                  # See all agents' state, locks, recent activity
 ygg lock acquire <resource-key>             # Lease a shared resource before editing
@@ -155,12 +213,21 @@ ygg logs --follow                           # Live event stream
 - **Durable notes** — `ygg remember "..."` writes a directive node the similarity retriever will surface in future sessions (scoped to the current repo when detectable). Prefer this over scratch `.md` files.
 - **Do NOT** use `bd` / beads. This project uses `ygg task` / `ygg remember` instead.
 
-## Session Completion (managed-block duplicate — see canonical block above)
+## Session Completion
 
-The earlier "Session Completion" section is canonical. The managed
-integration block keeps the rules in sync for downstream repos that
-install `ygg integrate`. PR-into-main is the default; direct push to
-main only for trivial changes.
+Work is NOT complete until `git push` succeeds.
+
+1. Run quality gates if code changed (tests, linters, build/type-check).
+2. Release any locks you still hold (`ygg lock list` → `ygg lock release <key>`).
+3. Push:
+   ```bash
+   git pull --rebase
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+4. If push fails, resolve and retry until it succeeds.
+
+**Never** stop before pushing; **never** say "ready to push when you are" — you push.
 
 ## Non-Interactive Shell Commands
 
