@@ -54,39 +54,37 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         .map(String::from);
     let now_minus_24 = Utc::now() - Duration::hours(24);
     let now_minus_48 = Utc::now() - Duration::hours(48);
-    let (cache_hits, embed_calls, hits_today, cache_prev, calls_prev, hits_prev) = if let Some(
-        sid,
-    ) =
-        session_id.as_deref()
+    // Embedding cache numbers still flow from non-retrieval paths
+    // (task dupe detection, occasional manual searches), so the cache
+    // hit ratio remains a meaningful signal post-ADR-0015 Phase 1.
+    // The retrieval-only signals (similarity_hit, hit_referenced) are
+    // gone — see the segment-rendering section below.
+    let (cache_hits, embed_calls, cache_prev, calls_prev) = if let Some(sid) = session_id.as_deref()
     {
         // Session-scoped: current session vs last 24h global for trend comparison.
-        let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        let row: (i64, i64, i64, i64) = sqlx::query_as(
                 r#"SELECT
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND cc_session_id = $1),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND cc_session_id = $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND cc_session_id = $1),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1)
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1)
                    FROM events"#,
             )
             .bind(sid)
             .bind(now_minus_24)
-            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0, 0));
+            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0));
         row
     } else {
-        let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        let row: (i64, i64, i64, i64) = sqlx::query_as(
                 r#"SELECT
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $1),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at >= $1),
                      COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at < $1 AND created_at >= $2),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at < $1 AND created_at >= $2),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'      AND created_at < $1 AND created_at >= $2)
+                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at < $1 AND created_at >= $2)
                    FROM events"#,
             )
             .bind(now_minus_24).bind(now_minus_48)
-            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0, 0, 0));
+            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0));
         row
     };
 
@@ -139,60 +137,10 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         ));
     }
 
-    if hits_today > 0 {
-        let trend = if hits_prev >= 10 {
-            let pct_change = (hits_today - hits_prev) as f64 / hits_prev as f64;
-            trend_arrow(pct_change, 0.15)
-        } else {
-            ""
-        };
-        segments.push(format!(
-            "{DIM}ygg recalls/24h{RESET} {BOLD}{hits_today}{RESET}{trend}"
-        ));
-    }
-
-    // Referenced ratio — the headline "is this actually helping?" number.
-    // Pulls hit_referenced / similarity_hit over the same window the recalls
-    // segment uses so the two numbers line up. Session-scoped when we have
-    // a session_id (matches the cache segment's behavior above).
-    let (refd, emitted): (i64, i64) = if let Some(sid) = session_id.as_deref() {
-        sqlx::query_as(
-            r#"SELECT
-                 COUNT(*) FILTER (WHERE event_kind::text = 'hit_referenced'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit')
-               FROM events WHERE cc_session_id = $1"#,
-        )
-        .bind(sid)
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0, 0))
-    } else {
-        sqlx::query_as(
-            r#"SELECT
-                 COUNT(*) FILTER (WHERE event_kind::text = 'hit_referenced' AND created_at >= $1),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit' AND created_at >= $1)
-               FROM events"#,
-        )
-        .bind(now_minus_24)
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0, 0))
-    };
-    if emitted > 0 {
-        let rate = (refd as f64 / emitted as f64 * 100.0) as i64;
-        // Threshold colors — mirror the eval pane so the same ratio tells
-        // the same story in both places.
-        let color = if rate >= 40 {
-            GREEN
-        } else if rate >= 20 {
-            YELL
-        } else {
-            DIM
-        };
-        segments.push(format!(
-            "{DIM}ygg recall{RESET} {color}{refd}/{emitted} ({rate}%){RESET}"
-        ));
-    }
+    // ADR 0015 Phase 1 dropped retrieval-as-memory; the `recalls/24h`
+    // and `recall N/M (X%)` segments measured a feature we no longer
+    // run, so they're gone. Cache-hit segment stays — embedding still
+    // fires from task dupe detection and manual searches.
 
     println!("{}", segments.join(" · "));
     Ok(())
