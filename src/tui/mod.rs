@@ -16,6 +16,7 @@ pub mod log_view;
 pub mod memgraph_view;
 pub mod motion;
 pub mod multi_select;
+pub mod nerdy;
 pub mod palette;
 pub mod pane_filter;
 pub mod pip;

@@ -37,6 +37,7 @@ pub enum ActiveView {
     Locks,
     Runs,
     RunGrid,
+    Nerdy,
 }
 
 pub struct App {
@@ -54,6 +55,7 @@ pub struct App {
     pub locks: LocksView,
     pub runs: RunsView,
     pub run_grid: RunGridView,
+    pub nerdy: super::nerdy::NerdyView,
     pub agent_name: String,
     pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
@@ -412,6 +414,7 @@ impl App {
             locks: LocksView::new(),
             runs: RunsView::new(),
             run_grid: RunGridView::new(),
+            nerdy: super::nerdy::NerdyView::new(),
             agent_name,
             query_focus: false,
             status_tail: Vec::new(),
@@ -785,6 +788,7 @@ impl App {
             KeyCode::Char('0') => self.set_view(ActiveView::Locks),
             KeyCode::Char('R') => self.set_view(ActiveView::Runs),
             KeyCode::Char('G') => self.set_view(ActiveView::RunGrid),
+            KeyCode::Char('N') => self.set_view(ActiveView::Nerdy),
             // yggdrasil-151: open the detail overlay populated from the
             // current pane's selected row. Per-pane adapters: Tasks
             // shows the full title + description + acceptance + design
@@ -1026,13 +1030,14 @@ impl App {
             ActiveView::Prompt => ActiveView::Locks,
             ActiveView::Locks => ActiveView::Runs,
             ActiveView::Runs => ActiveView::RunGrid,
-            ActiveView::RunGrid => ActiveView::Dashboard,
+            ActiveView::RunGrid => ActiveView::Nerdy,
+            ActiveView::Nerdy => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::RunGrid,
+            ActiveView::Dashboard => ActiveView::Nerdy,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
@@ -1044,6 +1049,7 @@ impl App {
             ActiveView::Locks => ActiveView::Prompt,
             ActiveView::Runs => ActiveView::Locks,
             ActiveView::RunGrid => ActiveView::Runs,
+            ActiveView::Nerdy => ActiveView::RunGrid,
         };
         self.set_view(prev);
     }
@@ -1121,6 +1127,7 @@ impl App {
                 ("0", ActiveView::Locks),
                 ("R", ActiveView::Runs),
                 ("G", ActiveView::RunGrid),
+                ("N", ActiveView::Nerdy),
             ]
             .iter()
             .map(|(k, v)| tab(k, self.active_view == *v))
@@ -1139,6 +1146,7 @@ impl App {
                 tab("[0] Locks", self.active_view == ActiveView::Locks),
                 tab("[R] Runs", self.active_view == ActiveView::Runs),
                 tab("[G] Grid", self.active_view == ActiveView::RunGrid),
+                tab("[N] Nerdy", self.active_view == ActiveView::Nerdy),
             ]
         };
         frame.render_widget(Line::from(tabs), chunks[0]);
@@ -1166,6 +1174,7 @@ impl App {
             ActiveView::RunGrid => {
                 "↑↓ select  ·  rows=tasks  ·  cols=recent attempts (newest left)"
             }
+            ActiveView::Nerdy => "pool / tables / pgvector / hooks (read-only deep-dive)",
         };
         // yggdrasil-134: scope chip on the right of the help row makes
         // the current scope (repo / all) and the toggle key visible.
@@ -1200,6 +1209,7 @@ impl App {
             ActiveView::Locks => self.locks.render(frame, chunks[2]),
             ActiveView::Runs => self.runs.render(frame, chunks[2]),
             ActiveView::RunGrid => self.run_grid.render(frame, chunks[2]),
+            ActiveView::Nerdy => self.nerdy.render(frame, chunks[2]),
         }
 
         // Render any pending toasts above the persistent status strip.
@@ -1414,6 +1424,7 @@ impl App {
             ActiveView::Locks => "Locks",
             ActiveView::Runs => "Runs",
             ActiveView::RunGrid => "RunGrid",
+            ActiveView::Nerdy => "Nerdy",
         }
     }
 }
@@ -1700,6 +1711,9 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                 }
                 ActiveView::RunGrid => {
                     app.run_grid.refresh(pool).await?;
+                }
+                ActiveView::Nerdy => {
+                    app.nerdy.refresh(pool).await?;
                 }
                 _ => {}
             }
