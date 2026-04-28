@@ -41,10 +41,15 @@ pub async fn execute(
     let (left_pane, right_pane) = TmuxManager::create_task_window(&agent_name).await?;
 
     // cd into the worktree, then start Claude Code with the task as prompt.
+    // YGG_SPAWN_PERMISSION_MODE overrides the default (bypassPermissions).
+    // Accepted values: bypassPermissions, dontAsk, acceptEdits, default, plan.
     let cd_cmd = format!("cd '{}'", shell_escape(&worktree_path.to_string_lossy()));
     TmuxManager::send_keys(&left_pane, &cd_cmd).await?;
+    let perm_mode = std::env::var("YGG_SPAWN_PERMISSION_MODE")
+        .unwrap_or_else(|_| "bypassPermissions".into());
     let claude_cmd = format!(
-        "claude --dangerously-skip-permissions --permission-mode bypassPermissions --name '{}' '{}'",
+        "claude --dangerously-skip-permissions --permission-mode {} --name '{}' '{}'",
+        shell_escape(&perm_mode),
         shell_escape(&agent_name),
         shell_escape(task),
     );

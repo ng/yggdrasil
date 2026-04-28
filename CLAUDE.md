@@ -104,6 +104,13 @@ rebuilding.
 the scheduler, watcher, TUI, and per-agent hooks all draw from this
 pool, and connection-wait latency manifests as spurious tick lag.
 
+**Spawn permission mode:** `YGG_SPAWN_PERMISSION_MODE` overrides the
+Claude Code `--permission-mode` flag for spawned agents (default
+`bypassPermissions`). Accepted values: `bypassPermissions`, `dontAsk`,
+`acceptEdits`, `default`, `plan`. Each spawned agent also gets its own
+git worktree under `.ygg/worktrees/<name>` to avoid working-directory
+collisions between concurrent agents.
+
 ## Architecture Overview
 
 - **src/models/**: `agent` (state machine), `node` (DAG ledger with embeddings), `event` (live stream).
