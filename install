@@ -21,24 +21,13 @@ case "$OS" in
     *)      echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
-# Atomic install + macOS codesign + verify. Mirrors `make install`.
-# `cp $src $PREFIX/ygg` directly is what bit yggdrasil-175: on macOS,
-# overwriting a path whose previous binary is in the Gatekeeper cache
-# silently SIGKILLs the next invocation. Always go through a sibling
-# `.next` path → atomic mv → codesign --force → 5 s `--version` smoke.
-install_atomic() {
-    local src="$1"
-    mkdir -p "$PREFIX"
-    cp "$src" "$PREFIX/ygg.next"
-    chmod +x "$PREFIX/ygg.next"
-    mv -f "$PREFIX/ygg.next" "$PREFIX/ygg"
-    if [ "$OS" = "darwin" ]; then
-        codesign --force -s - "$PREFIX/ygg" >/dev/null 2>&1 || true
-    fi
-    # 5 s --version smoke. Hard timeout via perl so a wedged binary
-    # can't hang the install.
+# 5 s `--version` smoke against $PREFIX/ygg. Hard perl timeout so a
+# wedged binary can't hang the install. Returns 0 on a clean
+# `ygg <version>` line, 1 on anything else (SIGKILL, hang, missing
+# perl + non-zero exit).
+verify_installed() {
     if command -v perl >/dev/null 2>&1; then
-        if ! perl -e '
+        perl -e '
             eval {
                 local $SIG{ALRM} = sub { die "timeout\n" };
                 alarm 5;
@@ -49,21 +38,59 @@ install_atomic() {
                 exit 1 unless defined $line && $line =~ /^ygg /;
             };
             exit 1 if $@;
-        ' "$PREFIX/ygg"; then
-            echo "FAIL: $PREFIX/ygg --version did not return cleanly within 5s." >&2
-            echo "      symptom: SIGKILL or hang. on macOS this means the codesign cache" >&2
-            echo "      for the previous binary at this path was invalidated. re-run" >&2
-            echo "      this script (a clean re-sign happens above) or:" >&2
-            echo "        cd $(pwd) && make reinstall" >&2
-            exit 1
-        fi
+        ' "$PREFIX/ygg"
     else
-        # No perl: best-effort check, no timeout. Caller will see hang.
-        "$PREFIX/ygg" --version >/dev/null 2>&1 || {
-            echo "FAIL: $PREFIX/ygg --version did not exit cleanly." >&2
-            exit 1
-        }
+        # No perl: no timeout. A truly wedged binary will hang, but
+        # most platforms ship perl by default.
+        "$PREFIX/ygg" --version >/dev/null 2>&1
     fi
+}
+
+# Atomic install + macOS codesign + verify + auto-recover. Mirrors
+# `make install`. `cp $src $PREFIX/ygg` directly is what bit
+# yggdrasil-175: on macOS, overwriting a path whose previous binary
+# is in the Gatekeeper cache silently SIGKILLs the next invocation.
+# Always go through a sibling `.next` path → atomic mv → codesign
+# --force → 5 s `--version` smoke. If the smoke fails on macOS, do a
+# hard codesign reset (--remove-signature then re-sign) and retry
+# automatically — the recovery is deterministic and safe (yggdrasil-176).
+install_atomic() {
+    local src="$1"
+    mkdir -p "$PREFIX"
+    cp "$src" "$PREFIX/ygg.next"
+    chmod +x "$PREFIX/ygg.next"
+    mv -f "$PREFIX/ygg.next" "$PREFIX/ygg"
+    if [ "$OS" = "darwin" ]; then
+        codesign --force -s - "$PREFIX/ygg" >/dev/null 2>&1 || true
+    fi
+
+    if verify_installed; then
+        return 0
+    fi
+
+    # First verify failed. On macOS, try a hard codesign reset before
+    # giving up — this is the recovery path `make reinstall` runs and
+    # it's deterministic + safe to repeat. Anywhere else, fall through.
+    if [ "$OS" = "darwin" ]; then
+        echo "verify: --version did not respond within 5s — likely Gatekeeper" >&2
+        echo "        cache invalidation from a prior install. Re-signing..." >&2
+        codesign --remove-signature "$PREFIX/ygg" >/dev/null 2>&1 || true
+        codesign --force -s - "$PREFIX/ygg" >/dev/null 2>&1 || true
+        if verify_installed; then
+            echo "verify: ok after codesign reset." >&2
+            return 0
+        fi
+    fi
+
+    echo "FAIL: $PREFIX/ygg --version did not return cleanly within 5s," >&2
+    echo "      even after a codesign reset on macOS. This is unusual." >&2
+    echo "      Diagnostics:" >&2
+    echo "        $PREFIX/ygg --version       # see if it errors or hangs" >&2
+    echo "        file $PREFIX/ygg            # confirm it's the right arch" >&2
+    if [ "$OS" = "darwin" ]; then
+        echo "        codesign -dv $PREFIX/ygg     # show signature state" >&2
+    fi
+    exit 1
 }
 
 echo "Installing ygg for ${OS}/${ARCH}..."
