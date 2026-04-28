@@ -112,7 +112,7 @@ pool, and connection-wait latency manifests as spurious tick lag.
 - **migrations/**: Postgres schema with `pgvector` + `uuid-ossp`.
 - **Hooks** in `~/.claude/ygg-hooks/` → call `ygg` subcommands at Claude Code lifecycle events.
 
-<!-- BEGIN YGG INTEGRATION v:2 hash:1a3cd45e -->
+<!-- BEGIN YGG INTEGRATION v:3 hash:1628b57b -->
 ## Yggdrasil Agent Coordination
 
 This project uses **Yggdrasil** (`ygg`) for cross-session memory, resource
@@ -212,6 +212,45 @@ ygg logs --follow                           # Live event stream
 - **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in a native TodoList; cross-session work lives in `ygg task`.
 - **Durable notes** — `ygg remember "..."` writes a directive node the similarity retriever will surface in future sessions (scoped to the current repo when detectable). Prefer this over scratch `.md` files.
 - **Do NOT** use `bd` / beads. This project uses `ygg task` / `ygg remember` instead.
+
+### Vector memory: how to actually use it
+
+Yggdrasil stores embeddings on tasks, memories, learnings, and recent
+conversation nodes. The retriever auto-surfaces relevant ones as
+`[ygg memory | ...]` lines above each user prompt — that's the
+**passive** path. There are four **active** patterns you should reach
+for explicitly:
+
+1. **Before `ygg task create`** → run `ygg task dupes --limit 5` (or
+   `--all` for cross-repo). If any pair surfaces above sim ≈ 0.85,
+   prefer claiming/extending the existing task over filing a new one.
+   Keeps the corpus from accreting near-duplicates.
+
+2. **Before tackling a hard problem** → `ygg memory search "<topic>"`
+   returns top hits ranked by cosine similarity across global / repo /
+   session memories. If a directive landed last week that applies, the
+   retriever finds it; you avoid re-solving.
+
+3. **When you discover a non-obvious rule** → `ygg remember "<rule>"`.
+   One-sentence directive. Preserve identifiers, paths, modal verbs
+   verbatim. Examples that earn their keep:
+   - `ygg remember "always rebuild after src/db.rs edits — sqlx caches the schema"`
+   - `ygg remember "scheduler retries fire AFTER finalize, not before — see PR #112"`
+
+4. **For engineering corrections** → `ygg learn add` with a file glob.
+   Unlike `remember`, learnings re-fire deterministically when an agent
+   touches a matching file. Use for "every time someone edits X, also
+   check Y" rules.
+
+**Anti-patterns** (don't write these — they pollute the retriever):
+- Narration of what you just did ("I refactored foo.rs"). The PR/commit
+  carries that.
+- Per-task scratch ("trying option A first"). Use a TodoList.
+- Speculation ("might want to revisit this"). Wait until it matters.
+
+`ygg trace` shows what the retriever actually surfaced for the last
+turn — useful when an injection looks off; tells you whether the
+problem is in the corpus, the embedder, or the scoring.
 
 ## Session Completion
 
