@@ -146,6 +146,12 @@ impl TmuxManager {
         Ok(())
     }
 
+    /// Check if a window named `agent_name` exists in the ygg session.
+    pub async fn has_agent_window(agent_name: &str) -> Result<bool, crate::YggError> {
+        let ws = Self::list_windows().await?;
+        Ok(ws.iter().any(|w| w == agent_name))
+    }
+
     /// List all windows in the ygg session.
     pub async fn list_windows() -> Result<Vec<String>, crate::YggError> {
         let output = Command::new("tmux")
