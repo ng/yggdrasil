@@ -15,6 +15,12 @@ fn ops(alive: i64, stuck: i64, tasks: i64, sessions: i64) -> OpsStats {
         tokens_per_min: 0.0,
         cost_today_usd: 0.0,
         tokens_today: 0,
+        // DB-side signals (yggdrasil-177): same defaults — these
+        // tests only flex agents/stuck/tasks/sessions cells.
+        pool_used: 0,
+        pool_max: 0,
+        events_per_min: 0,
+        pgvector_ok: false,
     }
 }
 

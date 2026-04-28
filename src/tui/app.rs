@@ -273,7 +273,7 @@ pub const TOAST_MAX_VISIBLE: usize = 3;
 
 /// Lightweight orchestration snapshot rendered on the right side of the
 /// global status strip. Cheap queries — every 500ms tick is fine.
-#[derive(Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct OpsStats {
     pub agents_alive: i64,  // != idle and updated in last 10m
     pub agents_stuck: i64,  // active-state but updated > 10m ago
@@ -290,6 +290,15 @@ pub struct OpsStats {
     pub tokens_per_min: f64,
     pub cost_today_usd: f64,
     pub tokens_today: i64,
+
+    /// yggdrasil-177: live DB-side signals. The status strip shows
+    /// pool saturation + event throughput + pgvector availability so
+    /// "is anything broken" is answerable without leaving the
+    /// dashboard.
+    pub pool_used: u32,
+    pub pool_max: u32,
+    pub events_per_min: i64,
+    pub pgvector_ok: bool,
 }
 
 /// yggdrasil-148: hide cost displays during screencasts / demos. Honors
@@ -500,11 +509,36 @@ impl App {
             tokens_per_min: self.ops_stats.tokens_per_min,
             cost_today_usd: self.ops_stats.cost_today_usd,
             tokens_today: self.ops_stats.tokens_today,
+            // yggdrasil-177: pool / events-per-min / pgvector get
+            // populated in the dedicated query block further down.
+            // Carry forward to keep flash markings stable.
+            pool_used: self.ops_stats.pool_used,
+            pool_max: self.ops_stats.pool_max,
+            events_per_min: self.ops_stats.events_per_min,
+            pgvector_ok: self.ops_stats.pgvector_ok,
         };
         self.flash.mark_changes(&prev, &next, 2);
         self.ops_stats = next;
         // yggdrasil-150: feed the in-panel sparkline.
         self.alive_history.push(alive.max(0) as u64);
+
+        // yggdrasil-177: pool saturation + event-rate + pgvector probe.
+        // sqlx::Pool exposes size + num_idle synchronously; the rest
+        // is one round-trip joining a 60s event count + a pg_extension
+        // existence check.
+        self.ops_stats.pool_used = pool.size().saturating_sub(pool.num_idle() as u32);
+        self.ops_stats.pool_max = pool.options().get_max_connections();
+        if let Ok(row) = sqlx::query_as::<_, (i64, bool)>(
+            r#"SELECT
+                 (SELECT COUNT(*) FROM events WHERE created_at > now() - interval '1 minute')::bigint,
+                 EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')"#,
+        )
+        .fetch_one(pool)
+        .await
+        {
+            self.ops_stats.events_per_min = row.0;
+            self.ops_stats.pgvector_ok = row.1;
+        }
 
         // Tight 150ms timeout — local Ollama answers in <20ms when
         // running; 150ms is plenty to catch "it's alive" without
@@ -1252,6 +1286,38 @@ impl App {
                 ),
             ])
         };
+
+        // yggdrasil-177: pool saturation + event throughput + pgvector
+        // health on a fourth line so "is anything broken right now"
+        // resolves without leaving the dashboard. Color-flips when
+        // pool gets hot (≥75% saturated) or pgvector is missing.
+        let pool_saturated = s.pool_max > 0 && (s.pool_used as f64 / s.pool_max as f64) >= 0.75;
+        let pool_color = if pool_saturated {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        let pgvec_color = if s.pgvector_ok {
+            Color::Green
+        } else {
+            Color::Red
+        };
+        let pgvec_label = if s.pgvector_ok {
+            "▼ pgvec"
+        } else {
+            "✗ pgvec"
+        };
+        let db_line = Line::from(vec![
+            Span::styled(
+                format!("  pool {}/{} ", s.pool_used, s.pool_max),
+                Style::default().fg(pool_color),
+            ),
+            Span::styled(
+                format!("· {}/m ", s.events_per_min),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(format!("· {pgvec_label}"), Style::default().fg(pgvec_color)),
+        ]);
         // yggdrasil-150: 10-glyph sparkline of recent alive-count history,
         // appended to the "● live" row so liveness trend is one glance.
         let alive_spark = self.alive_history.glyphs(10);
@@ -1285,6 +1351,7 @@ impl App {
                 ),
             ]),
             stuck_line,
+            db_line,
         ];
         // yggdrasil-148: append the burn-rate line when cost displays
         // are not hidden. Stays in the orchestration panel so the chrome
