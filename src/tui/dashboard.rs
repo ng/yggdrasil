@@ -1414,7 +1414,9 @@ impl DashboardView {
                 // The bar fills against the model's hard cap (1M when
                 // context-1m beta is observed, else 200K), but the *color*
                 // also reflects soft-degradation knees at 200K/300K so a
-                // 1M-cap session past 300K still warns.
+                // 1M-cap session past 300K still warns. Cap detection
+                // isn't 100% reliable across all transcript shapes, so we
+                // don't display the denominator — only the absolute count.
                 let (pressure_bar, pressure_color) =
                     match pressure_by_name.get(&agent.agent_name).copied().flatten() {
                         Some((tokens, hard_cap)) if hard_cap > 0 => {
@@ -1423,11 +1425,10 @@ impl DashboardView {
                             let color = ctx_color(tokens, hard_cap);
                             (
                                 format!(
-                                    "{}{} {}/{}",
+                                    "{}{} {}",
                                     "█".repeat(blocks),
                                     "░".repeat(10 - blocks),
                                     humanize_tokens(tokens),
-                                    humanize_tokens(hard_cap),
                                 ),
                                 color,
                             )
@@ -1459,12 +1460,16 @@ impl DashboardView {
                     base
                 };
 
-                // Idle rows are dormant — sat there for hours, no live
-                // turn happening. Dim the whole row so a yellow CTX bar
-                // on an idle session doesn't compete visually with an
-                // actually-working agent in trouble.
+                // Dormant rows: explicitly Idle, OR an agent the watcher
+                // hasn't seen update in 30+ minutes (regardless of what
+                // state it claims). 30m is well past the digest cadence,
+                // so anything quieter than that is a parked window. Mute
+                // the whole row — name, state, CTX bar, sparkline — so a
+                // bright bar on a long-cold session can't compete with a
+                // live agent in trouble.
                 let is_idle = matches!(agent.current_state, crate::models::agent::AgentState::Idle);
-                let (name_color, state_fg, ctx_fg, spark_fg) = if is_idle {
+                let is_dormant = is_idle || idle_mins >= 30;
+                let (name_color, state_fg, ctx_fg, spark_fg) = if is_dormant {
                     (
                         Color::DarkGray,
                         Color::DarkGray,
