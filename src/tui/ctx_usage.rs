@@ -22,6 +22,14 @@ pub const HARD_CAP_DEFAULT: i64 = 200_000;
 pub const SOFT_DEGRADATION: i64 = 200_000;
 /// Above this we're well past the soft knee — orange.
 pub const SOFT_HARD_WARN: i64 = 300_000;
+/// Absolute danger threshold — even on 1M-cap sessions, recall is
+/// poor enough at this point that the row should read as critical.
+pub const HARD_DANGER: i64 = 500_000;
+/// Reference scale for the bar widget. Each of 10 cells is 100K
+/// tokens; the bar visually positions a session against an
+/// "upper-bound any model could ever have" rather than an
+/// unreliable detected cap.
+pub const BAR_REF: i64 = 1_000_000;
 
 /// Per-component breakdown of the last `usage` block.
 #[derive(Debug, Default, Clone, Copy)]
@@ -145,12 +153,12 @@ fn parse_last_usage(path: &std::path::Path) -> Option<UsageBreakdown> {
     None
 }
 
-/// Color ramp for a context-tokens reading. Soft knees at 200K and 300K
-/// fire even on 1M-cap sessions — degradation research is independent
-/// of the model's hard limit.
-pub fn ctx_color(tokens: i64, hard_cap: i64) -> Color {
-    let near_hard = (hard_cap as f64 * 0.80) as i64;
-    if tokens >= near_hard {
+/// Color ramp for a context-tokens reading. Uses *absolute* knees
+/// only — the per-session hard cap detection isn't reliable across
+/// every transcript shape, and degradation research is independent
+/// of the model's advertised limit anyway.
+pub fn ctx_color(tokens: i64) -> Color {
+    if tokens >= HARD_DANGER {
         Color::Red
     } else if tokens >= SOFT_HARD_WARN {
         // Orange — Color::LightRed reads as orange in most palettes.

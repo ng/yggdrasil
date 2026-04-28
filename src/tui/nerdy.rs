@@ -11,7 +11,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use sqlx::PgPool;
 
 use super::ctx_usage::{
-    SOFT_DEGRADATION, SOFT_HARD_WARN, agent_usage_breakdown, ctx_color, humanize_tokens,
+    HARD_DANGER, SOFT_DEGRADATION, SOFT_HARD_WARN, agent_usage_breakdown, ctx_color,
+    humanize_tokens,
 };
 use crate::models::agent::AgentRepo;
 
@@ -162,20 +163,15 @@ impl NerdyView {
                     100.0 * t.output as f64 / total as f64
                 ),
             ));
-            if let Some((name, tokens, hard)) = &t.largest {
-                let color = ctx_color(*tokens, *hard);
+            if let Some((name, tokens, _hard)) = &t.largest {
+                let color = ctx_color(*tokens);
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("    {:<26}", "largest"),
                         Style::default().fg(Color::Gray),
                     ),
                     Span::styled(
-                        format!(
-                            "{} {} / {}",
-                            name,
-                            humanize_tokens(*tokens),
-                            humanize_tokens(*hard),
-                        ),
+                        format!("{} {}", name, humanize_tokens(*tokens)),
                         Style::default().fg(color),
                     ),
                 ]));
@@ -197,7 +193,7 @@ impl NerdyView {
                 ),
             ));
             lines.push(kv(
-                "past 80% hard cap",
+                &format!("past danger (≥{})", humanize_tokens(HARD_DANGER)),
                 &format!(
                     "{} session{}",
                     t.past_hard,
@@ -319,7 +315,7 @@ async fn collect(pool: &PgPool) -> NerdyStats {
             if total >= SOFT_HARD_WARN {
                 ts.past_warn += 1;
             }
-            if total >= (b.hard_cap as f64 * 0.80) as i64 {
+            if total >= HARD_DANGER {
                 ts.past_hard += 1;
             }
             match &ts.largest {
