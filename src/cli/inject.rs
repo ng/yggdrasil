@@ -65,6 +65,18 @@ pub async fn execute(
         warn!("inject: force_state failed: {e}");
     }
 
+    // Emit a hook_fired event so dashboards can count UserPromptSubmit
+    // turns. Fires unconditionally, before the YGG_INJECT gate, so the
+    // count survives ADR 0015 Phase 1's opt-in retrieval default.
+    let _ = event_repo
+        .emit(
+            EventKind::HookFired,
+            agent_name,
+            Some(agent.agent_id),
+            serde_json::json!({ "hook": "UserPromptSubmit" }),
+        )
+        .await;
+
     let mut output: Vec<String> = Vec::new();
 
     // ── context pressure warning ──────────────────────────────────────────────
