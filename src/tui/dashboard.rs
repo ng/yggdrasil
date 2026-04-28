@@ -1001,7 +1001,7 @@ impl DashboardView {
                             }),
                     ),
                     Span::styled(
-                        format!("{:<10}", delivery_badge(w)),
+                        format!("{:<12}", delivery_badge(w)),
                         Style::default().fg(delivery_color(w)),
                     ),
                     Span::styled(format!("{age:<6}"), Style::default().fg(age_color)),
