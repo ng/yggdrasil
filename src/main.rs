@@ -192,6 +192,28 @@ enum Commands {
         action: MsgAction,
     },
 
+    /// Pick-and-send wrapper around `msg send`. Open an fzf picker over
+    /// current agents (most-recent first), then send the message.
+    /// Use `--to` to skip the picker, or `--last` to reuse the most
+    /// recent recipient.
+    Chat {
+        /// Skip the picker — send directly to this agent.
+        #[arg(long)]
+        to: Option<String>,
+        /// Reuse the most recent recipient I messaged.
+        #[arg(long)]
+        last: bool,
+        /// Override sender (defaults to YGG_AGENT_NAME or cwd basename).
+        #[arg(long)]
+        from: Option<String>,
+        /// Also tmux send-keys the body so the recipient sees it now
+        /// rather than on their next prompt.
+        #[arg(long)]
+        push: bool,
+        /// Message body — joined with spaces.
+        body: Vec<String>,
+    },
+
     /// Purge stale rows from locks / sessions / memories / agents. Safe to cron.
     Reap {
         #[arg(long)]
@@ -1254,6 +1276,27 @@ async fn main() -> anyhow::Result<()> {
                     let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
                 }
             }
+        }
+        Commands::Chat {
+            to,
+            last,
+            from,
+            push,
+            body,
+        } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let from_name = from.unwrap_or_else(|| {
+                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "ygg".to_string())
+                })
+            });
+            let joined = body.join(" ");
+            ygg::cli::chat_cmd::execute(&pool, &from_name, &joined, to.as_deref(), last, push)
+                .await?;
         }
         Commands::Msg { action } => {
             let config = ygg::config::AppConfig::from_env()?;
