@@ -73,6 +73,9 @@ pub struct DashboardView {
     /// append to the buffer; Enter commits; Esc cancels. Tuple:
     /// `(agent_id_being_renamed, buffer)`.
     pub rename: Option<(Uuid, String)>,
+    /// Message input buffer. When `Some`, typed keys append to the body;
+    /// Enter sends via msg_cmd::send; Esc cancels. (recipient, body).
+    pub msg: Option<(String, String)>,
     /// Short-lived status message for the agents panel (archived / renamed /
     /// rename-failed). Rendered under the agents table; cleared on next
     /// action.
@@ -153,6 +156,7 @@ impl DashboardView {
             db_learnings: 0,
             db_locks_active: 0,
             rename: None,
+            msg: None,
             flash: None,
             orphan_last_check: None,
             sched_finalized_1h: 0,
@@ -282,6 +286,47 @@ impl DashboardView {
                 } else {
                     format!("rename failed: {e}")
                 });
+            }
+        }
+    }
+
+    pub fn msg_mode(&self) -> bool {
+        self.msg.is_some()
+    }
+    pub fn msg_begin(&mut self) {
+        if let Some(a) = self.agents.get(self.selected) {
+            self.msg = Some((a.agent_name.clone(), String::new()));
+            self.flash = None;
+        }
+    }
+    pub fn msg_cancel(&mut self) {
+        self.msg = None;
+    }
+    pub fn msg_push(&mut self, c: char) {
+        if let Some((_, buf)) = self.msg.as_mut() {
+            buf.push(c);
+        }
+    }
+    pub fn msg_pop(&mut self) {
+        if let Some((_, buf)) = self.msg.as_mut() {
+            buf.pop();
+        }
+    }
+    pub async fn msg_commit(&mut self, pool: &PgPool, from_agent: &str) {
+        let Some((to, body)) = self.msg.take() else {
+            return;
+        };
+        let body = body.trim().to_string();
+        if body.is_empty() {
+            self.flash = Some("message cancelled (empty)".into());
+            return;
+        }
+        match crate::cli::msg_cmd::send(pool, from_agent, &to, &body, true).await {
+            Ok(()) => {
+                self.flash = Some(format!("sent to {to}"));
+            }
+            Err(e) => {
+                self.flash = Some(format!("send failed: {e}"));
             }
         }
     }
@@ -522,7 +567,7 @@ impl DashboardView {
             sqlx::query_as(
                 "SELECT created_at, agent_name, payload FROM events
                  WHERE event_kind = 'agent_state_changed'
-                 ORDER BY created_at DESC LIMIT 5",
+                 ORDER BY created_at DESC LIMIT 2",
             )
             .fetch_all(pool)
             .await
@@ -734,7 +779,7 @@ impl DashboardView {
                 Constraint::Length(5), // scheduler tile (yggdrasil-142)
                 Constraint::Min(8),    // agents
                 Constraint::Length(6), // workers (click-to-do spawns)
-                Constraint::Length(7), // state transitions
+                Constraint::Length(4), // state transitions (compacted)
                 Constraint::Length(4), // locks summary (detail on [0] Locks tab)
             ])
             .split(area);
@@ -749,6 +794,9 @@ impl DashboardView {
 
         if self.rename.is_some() {
             render_rename_overlay(frame, chunks[3], self);
+        }
+        if self.msg.is_some() {
+            render_msg_overlay(frame, chunks[3], self);
         }
     }
 
@@ -1246,7 +1294,11 @@ impl DashboardView {
             Line::from(vec![
                 Span::styled(counter_label, Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{} prompts · {} digests", self.prompts_1h, self.digests_1h),
+                    if self.prompts_1h == 0 && self.digests_1h == 0 {
+                        "— prompts · — digests".to_string()
+                    } else {
+                        format!("{} prompts · {} digests", self.prompts_1h, self.digests_1h)
+                    },
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -1497,8 +1549,8 @@ impl DashboardView {
         // Surface action status (rename/archive) in the panel title so the
         // user gets feedback without a separate status line.
         let title = match self.flash.as_deref() {
-            Some(msg) => format!(" Agents  ·  {msg}  ·  r=rename a=archive "),
-            None => " Agents  ·  r=rename a=archive ".to_string(),
+            Some(msg) => format!(" Agents  ·  {msg}  ·  r=rename a=archive m=msg"),
+            None => " Agents  ·  r=rename a=archive m=msg".to_string(),
         };
         let table = Table::new(
             rows,
@@ -1750,6 +1802,44 @@ fn render_rename_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
             .borders(Borders::ALL)
             .title(hint)
             .border_style(Style::default().fg(Color::Cyan)),
+    );
+    frame.render_widget(para, popup);
+}
+
+fn render_msg_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
+    let Some((to, buf)) = dash.msg.as_ref() else {
+        return;
+    };
+    let w = area.width.saturating_sub(8).min(70);
+    let h = 5u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let hint = format!(" message → {to}  ·  Enter=send · Esc=cancel ");
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("▸ ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                buf.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]),
+    ];
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(hint)
+            .border_style(Style::default().fg(Color::Yellow)),
     );
     frame.render_widget(para, popup);
 }

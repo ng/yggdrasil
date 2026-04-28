@@ -45,8 +45,8 @@ pub async fn execute(
     // Accepted values: bypassPermissions, dontAsk, acceptEdits, default, plan.
     let cd_cmd = format!("cd '{}'", shell_escape(&worktree_path.to_string_lossy()));
     TmuxManager::send_keys(&left_pane, &cd_cmd).await?;
-    let perm_mode = std::env::var("YGG_SPAWN_PERMISSION_MODE")
-        .unwrap_or_else(|_| "bypassPermissions".into());
+    let perm_mode =
+        std::env::var("YGG_SPAWN_PERMISSION_MODE").unwrap_or_else(|_| "bypassPermissions".into());
     let claude_cmd = format!(
         "claude --dangerously-skip-permissions --permission-mode {} --name '{}' '{}'",
         shell_escape(&perm_mode),

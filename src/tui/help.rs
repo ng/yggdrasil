@@ -58,6 +58,10 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
                 keys: "S",
                 effect: "toggle session-scope (yggdrasil-134)",
             },
+            KeyHint {
+                keys: "m",
+                effect: "send message to selected agent",
+            },
         ],
         "Dag" => &[
             KeyHint {
