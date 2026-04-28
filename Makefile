@@ -11,9 +11,11 @@ build:
 #   2. chmod
 #   3. mv (atomic rename) — the next invocation gets a fresh inode
 #   4. codesign --force on macOS so the new path has a clean signature
-#   5. verify by running --version against the installed path; SIGKILL on
-#      first launch is the canonical "you cp'd over a running binary"
-#      symptom and we want install to fail loudly when it happens.
+#   5. verify by running --version against the installed path with a 5 s
+#      timeout. If verify fails on macOS, run the codesign hard-reset
+#      recovery automatically (yggdrasil-176) — the recipe is
+#      deterministic and safe to repeat, and we'd rather absorb the
+#      retry than leave the user staring at a SIGKILL.
 install: build
 	@mkdir -p $(PREFIX)
 	cp target/release/ygg $(PREFIX)/ygg.next
@@ -22,7 +24,16 @@ install: build
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		codesign --force -s - $(PREFIX)/ygg >/dev/null 2>&1 || true; \
 	fi
-	@$(MAKE) -s verify PREFIX=$(PREFIX)
+	@$(MAKE) -s verify PREFIX=$(PREFIX) || ( \
+		if [ "$$(uname -s)" = "Darwin" ]; then \
+			echo "verify failed; re-signing and retrying..." >&2; \
+			codesign --remove-signature $(PREFIX)/ygg >/dev/null 2>&1 || true; \
+			codesign --force -s - $(PREFIX)/ygg >/dev/null 2>&1 || true; \
+			$(MAKE) -s verify PREFIX=$(PREFIX); \
+		else \
+			exit 1; \
+		fi \
+	)
 	@echo "ygg installed to $(PREFIX)/ygg"
 	@if [ "$(PREFIX)/ygg" != "$$(which ygg 2>/dev/null)" ]; then \
 		echo "NOTE: a different ygg is in your PATH at $$(which ygg 2>/dev/null)"; \
