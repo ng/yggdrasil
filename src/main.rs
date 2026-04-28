@@ -500,6 +500,9 @@ enum MsgAction {
         from: Option<String>,
         #[arg(long)]
         push: bool,
+        /// Don't auto-spawn a worker if the recipient is inactive.
+        #[arg(long)]
+        no_spawn: bool,
         body: Vec<String>,
     },
     /// Show unread messages for this agent. `--all` ignores the cursor.
@@ -1314,6 +1317,7 @@ async fn main() -> anyhow::Result<()> {
                     to,
                     from,
                     push,
+                    no_spawn,
                     body,
                 } => {
                     let from_name = from.unwrap_or_else(default_agent);
@@ -1321,7 +1325,8 @@ async fn main() -> anyhow::Result<()> {
                     if joined.trim().is_empty() {
                         anyhow::bail!("empty body — pass the message as trailing args");
                     }
-                    ygg::cli::msg_cmd::send(&pool, &from_name, &to, &joined, push).await?;
+                    ygg::cli::msg_cmd::send_inner(&pool, &from_name, &to, &joined, push, no_spawn)
+                        .await?;
                 }
                 MsgAction::Inbox { agent, all } => {
                     let name = agent.unwrap_or_else(default_agent);

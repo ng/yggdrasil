@@ -10,7 +10,9 @@
 //! mark-read : bump the cursor to the latest message's timestamp. The
 //!         hook calls this after injecting.
 
+use crate::config::AppConfig;
 use crate::models::agent::AgentRepo;
+use crate::tmux::TmuxManager;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::process::Command;
@@ -32,36 +34,78 @@ pub async fn send(
     body: &str,
     push: bool,
 ) -> Result<(), anyhow::Error> {
+    send_inner(pool, from_agent_name, to_agent_name, body, push, false).await
+}
+
+pub async fn send_inner(
+    pool: &PgPool,
+    from_agent_name: &str,
+    to_agent_name: &str,
+    body: &str,
+    push: bool,
+    no_spawn: bool,
+) -> Result<(), anyhow::Error> {
     let repo = AgentRepo::new(pool);
     let from = repo.get_by_name(from_agent_name).await?;
-    let to = repo
-        .get_by_name(to_agent_name)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("recipient agent '{to_agent_name}' not found"))?;
+    let to = repo.get_by_name(to_agent_name).await?;
 
+    // Record the message event regardless of spawn outcome.
+    let (to_id, recipient_exists) = match &to {
+        Some(a) => (Some(a.agent_id), true),
+        None => (None, false),
+    };
     let from_id = from.as_ref().map(|a| a.agent_id);
     let payload = serde_json::json!({ "body": body });
 
-    sqlx::query(
-        "INSERT INTO events (event_kind, agent_id, agent_name, recipient_agent_id, payload)
-         VALUES ('message', $1, $2, $3, $4)",
-    )
-    .bind(from_id)
-    .bind(from_agent_name)
-    .bind(to.agent_id)
-    .bind(payload)
-    .execute(pool)
-    .await?;
+    if let Some(tid) = to_id {
+        sqlx::query(
+            "INSERT INTO events (event_kind, agent_id, agent_name, recipient_agent_id, payload)
+             VALUES ('message', $1, $2, $3, $4)",
+        )
+        .bind(from_id)
+        .bind(from_agent_name)
+        .bind(tid)
+        .bind(&payload)
+        .execute(pool)
+        .await?;
+    }
 
-    println!("sent to {to_agent_name}");
+    // Detect whether the recipient has a live tmux window.
+    let has_window = recipient_exists && TmuxManager::has_agent_window(to_agent_name).await;
 
-    if push {
-        // Best-effort tmux interrupt. The recipient has a window whose name
-        // encodes the agent (see plan_cmd::sanitize_tmux_name); we can't
-        // reliably reconstruct it without DB lookup, so shell out to
-        // `tmux list-windows` and match by prefix. Silent on miss — the
-        // inbox message still exists and will flush on next prompt-submit.
-        let _ = push_via_tmux(to_agent_name, body);
+    if has_window {
+        println!("sent to {to_agent_name}");
+        if push {
+            let _ = push_via_tmux(to_agent_name, body);
+        }
+    } else if no_spawn {
+        if !recipient_exists {
+            anyhow::bail!("recipient agent '{to_agent_name}' not found (--no-spawn)");
+        }
+        println!("sent to {to_agent_name} (inactive, --no-spawn)");
+    } else {
+        // Auto-spawn: start a fresh worker with the message as its task prompt.
+        let config = AppConfig::from_env()?;
+        let task_prompt = format!("[message from {from_agent_name}] {body}");
+        println!("spawning '{to_agent_name}' (inactive) …");
+        super::spawn::execute(pool, &config, &task_prompt, Some(to_agent_name)).await?;
+
+        // If the recipient didn't exist before, re-lookup so we can record
+        // the message event against the newly registered agent.
+        if !recipient_exists {
+            if let Some(new_agent) = repo.get_by_name(to_agent_name).await? {
+                sqlx::query(
+                    "INSERT INTO events (event_kind, agent_id, agent_name, recipient_agent_id, payload)
+                     VALUES ('message', $1, $2, $3, $4)",
+                )
+                .bind(from_id)
+                .bind(from_agent_name)
+                .bind(new_agent.agent_id)
+                .bind(&payload)
+                .execute(pool)
+                .await?;
+            }
+        }
     }
 
     Ok(())
