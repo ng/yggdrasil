@@ -32,7 +32,11 @@ pub async fn execute(
     let (left_pane, right_pane) = TmuxManager::create_task_window(&agent_name).await?;
 
     // Start Claude Code in the main (left) pane with the task as prompt.
-    let claude_cmd = format!("claude --prompt '{}'", shell_escape(task),);
+    let claude_cmd = format!(
+        "claude --dangerously-skip-permissions --name '{}' '{}'",
+        shell_escape(&agent_name),
+        shell_escape(task),
+    );
     TmuxManager::send_keys(&left_pane, &claude_cmd).await?;
 
     // Start the ygg observer in the sidebar (right) pane. It tails the
