@@ -60,7 +60,7 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             },
             KeyHint {
                 keys: "m",
-                effect: "send message to selected agent",
+                effect: "compose message to selected agent",
             },
         ],
         "Dag" => &[
