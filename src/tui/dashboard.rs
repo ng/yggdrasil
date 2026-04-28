@@ -11,7 +11,9 @@ use crate::models::agent::{AgentRepo, AgentWorkflow};
 
 const PRESSURE_TTL: Duration = Duration::from_secs(5);
 
-use super::ctx_usage::{SOFT_HARD_WARN, agent_context_usage, ctx_color, humanize_tokens};
+use super::ctx_usage::{
+    BAR_REF, HARD_DANGER, SOFT_HARD_WARN, agent_context_usage, ctx_color, humanize_tokens,
+};
 
 /// Dashboard view — system pulse at top, agents in the middle,
 /// meaningful locks table at bottom.
@@ -1100,18 +1102,15 @@ impl DashboardView {
     fn render_alerts(&mut self, frame: &mut Frame, area: Rect) {
         let mut alerts: Vec<Span> = Vec::new();
 
-        // Context alerts. Soft knee (300K, "past degradation") = warn,
-        // hard knee (>=80% of model's actual cap) = block. Mixing soft +
-        // hard means a 1M-cap session at 400K still surfaces — by the
-        // hard-cap math it's only 40%, but recall is already hurting.
+        // Context alerts use absolute knees only — cap detection isn't
+        // 100% reliable across transcript shapes, so any percent-of-cap
+        // math would lie. Block ≥ HARD_DANGER (500K), warn ≥ 300K.
         let agent_names: Vec<String> = self.agents.iter().map(|a| a.agent_name.clone()).collect();
         for name in &agent_names {
-            if let Some((tokens, hard)) = self.cached_pressure(name) {
-                let near_hard = (hard as f64 * 0.80) as i64;
-                if tokens >= near_hard {
-                    let pct = ((tokens as f64 / hard as f64) * 100.0) as u32;
+            if let Some((tokens, _hard)) = self.cached_pressure(name) {
+                if tokens >= HARD_DANGER {
                     alerts.push(Span::styled(
-                        format!(" ⛔ {name} {} ({pct}%) ", humanize_tokens(tokens)),
+                        format!(" ⛔ {name} {} ", humanize_tokens(tokens)),
                         Style::default()
                             .fg(Color::White)
                             .bg(Color::Red)
@@ -1411,18 +1410,14 @@ impl DashboardView {
 
                 // CTX comes from the live `usage` block in the agent's CC
                 // transcript (cache_read + cache_creation + input + output).
-                // The bar fills against the model's hard cap (1M when
-                // context-1m beta is observed, else 200K), but the *color*
-                // also reflects soft-degradation knees at 200K/300K so a
-                // 1M-cap session past 300K still warns. Cap detection
-                // isn't 100% reliable across all transcript shapes, so we
-                // don't display the denominator — only the absolute count.
+                // Bar fills against a fixed BAR_REF (1M) — each cell is
+                // 100K — so position is meaningful even when the per-
+                // session hard-cap detection misses. Color is keyed off
+                // absolute degradation knees, not the cap.
                 let (pressure_bar, pressure_color) =
                     match pressure_by_name.get(&agent.agent_name).copied().flatten() {
-                        Some((tokens, hard_cap)) if hard_cap > 0 => {
-                            let pct = ((tokens as f64 / hard_cap as f64) * 100.0).min(999.0) as u32;
-                            let blocks = (pct / 10).min(10) as usize;
-                            let color = ctx_color(tokens, hard_cap);
+                        Some((tokens, _hard_cap)) => {
+                            let blocks = ((tokens * 10) / BAR_REF).clamp(0, 10) as usize;
                             (
                                 format!(
                                     "{}{} {}",
@@ -1430,7 +1425,7 @@ impl DashboardView {
                                     "░".repeat(10 - blocks),
                                     humanize_tokens(tokens),
                                 ),
-                                color,
+                                ctx_color(tokens),
                             )
                         }
                         _ => ("—".to_string(), Color::DarkGray),
