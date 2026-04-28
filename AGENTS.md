@@ -69,7 +69,7 @@ cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 # scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
 
-<!-- BEGIN YGG INTEGRATION v:1 hash:863bd071 -->
+<!-- BEGIN YGG INTEGRATION v:2 hash:7a223f10 -->
 ## Yggdrasil Coordination
 
 This project uses **Yggdrasil** (`ygg`) for cross-session memory and
@@ -103,6 +103,22 @@ ygg logs --follow                           # Live event stream
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking; `ygg remember` for durable notes.
 - Do NOT use `bd` / beads.
+
+### Ticket body structure
+
+Tickets are read by other agents picking up the work. Bodies have four
+sections in this order, separated by blank lines: **Why** (one sentence,
+trigger or observation), **What** (one sentence, imperative change),
+**Acceptance:** (bulleted testable conditions, no vague verbs — pin
+SHAs, paths, commands, numeric thresholds), **Refs:** (optional —
+related ticket, ADR, URL).
+
+Be terse in `ygg task create` titles/descriptions/acceptance/notes and
+`ygg remember`. Drop filler and articles when meaning survives.
+Preserve identifiers, paths, commands, numbers, URLs, and modal
+keywords (always/never/must/should/cannot/don't) verbatim. Does NOT
+apply to commit messages, PR descriptions, or chat — those stay
+human-prose.
 
 ## Session Completion
 

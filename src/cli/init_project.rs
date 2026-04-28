@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-const VERSION: u32 = 1;
+// VERSION 2 (2026-04-27): added ticket-body structure template + the
+// terseness rule (was previously local-only). Bumped so existing
+// managed blocks auto-refresh on next `ygg integrate`.
+const VERSION: u32 = 2;
 const BEGIN: &str = "<!-- BEGIN YGG INTEGRATION";
 const END: &str = "<!-- END YGG INTEGRATION -->";
 
@@ -44,6 +47,52 @@ ygg remember "..."                          # Durable note; similarity retriever
 - `--status <open|in_progress|blocked|closed>` — for filtering / transitions.
 - `--label <a,b,c>` — comma-separated labels. Repeatable.
 - `<ref>` is either `<prefix>-<N>` (e.g. `yggdrasil-42`) or a UUID.
+
+### Ticket body structure
+
+Tickets are read by other agents picking up the work. Bodies have **four
+sections in this order**, separated by blank lines. No PR-prose walls.
+
+1. **Why** — one sentence. The trigger or observation that justifies the
+   work. Cite the source: `Adversarial review:`, `Codebase audit:`,
+   `Bench scenario X:`, `Research thread Y:`, `Incident on <date>:`.
+2. **What** — one sentence. The concrete change. Use imperative voice.
+3. **Acceptance:** — a bulleted list of testable conditions. Each bullet
+   is something an autonomous agent can verify when claiming the task as
+   done. Avoid vague verbs ("improve", "consider"); pin SHAs, file paths,
+   commands, numeric thresholds.
+4. **Refs:** *(optional)* — research thread tag, related ticket
+   (`yggdrasil-NN`), external URL, ADR number.
+
+Example:
+
+```text
+Adversarial review: src/db.rs max_connections(10) starves a fleet of
+50+ active agents.
+
+Bump default to 32 and accept YGG_DB_POOL env override.
+
+Acceptance:
+- src/db.rs default = 32; YGG_DB_POOL parses to u32, falls back on error
+- CLAUDE.md documents the knob in the Build & Test section
+- cargo check --all-targets clean
+
+Refs: yggdrasil-141, adversarial-review note 2026-04-23
+```
+
+### Terse for AI-tracking fields
+
+When writing content that only agents consume — `ygg task create`
+titles/descriptions/acceptance/design/notes, `ygg remember`,
+`ygg memory create` — be terse. Drop filler (really/just/basically/
+actually/very). Drop articles (`a`/`an`/`the`) when meaning survives.
+Prefer one sentence per field where content allows. **Preserve
+verbatim**: identifiers (snake_case, CamelCase), paths, commands,
+numbers, URLs, and modal keywords (always/never/must/should/cannot/
+don't/may/shall).
+
+Does **NOT** apply to commit messages, PR descriptions, code comments,
+or chat responses — those are human-facing and full fidelity is correct.
 
 Example:
 ```bash
@@ -129,6 +178,22 @@ ygg logs --follow                           # Live event stream
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking; `ygg remember` for durable notes.
 - Do NOT use `bd` / beads.
+
+### Ticket body structure
+
+Tickets are read by other agents picking up the work. Bodies have four
+sections in this order, separated by blank lines: **Why** (one sentence,
+trigger or observation), **What** (one sentence, imperative change),
+**Acceptance:** (bulleted testable conditions, no vague verbs — pin
+SHAs, paths, commands, numeric thresholds), **Refs:** (optional —
+related ticket, ADR, URL).
+
+Be terse in `ygg task create` titles/descriptions/acceptance/notes and
+`ygg remember`. Drop filler and articles when meaning survives.
+Preserve identifiers, paths, commands, numbers, URLs, and modal
+keywords (always/never/must/should/cannot/don't) verbatim. Does NOT
+apply to commit messages, PR descriptions, or chat — those stay
+human-prose.
 
 ## Session Completion
 

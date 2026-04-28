@@ -98,3 +98,29 @@ fn install_idempotent_on_repeat_runs() {
             .all(|(_, a)| matches!(a, ActionTaken::Unchanged))
     );
 }
+
+// yggdrasil-173: managed-block content carries the ticket structure
+// guidance + terseness rule so a fresh `ygg integrate` propagates them
+// to downstream repos. Pin the headings here so a future copy-edit
+// doesn't silently drop one.
+#[test]
+fn managed_block_carries_ticket_structure_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    install(dir.path()).unwrap();
+    let claude_md = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+    assert!(claude_md.contains("Ticket body structure"));
+    assert!(claude_md.contains("**Why**"));
+    assert!(claude_md.contains("**What**"));
+    assert!(claude_md.contains("**Acceptance:**"));
+    assert!(claude_md.contains("Terse for AI-tracking fields"));
+}
+
+#[test]
+fn managed_agents_block_carries_ticket_structure_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    install(dir.path()).unwrap();
+    let agents_md = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+    assert!(agents_md.contains("Ticket body structure"));
+    assert!(agents_md.contains("Why"));
+    assert!(agents_md.contains("Acceptance"));
+}
