@@ -10,14 +10,45 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use sqlx::PgPool;
 
+use super::ctx_usage::{
+    SOFT_DEGRADATION, SOFT_HARD_WARN, agent_usage_breakdown, ctx_color, humanize_tokens,
+};
+use crate::models::agent::AgentRepo;
+
 #[derive(Debug, Default, Clone)]
 pub struct NerdyStats {
     pub pool: PoolStats,
     pub tables: Vec<TableStat>,
     pub pgvector: PgvectorStats,
     pub hook_kinds: Vec<HookFire>,
+    pub tokens: TokenStats,
     pub loaded: bool,
     pub last_status: String,
+}
+
+/// Aggregated context-window usage across all live (non-archived)
+/// agents. Numbers come from the latest `usage` block in each agent's
+/// CC transcript JSONL (cache_read + cache_creation + input + output).
+#[derive(Debug, Default, Clone)]
+pub struct TokenStats {
+    /// How many agents had a parseable usage block.
+    pub sessions: usize,
+    /// Sum of all latest-turn totals (cache_read + cache_creation +
+    /// input + output) across sessions.
+    pub fleet_total: i64,
+    /// Component breakdowns aggregated across sessions.
+    pub cache_read: i64,
+    pub cache_creation: i64,
+    pub input: i64,
+    pub output: i64,
+    /// Largest single session: (agent_name, tokens, hard_cap).
+    pub largest: Option<(String, i64, i64)>,
+    /// Sessions past the soft-degradation knee (≥ 200K).
+    pub past_soft: usize,
+    /// Sessions past the orange knee (≥ 300K).
+    pub past_warn: usize,
+    /// Sessions ≥ 80% of their detected hard cap.
+    pub past_hard: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -82,7 +113,100 @@ impl NerdyView {
             return;
         }
 
-        let mut lines: Vec<Line> = Vec::with_capacity(48);
+        let mut lines: Vec<Line> = Vec::with_capacity(64);
+
+        // ── Tokens ───────────────────────────────────────────────
+        // Live context-window roll-up across all agents — flags how
+        // many sessions are sitting past the soft-degradation knee
+        // even when none individually trip the hard-cap alert.
+        let t = &self.stats.tokens;
+        lines.push(section_header(&format!(
+            "tokens (live across {} session{})",
+            t.sessions,
+            if t.sessions == 1 { "" } else { "s" }
+        )));
+        if t.sessions == 0 {
+            lines.push(dim("(no parseable transcripts)"));
+        } else {
+            lines.push(kv("fleet total", &humanize_tokens(t.fleet_total)));
+            let total = t.fleet_total.max(1);
+            lines.push(kv(
+                "cache_read",
+                &format!(
+                    "{} ({:.0}%)",
+                    humanize_tokens(t.cache_read),
+                    100.0 * t.cache_read as f64 / total as f64
+                ),
+            ));
+            lines.push(kv(
+                "cache_creation",
+                &format!(
+                    "{} ({:.0}%)",
+                    humanize_tokens(t.cache_creation),
+                    100.0 * t.cache_creation as f64 / total as f64
+                ),
+            ));
+            lines.push(kv(
+                "input",
+                &format!(
+                    "{} ({:.0}%)",
+                    humanize_tokens(t.input),
+                    100.0 * t.input as f64 / total as f64
+                ),
+            ));
+            lines.push(kv(
+                "output",
+                &format!(
+                    "{} ({:.0}%)",
+                    humanize_tokens(t.output),
+                    100.0 * t.output as f64 / total as f64
+                ),
+            ));
+            if let Some((name, tokens, hard)) = &t.largest {
+                let color = ctx_color(*tokens, *hard);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("    {:<26}", "largest"),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled(
+                        format!(
+                            "{} {} / {}",
+                            name,
+                            humanize_tokens(*tokens),
+                            humanize_tokens(*hard),
+                        ),
+                        Style::default().fg(color),
+                    ),
+                ]));
+            }
+            lines.push(kv(
+                &format!("past soft (≥{})", humanize_tokens(SOFT_DEGRADATION)),
+                &format!(
+                    "{} session{}",
+                    t.past_soft,
+                    if t.past_soft == 1 { "" } else { "s" }
+                ),
+            ));
+            lines.push(kv(
+                &format!("past warn (≥{})", humanize_tokens(SOFT_HARD_WARN)),
+                &format!(
+                    "{} session{}",
+                    t.past_warn,
+                    if t.past_warn == 1 { "" } else { "s" }
+                ),
+            ));
+            lines.push(kv(
+                "past 80% hard cap",
+                &format!(
+                    "{} session{}",
+                    t.past_hard,
+                    if t.past_hard == 1 { "" } else { "s" }
+                ),
+            ));
+        }
+        lines.push(Line::from(""));
+
         // ── Pool ─────────────────────────────────────────────────
         lines.push(section_header("pool"));
         let p = &self.stats.pool;
@@ -155,7 +279,7 @@ impl NerdyView {
         let para = Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Nerdy · pool / tables / pgvector / hooks "),
+                .title(" Nerdy · tokens / pool / tables / pgvector / hooks "),
         );
         frame.render_widget(para, area);
     }
@@ -171,6 +295,43 @@ async fn collect(pool: &PgPool) -> NerdyStats {
         idle: pool.num_idle() as u32,
         max: pool.options().get_max_connections(),
     };
+
+    // Tokens — walk every registered agent's latest CC transcript and
+    // aggregate the most-recent `usage` block. Disk-bound but cheap
+    // (200KB tail per file) and only fires at the nerdy refresh
+    // cadence (5s).
+    if let Ok(agents) = AgentRepo::new(pool).list().await {
+        let mut ts = TokenStats::default();
+        for a in &agents {
+            let Some(b) = agent_usage_breakdown(&a.agent_name) else {
+                continue;
+            };
+            ts.sessions += 1;
+            ts.cache_read += b.cache_read;
+            ts.cache_creation += b.cache_creation;
+            ts.input += b.input;
+            ts.output += b.output;
+            let total = b.total();
+            ts.fleet_total += total;
+            if total >= SOFT_DEGRADATION {
+                ts.past_soft += 1;
+            }
+            if total >= SOFT_HARD_WARN {
+                ts.past_warn += 1;
+            }
+            if total >= (b.hard_cap as f64 * 0.80) as i64 {
+                ts.past_hard += 1;
+            }
+            match &ts.largest {
+                None => ts.largest = Some((a.agent_name.clone(), total, b.hard_cap)),
+                Some((_, prev, _)) if total > *prev => {
+                    ts.largest = Some((a.agent_name.clone(), total, b.hard_cap))
+                }
+                _ => {}
+            }
+        }
+        out.tokens = ts;
+    }
 
     // Table sizes — pg_total_relation_size() per known orchestrator
     // table; deduplicated by joining pg_stat_user_tables for dead-tuple
