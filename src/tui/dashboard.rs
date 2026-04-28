@@ -326,13 +326,34 @@ impl DashboardView {
         // archived agents disappear on this same tick.
         self.sweep_orphans(pool).await;
 
+        // Pin selection across re-sorts. self.selected is a positional
+        // index, but we sort by updated_at below — without this, the
+        // user's cursor would drift to whichever row landed at that
+        // index on this tick.
+        let pinned_id = self.agents.get(self.selected).map(|a| a.agent_id);
+
         let agent_repo = AgentRepo::new(pool);
-        self.agents = agent_repo.list().await?;
+        let mut agents = agent_repo.list().await?;
+        // Most-recently-active first. The repo orders by created_at,
+        // which buries hot sessions under months-old identities in a
+        // 50+ agent fleet.
+        agents.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        self.agents = agents;
         self.agent_name_by_id = self
             .agents
             .iter()
             .map(|a| (a.agent_id, a.agent_name.clone()))
             .collect();
+
+        // Restore selection to the same agent_id it pointed to before
+        // the re-sort. Falls back to clamping if that agent vanished.
+        if let Some(id) = pinned_id {
+            if let Some(idx) = self.agents.iter().position(|a| a.agent_id == id) {
+                self.selected = idx;
+            } else if self.selected >= self.agents.len() {
+                self.selected = self.agents.len().saturating_sub(1);
+            }
+        }
 
         let lock_mgr = LockManager::new(pool, 300);
         self.locks = lock_mgr.list_all().await?;
