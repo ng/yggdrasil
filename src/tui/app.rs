@@ -666,6 +666,29 @@ impl App {
             return;
         }
 
+        // Dashboard message-input overlay captures keys while active.
+        if self.active_view == ActiveView::Dashboard && self.dashboard.msg_mode() {
+            match code {
+                KeyCode::Esc => self.dashboard.msg_cancel(),
+                KeyCode::Backspace => self.dashboard.msg_pop(),
+                KeyCode::Enter => {
+                    let from = std::env::var("YGG_AGENT_NAME")
+                        .ok()
+                        .unwrap_or_else(|| self.agent_name.clone());
+                    self.dashboard.msg_commit(pool, &from).await;
+                }
+                KeyCode::Char(c) => {
+                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        self.should_quit = true;
+                    } else {
+                        self.dashboard.msg_push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Query pane is always in input mode while active, so typing
         // characters goes to the input buffer. Esc or Tab/arrows leave;
         // Ctrl-C quits. Enter runs the query.
@@ -913,6 +936,12 @@ impl App {
                     && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
             {
                 self.dashboard.archive_selected(pool).await;
+            }
+            KeyCode::Char('m')
+                if self.active_view == ActiveView::Dashboard
+                    && self.dashboard.focus == super::dashboard::DashboardFocus::Agents =>
+            {
+                self.dashboard.msg_begin();
             }
             KeyCode::Char('w') if self.active_view == ActiveView::Dashboard => {
                 // Toggle focus between agents + workers panel. Whatever's
