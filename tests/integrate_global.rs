@@ -124,3 +124,26 @@ fn managed_agents_block_carries_ticket_structure_guidance() {
     assert!(agents_md.contains("Why"));
     assert!(agents_md.contains("Acceptance"));
 }
+
+// yggdrasil-174: vector-memory active-retrieval patterns surface in
+// the managed block. Pin the four command names so a future copy-edit
+// that drops one fails the test.
+#[test]
+fn managed_block_documents_active_vector_retrieval_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    install(dir.path()).unwrap();
+    let body = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+    for needle in [
+        "ygg task dupes",
+        "ygg memory search",
+        "ygg remember",
+        "ygg learn",
+        "ygg trace",
+        "Anti-patterns",
+    ] {
+        assert!(
+            body.contains(needle),
+            "managed block missing vector-memory anchor: {needle:?}"
+        );
+    }
+}

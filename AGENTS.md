@@ -69,7 +69,7 @@ cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 # scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
 
-<!-- BEGIN YGG INTEGRATION v:2 hash:7a223f10 -->
+<!-- BEGIN YGG INTEGRATION v:3 hash:4aca3e95 -->
 ## Yggdrasil Coordination
 
 This project uses **Yggdrasil** (`ygg`) for cross-session memory and
@@ -103,6 +103,17 @@ ygg logs --follow                           # Live event stream
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking; `ygg remember` for durable notes.
 - Do NOT use `bd` / beads.
+
+### Vector memory
+
+Active retrieval, not just passive injections:
+- Before `ygg task create` → `ygg task dupes` to surface near-dups.
+- Before a hard problem → `ygg memory search "<topic>"`.
+- On a non-obvious rule → `ygg remember "<one-sentence>"`.
+- On a recurring engineering correction → `ygg learn add` with a glob.
+
+Anti-patterns: don't write narration, scratch, or speculation.
+`ygg trace` shows what the retriever surfaced last turn.
 
 ### Ticket body structure
 
