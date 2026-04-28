@@ -1468,13 +1468,16 @@ impl DashboardView {
                 // live agent in trouble.
                 let is_idle = matches!(agent.current_state, crate::models::agent::AgentState::Idle);
                 let is_dormant = is_idle || idle_mins >= 30;
+                // Selection bg is DarkGray; if we also painted dormant
+                // text DarkGray the row would vanish under the cursor.
+                // Lift to plain Gray when selected so the contrast stays.
+                let dormant_fg = if i == selected {
+                    Color::Gray
+                } else {
+                    Color::DarkGray
+                };
                 let (name_color, state_fg, ctx_fg, spark_fg) = if is_dormant {
-                    (
-                        Color::DarkGray,
-                        Color::DarkGray,
-                        Color::DarkGray,
-                        Color::DarkGray,
-                    )
+                    (dormant_fg, dormant_fg, dormant_fg, dormant_fg)
                 } else {
                     (Color::Reset, state_color, pressure_color, Color::Cyan)
                 };
