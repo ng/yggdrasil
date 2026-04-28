@@ -3,5 +3,6 @@
 # Stray runtime artifacts
 .dolt/
 .beads/
+.ygg/
 *.db
 .env

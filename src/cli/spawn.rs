@@ -1,8 +1,13 @@
+use std::path::PathBuf;
+
 use crate::config::AppConfig;
 use crate::models::agent::AgentRepo;
 use crate::tmux::TmuxManager;
 
 /// Spawn a new Claude Code agent in a tmux window.
+///
+/// Each agent gets its own git worktree so concurrent agents never collide
+/// on the shared working directory.
 pub async fn execute(
     pool: &sqlx::PgPool,
     _config: &AppConfig,
@@ -25,15 +30,21 @@ pub async fn execute(
     let agent = agent_repo.register(&agent_name).await?;
     println!("  Agent ID: {}", agent.agent_id);
 
+    // Create a git worktree so this agent has an isolated working copy.
+    let worktree_path = create_worktree(&agent_name).await?;
+    println!("  Worktree: {}", worktree_path.display());
+
     // Ensure tmux session + create task window. The helper returns pane
     // *ids* (tmux's stable @N references) rather than positional .0/.1
     // — the latter break under `pane-base-index 1` in .tmux.conf.
     TmuxManager::ensure_session().await?;
     let (left_pane, right_pane) = TmuxManager::create_task_window(&agent_name).await?;
 
-    // Start Claude Code in the main (left) pane with the task as prompt.
+    // cd into the worktree, then start Claude Code with the task as prompt.
+    let cd_cmd = format!("cd '{}'", shell_escape(&worktree_path.to_string_lossy()));
+    TmuxManager::send_keys(&left_pane, &cd_cmd).await?;
     let claude_cmd = format!(
-        "claude --dangerously-skip-permissions --name '{}' '{}'",
+        "claude --dangerously-skip-permissions --permission-mode bypassPermissions --name '{}' '{}'",
         shell_escape(&agent_name),
         shell_escape(task),
     );
@@ -50,11 +61,45 @@ pub async fn execute(
 
     println!("  Agent '{agent_name}' spawned in tmux");
     println!("  ├─ pane 0: Claude Code (agent)");
-    println!("  └─ pane 1: ygg observe (DAG ingest)");
+    println!("  ├─ pane 1: ygg observe (DAG ingest)");
+    println!("  └─ worktree: {}", worktree_path.display());
     println!();
     println!("  tmux attach -t ygg");
 
     Ok(())
+}
+
+/// Create a git worktree for the agent under `.ygg/worktrees/<name>`.
+/// Returns the absolute path to the new worktree.
+async fn create_worktree(agent_name: &str) -> Result<PathBuf, anyhow::Error> {
+    let branch_name = format!("ygg/{agent_name}");
+    let worktree_dir = PathBuf::from(".ygg/worktrees").join(agent_name);
+
+    if worktree_dir.exists() {
+        // Reuse existing worktree (agent respawn / retry).
+        return Ok(std::fs::canonicalize(&worktree_dir)?);
+    }
+
+    std::fs::create_dir_all(".ygg/worktrees")?;
+
+    let output = tokio::process::Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            &branch_name,
+            &worktree_dir.to_string_lossy(),
+            "HEAD",
+        ])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git worktree add failed: {stderr}");
+    }
+
+    Ok(std::fs::canonicalize(&worktree_dir)?)
 }
 
 fn slugify(task: &str) -> String {
