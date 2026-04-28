@@ -1421,6 +1421,7 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
     // `*.rs` translates to SQL LIKE `%.rs` which matches `src/main.rs`.
     // The model's translate(glob, '*?', '%_') doesn't do `**`-collapsing,
     // so use a single-`*` glob that LIKE handles natively.
+    let default_scope = serde_json::json!({});
     let glob_match = lr
         .create(
             Some(repo.0),
@@ -1429,6 +1430,7 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             "Use anyhow::Result on public functions.",
             None,
             None,
+            &default_scope,
         )
         .await
         .unwrap();
@@ -1440,6 +1442,7 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             "Always run cargo fmt before pushing.",
             None,
             None,
+            &default_scope,
         )
         .await
         .unwrap();
@@ -1451,12 +1454,13 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             "Mermaid sections should preserve ASCII fallback.",
             None,
             None,
+            &default_scope,
         )
         .await
         .unwrap();
 
     let files = vec!["src/main.rs".to_string()];
-    let lines = ygg::cli::learning_cmd::surface_for_files(&pool, Some(repo.0), &files)
+    let lines = ygg::cli::learning_cmd::surface_for_files(&pool, Some(repo.0), &files, None, None)
         .await
         .unwrap();
 

@@ -19,6 +19,12 @@ pub async fn execute(
         None => slugify(task),
     };
 
+    if agent_name.is_empty() {
+        anyhow::bail!(
+            "agent name cannot be empty — provide --name or a task with alphanumeric characters"
+        );
+    }
+
     println!("Spawning agent '{agent_name}' for task: {task}");
 
     if !TmuxManager::is_available().await {
@@ -61,7 +67,11 @@ pub async fn execute(
         .unwrap_or_else(|_| "ygg".into())
         .to_string_lossy()
         .to_string();
-    let observe_cmd = format!("{} observe --agent {}", ygg_bin, shell_escape(&agent_name),);
+    let observe_cmd = format!(
+        "'{}' observe --agent '{}'",
+        shell_escape(&ygg_bin),
+        shell_escape(&agent_name),
+    );
     TmuxManager::send_keys(&right_pane, &observe_cmd).await?;
 
     println!("  Agent '{agent_name}' spawned in tmux");
