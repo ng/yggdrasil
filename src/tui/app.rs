@@ -905,6 +905,10 @@ impl App {
                 self.dashboard.toggle_user_filter();
                 let _ = self.dashboard.refresh(pool).await;
             }
+            KeyCode::Char('t') if self.active_view == ActiveView::Dashboard => {
+                self.dashboard.cycle_runs_window();
+                let _ = self.dashboard.refresh(pool).await;
+            }
             KeyCode::Char('/') if self.active_view == ActiveView::MemGraph => {
                 self.memgraph.search_begin();
             }
@@ -1171,7 +1175,7 @@ impl App {
             Style::default().fg(Color::DarkGray),
         );
         let pane_hint = match self.active_view {
-            ActiveView::Dashboard => "S=session-scope",
+            ActiveView::Dashboard => "S=session-scope  t=window  u=mine/all",
             ActiveView::Dag => {
                 "Enter=detail  r=run  n=add  ⌫=delete  s=sort  a=agent  f=focus  c=clear"
             }

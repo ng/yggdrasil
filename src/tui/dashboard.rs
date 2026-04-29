@@ -96,6 +96,7 @@ pub struct DashboardView {
     runs_recent: Vec<RunSnap>,
     run_spark: Vec<u64>,
     runs_top_loop: i64,
+    runs_window: RunsWindow,
 
     /// When true, only show agents belonging to the current user_id.
     /// Default false (show all users). Persisted in ~/.config/ygg/dashboard.json.
@@ -110,12 +111,74 @@ pub struct DashboardView {
     corrections_24h: i64,
     nodes_with_embedding: i64,
     nodes_total_count: i64,
+
+    // Recent similarity hits for the vector tile (task 3)
+    recent_hits: Vec<RecentHit>,
+}
+
+#[derive(Debug, Clone)]
+struct RecentHit {
+    score: f64,
+    snippet: String,
+    source_agent: String,
+    referenced: bool,
+    age: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DashboardFocus {
     Agents,
     Workers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RunsWindow {
+    Hour1,
+    Hour6,
+    Hour24,
+}
+
+impl RunsWindow {
+    fn next(self) -> Self {
+        match self {
+            Self::Hour1 => Self::Hour6,
+            Self::Hour6 => Self::Hour24,
+            Self::Hour24 => Self::Hour1,
+        }
+    }
+
+    fn interval_sql(&self) -> &'static str {
+        match self {
+            Self::Hour1 => "1 hour",
+            Self::Hour6 => "6 hours",
+            Self::Hour24 => "24 hours",
+        }
+    }
+
+    fn bucket_count(&self) -> usize {
+        match self {
+            Self::Hour1 => 12,
+            Self::Hour6 => 24,
+            Self::Hour24 => 24,
+        }
+    }
+
+    fn bucket_seconds(&self) -> i64 {
+        match self {
+            Self::Hour1 => 300,
+            Self::Hour6 => 900,
+            Self::Hour24 => 3600,
+        }
+    }
+
+    fn spark_title(&self, max: u64) -> String {
+        let (rate, window) = match self {
+            Self::Hour1 => ("5min", "1h"),
+            Self::Hour6 => ("15min", "6h"),
+            Self::Hour24 => ("hour", "24h"),
+        };
+        format!(" Runs/{rate} — {window} · peak {max} ")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +244,7 @@ impl DashboardView {
             runs_recent: Vec::new(),
             run_spark: vec![0; 24],
             runs_top_loop: 0,
+            runs_window: RunsWindow::Hour1,
             filter_my_agents: load_filter_my_agents(),
             embed_calls_1h: 0,
             embed_cache_hits_1h: 0,
@@ -190,6 +254,7 @@ impl DashboardView {
             corrections_24h: 0,
             nodes_with_embedding: 0,
             nodes_total_count: 0,
+            recent_hits: Vec::new(),
         }
     }
 
@@ -377,6 +442,10 @@ impl DashboardView {
     pub fn toggle_user_filter(&mut self) {
         self.filter_my_agents = !self.filter_my_agents;
         save_filter_my_agents(self.filter_my_agents);
+    }
+
+    pub fn cycle_runs_window(&mut self) {
+        self.runs_window = self.runs_window.next();
     }
 
     fn cached_pressure(&mut self, agent_name: &str) -> Option<(i64, i64)> {
@@ -579,6 +648,47 @@ impl DashboardView {
         self.nodes_total_count = nt;
         self.nodes_with_embedding = ne;
 
+        // Recent individual similarity hits for the vector tile.
+        let hit_rows: Vec<(serde_json::Value, chrono::DateTime<chrono::Utc>, bool)> =
+            sqlx::query_as(
+                r#"SELECT e.payload, e.created_at,
+                       EXISTS(SELECT 1 FROM events r
+                              WHERE r.event_kind::text = 'hit_referenced'
+                                AND r.payload->>'source_node_id' = e.payload->>'source_node_id'
+                                AND r.created_at > e.created_at
+                                AND r.created_at < e.created_at + interval '10 minutes') AS referenced
+                   FROM events e
+                   WHERE e.event_kind::text = 'similarity_hit'
+                   ORDER BY e.created_at DESC LIMIT 3"#,
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        self.recent_hits = hit_rows
+            .into_iter()
+            .map(|(payload, created_at, referenced)| {
+                let score = payload["total_score"]
+                    .as_f64()
+                    .or_else(|| payload["similarity"].as_f64())
+                    .unwrap_or(0.0);
+                let snippet = payload["snippet"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let source_agent = payload["source_agent"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string();
+                RecentHit {
+                    score,
+                    snippet,
+                    source_agent,
+                    referenced,
+                    age: created_at,
+                }
+            })
+            .collect();
+
         // Prompts per hour sparkline, 24h — global across agents.
         // Uses hook_fired/UserPromptSubmit which fires on every user turn.
         let sparkline: Vec<(i32, i64)> = sqlx::query_as(
@@ -777,24 +887,26 @@ impl DashboardView {
             })
             .collect();
 
-        // Hourly sparkline from run_terminal events (24 buckets).
+        // Sparkline from run_terminal events, bucketed by runs_window.
         let now = Utc::now();
-        let spark_rows: Vec<(chrono::DateTime<chrono::Utc>, i64)> = sqlx::query_as(
-            "SELECT date_trunc('hour', created_at) AS bucket, COUNT(*)
-             FROM events
-             WHERE event_kind::text = 'run_terminal'
-               AND created_at >= now() - interval '24 hours'
-             GROUP BY 1 ORDER BY 1",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-        let mut spark = vec![0u64; 24];
-        for (bucket, count) in &spark_rows {
-            let hours_ago = (now - *bucket).num_hours().max(0);
-            if hours_ago < 24 {
-                let idx = (23 - hours_ago) as usize;
-                spark[idx] = *count as u64;
+        let bucket_count = self.runs_window.bucket_count();
+        let bucket_secs = self.runs_window.bucket_seconds();
+        let interval_sql = self.runs_window.interval_sql();
+        let query = format!(
+            "SELECT created_at, 1 FROM events \
+             WHERE event_kind::text = 'run_terminal' \
+               AND created_at >= now() - interval '{interval_sql}' \
+             ORDER BY created_at"
+        );
+        let spark_rows: Vec<(chrono::DateTime<chrono::Utc>, i64)> =
+            sqlx::query_as(&query).fetch_all(pool).await.unwrap_or_default();
+        let mut spark = vec![0u64; bucket_count];
+        let window_start = now - CDuration::seconds(bucket_secs * bucket_count as i64);
+        for (ts, _) in &spark_rows {
+            let elapsed = (*ts - window_start).num_seconds().max(0);
+            let idx = (elapsed / bucket_secs) as usize;
+            if idx < bucket_count {
+                spark[idx] += 1;
             }
         }
         self.run_spark = spark;
@@ -875,7 +987,7 @@ impl DashboardView {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!(" Runs/hour — 24h · peak {} ", max)),
+                    .title(self.runs_window.spark_title(max)),
             )
             .data(&self.run_spark)
             .max(max.max(1))
@@ -1003,6 +1115,11 @@ impl DashboardView {
     }
 
     fn render_vector_tile(&self, frame: &mut Frame, area: Rect) {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+
         let embed_total = self.embed_calls_1h + self.embed_cache_hits_1h;
         let hit_rate = if embed_total > 0 {
             (self.embed_cache_hits_1h as f64 / embed_total as f64 * 100.0) as i64
@@ -1010,7 +1127,7 @@ impl DashboardView {
             0
         };
 
-        let lines: Vec<Line> = vec![
+        let stats_lines: Vec<Line> = vec![
             Line::from(vec![
                 Span::styled("embedder  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
@@ -1018,7 +1135,7 @@ impl DashboardView {
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!(" · {} cache hits ({}%)", self.embed_cache_hits_1h, hit_rate),
+                    format!(" · {}% cache", hit_rate),
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
@@ -1027,7 +1144,7 @@ impl DashboardView {
             Line::from(vec![
                 Span::styled("retrieval ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{} sim hits", self.similarity_hits_1h),
+                    format!("{} hits", self.similarity_hits_1h),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -1039,16 +1156,6 @@ impl DashboardView {
                 Span::styled(
                     format!(" · {} drops", self.scoring_drops_1h),
                     Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!(" · {} corrections", self.corrections_24h),
-                    if self.corrections_24h > 0 {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
                 ),
             ]),
             Line::from(vec![
@@ -1067,31 +1174,75 @@ impl DashboardView {
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!(
-                        "· {} nodes ({} embedded) ",
-                        self.nodes_total_count, self.nodes_with_embedding
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("· {} locks", self.db_locks_active),
-                    if self.db_locks_active > 0 {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
             ]),
         ];
-        let para = Paragraph::new(lines).block(
+        let stats_para = Paragraph::new(stats_lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Vector & Retrieval "),
         );
-        frame.render_widget(para, area);
+        frame.render_widget(stats_para, cols[0]);
+
+        // Right column: recent individual similarity matches.
+        let now = Utc::now();
+        let mut hit_lines: Vec<Line> = Vec::new();
+        for hit in self.recent_hits.iter().take(3) {
+            let (glyph, glyph_color) = if hit.referenced {
+                ("\u{2713}", Color::Green)
+            } else {
+                ("\u{00b7}", Color::DarkGray)
+            };
+            let score_color = if hit.score >= 0.6 {
+                Color::Green
+            } else if hit.score >= 0.3 {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
+            let age_s = (now - hit.age).num_seconds().max(0);
+            let age = if age_s < 60 {
+                format!("{age_s}s")
+            } else if age_s < 3600 {
+                format!("{}m", age_s / 60)
+            } else {
+                format!("{}h", age_s / 3600)
+            };
+            let snip: String = hit
+                .snippet
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(30)
+                .collect();
+            hit_lines.push(Line::from(vec![
+                Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
+                Span::styled(
+                    format!("{:.2} ", hit.score),
+                    Style::default()
+                        .fg(score_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("\"{snip}\" "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{} {age}", hit.source_agent),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+        if hit_lines.is_empty() {
+            hit_lines.push(Line::from(Span::styled(
+                "no recent matches",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        let hits_para = Paragraph::new(hit_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Recent matches "),
+        );
+        frame.render_widget(hits_para, cols[1]);
     }
 
     fn render_workers(&self, frame: &mut Frame, area: Rect) {
@@ -1628,7 +1779,7 @@ impl DashboardView {
                     _ => agent.agent_name.clone(),
                 };
                 let name_cell = if live > 1 {
-                    format!("{base}  ×{live}")
+                    format!("{base}  ({live} sessions)")
                 } else {
                     base
                 };

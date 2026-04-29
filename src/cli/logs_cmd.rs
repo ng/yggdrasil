@@ -408,10 +408,10 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
             format!("{YELLOW}{task}{RESET} attempt {attempt} after {DIM}{backoff_ms}ms{RESET}")
         }
         EventKind::SchedulerTick => {
-            let dispatched = p["dispatched"].as_i64().unwrap_or(0);
-            let finalized = p["finalized"].as_i64().unwrap_or(0);
+            let spawned = p["dispatched"].as_i64().unwrap_or(0);
+            let done = p["finalized"].as_i64().unwrap_or(0);
             let retried = p["retried"].as_i64().unwrap_or(0);
-            format!("{DIM}dispatched={dispatched} finalized={finalized} retried={retried}{RESET}")
+            format!("{DIM}spawned={spawned} done={done} retried={retried}{RESET}")
         }
         EventKind::SchedulerError => {
             let msg = p["error"].as_str().unwrap_or("");
