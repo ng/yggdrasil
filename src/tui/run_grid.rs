@@ -228,7 +228,7 @@ impl RunGridView {
             ];
             for i in 0..MAX_ATTEMPT_COLS {
                 cells.push(
-                    Cell::from(format!("#{}", MAX_ATTEMPT_COLS - i))
+                    Cell::from(format!("#{}", i + 1))
                         .style(Style::default().fg(Color::DarkGray)),
                 );
             }

@@ -789,12 +789,24 @@ impl DagView {
         );
 
         if blockers.is_empty() && dependents.is_empty() {
+            let total_edges = self
+                .blockers_of
+                .get(&task.task_id)
+                .map(|v| v.len())
+                .unwrap_or(0)
+                + self
+                    .children_of
+                    .get(&task.task_id)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+            let msg = if total_edges > 0 {
+                format!("  {total_edges} dep(s) hidden by current filter")
+            } else {
+                "  no dependencies — this task is independent".to_string()
+            };
             let para = ratatui::widgets::Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(
-                    "  no dependencies — this task is independent",
-                    Style::default().fg(Color::DarkGray),
-                )),
+                Line::from(Span::styled(msg, Style::default().fg(Color::DarkGray))),
             ])
             .block(Block::default().borders(Borders::ALL).title(title));
             frame.render_widget(para, area);
@@ -852,7 +864,7 @@ impl DagView {
     }
 }
 
-fn dep_line<'a>(t: &Task, prefix: &str) -> Line<'a> {
+fn dep_line(t: &Task, prefix: &str) -> Line<'static> {
     let (status_color, glyph) = match t.status {
         TaskStatus::Open => (Color::DarkGray, "◯"),
         TaskStatus::InProgress => (Color::Green, "▶"),
