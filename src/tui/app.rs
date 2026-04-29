@@ -710,6 +710,36 @@ impl App {
             return;
         }
 
+        // Chat detail overlay — Esc closes.
+        if self.active_view == ActiveView::Chat && self.chat.detail_open() {
+            match code {
+                KeyCode::Esc => self.chat.detail_close(),
+                KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Chat filter-editing mode captures keys while typing.
+        if self.active_view == ActiveView::Chat && self.chat.filter_editing() {
+            match code {
+                KeyCode::Esc => self.chat.filter_clear(),
+                KeyCode::Enter => self.chat.filter_accept(),
+                KeyCode::Backspace => self.chat.filter_pop(),
+                KeyCode::Char(c) => {
+                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        self.should_quit = true;
+                    } else {
+                        self.chat.filter_push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // MemGraph search mode captures keys while active.
         if self.active_view == ActiveView::MemGraph && self.memgraph.search_mode() {
             match code {
@@ -889,10 +919,26 @@ impl App {
                 self.chat.compose_begin();
             }
             KeyCode::Enter if self.active_view == ActiveView::Chat => {
-                let agent = std::env::var("YGG_AGENT_NAME")
-                    .ok()
-                    .unwrap_or_else(|| self.agent_name.clone());
-                self.chat.claim_selected(pool, &agent).await;
+                // Enter on a broadcast = claim; on a directed msg = detail overlay.
+                self.chat.detail_selected();
+                if !self.chat.detail_open() {
+                    // Was not a directed msg, so try claiming as broadcast.
+                    let agent = std::env::var("YGG_AGENT_NAME")
+                        .ok()
+                        .unwrap_or_else(|| self.agent_name.clone());
+                    self.chat.claim_selected(pool, &agent).await;
+                }
+            }
+            KeyCode::Char('/') if self.active_view == ActiveView::Chat => {
+                self.chat.filter_begin();
+            }
+            KeyCode::Esc if self.active_view == ActiveView::Chat => {
+                // Esc clears active filter when not in a sub-mode.
+                if self.chat.filter_editing() {
+                    self.chat.filter_clear();
+                } else {
+                    self.chat.filter_clear();
+                }
             }
             // yggdrasil-155: lazygit-style inline rename of the selected
             // task's title. 'r' is already taken (run-task), so 'e' for
@@ -1078,6 +1124,9 @@ impl App {
 
     fn set_view(&mut self, v: ActiveView) {
         self.active_view = v;
+        if v == ActiveView::Chat {
+            self.chat.mark_seen();
+        }
     }
     fn cycle_view_forward(&mut self) {
         let next = match self.active_view {
@@ -1207,7 +1256,15 @@ impl App {
                 tab("[0] Runs", self.active_view == ActiveView::Runs),
                 tab("[G] Grid", self.active_view == ActiveView::RunGrid),
                 tab("[N] Nerdy", self.active_view == ActiveView::Nerdy),
-                tab("[C] Chat", self.active_view == ActiveView::Chat),
+                {
+                    let unread = self.chat.unread_count();
+                    let label = if unread > 0 && self.active_view != ActiveView::Chat {
+                        format!("[C] Chat ({unread})")
+                    } else {
+                        "[C] Chat".into()
+                    };
+                    tab(&label, self.active_view == ActiveView::Chat)
+                },
             ]
         };
         frame.render_widget(Line::from(tabs), chunks[0]);
@@ -1235,7 +1292,7 @@ impl App {
                 "↑↓ select  ·  rows=tasks  ·  cols=recent attempts (newest left)"
             }
             ActiveView::Nerdy => "pool / tables / pgvector / hooks (read-only deep-dive)",
-            ActiveView::Chat => "c=compose  ↑↓=scroll  Enter=claim broadcast",
+            ActiveView::Chat => "c=compose  ↑↓=scroll  Enter=detail/claim  /=filter",
         };
         // yggdrasil-134: scope chip on the right of the help row makes
         // the current scope (repo / all) and the toggle key visible.
@@ -1779,6 +1836,7 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                 }
                 ActiveView::Chat => {
                     app.chat.refresh(pool).await?;
+                    app.chat.mark_seen();
                 }
                 _ => {}
             }
