@@ -417,6 +417,13 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: i64,
     },
+
+    /// Handle Claude Code lifecycle hooks natively (replaces shell scripts)
+    Hook {
+        /// The hook event type
+        #[clap(subcommand)]
+        action: ygg::cli::hook_cmd::HookAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2370,6 +2377,9 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| "ygg".to_string())
                 });
             ygg::cli::agent_cmd::set_tool(&pool, &agent_name, &tool).await?;
+        }
+        Commands::Hook { action } => {
+            ygg::cli::hook_cmd::handle(action).await?;
         }
         Commands::Remember {
             text,
