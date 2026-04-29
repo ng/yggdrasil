@@ -12,12 +12,7 @@ Yggdrasil is a multi-agent coordination layer for AI coding agents. It gives fle
 cargo install --path .
 ```
 
-**From GitHub releases:**
-
-```bash
-curl -fsSL https://github.com/ng/yggdrasil/releases/latest/download/ygg-$(uname -m)-$(uname -s | tr A-Z a-z)-gnu -o ygg && chmod +x ygg
-sudo mv -f ygg /usr/local/bin/
-```
+**From GitHub releases:** coming soon.
 
 **Homebrew:** coming soon.
 
@@ -48,7 +43,7 @@ ygg status
 
 ## Architecture
 
-```
+```text
 +------------------+         +-------------------------------+
 |   Claude Code    |         |    PostgreSQL + pgvector       |
 |                  |         |                               |
@@ -104,7 +99,7 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `remember`  | Write a directive node (shorthand for `memory create --scope repo`).    |
 | `lock`      | Acquire / release / list / heartbeat resource locks.                    |
 | `inject`    | Hook: writes prompt node, emits similar-context directives.             |
-| `prime`     | Hook: emits agent context as markdown.                                  |
+| `prime`     | Hook: emits agent context as Markdown.                                  |
 | `digest`    | Hook: extracts corrections/sentiment into a digest node.                |
 | `observe`   | Ingest an existing Claude Code session transcript.                      |
 | `interrupt` | Human overrides: take-over, pause, resume.                              |
@@ -121,7 +116,7 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 
 ## Project Layout
 
-```
+```text
 src/
   cli/          one file per subcommand
   models/       agent, node, event -- sqlx types + repos

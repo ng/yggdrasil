@@ -230,7 +230,11 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             },
             KeyHint {
                 keys: "/",
-                effect: "filter messages (Enter=apply, Esc=clear)",
+                effect: "search / filter messages (Enter=accept, Esc=clear)",
+            },
+            KeyHint {
+                keys: "Esc",
+                effect: "close detail / clear filter",
             },
         ],
         _ => &[],

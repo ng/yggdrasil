@@ -878,7 +878,9 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         pg_createdb(&pg_user, &pg_host, pg_port, pg_pass.as_deref()).await;
 
         // Pre-flight psql connection check before attempting migrations
-        let probe_ok = {
+        let probe_ok = if skipping(&all_skips, "migrations") {
+            true
+        } else {
             let port_s = pg_port.to_string();
             let bin = find_bin("psql").unwrap_or_else(|| "psql".to_string());
             let mut cmd = Command::new(&bin);
@@ -900,7 +902,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         hint(&format!("psql: {stderr}"));
                     }
                     if stderr.contains("role") && stderr.contains("does not exist") {
-                        hint(&format!("configured URL: {db_url}"));
+                        hint(&format!("configured URL: {db_show}"));
                         hint("create the role or update DATABASE_URL in .env");
                     } else if stderr.contains("password authentication failed") {
                         hint("check the password in DATABASE_URL");
@@ -959,7 +961,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         }
                     } else if err_str.contains("role") && err_str.contains("does not exist") {
                         hint("the configured role doesn't exist on this postgres server");
-                        hint(&format!("current URL: {db_url}"));
+                        hint(&format!("current URL: {db_show}"));
                         hint("");
                         // Offer to reconfigure the URL in-place
                         if prompt_yes("reconfigure the database URL now?") {

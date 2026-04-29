@@ -286,7 +286,7 @@ pub async fn all_messages(
                  FROM events e
                  LEFT JOIN agents a ON a.agent_id = e.recipient_agent_id
                 WHERE e.event_kind = 'message'
-                  AND e.created_at > now() - make_interval(hours => $1)
+                  AND e.created_at > now() - interval '1 hour' * $1
                 ORDER BY e.created_at DESC
                 LIMIT $2"#,
     )

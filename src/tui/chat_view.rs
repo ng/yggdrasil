@@ -41,8 +41,8 @@ pub struct ChatView {
     filter: Option<String>,
     /// True when the filter input line is focused (typing mode).
     filter_editing: bool,
-    /// How many messages the user has "seen" (updated when view is active).
-    last_seen_count: usize,
+    /// Timestamp of the newest message seen (updated when view is active).
+    last_seen_ts: Option<DateTime<Utc>>,
 }
 
 pub struct ComposeState {
@@ -60,7 +60,7 @@ impl ChatView {
             detail: None,
             filter: None,
             filter_editing: false,
-            last_seen_count: 0,
+            last_seen_ts: None,
         }
     }
 
@@ -74,6 +74,52 @@ impl ChatView {
 
     pub fn compose_cancel(&mut self) {
         self.compose = None;
+    }
+
+    pub fn compose_push(&mut self, c: char) {
+        if let Some(cs) = self.compose.as_mut() {
+            cs.buf.push(c);
+        }
+    }
+
+    pub fn compose_pop(&mut self) {
+        if let Some(cs) = self.compose.as_mut() {
+            cs.buf.pop();
+        }
+    }
+
+    /// Parse compose buffer and send. `@agent rest` = directed; plain text = broadcast.
+    pub async fn compose_commit(&mut self, pool: &PgPool, from_agent: &str) {
+        let Some(cs) = self.compose.take() else {
+            return;
+        };
+        let input = cs.buf.trim().to_string();
+        if input.is_empty() {
+            self.flash = Some("cancelled (empty)".into());
+            return;
+        }
+
+        if let Some(rest) = input.strip_prefix('@') {
+            if let Some(space) = rest.find(' ') {
+                let to = &rest[..space];
+                let body = rest[space + 1..].trim();
+                if body.is_empty() {
+                    self.flash = Some("cancelled (empty body)".into());
+                    return;
+                }
+                match msg_cmd::send(pool, from_agent, to, body, true).await {
+                    Ok(()) => self.flash = Some(format!("sent to {to}")),
+                    Err(e) => self.flash = Some(format!("send failed: {e}")),
+                }
+            } else {
+                self.flash = Some("usage: @agent message".into());
+            }
+        } else {
+            match msg_cmd::broadcast(pool, from_agent, &input).await {
+                Ok(_id) => self.flash = Some("broadcast sent".into()),
+                Err(e) => self.flash = Some(format!("broadcast failed: {e}")),
+            }
+        }
     }
 
     // ── detail overlay ──────────────────────────────────────────────
@@ -147,98 +193,24 @@ impl ChatView {
         self.clamp_selection();
     }
 
-    // ── helpers ─────────────────────────────────────────────────────
-
-    /// Return indices into `self.messages` that pass the current filter.
-    fn visible_indices(&self) -> Vec<usize> {
-        match &self.filter {
-            None => (0..self.messages.len()).collect(),
-            Some(q) => {
-                let q = q.to_lowercase();
-                self.messages
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, m)| {
-                        m.from_name.to_lowercase().contains(&q)
-                            || m.to_name
-                                .as_ref()
-                                .map_or(false, |t| t.to_lowercase().contains(&q))
-                            || m.body.to_lowercase().contains(&q)
-                    })
-                    .map(|(i, _)| i)
-                    .collect()
-            }
-        }
-    }
-
-    /// Keep `self.state.selected()` within the visible set.
-    fn clamp_selection(&mut self) {
-        let count = self.visible_indices().len();
-        if count == 0 {
-            self.state.select(None);
-        } else {
-            let cur = self.state.selected().unwrap_or(0);
-            self.state.select(Some(cur.min(count - 1)));
-        }
-    }
-
     // ── unread count ────────────────────────────────────────────────
 
     /// Number of messages that arrived since the user last viewed the Chat pane.
     pub fn unread_count(&self) -> usize {
-        self.messages.len().saturating_sub(self.last_seen_count)
+        match self.last_seen_ts {
+            Some(ts) => self.messages.iter().filter(|m| m.created_at > ts).count(),
+            None => self.messages.len(),
+        }
     }
 
     /// Mark all current messages as seen (call when Chat pane is active).
     pub fn mark_seen(&mut self) {
-        self.last_seen_count = self.messages.len();
-    }
-
-    pub fn compose_push(&mut self, c: char) {
-        if let Some(cs) = self.compose.as_mut() {
-            cs.buf.push(c);
+        if let Some(newest) = self.messages.iter().map(|m| m.created_at).max() {
+            self.last_seen_ts = Some(newest);
         }
     }
 
-    pub fn compose_pop(&mut self) {
-        if let Some(cs) = self.compose.as_mut() {
-            cs.buf.pop();
-        }
-    }
-
-    /// Parse compose buffer and send. `@agent rest` = directed; plain text = broadcast.
-    pub async fn compose_commit(&mut self, pool: &PgPool, from_agent: &str) {
-        let Some(cs) = self.compose.take() else {
-            return;
-        };
-        let input = cs.buf.trim().to_string();
-        if input.is_empty() {
-            self.flash = Some("cancelled (empty)".into());
-            return;
-        }
-
-        if let Some(rest) = input.strip_prefix('@') {
-            if let Some(space) = rest.find(' ') {
-                let to = &rest[..space];
-                let body = rest[space + 1..].trim();
-                if body.is_empty() {
-                    self.flash = Some("cancelled (empty body)".into());
-                    return;
-                }
-                match msg_cmd::send(pool, from_agent, to, body, true).await {
-                    Ok(()) => self.flash = Some(format!("sent to {to}")),
-                    Err(e) => self.flash = Some(format!("send failed: {e}")),
-                }
-            } else {
-                self.flash = Some("usage: @agent message".into());
-            }
-        } else {
-            match msg_cmd::broadcast(pool, from_agent, &input).await {
-                Ok(_id) => self.flash = Some("broadcast sent".into()),
-                Err(e) => self.flash = Some(format!("broadcast failed: {e}")),
-            }
-        }
-    }
+    // ── claim / scroll / refresh ────────────────────────────────────
 
     /// Claim the selected broadcast message.
     pub async fn claim_selected(&mut self, pool: &PgPool, agent_name: &str) {
@@ -295,6 +267,8 @@ impl ChatView {
         Ok(())
     }
 
+    // ── render ───────────────────────────────────────────────────────
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if !self.loaded {
             let p = Paragraph::new(" loading messages… ")
@@ -303,7 +277,9 @@ impl ChatView {
             return;
         }
 
-        if self.messages.is_empty() {
+        let visible = self.visible_indices();
+
+        if self.messages.is_empty() || (visible.is_empty() && self.filter.is_none()) {
             let hint = if let Some(ref f) = self.flash {
                 format!(" {f} ")
             } else {
@@ -323,10 +299,10 @@ impl ChatView {
             .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(area);
 
-        let items: Vec<ListItem> = self
-            .messages
+        let items: Vec<ListItem> = visible
             .iter()
-            .map(|m| {
+            .map(|&i| {
+                let m = &self.messages[i];
                 let ts = m.created_at.format("%H:%M");
                 let arrow = match &m.to_name {
                     Some(to) => format!("{} → {}", m.from_name, to),
@@ -346,7 +322,15 @@ impl ChatView {
             })
             .collect();
 
-        let title = format!(" Chat · {} msg(s) · 24h ", self.messages.len());
+        let title = if self.filter.is_some() {
+            format!(
+                " Chat · {}/{} msg(s) · 24h ",
+                visible.len(),
+                self.messages.len()
+            )
+        } else {
+            format!(" Chat · {} msg(s) · 24h ", self.messages.len())
+        };
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -356,8 +340,13 @@ impl ChatView {
         // Hint bar
         let hint = if let Some(ref f) = self.flash {
             f.clone()
+        } else if self.filter_editing {
+            let txt = self.filter.as_deref().unwrap_or("");
+            format!(" filter: {txt}█  (Enter=accept  Esc=clear)")
+        } else if let Some(ref f) = self.filter {
+            format!(" filter: {f}  (/=edit  Esc=clear)")
         } else {
-            " c=compose  ↑↓=scroll  Enter=claim broadcast".into()
+            " c=compose  ↑↓=scroll  Enter=detail/claim  /=filter".into()
         };
         frame.render_widget(
             Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
@@ -367,7 +356,12 @@ impl ChatView {
         if self.compose.is_some() {
             self.render_compose_overlay(frame, area);
         }
+        if self.detail.is_some() {
+            self.render_detail_overlay(frame, area);
+        }
     }
+
+    // ── overlays ────────────────────────────────────────────────────
 
     fn render_compose_overlay(&self, frame: &mut Frame, area: Rect) {
         let Some(cs) = &self.compose else {
@@ -391,6 +385,102 @@ impl ChatView {
             .style(Style::default().fg(Color::Yellow))
             .wrap(Wrap { trim: false });
         frame.render_widget(p, popup);
+    }
+
+    fn render_detail_overlay(&self, frame: &mut Frame, area: Rect) {
+        let Some(idx) = self.detail else {
+            return;
+        };
+        let Some(msg) = self.messages.get(idx) else {
+            return;
+        };
+
+        let w = area.width.min(72);
+        let h = area.height.min(16).max(8);
+        let x = area.x + area.width.saturating_sub(w) / 2;
+        let y = area.y + area.height.saturating_sub(h) / 2;
+        let popup = Rect::new(x, y, w, h);
+
+        Clear.render(popup, frame.buffer_mut());
+
+        let to_label = msg.to_name.as_deref().unwrap_or("ALL");
+        let ts = msg.created_at.format("%Y-%m-%d %H:%M:%S UTC");
+        let mut lines: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled("From: ", Style::default().fg(Color::Cyan)),
+                Span::raw(msg.from_name.clone()),
+            ]),
+            Line::from(vec![
+                Span::styled("  To: ", Style::default().fg(Color::Cyan)),
+                Span::raw(to_label.to_string()),
+            ]),
+            Line::from(vec![
+                Span::styled("Time: ", Style::default().fg(Color::Cyan)),
+                Span::raw(ts.to_string()),
+            ]),
+            Line::from(""),
+        ];
+        // Wrap long body into lines that fit the popup width (minus borders).
+        let body_width = (w as usize).saturating_sub(4);
+        for raw_line in msg.body.lines() {
+            if raw_line.len() <= body_width {
+                lines.push(Line::from(raw_line.to_string()));
+            } else {
+                // Simple char-boundary wrap.
+                let mut pos = 0;
+                while pos < raw_line.len() {
+                    let end = (pos + body_width).min(raw_line.len());
+                    lines.push(Line::from(raw_line[pos..end].to_string()));
+                    pos = end;
+                }
+            }
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Message Detail ")
+            .title_bottom(Line::from(vec![Span::styled(
+                "  Esc close  ",
+                Style::default().fg(Color::DarkGray),
+            )]))
+            .border_style(Style::default().fg(Color::Green));
+        let p = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(p, popup);
+    }
+
+    // ── helpers ─────────────────────────────────────────────────────
+
+    /// Return indices into `self.messages` that pass the current filter.
+    fn visible_indices(&self) -> Vec<usize> {
+        match &self.filter {
+            None => (0..self.messages.len()).collect(),
+            Some(f) => {
+                let needle = f.to_lowercase();
+                (0..self.messages.len())
+                    .filter(|&i| {
+                        let m = &self.messages[i];
+                        m.from_name.to_lowercase().contains(&needle)
+                            || m.to_name
+                                .as_ref()
+                                .map_or(false, |t| t.to_lowercase().contains(&needle))
+                            || m.body.to_lowercase().contains(&needle)
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Keep the selection index within bounds of the visible list.
+    fn clamp_selection(&mut self) {
+        let count = self.visible_indices().len();
+        if count == 0 {
+            self.state.select(None);
+        } else {
+            let i = self.state.selected().unwrap_or(0);
+            self.state.select(Some(i.min(count - 1)));
+        }
     }
 }
 
