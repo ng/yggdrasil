@@ -33,7 +33,7 @@ impl AppConfig {
             ollama_base_url: env::var("OLLAMA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
             ollama_embed_model: env::var("OLLAMA_EMBED_MODEL")
-                .unwrap_or_else(|_| "all-minilm".into()),
+                .unwrap_or_else(|_| "qwen3-embedding:0.6b".into()),
             ollama_chat_model: env::var("OLLAMA_CHAT_MODEL").unwrap_or_default(), // optional — digest is deterministic
             embedding_dimensions: env::var("EMBEDDING_DIMENSIONS")
                 .unwrap_or_else(|_| "384".into())

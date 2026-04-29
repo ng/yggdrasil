@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Embedder using Ollama's /api/embed endpoint.
-/// Uses all-minilm model (384d) — pull with: ollama pull all-minilm
+/// Default: qwen3-embedding:0.6b (1024d native, truncated to 384d via MRL).
 pub struct Embedder {
     http: reqwest::Client,
     base_url: String,
     model: String,
+    dimensions: usize,
 }
 
 #[derive(Serialize)]
@@ -24,10 +25,15 @@ struct EmbedResponse {
 
 impl Embedder {
     pub fn new(base_url: &str, model: &str) -> Self {
+        let dimensions: usize = std::env::var("EMBEDDING_DIMENSIONS")
+            .unwrap_or_else(|_| "384".into())
+            .parse()
+            .unwrap_or(384);
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
+            dimensions,
         }
     }
 
@@ -35,7 +41,8 @@ impl Embedder {
     pub fn default_ollama() -> Self {
         let base_url =
             std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-        let model = std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "all-minilm".into());
+        let model =
+            std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "qwen3-embedding:0.6b".into());
         Self::new(&base_url, &model)
     }
 
@@ -63,11 +70,18 @@ impl Embedder {
             .await
             .map_err(|e| crate::YggError::Ollama(format!("embed parse error: {e}")))?;
 
-        let vec = data
+        let mut vec = data
             .embeddings
             .into_iter()
             .next()
             .ok_or_else(|| crate::YggError::Ollama("no embedding returned".into()))?;
+
+        // MRL truncation: models like Qwen3 return 1024d natively but
+        // support Matryoshka truncation to smaller dims with minimal
+        // quality loss. Truncate to match the schema's vector(N) column.
+        if vec.len() > self.dimensions {
+            vec.truncate(self.dimensions);
+        }
 
         Ok(Vector::from(vec))
     }

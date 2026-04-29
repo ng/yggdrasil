@@ -119,7 +119,7 @@ pub async fn execute(
                 .map(|e| format!("{prompt}\n\n{e}")) // Combine for both embedding + tsvector
                 .unwrap_or_else(|| prompt.to_string());
 
-            // Truncate to ~1500 chars — all-minilm has a 256-token limit
+            // Truncate to ~1500 chars — keeps embedding input manageable
             let query_text: &str = if embed_source.len() > 1500 {
                 &embed_source[..1500]
             } else {
@@ -150,7 +150,7 @@ pub async fn execute(
                     agent_name,
                     Some(agent.agent_id),
                     serde_json::json!({
-                        "model": "all-minilm",
+                        "model": &config.ollama_embed_model,
                         "input_chars": query_text.len(),
                         "latency_ms": embed_ms,
                         "success": embed_result.is_ok(),

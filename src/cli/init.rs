@@ -837,15 +837,15 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
         // Pull embed model
         let embedder = crate::embed::Embedder::default_ollama();
-        let pb = spin("pulling all-minilm embedding model...");
+        let pb = spin("pulling embedding model...");
         match embedder.pull_model().await {
             Ok(()) => {
                 pb.finish_and_clear();
-                ok("all-minilm", "pulled");
+                ok("embed model", "pulled");
             }
             Err(e) => {
                 pb.finish_and_clear();
-                bad("all-minilm", &format!("{e}"));
+                bad("embed model", &format!("{e}"));
             }
         }
 
