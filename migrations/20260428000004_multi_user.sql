@@ -25,13 +25,13 @@ ALTER TABLE learnings ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT '';
 -- Unique constraints: agent identity is now (user_id, name, persona)
 ---------------------------------------------------------------------
 DROP INDEX IF EXISTS agents_name_persona_uk;
-CREATE UNIQUE INDEX agents_name_persona_user_uk
+CREATE UNIQUE INDEX IF NOT EXISTS agents_name_persona_user_uk
     ON agents (user_id, agent_name, COALESCE(persona, ''));
 
 -- Repos: (user_id, task_prefix) must be unique so two users can
 -- register the same repo independently. Drop the old global unique.
 ALTER TABLE repos DROP CONSTRAINT IF EXISTS repos_task_prefix_key;
-CREATE UNIQUE INDEX repos_user_prefix_uk ON repos (user_id, task_prefix);
+CREATE UNIQUE INDEX IF NOT EXISTS repos_user_prefix_uk ON repos (user_id, task_prefix);
 
 ---------------------------------------------------------------------
 -- Filtered indexes for the most common query patterns
