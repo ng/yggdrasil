@@ -62,6 +62,14 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
                 keys: "m",
                 effect: "compose message to selected agent",
             },
+            KeyHint {
+                keys: "t",
+                effect: "cycle runs sparkline window (1h / 6h / 24h)",
+            },
+            KeyHint {
+                keys: "u",
+                effect: "toggle mine / all agents",
+            },
         ],
         "Dag" => &[
             KeyHint {

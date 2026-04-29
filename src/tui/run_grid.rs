@@ -227,9 +227,8 @@ impl RunGridView {
                 Cell::from("title").style(Style::default().fg(Color::DarkGray)),
             ];
             for i in 0..MAX_ATTEMPT_COLS {
-                // Newest attempt first; column 0 is most recent.
                 cells.push(
-                    Cell::from(format!("a{}", MAX_ATTEMPT_COLS - i))
+                    Cell::from(format!("#{}", MAX_ATTEMPT_COLS - i))
                         .style(Style::default().fg(Color::DarkGray)),
                 );
             }
@@ -305,6 +304,10 @@ fn legend_paragraph() -> Paragraph<'static> {
             Style::default().fg(Color::DarkGray),
         ));
     }
+    spans.push(ratatui::text::Span::styled(
+        "  #1 = latest attempt",
+        Style::default().fg(Color::DarkGray),
+    ));
     Paragraph::new(ratatui::text::Line::from(spans))
 }
 
