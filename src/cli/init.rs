@@ -248,6 +248,90 @@ fn parse_pg_url_parts(url: &str, fallback_user: &str) -> (String, String, u16, O
     (user, host, port, pass)
 }
 
+/// Try to create the given PG role by connecting as a superuser.
+/// Attempts `postgres` first, then the system user, then the target user itself.
+async fn pg_ensure_role(
+    role: &str,
+    pass: Option<&str>,
+    host: &str,
+    port: u16,
+    sys_user: &str,
+) -> bool {
+    let port_s = port.to_string();
+    let bin = find_bin("psql").unwrap_or_else(|| "psql".to_string());
+
+    // Check if role already works
+    {
+        let mut cmd = Command::new(&bin);
+        cmd.args([
+            "-U", role, "-h", host, "-p", &port_s, "-d", "postgres", "-c", "SELECT 1", "-q",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+        if let Some(p) = pass {
+            cmd.env("PGPASSWORD", p);
+        }
+        if cmd.status().await.is_ok_and(|s| s.success()) {
+            return true;
+        }
+    }
+
+    let esc_id = role.replace('"', "\"\"");
+    let quoted_role = format!("\"{esc_id}\"");
+    let create_sql = if let Some(p) = pass {
+        let esc_pass = p.replace('\'', "''");
+        format!(
+            "DO $$ BEGIN \
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{esc_id}') THEN \
+             CREATE ROLE {quoted_role} WITH LOGIN PASSWORD '{esc_pass}' CREATEDB; \
+             END IF; \
+             END $$"
+        )
+    } else {
+        format!(
+            "DO $$ BEGIN \
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{esc_id}') THEN \
+             CREATE ROLE {quoted_role} WITH LOGIN CREATEDB; \
+             END IF; \
+             END $$"
+        )
+    };
+    let grant_sql = format!("GRANT ALL ON SCHEMA public TO {quoted_role}");
+
+    // Try connecting as common superusers to create the role
+    let candidates: Vec<&str> = ["postgres", sys_user]
+        .iter()
+        .copied()
+        .filter(|u| *u != role)
+        .collect();
+
+    for su in &candidates {
+        let mut cmd = Command::new(&bin);
+        cmd.args([
+            "-U",
+            su,
+            "-h",
+            host,
+            "-p",
+            &port_s,
+            "-d",
+            "postgres",
+            "-c",
+            &create_sql,
+            "-c",
+            &grant_sql,
+            "-q",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+        if cmd.status().await.is_ok_and(|s| s.success()) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Run `createdb` against the configured postgres instance.
 async fn pg_createdb(user: &str, host: &str, port: u16, pass: Option<&str>) -> bool {
     let port_s = port.to_string();
@@ -653,7 +737,22 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     // database + pgvector (only if pg is up)
     if !skipping(&all_skips, "pg") && host_port_open(&pg_host, pg_port).await {
-        // Create database first
+        // Ensure the configured role exists
+        if pg_ensure_role(&pg_user, pg_pass.as_deref(), &pg_host, pg_port, &sys_user).await {
+            ok(&format!("role '{pg_user}'"), "ready");
+        } else {
+            bad(&format!("role '{pg_user}'"), "cannot create");
+            hint(&format!(
+                "run: psql -U postgres -h {pg_host} -p {pg_port} -d postgres -c \"CREATE ROLE {pg_user} WITH LOGIN CREATEDB;\""
+            ));
+            hint(&format!(
+                "then: psql -U postgres -h {pg_host} -p {pg_port} -d postgres -c \"GRANT ALL ON SCHEMA public TO {pg_user};\""
+            ));
+            hint("then re-run: ygg init");
+            std::process::exit(1);
+        }
+
+        // Create database
         if pg_createdb(&pg_user, &pg_host, pg_port, pg_pass.as_deref()).await {
             ok("database 'ygg'", "created");
         } else {
