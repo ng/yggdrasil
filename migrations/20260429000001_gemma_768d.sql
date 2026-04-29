@@ -8,7 +8,7 @@ CREATE INDEX IF NOT EXISTS nodes_embedding_idx ON nodes USING hnsw (embedding ve
 
 -- embedding_cache: full wipe — model changed and dimensionality changed
 TRUNCATE embedding_cache;
-ALTER TABLE embedding_cache DROP COLUMN embedding;
+ALTER TABLE embedding_cache DROP COLUMN IF EXISTS embedding;
 ALTER TABLE embedding_cache ADD COLUMN embedding vector(768) NOT NULL;
 
 -- tasks

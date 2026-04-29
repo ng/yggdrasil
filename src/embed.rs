@@ -76,7 +76,13 @@ impl Embedder {
             .next()
             .ok_or_else(|| crate::YggError::Ollama("no embedding returned".into()))?;
 
-        // Truncate if the model returns more dims than the schema expects.
+        if vec.len() < self.dimensions {
+            return Err(crate::YggError::Ollama(format!(
+                "embedding too short: got {}, need {}",
+                vec.len(),
+                self.dimensions
+            )));
+        }
         if vec.len() > self.dimensions {
             vec.truncate(self.dimensions);
         }
