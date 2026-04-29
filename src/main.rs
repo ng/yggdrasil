@@ -1394,9 +1394,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 MsgAction::Claim { id, agent } => {
                     let name = agent.unwrap_or_else(default_agent);
-                    let event_id: uuid::Uuid = id.parse().map_err(|_| {
-                        anyhow::anyhow!("invalid UUID: {id}")
-                    })?;
+                    let event_id: uuid::Uuid = id
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("invalid UUID: {id}"))?;
                     ygg::cli::msg_cmd::claim_broadcast(&pool, event_id, &name).await?;
                 }
             }

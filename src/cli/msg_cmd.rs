@@ -272,9 +272,15 @@ pub async fn all_messages(
     hours: i64,
     limit: i64,
 ) -> Result<Vec<ChatMessage>, anyhow::Error> {
-    let rows: Vec<(Uuid, Option<Uuid>, String, Option<String>, serde_json::Value, DateTime<Utc>)> =
-        sqlx::query_as(
-            r#"SELECT e.id, e.agent_id, e.agent_name,
+    let rows: Vec<(
+        Uuid,
+        Option<Uuid>,
+        String,
+        Option<String>,
+        serde_json::Value,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        r#"SELECT e.id, e.agent_id, e.agent_name,
                       a.agent_name AS to_name,
                       e.payload, e.created_at
                  FROM events e
@@ -283,25 +289,27 @@ pub async fn all_messages(
                   AND e.created_at > now() - make_interval(hours => $1)
                 ORDER BY e.created_at DESC
                 LIMIT $2"#,
-        )
-        .bind(hours)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(hours)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows
         .into_iter()
-        .map(|(id, _from_id, from_name, to_name, payload, ts)| ChatMessage {
-            id,
-            from_name,
-            to_name,
-            body: payload
-                .get("body")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            created_at: ts,
-        })
+        .map(
+            |(id, _from_id, from_name, to_name, payload, ts)| ChatMessage {
+                id,
+                from_name,
+                to_name,
+                body: payload
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                created_at: ts,
+            },
+        )
         .collect())
 }
 

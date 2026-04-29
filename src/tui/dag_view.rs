@@ -448,8 +448,7 @@ impl DagView {
                     .find(|r| r.repo_id == t.repo_id)
                     .map(|r| r.task_prefix.clone())
                     .unwrap_or_default();
-                self.tasks_by_id
-                    .insert(t.task_id, (t.clone(), prefix));
+                self.tasks_by_id.insert(t.task_id, (t.clone(), prefix));
             }
         }
 
@@ -756,7 +755,11 @@ impl DagView {
                         Style::default().fg(Color::DarkGray),
                     )),
                 ])
-                .block(Block::default().borders(Borders::ALL).title(" Dependencies "));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Dependencies "),
+                );
                 frame.render_widget(para, area);
                 return;
             }
@@ -783,10 +786,7 @@ impl DagView {
             })
             .unwrap_or_default();
 
-        let title = format!(
-            " Dependencies · {task_ref}: {} ",
-            truncate(&task.title, 40)
-        );
+        let title = format!(" Dependencies · {task_ref}: {} ", truncate(&task.title, 40));
 
         if blockers.is_empty() && dependents.is_empty() {
             let total_edges = self
@@ -835,11 +835,8 @@ impl DagView {
         for (t, p) in &blockers {
             left_lines.push(dep_line(t, p));
         }
-        let left = ratatui::widgets::Paragraph::new(left_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title.clone()),
-        );
+        let left = ratatui::widgets::Paragraph::new(left_lines)
+            .block(Block::default().borders(Borders::ALL).title(title.clone()));
         frame.render_widget(left, cols[0]);
 
         // Right: blocks
@@ -880,10 +877,7 @@ fn dep_line(t: &Task, prefix: &str) -> Line<'static> {
     let id = format!("{}-{}", prefix, t.seq);
     Line::from(vec![
         Span::styled(format!("   {glyph} "), Style::default().fg(status_color)),
-        Span::styled(
-            format!("P{} ", t.priority),
-            Style::default().fg(prio_color),
-        ),
+        Span::styled(format!("P{} ", t.priority), Style::default().fg(prio_color)),
         Span::styled(format!("{id} "), Style::default().fg(Color::DarkGray)),
         Span::styled(truncate(&t.title, 35), Style::default()),
     ])
