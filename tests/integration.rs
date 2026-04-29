@@ -378,8 +378,11 @@ async fn test_msg_send_inbox_mark_read() {
         .unwrap();
     assert_eq!(all.len(), 2);
 
-    // Missing recipient errors.
-    let err = ygg::cli::msg_cmd::send(&pool, "test-msg-sender", "does-not-exist", "x", false).await;
+    // Missing recipient errors (no_spawn=true to test the error path;
+    // send() with no_spawn=false auto-spawns the recipient since PR #70).
+    let err =
+        ygg::cli::msg_cmd::send_inner(&pool, "test-msg-sender", "does-not-exist", "x", false, true)
+            .await;
     assert!(err.is_err());
 
     // Cleanup
