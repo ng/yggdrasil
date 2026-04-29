@@ -278,11 +278,25 @@ async fn pg_enable_extension(
         "-U", user, "-h", host, "-p", &port_s, "-d", "ygg", "-c", &sql, "-q",
     ])
     .stdout(Stdio::null())
-    .stderr(Stdio::null());
+    .stderr(Stdio::piped());
     if let Some(p) = pass {
         cmd.env("PGPASSWORD", p);
     }
-    cmd.status().await.is_ok_and(|s| s.success())
+    match cmd.output().await {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            if !stderr.is_empty() {
+                hint(&format!("psql: {stderr}"));
+            }
+            false
+        }
+        Err(e) => {
+            hint(&format!("psql invocation failed: {e}"));
+            false
+        }
+    }
 }
 
 /// Detect which postgresql@XX version is running via brew services or pg_config.
@@ -781,7 +795,19 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 let err_str = format!("{e}");
                 bad("migrations", "failed");
 
-                if err_str.contains("role") && err_str.contains("does not exist") {
+                if err_str.contains("TimeZone") {
+                    hint("PostgreSQL cannot resolve timezone data");
+                    hint("this is common with brew postgresql@17/18 installs");
+                    hint("");
+                    if has_brew {
+                        let pg_ver = detect_pg_version().await;
+                        hint(&format!("try: brew reinstall {pg_ver}"));
+                        hint(&format!("then: brew services restart {pg_ver}"));
+                    } else {
+                        hint("ensure timezone data is installed (postgresql-common on apt)");
+                        hint("check: psql -c \"SHOW timezone\"");
+                    }
+                } else if err_str.contains("role") && err_str.contains("does not exist") {
                     hint("the configured role doesn't exist on this postgres server");
                     hint(&format!("current URL: {db_url}"));
                     hint("");
@@ -827,6 +853,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                 if !prompt_skip("migrations") {
                     std::process::exit(1);
                 }
+                hint("to retry later: ygg migrate");
             }
         }
     }
