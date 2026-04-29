@@ -3,6 +3,14 @@
 //! Shows all recent messages (directed + broadcast) in a scrollable
 //! list. Compose with `c` (type `@agent msg` for directed, or just
 //! `msg` for broadcast). Claim unclaimed broadcasts with Enter.
+//!
+//! Features:
+//! - **Detail overlay** (Enter on a directed msg): full body, sender,
+//!   recipient, timestamp. Esc closes.
+//! - **Filter** (`/`): type to filter messages by from_name, to_name,
+//!   or body (case-insensitive). Esc clears.
+//! - **Unread count**: tracks messages seen while the view is active;
+//!   `unread_count()` reports unseen messages for tab badges.
 
 use chrono::{DateTime, Utc};
 use ratatui::prelude::*;
@@ -27,6 +35,14 @@ pub struct ChatView {
     loaded: bool,
     pub compose: Option<ComposeState>,
     pub flash: Option<String>,
+    /// Index into `messages` for the detail overlay (Enter on directed msg).
+    detail: Option<usize>,
+    /// Active filter string — when `Some`, only matching messages are shown.
+    filter: Option<String>,
+    /// True when the filter input line is focused (typing mode).
+    filter_editing: bool,
+    /// How many messages the user has "seen" (updated when view is active).
+    last_seen_count: usize,
 }
 
 pub struct ComposeState {
@@ -41,6 +57,10 @@ impl ChatView {
             loaded: false,
             compose: None,
             flash: None,
+            detail: None,
+            filter: None,
+            filter_editing: false,
+            last_seen_count: 0,
         }
     }
 
@@ -54,6 +74,124 @@ impl ChatView {
 
     pub fn compose_cancel(&mut self) {
         self.compose = None;
+    }
+
+    // ── detail overlay ──────────────────────────────────────────────
+
+    /// True when the detail popup is visible.
+    pub fn detail_open(&self) -> bool {
+        self.detail.is_some()
+    }
+
+    /// Open detail overlay for the currently selected message, but only
+    /// if it is a directed message (broadcasts use Enter to claim).
+    pub fn detail_selected(&mut self) {
+        let Some(idx) = self.state.selected() else {
+            return;
+        };
+        let indices = self.visible_indices();
+        if let Some(&real) = indices.get(idx) {
+            if let Some(msg) = self.messages.get(real) {
+                if msg.to_name.is_some() {
+                    self.detail = Some(real);
+                }
+            }
+        }
+    }
+
+    pub fn detail_close(&mut self) {
+        self.detail = None;
+    }
+
+    // ── filter ──────────────────────────────────────────────────────
+
+    /// True when the filter input line is focused (typing mode).
+    pub fn filter_editing(&self) -> bool {
+        self.filter_editing
+    }
+
+    /// Enter filter-editing mode. If a filter is already set, resume editing it.
+    pub fn filter_begin(&mut self) {
+        self.filter_editing = true;
+        if self.filter.is_none() {
+            self.filter = Some(String::new());
+        }
+    }
+
+    pub fn filter_push(&mut self, c: char) {
+        if let Some(f) = self.filter.as_mut() {
+            f.push(c);
+        }
+    }
+
+    pub fn filter_pop(&mut self) {
+        if let Some(f) = self.filter.as_mut() {
+            f.pop();
+        }
+    }
+
+    /// Stop editing the filter. If the text is empty, clear the filter entirely.
+    pub fn filter_accept(&mut self) {
+        self.filter_editing = false;
+        if self.filter.as_ref().map_or(true, |f| f.is_empty()) {
+            self.filter = None;
+        }
+        // Reset selection to stay in bounds of the now-visible list.
+        self.clamp_selection();
+    }
+
+    /// Clear the filter and exit editing mode.
+    pub fn filter_clear(&mut self) {
+        self.filter = None;
+        self.filter_editing = false;
+        self.clamp_selection();
+    }
+
+    // ── helpers ─────────────────────────────────────────────────────
+
+    /// Return indices into `self.messages` that pass the current filter.
+    fn visible_indices(&self) -> Vec<usize> {
+        match &self.filter {
+            None => (0..self.messages.len()).collect(),
+            Some(q) => {
+                let q = q.to_lowercase();
+                self.messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| {
+                        m.from_name.to_lowercase().contains(&q)
+                            || m.to_name
+                                .as_ref()
+                                .map_or(false, |t| t.to_lowercase().contains(&q))
+                            || m.body.to_lowercase().contains(&q)
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            }
+        }
+    }
+
+    /// Keep `self.state.selected()` within the visible set.
+    fn clamp_selection(&mut self) {
+        let count = self.visible_indices().len();
+        if count == 0 {
+            self.state.select(None);
+        } else {
+            let cur = self.state.selected().unwrap_or(0);
+            self.state.select(Some(cur.min(count - 1)));
+        }
+    }
+
+    // ── unread count ────────────────────────────────────────────────
+
+    /// Number of messages that arrived since the user last viewed the Chat pane.
+    pub fn unread_count(&self) -> usize {
+        self.messages.len().saturating_sub(self.last_seen_count)
+    }
+
+    /// Mark all current messages as seen (call when Chat pane is active).
+    pub fn mark_seen(&mut self) {
+        self.last_seen_count = self.messages.len();
     }
 
     pub fn compose_push(&mut self, c: char) {
@@ -107,7 +245,11 @@ impl ChatView {
         let Some(idx) = self.state.selected() else {
             return;
         };
-        let Some(msg) = self.messages.get(idx) else {
+        let indices = self.visible_indices();
+        let Some(&real) = indices.get(idx) else {
+            return;
+        };
+        let Some(msg) = self.messages.get(real) else {
             return;
         };
         if msg.to_name.is_some() {
@@ -121,10 +263,10 @@ impl ChatView {
     }
 
     pub fn select_next(&mut self) {
-        if !self.messages.is_empty() {
+        let count = self.visible_indices().len();
+        if count > 0 {
             let i = self.state.selected().unwrap_or(0);
-            self.state
-                .select(Some((i + 1).min(self.messages.len() - 1)));
+            self.state.select(Some((i + 1).min(count - 1)));
         }
     }
 
@@ -149,14 +291,7 @@ impl ChatView {
         // all_messages returns newest-first; reverse for chronological display
         self.messages.reverse();
 
-        if self.messages.is_empty() {
-            self.state.select(None);
-        } else {
-            match self.state.selected() {
-                Some(cur) if cur < self.messages.len() => {}
-                _ => self.state.select(Some(self.messages.len() - 1)),
-            }
-        }
+        self.clamp_selection();
         Ok(())
     }
 

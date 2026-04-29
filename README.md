@@ -1,200 +1,166 @@
 # Yggdrasil
 
-**High-density multi-agent orchestration for Claude Code and sibling CLI agents.**
-
-Yggdrasil is the coordination layer that lets multiple autonomous coding agents share a workspace without stepping on each other. It provides resource leases, a similarity-indexed conversation DAG, cross-session memory, and live-event introspection — all wired into Claude Code via hooks. The CLI binary is `ygg`.
+Yggdrasil is a multi-agent coordination layer for AI coding agents. It gives fleets of Claude Code instances (or any CLI-driven agent) the infrastructure they need to work in the same codebase without colliding: cross-session memory with vector-indexed retrieval, resource locking, task tracking with dependency graphs, a real-time TUI dashboard, scheduled task execution, and inter-agent messaging. Built in Rust, backed by PostgreSQL + pgvector. The CLI binary is `ygg`.
 
 ---
 
-## Why Yggdrasil exists
+## Install
 
-Running one agent in a terminal is easy. Running three to seven is *taxing but common* — many developers already do it, juggling tmux panes and mental state. Beyond that, things get tricky fast: too many windows to watch, too much overlap on shared files, too much context lost to compaction, too much prior conversation that never comes back even when it's relevant.
-
-I've used [beads](https://github.com/steveyegge/beads) and [gastown](https://github.com/steveyegge/gastown) and learned a lot from both.[^1] And then, as is apparently the rite of passage in this space, I went ahead and built my own orchestration agent anyway. Yggdrasil is that project. It focuses on the parts I kept wanting and didn't already have in one place:
-
-- a shared **lock graph** so agents don't clobber each other mid-edit,
-- a **memory layer** that surfaces prior-conversation context by similarity — across sessions *and across repositories*,
-- **context-pressure telemetry** that fires a digest before compaction,
-- **live event streams** for humans watching multiple agents at once.
-
-One deliberate divergence from most of the tooling in this space: Yggdrasil is **global per user**, not per repo. One Postgres instance backs every repo you work in; agents are auto-keyed by the basename of the current working directory. Foundational knowledge — conventions, gotchas, workarounds — is shared, not isolated. The trade-off is pollution risk from cross-repo hits, which is the central open question this project is exploring. See [ADR 0008](docs/adr/0008-shared-db-across-repos.md) and [Open questions](docs/open-questions.md).
-
-## Architecture at a glance
-
-```mermaid
-flowchart LR
-    subgraph CC["Claude Code"]
-        H1[SessionStart]
-        H2[UserPromptSubmit]
-        H3[PreToolUse]
-        H4[Stop]
-        H5[PreCompact]
-    end
-
-    subgraph YGG["ygg CLI"]
-        P[prime]
-        I[inject]
-        D[digest]
-        L[lock]
-        S[spawn]
-        INT[interrupt]
-        O[observe]
-    end
-
-    subgraph OLL["Ollama (local)"]
-        EMB[all-MiniLM-L6-v2<br/>384-dim vectors]
-    end
-
-    subgraph PG["Postgres + pgvector"]
-        N[(nodes<br/>DAG + embeddings)]
-        LK[(locks<br/>semantic leases)]
-        AG[(agents<br/>state machine)]
-        EV[(events<br/>live stream)]
-    end
-
-    subgraph TM["tmux session"]
-        DASH[dashboard]
-        A1[agent: route-53]
-        A2[agent: kb-chunking]
-    end
-
-    H1 --> P
-    H2 --> I
-    H4 --> D
-    H3 --> L
-    H5 --> P
-
-    I -.embed prompt.-> EMB
-    D -.embed turns.-> EMB
-    EMB --> N
-
-    P --> N
-    P --> AG
-    I --> N
-    D --> N
-    L --> LK
-    S --> AG
-    S --> TM
-    INT --> AG
-    O --> N
-
-    DASH -.reads.-> PG
-    A1 -.hooks fire.-> CC
-    A2 -.hooks fire.-> CC
-```
-
-### The pieces
-
-- **Nodes** form a DAG: every user message, assistant message, tool call/result, digest, and directive is a row. Parent/child edges preserve turn structure; an `ancestors` array materializes the path for cheap subtree queries.
-- **Semantic embeddings** are what make the DAG *useful* across sessions. Every node's content is embedded on write via a local Ollama model (`all-minilm` / all-MiniLM-L6-v2, 384 dimensions), stored in a `pgvector` column, and indexed with HNSW for cosine-similarity search. Deeper rationale in [docs/retrieval.md](docs/retrieval.md).
-- **Locks** are short-TTL leases on arbitrary string keys (file paths, branch names, topics) with heartbeats. Advisory; coordinate cooperating agents. See [ADR 0003](docs/adr/0003-lock-graph-coordination.md).
-- **Agents** are a state machine: `idle → planning → executing → waiting_tool → context_flush → …`.
-- **Events** stream out of Postgres via `LISTEN`/`NOTIFY` for `ygg logs --follow` and the TUI dashboard.
-- **Hooks** live in `~/.claude/ygg-hooks/` and shell out to `ygg` subcommands at Claude Code lifecycle events. See [ADR 0005](docs/adr/0005-shell-hook-integration.md).
-- **tmux** is the display substrate — `ygg spawn` opens a new window in the Yggdrasil tmux session so spawned agents are visible and attachable. See [ADR 0007](docs/adr/0007-tmux-as-substrate.md).
-
-Yggdrasil runs as a set of subcommands under the `ygg` binary; there is no long-running daemon other than the optional `ygg watcher`.
-
-## Getting started
+**From source** (requires Rust 1.75+):
 
 ```bash
-docker-compose up -d           # Postgres 16 + pgvector, Ollama
-make install                   # cargo build --release && copy to ~/.local/bin
-ygg init                       # install hooks, pull embedding model, run migrations
-ygg up                         # open the tmux dashboard
+cargo install --path .
 ```
 
-From inside Claude Code:
+**From GitHub releases:**
 
 ```bash
-ygg status                     # see every agent + outstanding locks
-ygg task ready                 # show unblocked tasks in this repo
-ygg task create "fix migration order"                         # create a task
-ygg task list --status open,in_progress                       # comma-separated filters
-ygg task claim yggdrasil-3     # take a task
-ygg memory create "migrations must be backwards-compatible" --scope repo
-ygg memory search "deploy"                                    # semantic search over memories
-ygg rollup --days 7            # per-repo activity summary (markdown / text / json)
-ygg lock acquire src/db.rs     # before you edit a shared file
-ygg spawn --task "..."         # open a parallel agent in a new window
-ygg logs --follow --kind agent_state_changed  # filter live event stream
-ygg reap --dry-run             # preview stale rows before cleanup
+curl -fsSL https://github.com/ng/yggdrasil/releases/latest/download/ygg-$(uname -m)-$(uname -s | tr A-Z a-z)-gnu -o ygg && chmod +x ygg
+sudo mv -f ygg /usr/local/bin/
 ```
 
-## Subcommand reference
+**Homebrew:** coming soon.
+
+## Requirements
+
+- **Rust 1.75+** (build from source only)
+- **PostgreSQL 14+** with the [pgvector](https://github.com/pgvector/pgvector) extension
+- **Ollama** (local embedding model for vector memory)
+
+## Quick Start
+
+```bash
+# 1. Bootstrap everything: Postgres check, Ollama model pull, migrations, hooks
+ygg init
+
+# 2. Create a task
+ygg task create "my first task" --kind task --priority 2
+
+# 3. Spawn a Claude Code agent to work on it
+ygg spawn --task "do something"
+
+# 4. Open the TUI dashboard to watch your fleet
+ygg dashboard
+
+# 5. Check fleet state from the command line
+ygg status
+```
+
+## Architecture
+
+```
++------------------+         +-------------------------------+
+|   Claude Code    |         |    PostgreSQL + pgvector       |
+|                  |         |                               |
+|  SessionStart  --+--ygg-->|  agents   (state machine)     |
+|  UserPromptSubmit+-prime-->|  nodes    (DAG + embeddings)  |
+|  Stop          --+-inject->|  events   (live stream)       |
+|  PreCompact    --+-digest->|  locks    (semantic leases)   |
+|  PreToolUse    --+--lock-->|  tasks    (tracking + deps)   |
++------------------+         +-------------------------------+
+        |                                |
+        v                                v
++------------------+         +------------------+
+|  Ollama (local)  |         |   TUI Dashboard  |
+|  embedding model |         |   (ratatui)      |
++------------------+         +------------------+
+```
+
+Hooks in `~/.claude/ygg-hooks/` fire at Claude Code lifecycle events and shell out to `ygg` subcommands:
+
+- **SessionStart / PreCompact** -> `ygg prime` -- emits agent context as markdown
+- **UserPromptSubmit** -> `ygg inject` -- writes a prompt node, retrieves similar context by embedding
+- **Stop** -> `ygg digest` -- extracts corrections and sentiment into a digest node
+- **PreToolUse** -> `ygg lock` / `ygg agent-tool` -- enforces resource leases, records tool usage
+
+There is no long-running daemon other than the optional `ygg watcher` (heartbeats, lock expiry, digest triggers). Everything else runs as one-shot CLI invocations.
+
+## Why Yggdrasil Exists
+
+Running one agent in a terminal is easy. Running three to seven is taxing but common. Beyond that, things break: too many windows to watch, too much overlap on shared files, too much context lost to compaction, too much prior conversation that never resurfaces.
+
+Yggdrasil focuses on the parts that are hard to get in one place:
+
+- A shared **lock graph** so agents don't clobber each other mid-edit.
+- A **memory layer** that surfaces prior-conversation context by similarity -- across sessions and across repositories.
+- **Context-pressure telemetry** that fires a digest before compaction.
+- **Live event streams** for humans watching multiple agents at once.
+
+One deliberate design choice: Yggdrasil is **global per user**, not per repo. One Postgres instance backs every repo you work in; agents are auto-keyed by the basename of the current working directory. Foundational knowledge is shared, not isolated. The trade-off is pollution risk from cross-repo hits. See [ADR 0008](docs/adr/0008-shared-db-across-repos.md) and [Open questions](docs/open-questions.md).
+
+## Subcommand Reference
 
 | Command     | Purpose                                                                 |
 |-------------|-------------------------------------------------------------------------|
-| `up`        | Launch the tmux dashboard (default when run bare).                     |
 | `init`      | Bootstrap: Postgres check, Ollama model pull, migrations, hooks.       |
-| `migrate`   | Run database migrations.                                                |
-| `run`       | Start an agent run loop.                                                |
-| `spawn`     | Spawn a new agent in a tmux window, registered in the DB.               |
-| `observe`   | Ingest an existing Claude Code session transcript.                      |
-| `inject`    | Called by `UserPromptSubmit` — writes prompt node, emits similar-context directives. |
-| `prime`     | Called by `SessionStart`/`PreCompact` — emits agent context as markdown. |
-| `digest`    | Called by `Stop` — extracts corrections/sentiment into a Digest node.  |
-| `lock`      | Acquire / release / list / heartbeat resource locks.                    |
-| `interrupt` | Human overrides: take-over, pause, resume.                              |
-| `status`    | Quick text output of agent + system state.                              |
-| `logs`      | Live event stream (stdout).                                             |
+| `up`        | Launch the tmux dashboard (default when run bare).                     |
 | `dashboard` | Launch the TUI dashboard directly.                                      |
-| `watcher`   | Background daemon — heartbeats, lock expiry, digest triggers.           |
+| `status`    | Quick text output of agent + system state.                              |
+| `migrate`   | Run database migrations.                                                |
+| `spawn`     | Spawn a new agent in a tmux window, registered in the DB.               |
+| `run`       | Start an agent run loop.                                                |
+| `task`      | Task tracking: `create / list / ready / claim / close / dep / show`.    |
+| `memory`    | Scoped memories: `create / list / search / pin / unpin / expire / delete`. |
+| `remember`  | Write a directive node (shorthand for `memory create --scope repo`).    |
+| `lock`      | Acquire / release / list / heartbeat resource locks.                    |
+| `inject`    | Hook: writes prompt node, emits similar-context directives.             |
+| `prime`     | Hook: emits agent context as markdown.                                  |
+| `digest`    | Hook: extracts corrections/sentiment into a digest node.                |
+| `observe`   | Ingest an existing Claude Code session transcript.                      |
+| `interrupt` | Human overrides: take-over, pause, resume.                              |
+| `logs`      | Live event stream (stdout).                                             |
+| `watcher`   | Background daemon: heartbeats, lock expiry, digest triggers.            |
 | `recover`   | Recover orphaned agents stuck in active states.                         |
-| `task`      | Task tracking scoped to the current repo (create / list / ready / claim / close / dep / ...). Replaces `bd`. `ygg task list --status` accepts comma-separated values. |
-| `memory`    | First-class scoped memories (global / repo / session). `ygg memory create / list / search / pin / unpin / expire / delete`. Search is semantic via pgvector. |
-| `remember`  | Back-compat wrapper — writes a directive node. Prefer `ygg memory create --scope repo` for new notes. |
-| `rollup`    | Per-repo activity summary over a time window (`--days N`). Output as text / markdown / json. |
-| `agent-tool`| Hook-driven: record the tool an agent is about to call (drives the dashboard State column). |
-| `reap`      | Purge stale locks / sessions / memories. `--dry-run` previews. Safe to cron. |
-| `trace`     | Per-turn pipeline inspection: embed → retrieve → score → emit → referenced. |
-| `eval`      | Retrieval effectiveness summary (hit rate, classifier decisions, cache hit %). Also a live TUI pane. |
-| `forget`    | Retroactive redaction — scrub a node or pattern from past history. |
+| `rollup`    | Per-repo activity summary over a time window.                           |
+| `reap`      | Purge stale locks / sessions / memories. Safe to cron.                  |
+| `trace`     | Per-turn pipeline inspection: embed, retrieve, score, emit.             |
+| `eval`      | Retrieval effectiveness summary (hit rate, cache hit %).                |
+| `forget`    | Retroactive redaction of a node or pattern from history.                |
 | `bar`       | Claude Code statusline generator (context pressure, cache rate, spend). |
+| `agent-tool`| Hook: record the tool an agent is about to call.                        |
 
-## Project layout
+## Project Layout
 
 ```
 src/
-├── cli/          one file per subcommand
-├── models/       agent, node, event — sqlx types + repos
-├── analytics/    similarity, pressure, salience aggregates
-├── stats/        token accounting, telemetry
-├── tui/          dashboard views (ratatui)
-├── config.rs     env loading
-├── db.rs         sqlx pool + migrations runner
-├── embed.rs      Ollama HTTP client
-├── executor.rs   agent run loop
-├── interrupt.rs  human-override primitives
-├── lock.rs       LockManager — acquire/release/heartbeat
-├── ollama.rs     embedding model interface
-├── pressure.rs   context-pressure estimation
-├── salience.rs   memory ranking
-├── status.rs     status aggregation
-├── tmux.rs       tmux window management
-└── watcher.rs    background daemon
-migrations/       Postgres schema
-docs/             Prose docs (see Further reading below)
-docs/adr/         Architecture Decision Records
+  cli/          one file per subcommand
+  models/       agent, node, event -- sqlx types + repos
+  analytics/    similarity, pressure, salience aggregates
+  stats/        token accounting, telemetry
+  tui/          dashboard views (ratatui)
+  config.rs     env loading
+  db.rs         sqlx pool + migrations runner
+  embed.rs      Ollama HTTP client
+  executor.rs   agent run loop
+  interrupt.rs  human-override primitives
+  lock.rs       LockManager -- acquire/release/heartbeat
+  ollama.rs     embedding model interface
+  pressure.rs   context-pressure estimation
+  salience.rs   memory ranking
+  status.rs     status aggregation
+  tmux.rs       tmux window management
+  watcher.rs    background daemon
+migrations/     Postgres schema
+docs/           prose docs + ADRs
 ```
 
-## Further reading
+## Build from Source
 
-Deeper topics live in `docs/`:
+```bash
+docker-compose up -d             # Postgres 16 + pgvector, Ollama
+cargo build --release            # build the ygg binary
+cargo test                       # run tests (requires Postgres)
+make install                     # build + install to ~/.local/bin/ygg
+```
 
-- [**Orchestration runtime**](docs/orchestration.md) — how Yggdrasil autonomously advances a DAG end-to-end: scheduler, task runs, payload flow, lock integration, approval levels, dynamic child-spawn, failure semantics.
-- [**Eval benchmarks**](docs/eval-benchmarks.md) — `ygg bench` scenarios, baselines, Tier-A metrics (wall-clock, pass^k, token-cost, lock-wait), and the METR-style 50%-horizon methodology.
-- [**Task-runs data model**](docs/design/task-runs.md) — schema for the DBOS-shaped execution layer: `task_runs`, state/reason enums, payload formats, blob store, idempotency strategy.
-- [**Scheduler design**](docs/design/scheduler.md) — the single authoritative daemon: tick loop, `SKIP LOCKED` claim query, retry math, loop detection, failure modes.
-- [**Retrieval and injection**](docs/retrieval.md) — why embeddings (and why not *only* embeddings), what gets injected at `UserPromptSubmit` and `PreToolUse`, sequence diagrams for each flow, and the classifier-gated tool-level injection we haven't shipped yet.
-- [**Design principles**](docs/design-principles.md) — substrate separation; premises, not rules; smarter-cheaper-fewer-tokens with a concrete cache taxonomy; habituation / disclosure gate; epoch reflections; the forgetting question.
-- [**Open questions**](docs/open-questions.md) — the central hypothesis (does shared memory across agents help or hurt?), directions under consideration, and the named LLM failure modes Yggdrasil touches (context rot, see-sawing, sycophancy, cross-agent contamination).
-- [**References**](docs/references.md) — tooling we compose with and research we build on.
-- [**`docs/adr/`**](docs/adr/) — Architecture Decision Records for every non-obvious design choice.
+## Further Reading
 
----
-
-[^1]: Project URLs are best-effort; the canonical beads repository is `github.com/steveyegge/beads`. Earlier drafts of this README pointed elsewhere; corrected here.
+- [Orchestration runtime](docs/orchestration.md) -- scheduler, task runs, payload flow, lock integration, failure semantics.
+- [Retrieval and injection](docs/retrieval.md) -- why embeddings, what gets injected, sequence diagrams.
+- [Eval benchmarks](docs/eval-benchmarks.md) -- `ygg bench` scenarios, Tier-A metrics, METR-style methodology.
+- [Design principles](docs/design-principles.md) -- substrate separation, cache taxonomy, forgetting.
+- [Open questions](docs/open-questions.md) -- the shared-memory hypothesis, named LLM failure modes.
+- [Architecture Decision Records](docs/adr/) -- one ADR per non-obvious design choice.
 
 ## License
 

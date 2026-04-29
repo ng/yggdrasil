@@ -226,7 +226,11 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             },
             KeyHint {
                 keys: "Enter",
-                effect: "claim selected broadcast",
+                effect: "detail (directed) / claim (broadcast)",
+            },
+            KeyHint {
+                keys: "/",
+                effect: "filter messages (Enter=apply, Esc=clear)",
             },
         ],
         _ => &[],

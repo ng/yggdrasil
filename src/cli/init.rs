@@ -877,54 +877,105 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         // Ensure database exists
         pg_createdb(&pg_user, &pg_host, pg_port, pg_pass.as_deref()).await;
 
-        let pb = spin("running migrations...");
-        match async {
-            let pool = db::create_pool(&db_url).await?;
-            db::run_migrations(&pool).await?;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await
-        {
-            Result::Ok(()) => {
-                pb.finish_and_clear();
-                ok("migrations", "applied");
+        // Pre-flight psql connection check before attempting migrations
+        let probe_ok = {
+            let port_s = pg_port.to_string();
+            let bin = find_bin("psql").unwrap_or_else(|| "psql".to_string());
+            let mut cmd = Command::new(&bin);
+            cmd.args([
+                "-U", &pg_user, "-h", &pg_host, "-p", &port_s, "-d", "ygg", "-c", "SELECT 1", "-q",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+            if let Some(ref p) = pg_pass {
+                cmd.env("PGPASSWORD", p);
             }
-            Err(e) => {
-                pb.finish_and_clear();
-                let err_str = format!("{e}");
-                bad("migrations", "failed");
-
-                if err_str.contains("TimeZone") {
-                    hint("PostgreSQL cannot resolve timezone data");
-                    hint("this is common with brew postgresql@17/18 installs");
-                    hint("");
-                    if has_brew {
-                        let pg_ver = detect_pg_version().await;
-                        hint(&format!("try: brew reinstall {pg_ver}"));
-                        hint(&format!("then: brew services restart {pg_ver}"));
-                    } else {
-                        hint("ensure timezone data is installed (postgresql-common on apt)");
-                        hint("check: psql -c \"SHOW timezone\"");
+            match cmd.output().await {
+                Ok(output) if output.status.success() => true,
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = stderr.trim();
+                    bad("connection", "psql probe failed");
+                    if !stderr.is_empty() {
+                        hint(&format!("psql: {stderr}"));
                     }
-                } else if err_str.contains("role") && err_str.contains("does not exist") {
-                    hint("the configured role doesn't exist on this postgres server");
-                    hint(&format!("current URL: {db_url}"));
-                    hint("");
-                    // Offer to reconfigure the URL in-place
-                    if prompt_yes("reconfigure the database URL now?") {
-                        use std::io::{self, BufRead, Write};
-                        hint(&format!("your system user is: {sys_user}"));
-                        println!(
-                            "  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:port/ygg){X}"
-                        );
-                        print!("  {BR}│{X}  > ");
-                        io::stdout().flush().ok();
-                        let mut new_url = String::new();
-                        io::stdin().lock().read_line(&mut new_url).ok();
-                        let new_url = new_url.trim().to_string();
-                        if !new_url.is_empty() {
-                            let new_content = format!(
-                                "DATABASE_URL={new_url}\n\
+                    if stderr.contains("role") && stderr.contains("does not exist") {
+                        hint(&format!("configured URL: {db_url}"));
+                        hint("create the role or update DATABASE_URL in .env");
+                    } else if stderr.contains("password authentication failed") {
+                        hint("check the password in DATABASE_URL");
+                    } else if stderr.contains("Connection refused") {
+                        hint("postgres appears down or not listening on the configured port");
+                    } else if stderr.contains("TimeZone") {
+                        hint("postgres cannot resolve timezone data — reinstall or check config");
+                    }
+                    false
+                }
+                Err(e) => {
+                    bad("connection", "psql probe failed");
+                    hint(&format!("could not run psql: {e}"));
+                    false
+                }
+            }
+        };
+
+        if !probe_ok {
+            if prompt_skip("migrations") {
+                // skip migrations entirely
+            } else {
+                std::process::exit(1);
+            }
+        }
+
+        if probe_ok {
+            let pb = spin("running migrations...");
+            match async {
+                let pool = db::create_pool(&db_url).await?;
+                db::run_migrations(&pool).await?;
+                Ok::<(), anyhow::Error>(())
+            }
+            .await
+            {
+                Result::Ok(()) => {
+                    pb.finish_and_clear();
+                    ok("migrations", "applied");
+                }
+                Err(e) => {
+                    pb.finish_and_clear();
+                    let err_str = format!("{e}");
+                    bad("migrations", "failed");
+
+                    if err_str.contains("TimeZone") {
+                        hint("PostgreSQL cannot resolve timezone data");
+                        hint("this is common with brew postgresql@17/18 installs");
+                        hint("");
+                        if has_brew {
+                            let pg_ver = detect_pg_version().await;
+                            hint(&format!("try: brew reinstall {pg_ver}"));
+                            hint(&format!("then: brew services restart {pg_ver}"));
+                        } else {
+                            hint("ensure timezone data is installed (postgresql-common on apt)");
+                            hint("check: psql -c \"SHOW timezone\"");
+                        }
+                    } else if err_str.contains("role") && err_str.contains("does not exist") {
+                        hint("the configured role doesn't exist on this postgres server");
+                        hint(&format!("current URL: {db_url}"));
+                        hint("");
+                        // Offer to reconfigure the URL in-place
+                        if prompt_yes("reconfigure the database URL now?") {
+                            use std::io::{self, BufRead, Write};
+                            hint(&format!("your system user is: {sys_user}"));
+                            println!(
+                                "  {BR}│{X}  {D}enter postgres URL (e.g. postgres://user:pass@host:port/ygg){X}"
+                            );
+                            print!("  {BR}│{X}  > ");
+                            io::stdout().flush().ok();
+                            let mut new_url = String::new();
+                            io::stdin().lock().read_line(&mut new_url).ok();
+                            let new_url = new_url.trim().to_string();
+                            if !new_url.is_empty() {
+                                let new_content = format!(
+                                    "DATABASE_URL={new_url}\n\
                                  EMBEDDING_DIMENSIONS=768\n\
                                  CONTEXT_LIMIT_TOKENS=250000\n\
                                  CONTEXT_HARD_CAP_TOKENS=300000\n\
@@ -933,28 +984,29 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                                  WATCHER_INTERVAL_SECS=30\n\
                                  RTK_BINARY_PATH=rtk\n\
                                  RUST_LOG=ygg=info\n"
-                            );
-                            if tokio::fs::write(&env_path, &new_content).await.is_ok() {
-                                ok("config", "updated — re-run: ygg init");
+                                );
+                                if tokio::fs::write(&env_path, &new_content).await.is_ok() {
+                                    ok("config", "updated — re-run: ygg init");
+                                }
                             }
+                        } else {
+                            hint(&format!("  rm {}", env_path.display()));
+                            hint("  ygg init");
                         }
+                    } else if err_str.contains("does not exist") && err_str.contains("database") {
+                        hint("database 'ygg' doesn't exist");
+                        hint(&format!("  createdb -U {sys_user} ygg"));
                     } else {
-                        hint(&format!("  rm {}", env_path.display()));
-                        hint("  ygg init");
+                        hint(&format!("{e}"));
                     }
-                } else if err_str.contains("does not exist") && err_str.contains("database") {
-                    hint("database 'ygg' doesn't exist");
-                    hint(&format!("  createdb -U {sys_user} ygg"));
-                } else {
-                    hint(&format!("{e}"));
-                }
 
-                if !prompt_skip("migrations") {
-                    std::process::exit(1);
+                    if !prompt_skip("migrations") {
+                        std::process::exit(1);
+                    }
+                    hint("to retry later: ygg migrate");
                 }
-                hint("to retry later: ygg migrate");
             }
-        }
+        } // if probe_ok
     }
 
     // No Ollama model pulls needed — embedding is in-process via fastembed
@@ -1160,5 +1212,69 @@ mod tests {
             content.contains("ygg run capture-outcome"),
             "stop.sh must invoke `ygg run capture-outcome` (see yggdrasil-97)"
         );
+    }
+
+    use super::parse_pg_url_parts;
+
+    #[test]
+    fn parse_full_url_with_user_pass_host_port() {
+        let (user, host, port, pass) = parse_pg_url_parts(
+            "postgres://alice:s3cret@db.example.com:5433/ygg",
+            "fallback",
+        );
+        assert_eq!(user, "alice");
+        assert_eq!(host, "db.example.com");
+        assert_eq!(port, 5433);
+        assert_eq!(pass, Some("s3cret".to_string()));
+    }
+
+    #[test]
+    fn parse_user_without_password() {
+        let (user, host, port, pass) =
+            parse_pg_url_parts("postgres://bob@localhost:5432/ygg", "fallback");
+        assert_eq!(user, "bob");
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 5432);
+        assert_eq!(pass, None);
+    }
+
+    #[test]
+    fn parse_no_userinfo_uses_fallback() {
+        let (user, host, port, pass) =
+            parse_pg_url_parts("postgres://localhost:5432/ygg", "sysuser");
+        assert_eq!(user, "sysuser");
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 5432);
+        assert_eq!(pass, None);
+    }
+
+    #[test]
+    fn parse_postgresql_prefix() {
+        let (user, host, port, pass) =
+            parse_pg_url_parts("postgresql://admin:pw@pghost:5555/mydb", "fallback");
+        assert_eq!(user, "admin");
+        assert_eq!(host, "pghost");
+        assert_eq!(port, 5555);
+        assert_eq!(pass, Some("pw".to_string()));
+    }
+
+    #[test]
+    fn parse_default_port_when_omitted() {
+        let (user, host, port, pass) =
+            parse_pg_url_parts("postgres://alice@myhost/ygg", "fallback");
+        assert_eq!(user, "alice");
+        assert_eq!(host, "myhost");
+        assert_eq!(port, 5432);
+        assert_eq!(pass, None);
+    }
+
+    #[test]
+    fn parse_non_standard_port() {
+        let (user, host, port, pass) =
+            parse_pg_url_parts("postgres://dev:devpass@127.0.0.1:15432/ygg", "fallback");
+        assert_eq!(user, "dev");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 15432);
+        assert_eq!(pass, Some("devpass".to_string()));
     }
 }
