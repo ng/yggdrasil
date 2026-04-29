@@ -342,7 +342,10 @@ impl DagView {
                 owner_ids.insert(id);
             }
         }
-        let all_agents = AgentRepo::new(pool).list().await.unwrap_or_default();
+        let all_agents = AgentRepo::new(pool, crate::db::user_id())
+            .list()
+            .await
+            .unwrap_or_default();
         let mut assignees: Vec<(Uuid, String)> = all_agents
             .into_iter()
             .filter(|a| owner_ids.contains(&a.agent_id))

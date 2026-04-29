@@ -132,6 +132,9 @@ enum Commands {
         /// Specific agent name
         #[arg(short, long)]
         agent: Option<String>,
+        /// Show agents across all users
+        #[arg(long)]
+        all_users: bool,
     },
 
     /// Live event stream — all hook activity, node writes, locks, digests, similarity hits
@@ -1044,6 +1047,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let user_id = ygg::db::resolve_user();
 
     let command = cli.command.unwrap_or(Commands::Up);
 
@@ -1198,10 +1202,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Status { agent } => {
+        Commands::Status { agent, all_users } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::status_cmd::execute(&pool, agent.as_deref()).await?;
+            ygg::cli::status_cmd::execute(&pool, agent.as_deref(), all_users).await?;
         }
         Commands::Logs {
             follow,
@@ -1265,7 +1269,7 @@ async fn main() -> anyhow::Result<()> {
             // Mark the session ended when the Stop hook flow called us —
             // PreCompact continues the same session, so only Stop should end.
             if stop {
-                if let Ok(Some(a)) = ygg::models::agent::AgentRepo::new(&pool)
+                if let Ok(Some(a)) = ygg::models::agent::AgentRepo::new(&pool, &user_id)
                     .get_by_name(&agent_name)
                     .await
                 {
@@ -1278,7 +1282,8 @@ async fn main() -> anyhow::Result<()> {
                     // leases on shared resources, not persistent claims, and
                     // a dead session shouldn't keep others waiting for TTL
                     // expiry. Silent on error (DB contention is fine to skip).
-                    let lock_mgr = ygg::lock::LockManager::new(&pool, config.lock_ttl_secs);
+                    let lock_mgr =
+                        ygg::lock::LockManager::new(&pool, config.lock_ttl_secs, &user_id);
                     let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
                 }
             }
@@ -1436,7 +1441,7 @@ async fn main() -> anyhow::Result<()> {
                 // Archive-not-delete: keep history intact, just hide from
                 // live views. Staleness = no events + no sessions + no
                 // live locks in the window.
-                let repo = ygg::models::agent::AgentRepo::new(&pool);
+                let repo = ygg::models::agent::AgentRepo::new(&pool, &user_id);
                 let stale = repo.find_stale(older_than_days).await.unwrap_or_default();
                 let n = stale.len() as i64;
                 if !dry_run {
@@ -1466,7 +1471,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Agent { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            let repo = ygg::models::agent::AgentRepo::new(&pool);
+            let repo = ygg::models::agent::AgentRepo::new(&pool, &user_id);
             match action {
                 AgentAction::List { all } => {
                     let agents = if all {
@@ -1768,7 +1773,7 @@ async fn main() -> anyhow::Result<()> {
                 TaskAction::Approve { reference, agent } => {
                     let task = ygg::cli::task_cmd::resolve_task_public(&pool, &reference).await?;
                     let agent = resolve_agent_arg(agent);
-                    let agent_id = ygg::models::agent::AgentRepo::new(&pool)
+                    let agent_id = ygg::models::agent::AgentRepo::new(&pool, &user_id)
                         .get_by_name(&agent)
                         .await?
                         .map(|a| a.agent_id);

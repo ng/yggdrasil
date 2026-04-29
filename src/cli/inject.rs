@@ -22,7 +22,7 @@ pub async fn execute(
     agent_name: &str,
     prompt_text: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let node_repo = NodeRepo::new(pool);
     let event_repo = EventRepo::new(pool);
 
@@ -534,7 +534,7 @@ pub async fn execute(
     }
 
     // ── lock status ───────────────────────────────────────────────────────────
-    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs);
+    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, crate::db::user_id());
     let locks = lock_mgr.list_agent_locks(agent.agent_id).await?;
     if !locks.is_empty() {
         let lock_list: Vec<String> = locks.iter().map(|l| l.resource_key.clone()).collect();

@@ -296,7 +296,7 @@ async fn collect(pool: &PgPool) -> NerdyStats {
     // aggregate the most-recent `usage` block. Disk-bound but cheap
     // (200KB tail per file) and only fires at the nerdy refresh
     // cadence (5s).
-    if let Ok(agents) = AgentRepo::new(pool).list().await {
+    if let Ok(agents) = AgentRepo::new(pool, crate::db::user_id()).list().await {
         let mut ts = TokenStats::default();
         for a in &agents {
             let Some(b) = agent_usage_breakdown(&a.agent_name) else {

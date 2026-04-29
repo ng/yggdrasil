@@ -32,11 +32,16 @@ pub struct ResourceLock {
 pub struct LockManager<'a> {
     pool: &'a PgPool,
     ttl_secs: u64,
+    user_id: String,
 }
 
 impl<'a> LockManager<'a> {
-    pub fn new(pool: &'a PgPool, ttl_secs: u64) -> Self {
-        Self { pool, ttl_secs }
+    pub fn new(pool: &'a PgPool, ttl_secs: u64, user_id: &str) -> Self {
+        Self {
+            pool,
+            ttl_secs,
+            user_id: user_id.to_string(),
+        }
     }
 
     /// Try to acquire a lock. Returns the lock on success, or info about the holder on conflict.
@@ -45,14 +50,13 @@ impl<'a> LockManager<'a> {
         resource_key: &str,
         agent_id: Uuid,
     ) -> Result<ResourceLock, LockError> {
-        // Atomic: delete expired + insert in one statement (no TOCTOU race)
         let row: Option<ResourceLock> = sqlx::query_as::<_, ResourceLock>(
             r#"
             WITH reap AS (
                 DELETE FROM locks WHERE resource_key = $1 AND expires_at < now()
             )
-            INSERT INTO locks (resource_key, agent_id, expires_at)
-            VALUES ($1, $2, now() + make_interval(secs => $3))
+            INSERT INTO locks (resource_key, agent_id, expires_at, user_id)
+            VALUES ($1, $2, now() + make_interval(secs => $3), $4)
             ON CONFLICT (resource_key) DO NOTHING
             RETURNING id, resource_key, agent_id, acquired_at, expires_at, heartbeat_at
             "#,
@@ -60,6 +64,7 @@ impl<'a> LockManager<'a> {
         .bind(resource_key)
         .bind(agent_id)
         .bind(self.ttl_secs as f64)
+        .bind(&self.user_id)
         .fetch_optional(self.pool)
         .await?;
 
@@ -125,8 +130,18 @@ impl<'a> LockManager<'a> {
         Ok(result.rows_affected())
     }
 
-    /// List all active locks.
+    /// List active locks for the current user.
     pub async fn list_all(&self) -> Result<Vec<ResourceLock>, sqlx::Error> {
+        sqlx::query_as::<_, ResourceLock>(
+            "SELECT id, resource_key, agent_id, acquired_at, expires_at, heartbeat_at FROM locks WHERE user_id = $1 ORDER BY acquired_at",
+        )
+        .bind(&self.user_id)
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// List active locks across ALL users.
+    pub async fn list_all_users(&self) -> Result<Vec<ResourceLock>, sqlx::Error> {
         sqlx::query_as::<_, ResourceLock>(
             "SELECT id, resource_key, agent_id, acquired_at, expires_at, heartbeat_at FROM locks ORDER BY acquired_at",
         )
@@ -144,9 +159,7 @@ impl<'a> LockManager<'a> {
         .await
     }
 
-    /// Release every lock held by an agent. Called by the Stop hook so a
-    /// worker's leases don't linger after its session ends. Returns count
-    /// released.
+    /// Release every lock held by an agent.
     pub async fn release_all_for_agent(&self, agent_id: Uuid) -> Result<u64, sqlx::Error> {
         let result = sqlx::query("DELETE FROM locks WHERE agent_id = $1")
             .bind(agent_id)

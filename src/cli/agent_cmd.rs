@@ -13,7 +13,7 @@ pub async fn set_tool(
     agent_name: &str,
     tool: &str,
 ) -> Result<(), anyhow::Error> {
-    let repo = AgentRepo::new(pool);
+    let repo = AgentRepo::new(pool, crate::db::user_id());
     let persona = std::env::var("YGG_AGENT_PERSONA")
         .ok()
         .filter(|s| !s.is_empty());

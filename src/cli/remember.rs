@@ -16,7 +16,9 @@ pub async fn remember(
     agent_name: &str,
     text: &str,
 ) -> Result<(), anyhow::Error> {
-    let agent = AgentRepo::new(pool).register(agent_name).await?;
+    let agent = AgentRepo::new(pool, crate::db::user_id())
+        .register(agent_name)
+        .await?;
 
     // Best-effort repo detection; memory without a repo is still valid.
     let repo_id = match crate::cli::task_cmd::resolve_cwd_repo(pool).await {

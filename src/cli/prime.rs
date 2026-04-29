@@ -53,7 +53,7 @@ async fn try_with_db(
 ) -> Result<PrimeContext, anyhow::Error> {
     let config = AppConfig::from_env()?;
     let pool = db::create_pool(&config.database_url).await?;
-    let agent_repo = AgentRepo::new(&pool);
+    let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
     // Register (or touch) this agent so it exists in the DB. Persona from
     // $YGG_AGENT_PERSONA forms a compound key with agent_name — same cwd,
     // different role = different agent row.
@@ -71,7 +71,7 @@ async fn try_with_db(
         crate::classifier::Classifier::from_env().warm_up().await;
     });
 
-    let lock_mgr = LockManager::new(&pool, config.lock_ttl_secs);
+    let lock_mgr = LockManager::new(&pool, config.lock_ttl_secs, crate::db::user_id());
     let locks = lock_mgr
         .list_agent_locks(agent.agent_id)
         .await

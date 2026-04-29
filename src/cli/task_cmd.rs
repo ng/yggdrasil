@@ -39,7 +39,7 @@ async fn resolve_agent_id(
     pool: &sqlx::PgPool,
     agent_name: &str,
 ) -> Result<Option<Uuid>, anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     Ok(agent_repo
         .get_by_name(agent_name)
         .await?

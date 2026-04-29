@@ -8,7 +8,7 @@ async fn test_agent_lifecycle() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
 
     // Register
     let agent = agent_repo.register("test-agent-lifecycle").await.unwrap();
@@ -65,7 +65,7 @@ async fn test_node_dag() {
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
     let node_repo = ygg::models::node::NodeRepo::new(&pool);
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
 
     // Create test agent
     let agent = agent_repo.register("test-node-dag").await.unwrap();
@@ -144,7 +144,7 @@ async fn test_lock_acquire_release() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
-    let lock_mgr = ygg::lock::LockManager::new(&pool, 300);
+    let lock_mgr = ygg::lock::LockManager::new(&pool, 300, "test");
     let agent_id = uuid::Uuid::new_v4();
 
     // Acquire
@@ -172,7 +172,7 @@ async fn test_lock_atomic_no_toctou() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
-    let lock_mgr = ygg::lock::LockManager::new(&pool, 300);
+    let lock_mgr = ygg::lock::LockManager::new(&pool, 300, "test");
     let a1 = uuid::Uuid::new_v4();
     let a2 = uuid::Uuid::new_v4();
 
@@ -278,7 +278,7 @@ async fn test_crash_recovery() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
 
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
 
     // Create agent stuck in executing
     let agent = agent_repo.register("test-crash-recovery").await.unwrap();
@@ -322,7 +322,7 @@ async fn test_crash_recovery() {
 async fn test_msg_send_inbox_mark_read() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
 
     sqlx::query("DELETE FROM events WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
         .execute(&pool)
@@ -397,7 +397,7 @@ async fn test_msg_send_inbox_mark_read() {
 async fn test_lock_release_all_for_agent() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
 
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-lock-stop-a', 'test-lock-stop-b')")
         .execute(&pool)
@@ -407,7 +407,7 @@ async fn test_lock_release_all_for_agent() {
     let a = agent_repo.register("test-lock-stop-a").await.unwrap();
     let b = agent_repo.register("test-lock-stop-b").await.unwrap();
 
-    let lock_mgr = ygg::lock::LockManager::new(&pool, 300);
+    let lock_mgr = ygg::lock::LockManager::new(&pool, 300, "test");
     lock_mgr.acquire("test-res-a-1", a.agent_id).await.unwrap();
     lock_mgr.acquire("test-res-a-2", a.agent_id).await.unwrap();
     lock_mgr.acquire("test-res-b-1", b.agent_id).await.unwrap();
@@ -432,7 +432,7 @@ async fn test_lock_release_all_for_agent() {
 async fn test_orphan_candidates_filter_by_idle() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
 
     sqlx::query(
         "DELETE FROM agents WHERE agent_name IN ('test-orphan-fresh', 'test-orphan-stale')",
@@ -502,7 +502,7 @@ async fn test_orphan_candidates_filter_by_idle() {
 async fn test_agent_rename() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool);
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
 
     // Clean up any leftovers from a prior failed run.
     sqlx::query("DELETE FROM agents WHERE agent_name IN ('test-rename-src', 'test-rename-dst', 'test-rename-collision')")

@@ -9,13 +9,13 @@ pub async fn acquire(
     resource: &str,
     agent_name: &str,
 ) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let agent = agent_repo
         .get_by_name(agent_name)
         .await?
         .ok_or_else(|| anyhow::anyhow!("agent '{}' not found", agent_name))?;
 
-    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs);
+    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, crate::db::user_id());
     match lock_mgr.acquire(resource, agent.agent_id).await {
         Ok(lock) => {
             println!(
@@ -37,13 +37,13 @@ pub async fn release(
     resource: &str,
     agent_name: &str,
 ) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let agent = agent_repo
         .get_by_name(agent_name)
         .await?
         .ok_or_else(|| anyhow::anyhow!("agent '{}' not found", agent_name))?;
 
-    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs);
+    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, crate::db::user_id());
     lock_mgr.release(resource, agent.agent_id).await?;
     println!("Lock released: {resource}");
     Ok(())
@@ -56,7 +56,7 @@ pub async fn list(
     stale_only: bool,
     stale_secs: i64,
 ) -> Result<(), anyhow::Error> {
-    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs);
+    let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, crate::db::user_id());
     let mut locks = lock_mgr.list_all().await?;
 
     if stale_only {
@@ -75,7 +75,7 @@ pub async fn list(
 
     // Resolve agent names inline so the output is scriptable without
     // round-tripping through UUIDs.
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let now = chrono::Utc::now();
     println!(
         "{:<30} {:<20} {:<10} {:<10}",

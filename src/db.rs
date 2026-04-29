@@ -1,7 +1,40 @@
+use std::sync::OnceLock;
+
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 32;
+
+static USER_ID: OnceLock<String> = OnceLock::new();
+
+/// Return the cached user identity. Resolved once per process.
+pub fn user_id() -> &'static str {
+    USER_ID.get_or_init(resolve_user)
+}
+
+/// Resolve the current user identity.
+/// Priority: YGG_USER env → whoami output → "default".
+pub fn resolve_user() -> String {
+    if let Ok(u) = std::env::var("YGG_USER") {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    std::process::Command::new("whoami")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
 
 pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let max_connections: u32 = std::env::var("YGG_DB_POOL")

@@ -32,7 +32,7 @@ pub async fn execute(
     }
 
     // Register agent in DB
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let agent = agent_repo.register(&agent_name).await?;
     println!("  Agent ID: {}", agent.agent_id);
 

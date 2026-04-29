@@ -45,7 +45,7 @@ pub async fn send_inner(
     push: bool,
     no_spawn: bool,
 ) -> Result<(), anyhow::Error> {
-    let repo = AgentRepo::new(pool);
+    let repo = AgentRepo::new(pool, crate::db::user_id());
     let from = repo.get_by_name(from_agent_name).await?;
     let to = repo.get_by_name(to_agent_name).await?;
 
@@ -127,7 +127,7 @@ pub async fn inbox(
     agent_name: &str,
     all: bool,
 ) -> Result<Vec<Message>, anyhow::Error> {
-    let repo = AgentRepo::new(pool);
+    let repo = AgentRepo::new(pool, crate::db::user_id());
     let agent = repo
         .get_by_name(agent_name)
         .await?
@@ -179,7 +179,7 @@ pub async fn inbox(
 /// Advance the cursor to `now`. Called by the hook after the block has
 /// been injected so the same messages don't resurface next turn.
 pub async fn mark_read(pool: &PgPool, agent_name: &str) -> Result<(), anyhow::Error> {
-    let repo = AgentRepo::new(pool);
+    let repo = AgentRepo::new(pool, crate::db::user_id());
     let agent = repo
         .get_by_name(agent_name)
         .await?
