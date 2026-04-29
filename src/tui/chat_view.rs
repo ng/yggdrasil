@@ -35,8 +35,8 @@ pub struct ChatView {
     loaded: bool,
     pub compose: Option<ComposeState>,
     pub flash: Option<String>,
-    /// Index into `messages` for the detail overlay (Enter on directed msg).
-    detail: Option<usize>,
+    /// UUID of the message shown in the detail overlay (Enter on directed msg).
+    detail: Option<Uuid>,
     /// Active filter string — when `Some`, only matching messages are shown.
     filter: Option<String>,
     /// True when the filter input line is focused (typing mode).
@@ -139,7 +139,7 @@ impl ChatView {
         if let Some(&real) = indices.get(idx) {
             if let Some(msg) = self.messages.get(real) {
                 if msg.to_name.is_some() {
-                    self.detail = Some(real);
+                    self.detail = Some(msg.id);
                 }
             }
         }
@@ -388,10 +388,7 @@ impl ChatView {
     }
 
     fn render_detail_overlay(&self, frame: &mut Frame, area: Rect) {
-        let Some(idx) = self.detail else {
-            return;
-        };
-        let Some(msg) = self.messages.get(idx) else {
+        let Some(msg) = self.messages.iter().find(|m| self.detail == Some(m.id)) else {
             return;
         };
 
@@ -421,19 +418,20 @@ impl ChatView {
             Line::from(""),
         ];
         // Wrap long body into lines that fit the popup width (minus borders).
-        let body_width = (w as usize).saturating_sub(4);
+        // Uses char iteration to avoid panicking on multi-byte UTF-8.
+        let body_width = (w as usize).saturating_sub(4).max(1);
         for raw_line in msg.body.lines() {
-            if raw_line.len() <= body_width {
-                lines.push(Line::from(raw_line.to_string()));
-            } else {
-                // Simple char-boundary wrap.
-                let mut pos = 0;
-                while pos < raw_line.len() {
-                    let end = (pos + body_width).min(raw_line.len());
-                    lines.push(Line::from(raw_line[pos..end].to_string()));
-                    pos = end;
+            let mut chunk = String::new();
+            let mut count = 0usize;
+            for ch in raw_line.chars() {
+                if count == body_width {
+                    lines.push(Line::from(std::mem::take(&mut chunk)));
+                    count = 0;
                 }
+                chunk.push(ch);
+                count += 1;
             }
+            lines.push(Line::from(chunk));
         }
 
         let block = Block::default()

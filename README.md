@@ -48,8 +48,8 @@ ygg status
 |   Claude Code    |         |    PostgreSQL + pgvector       |
 |                  |         |                               |
 |  SessionStart  --+--ygg-->|  agents   (state machine)     |
-|  UserPromptSubmit+-prime-->|  nodes    (DAG + embeddings)  |
-|  Stop          --+-inject->|  events   (live stream)       |
+|  UserPromptSubmit+inject-->|  nodes    (DAG + embeddings)  |
+|  Stop          --+digest-->|  events   (live stream)       |
 |  PreCompact    --+-digest->|  locks    (semantic leases)   |
 |  PreToolUse    --+--lock-->|  tasks    (tracking + deps)   |
 +------------------+         +-------------------------------+
