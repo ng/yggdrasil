@@ -17,7 +17,6 @@ use super::locks_view::LocksView;
 use super::log_view::LogView;
 use super::memgraph_view::MemGraphView;
 use super::prompt_view::PromptView;
-use super::query_view::QueryView;
 use super::run_grid::RunGridView;
 use super::runs_view::RunsView;
 use super::tasks_view::TasksView;
@@ -29,7 +28,6 @@ pub enum ActiveView {
     Dag,
     Tasks,
     Trace,
-    Query,
     Logs,
     MemGraph,
     Eval,
@@ -47,7 +45,6 @@ pub struct App {
     pub dag: DagView,
     pub tasks: TasksView,
     pub trace: TraceView,
-    pub query: QueryView,
     pub logs: LogView,
     pub memgraph: MemGraphView,
     pub eval: EvalView,
@@ -57,7 +54,6 @@ pub struct App {
     pub run_grid: RunGridView,
     pub nerdy: super::nerdy::NerdyView,
     pub agent_name: String,
-    pub query_focus: bool, // true = typing in Query pane; blocks global keys
     /// Recent events shown in the global bottom status bar across all panes.
     pub status_tail: Vec<(String, String, String)>, // (hh:mm:ss, kind, one-line detail)
     /// Right-hand-side orchestration stats (filled each refresh tick).
@@ -406,7 +402,6 @@ impl App {
             dag: DagView::new(),
             tasks: TasksView::new(),
             trace: TraceView::new(),
-            query: QueryView::new(),
             logs: LogView::new(),
             memgraph: MemGraphView::new(),
             eval: EvalView::new(),
@@ -416,7 +411,6 @@ impl App {
             run_grid: RunGridView::new(),
             nerdy: super::nerdy::NerdyView::new(),
             agent_name,
-            query_focus: false,
             status_tail: Vec::new(),
             ops_stats: OpsStats::default(),
             flash: FlashState::default(),
@@ -689,27 +683,21 @@ impl App {
             return;
         }
 
-        // Query pane is always in input mode while active, so typing
-        // characters goes to the input buffer. Esc or Tab/arrows leave;
-        // Ctrl-C quits. Enter runs the query.
-        if self.query_focus {
+        // MemGraph search mode captures keys while active.
+        if self.active_view == ActiveView::MemGraph && self.memgraph.search_mode() {
             match code {
-                KeyCode::Esc => self.set_view(ActiveView::Dashboard),
-                KeyCode::Tab | KeyCode::Right => self.cycle_view_forward(),
-                KeyCode::BackTab | KeyCode::Left => self.cycle_view_backward(),
+                KeyCode::Esc => self.memgraph.search_cancel(),
+                KeyCode::Backspace => self.memgraph.search_pop(),
                 KeyCode::Enter => {
-                    let _ = self.query.run_query(pool).await;
+                    self.memgraph.search_run(pool).await;
                 }
-                KeyCode::Backspace => self.query.pop_char(),
                 KeyCode::Char(c) => {
                     if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                         self.should_quit = true;
                     } else {
-                        self.query.push_char(c);
+                        self.memgraph.search_push(c);
                     }
                 }
-                KeyCode::Up => self.query.select_prev(),
-                KeyCode::Down => self.query.select_next(),
                 _ => {}
             }
             return;
@@ -803,13 +791,12 @@ impl App {
             KeyCode::Char('2') => self.set_view(ActiveView::Dag),
             KeyCode::Char('3') => self.set_view(ActiveView::Tasks),
             KeyCode::Char('4') => self.set_view(ActiveView::Trace),
-            KeyCode::Char('5') => self.set_view(ActiveView::Query),
-            KeyCode::Char('6') => self.set_view(ActiveView::Logs),
-            KeyCode::Char('7') => self.set_view(ActiveView::MemGraph),
-            KeyCode::Char('8') => self.set_view(ActiveView::Eval),
-            KeyCode::Char('9') => self.set_view(ActiveView::Prompt),
-            KeyCode::Char('0') => self.set_view(ActiveView::Locks),
-            KeyCode::Char('R') => self.set_view(ActiveView::Runs),
+            KeyCode::Char('5') => self.set_view(ActiveView::Logs),
+            KeyCode::Char('6') => self.set_view(ActiveView::MemGraph),
+            KeyCode::Char('7') => self.set_view(ActiveView::Eval),
+            KeyCode::Char('8') => self.set_view(ActiveView::Prompt),
+            KeyCode::Char('9') => self.set_view(ActiveView::Locks),
+            KeyCode::Char('0') => self.set_view(ActiveView::Runs),
             KeyCode::Char('G') => self.set_view(ActiveView::RunGrid),
             KeyCode::Char('N') => self.set_view(ActiveView::Nerdy),
             // yggdrasil-151: open the detail overlay populated from the
@@ -913,6 +900,13 @@ impl App {
             }
             KeyCode::Char('n') if self.active_view == ActiveView::Dag && !self.dag.add_mode() => {
                 self.dag.add_begin();
+            }
+            KeyCode::Char('u') if self.active_view == ActiveView::Dashboard => {
+                self.dashboard.toggle_user_filter();
+                let _ = self.dashboard.refresh(pool).await;
+            }
+            KeyCode::Char('/') if self.active_view == ActiveView::MemGraph => {
+                self.memgraph.search_begin();
             }
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
@@ -1039,20 +1033,15 @@ impl App {
         }
     }
 
-    /// Change the active pane, keeping query_focus in sync. The Query pane
-    /// is always in input mode while active — anything else resets focus so
-    /// global keybindings work.
     fn set_view(&mut self, v: ActiveView) {
         self.active_view = v;
-        self.query_focus = v == ActiveView::Query;
     }
     fn cycle_view_forward(&mut self) {
         let next = match self.active_view {
             ActiveView::Dashboard => ActiveView::Dag,
             ActiveView::Dag => ActiveView::Tasks,
             ActiveView::Tasks => ActiveView::Trace,
-            ActiveView::Trace => ActiveView::Query,
-            ActiveView::Query => ActiveView::Logs,
+            ActiveView::Trace => ActiveView::Logs,
             ActiveView::Logs => ActiveView::MemGraph,
             ActiveView::MemGraph => ActiveView::Eval,
             ActiveView::Eval => ActiveView::Prompt,
@@ -1070,8 +1059,7 @@ impl App {
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
-            ActiveView::Query => ActiveView::Trace,
-            ActiveView::Logs => ActiveView::Query,
+            ActiveView::Logs => ActiveView::Trace,
             ActiveView::MemGraph => ActiveView::Logs,
             ActiveView::Eval => ActiveView::MemGraph,
             ActiveView::Prompt => ActiveView::Eval,
@@ -1148,13 +1136,12 @@ impl App {
                 ("2", ActiveView::Dag),
                 ("3", ActiveView::Tasks),
                 ("4", ActiveView::Trace),
-                ("5", ActiveView::Query),
-                ("6", ActiveView::Logs),
-                ("7", ActiveView::MemGraph),
-                ("8", ActiveView::Eval),
-                ("9", ActiveView::Prompt),
-                ("0", ActiveView::Locks),
-                ("R", ActiveView::Runs),
+                ("5", ActiveView::Logs),
+                ("6", ActiveView::MemGraph),
+                ("7", ActiveView::Eval),
+                ("8", ActiveView::Prompt),
+                ("9", ActiveView::Locks),
+                ("0", ActiveView::Runs),
                 ("G", ActiveView::RunGrid),
                 ("N", ActiveView::Nerdy),
             ]
@@ -1167,13 +1154,12 @@ impl App {
                 tab("[2] DAG", self.active_view == ActiveView::Dag),
                 tab("[3] Tasks", self.active_view == ActiveView::Tasks),
                 tab("[4] Trace", self.active_view == ActiveView::Trace),
-                tab("[5] Query", self.active_view == ActiveView::Query),
-                tab("[6] Logs", self.active_view == ActiveView::Logs),
-                tab("[7] Memgraph", self.active_view == ActiveView::MemGraph),
-                tab("[8] Eval", self.active_view == ActiveView::Eval),
-                tab("[9] Prompt", self.active_view == ActiveView::Prompt),
-                tab("[0] Locks", self.active_view == ActiveView::Locks),
-                tab("[R] Runs", self.active_view == ActiveView::Runs),
+                tab("[5] Logs", self.active_view == ActiveView::Logs),
+                tab("[6] Memgraph", self.active_view == ActiveView::MemGraph),
+                tab("[7] Eval", self.active_view == ActiveView::Eval),
+                tab("[8] Prompt", self.active_view == ActiveView::Prompt),
+                tab("[9] Locks", self.active_view == ActiveView::Locks),
+                tab("[0] Runs", self.active_view == ActiveView::Runs),
                 tab("[G] Grid", self.active_view == ActiveView::RunGrid),
                 tab("[N] Nerdy", self.active_view == ActiveView::Nerdy),
             ]
@@ -1193,9 +1179,8 @@ impl App {
                 "↑↓ select  ·  Enter=detail  ·  d=overlay  ·  e=rename  ·  r=run  ·  ⌫=delete"
             }
             ActiveView::Trace => "↑↓ select",
-            ActiveView::Query => "type then Enter  ·  Esc=leave",
             ActiveView::Logs => "f=filter  Enter=detail",
-            ActiveView::MemGraph => "↑↓ scroll  Enter=detail  Esc=close",
+            ActiveView::MemGraph => "↑↓ scroll  Enter=detail  /=search  Esc=close",
             ActiveView::Eval => "w=cycle window (1h/6h/24h/7d)",
             ActiveView::Prompt => "↑↓ pins · PgUp/PgDn scroll MEMORY.md",
             ActiveView::Locks => "↑↓ select  ·  r=release",
@@ -1230,7 +1215,6 @@ impl App {
             ActiveView::Dag => self.dag.render(frame, chunks[2]),
             ActiveView::Tasks => self.tasks.render(frame, chunks[2]),
             ActiveView::Trace => self.trace.render(frame, chunks[2]),
-            ActiveView::Query => self.query.render(frame, chunks[2]),
             ActiveView::Logs => self.logs.render(frame, chunks[2]),
             ActiveView::MemGraph => self.memgraph.render(frame, chunks[2]),
             ActiveView::Eval => self.eval.render(frame, chunks[2]),
@@ -1445,7 +1429,6 @@ impl App {
             ActiveView::Dag => "Dag",
             ActiveView::Tasks => "Tasks",
             ActiveView::Trace => "Trace",
-            ActiveView::Query => "Query",
             ActiveView::Logs => "Logs",
             ActiveView::MemGraph => "MemGraph",
             ActiveView::Eval => "Eval",
@@ -1742,6 +1725,7 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                     app.run_grid.refresh(pool).await?;
                 }
                 ActiveView::Nerdy => {
+                    app.nerdy.update_ops(&app.ops_stats);
                     app.nerdy.refresh(pool).await?;
                 }
                 _ => {}

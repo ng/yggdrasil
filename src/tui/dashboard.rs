@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -104,6 +105,20 @@ pub struct DashboardView {
     /// Most-frequent loop-detection fingerprint repeat count (>1 means an
     /// agent's been doing the same thing N times in a row).
     sched_top_loop_count: i64,
+
+    /// When true, only show agents belonging to the current user_id.
+    /// Default false (show all users). Persisted in ~/.config/ygg/dashboard.json.
+    pub filter_my_agents: bool,
+
+    // Vector & retrieval stats (refreshed every tick)
+    embed_calls_1h: i64,
+    embed_cache_hits_1h: i64,
+    similarity_hits_1h: i64,
+    similarity_avg_score: f64,
+    scoring_drops_1h: i64,
+    corrections_24h: i64,
+    nodes_with_embedding: i64,
+    nodes_total_count: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,6 +186,15 @@ impl DashboardView {
             sched_queue_depth: 0,
             sched_running: 0,
             sched_top_loop_count: 0,
+            filter_my_agents: load_filter_my_agents(),
+            embed_calls_1h: 0,
+            embed_cache_hits_1h: 0,
+            similarity_hits_1h: 0,
+            similarity_avg_score: 0.0,
+            scoring_drops_1h: 0,
+            corrections_24h: 0,
+            nodes_with_embedding: 0,
+            nodes_total_count: 0,
         }
     }
 
@@ -355,6 +379,11 @@ impl DashboardView {
         self.session_scoped = !self.session_scoped;
     }
 
+    pub fn toggle_user_filter(&mut self) {
+        self.filter_my_agents = !self.filter_my_agents;
+        save_filter_my_agents(self.filter_my_agents);
+    }
+
     fn cached_pressure(&mut self, agent_name: &str) -> Option<(i64, i64)> {
         let now = Instant::now();
         if let Some((t, v)) = self.pressure_cache.get(agent_name) {
@@ -379,7 +408,11 @@ impl DashboardView {
         let pinned_id = self.agents.get(self.selected).map(|a| a.agent_id);
 
         let agent_repo = AgentRepo::new(pool, crate::db::user_id());
-        let mut agents = agent_repo.list().await?;
+        let mut agents = if self.filter_my_agents {
+            agent_repo.list().await?
+        } else {
+            agent_repo.list_all_users().await?
+        };
         // Most-recently-active first. The repo orders by created_at,
         // which buries hot sessions under months-old identities in a
         // 50+ agent fleet.
@@ -521,14 +554,45 @@ impl DashboardView {
         self.db_learnings = learnings;
         self.db_locks_active = locks_active;
 
+        // Vector & retrieval stats — embedding activity and similarity search.
+        let (ec, ech, sh, sa, sd, cd): (i64, i64, i64, f64, i64, i64) = sqlx::query_as(
+            r#"SELECT
+                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'),
+                 COALESCE(AVG((payload->>'similarity')::float)
+                     FILTER (WHERE event_kind::text = 'similarity_hit'), 0),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'scoring_decision'),
+                 COUNT(*) FILTER (WHERE event_kind::text = 'correction_detected')
+               FROM events WHERE created_at >= $1"#,
+        )
+        .bind(since_24h)
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0, 0, 0, 0.0, 0, 0));
+        self.embed_calls_1h = ec;
+        self.embed_cache_hits_1h = ech;
+        self.similarity_hits_1h = sh;
+        self.similarity_avg_score = sa;
+        self.scoring_drops_1h = sd;
+        self.corrections_24h = cd;
+
+        let (nt, ne): (i64, i64) = sqlx::query_as("SELECT COUNT(*), COUNT(embedding) FROM nodes")
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0, 0));
+        self.nodes_total_count = nt;
+        self.nodes_with_embedding = ne;
+
         // Prompts per hour sparkline, 24h — global across agents.
+        // Uses hook_fired/UserPromptSubmit which fires on every user turn.
         let sparkline: Vec<(i32, i64)> = sqlx::query_as(
             "SELECT (24 - FLOOR(EXTRACT(EPOCH FROM (now() - created_at)) / 3600))::int,
                     COUNT(*)
              FROM events
              WHERE created_at >= now() - interval '24 hours'
-               AND event_kind::text = 'node_written'
-               AND payload->>'kind' = 'user_message'
+               AND event_kind::text = 'hook_fired'
+               AND payload->>'hook' = 'UserPromptSubmit'
              GROUP BY 1 ORDER BY 1",
         )
         .fetch_all(pool)
@@ -548,8 +612,8 @@ impl DashboardView {
                     COUNT(*)
              FROM events
              WHERE created_at >= now() - interval '24 hours'
-               AND event_kind::text = 'node_written'
-               AND payload->>'kind' = 'user_message'
+               AND event_kind::text = 'hook_fired'
+               AND payload->>'hook' = 'UserPromptSubmit'
                AND agent_id IS NOT NULL
              GROUP BY 1, 2",
         )
@@ -775,33 +839,33 @@ impl DashboardView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        // Layout: alerts · pulse · scheduler · agents (stretch) · workers · transitions · locks
+        // Layout: alerts · pulse · scheduler · vector · agents (stretch) · workers · locks
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // alerts
-                Constraint::Length(6), // system pulse
-                Constraint::Length(5), // scheduler tile (yggdrasil-142)
+                Constraint::Length(6), // system pulse + latest transition
+                Constraint::Length(5), // scheduler tile
+                Constraint::Length(5), // vector & retrieval tile
                 Constraint::Min(8),    // agents
-                Constraint::Length(6), // workers (click-to-do spawns)
-                Constraint::Length(4), // state transitions (compacted)
-                Constraint::Length(4), // locks summary (detail on [0] Locks tab)
+                Constraint::Length(6), // workers
+                Constraint::Length(4), // locks summary
             ])
             .split(area);
 
         self.render_alerts(frame, chunks[0]);
         self.render_pulse(frame, chunks[1]);
         self.render_scheduler_tile(frame, chunks[2]);
-        self.render_agents_table(frame, chunks[3]);
-        self.render_workers(frame, chunks[4]);
-        self.render_transitions(frame, chunks[5]);
+        self.render_vector_tile(frame, chunks[3]);
+        self.render_agents_table(frame, chunks[4]);
+        self.render_workers(frame, chunks[5]);
         self.render_locks_table(frame, chunks[6]);
 
         if self.rename.is_some() {
-            render_rename_overlay(frame, chunks[3], self);
+            render_rename_overlay(frame, chunks[4], self);
         }
         if self.msg.is_some() {
-            render_msg_overlay(frame, chunks[3], self);
+            render_msg_overlay(frame, chunks[4], self);
         }
     }
 
@@ -942,6 +1006,98 @@ impl DashboardView {
         );
         let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(para, cols[1]);
+    }
+
+    fn render_vector_tile(&self, frame: &mut Frame, area: Rect) {
+        let embed_total = self.embed_calls_1h + self.embed_cache_hits_1h;
+        let hit_rate = if embed_total > 0 {
+            (self.embed_cache_hits_1h as f64 / embed_total as f64 * 100.0) as i64
+        } else {
+            0
+        };
+
+        let lines: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled("embedder  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} calls", self.embed_calls_1h),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · {} cache hits ({}%)", self.embed_cache_hits_1h, hit_rate),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("retrieval ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} sim hits", self.similarity_hits_1h),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · avg {:.2}", self.similarity_avg_score),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · {} drops", self.scoring_drops_1h),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!(" · {} corrections", self.corrections_24h),
+                    if self.corrections_24h > 0 {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("corpus    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} tasks ", self.db_tasks_total),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({} open) ", self.db_tasks_open),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("· {} learnings ", self.db_learnings),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "· {} nodes ({} embedded) ",
+                        self.nodes_total_count, self.nodes_with_embedding
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("· {} locks", self.db_locks_active),
+                    if self.db_locks_active > 0 {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]),
+        ];
+        let para = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Vector & Retrieval "),
+        );
+        frame.render_widget(para, area);
     }
 
     fn render_workers(&self, frame: &mut Frame, area: Rect) {
@@ -1127,51 +1283,6 @@ impl DashboardView {
         self.workers.get(self.worker_sel)
     }
 
-    fn render_transitions(&self, frame: &mut Frame, area: Rect) {
-        let lines: Vec<Line> = if self.recent_transitions.is_empty() {
-            vec![Line::from(Span::styled(
-                "  · no agent state changes yet — transitions appear here when hooks fire",
-                Style::default().fg(Color::DarkGray),
-            ))]
-        } else {
-            self.recent_transitions
-                .iter()
-                .map(|(ts, name, from, to, tool)| {
-                    let t = ts
-                        .with_timezone(&chrono::Local)
-                        .format("%H:%M:%S")
-                        .to_string();
-                    let to_color = state_color(to);
-                    let mut spans = vec![
-                        Span::styled(t, Style::default().fg(Color::DarkGray)),
-                        Span::raw("  "),
-                        Span::styled(name.clone(), Style::default().fg(Color::Cyan)),
-                        Span::raw("  "),
-                        Span::styled(from.clone(), Style::default().fg(Color::DarkGray)),
-                        Span::raw(" → "),
-                        Span::styled(
-                            to.clone(),
-                            Style::default().fg(to_color).add_modifier(Modifier::BOLD),
-                        ),
-                    ];
-                    if let Some(t) = tool {
-                        spans.push(Span::styled(
-                            format!(" ({t})"),
-                            Style::default().fg(Color::Yellow),
-                        ));
-                    }
-                    Line::from(spans)
-                })
-                .collect()
-        };
-        let para = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Recent state transitions "),
-        );
-        frame.render_widget(para, area);
-    }
-
     fn render_alerts(&mut self, frame: &mut Frame, area: Rect) {
         let mut alerts: Vec<Span> = Vec::new();
 
@@ -1340,40 +1451,39 @@ impl DashboardView {
                     },
                 ),
             ]),
-            // DB corpus totals — size of the tracked state, not activity.
-            // Updates every refresh tick. Post-pivot (ADR 0015), nodes +
-            // memories fields will naturally drop to 0 and the line shrinks.
-            Line::from(vec![
-                Span::styled("db        ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} tasks ", self.db_tasks_total),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("({} open) ", self.db_tasks_open),
+            // Most-recent agent state transition — replaces standalone
+            // transitions panel; corpus totals moved to vector tile.
+            if let Some((ts, name, from, to, tool)) = self.recent_transitions.first() {
+                let t = ts
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string();
+                let to_color = state_color(to);
+                let mut spans = vec![
+                    Span::styled(t, Style::default().fg(Color::DarkGray)),
+                    Span::raw("  "),
+                    Span::styled(name.clone(), Style::default().fg(Color::Cyan)),
+                    Span::raw("  "),
+                    Span::styled(from.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::raw(" → "),
+                    Span::styled(
+                        to.clone(),
+                        Style::default().fg(to_color).add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if let Some(t) = tool {
+                    spans.push(Span::styled(
+                        format!(" ({t})"),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+                Line::from(spans)
+            } else {
+                Line::from(Span::styled(
+                    "          no recent transitions",
                     Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("· {} learnings ", self.db_learnings),
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("· {} nodes ", self.db_nodes),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("· {} locks", self.db_locks_active),
-                    if self.db_locks_active > 0 {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-            ]),
+                ))
+            },
         ];
         let title = match &self.current_session_id {
             Some(sid) => {
@@ -1566,9 +1676,12 @@ impl DashboardView {
 
         // Surface action status (rename/archive) in the panel title so the
         // user gets feedback without a separate status line.
+        let scope_label = if self.filter_my_agents { "mine" } else { "all" };
         let title = match self.flash.as_deref() {
-            Some(msg) => format!(" Agents  ·  {msg}  ·  r=rename a=archive m=msg"),
-            None => " Agents  ·  r=rename a=archive m=msg".to_string(),
+            Some(msg) => {
+                format!(" Agents ({scope_label})  ·  {msg}  ·  u=filter r=rename a=archive m=msg")
+            }
+            None => format!(" Agents ({scope_label})  ·  u=filter r=rename a=archive m=msg"),
         };
         let table = Table::new(
             rows,
@@ -1860,4 +1973,37 @@ fn render_msg_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
             .border_style(Style::default().fg(Color::Yellow)),
     );
     frame.render_widget(para, popup);
+}
+
+fn dashboard_settings_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".config/ygg/dashboard.json")
+}
+
+fn load_filter_my_agents() -> bool {
+    let path = dashboard_settings_path();
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return false;
+    };
+    v.get("filter_my_agents")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn save_filter_my_agents(val: bool) {
+    let path = dashboard_settings_path();
+    let mut obj = match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+    {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("filter_my_agents".into(), serde_json::Value::Bool(val));
+    if let Ok(json) = serde_json::to_string_pretty(&obj) {
+        let _ = std::fs::write(&path, json);
+    }
 }

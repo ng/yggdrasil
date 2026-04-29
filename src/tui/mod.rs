@@ -22,7 +22,6 @@ pub mod palette;
 pub mod pane_filter;
 pub mod pip;
 pub mod prompt_view;
-pub mod query_view;
 pub mod retry_collapse;
 pub mod ridgeline;
 pub mod run_grid;
