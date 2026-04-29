@@ -55,6 +55,8 @@ pub struct Worker {
     pub pr_url: Option<String>,
     #[sqlx(default)]
     pub delivery_checked_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub intent: Option<String>,
 }
 
 pub struct WorkerRepo<'a> {
@@ -84,7 +86,7 @@ impl<'a> WorkerRepo<'a> {
             VALUES ($1, $2, $3, $4, $5, 'spawned')
             RETURNING worker_id, task_id, session_id, tmux_session, tmux_window,
                       worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
-                      branch_pushed, branch_merged, pr_url, delivery_checked_at
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
             "#,
         )
         .bind(task_id)
@@ -170,7 +172,7 @@ impl<'a> WorkerRepo<'a> {
         sqlx::query_as::<_, Worker>(
             r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
                       worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
-                      branch_pushed, branch_merged, pr_url, delivery_checked_at
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
                  FROM workers
                 WHERE ended_at IS NULL
                    OR (ended_at > now() - interval '24 hours'
@@ -186,10 +188,34 @@ impl<'a> WorkerRepo<'a> {
         sqlx::query_as::<_, Worker>(
             r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
                       worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
-                      branch_pushed, branch_merged, pr_url, delivery_checked_at
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
                  FROM workers
                 WHERE ended_at IS NULL
                 ORDER BY started_at DESC"#,
+        )
+        .fetch_all(self.pool)
+        .await
+    }
+
+    pub async fn set_intent(&self, worker_id: Uuid, intent: Option<&str>) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE workers SET intent = $2 WHERE worker_id = $1")
+            .bind(worker_id)
+            .bind(intent)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_cleanable(&self) -> Result<Vec<Worker>, sqlx::Error> {
+        sqlx::query_as::<_, Worker>(
+            r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
+                      worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
+                 FROM workers
+                WHERE (state IN ('completed', 'failed') AND branch_merged = true)
+                   OR (state = 'abandoned' AND ended_at < now() - interval '1 hour')
+                ORDER BY ended_at ASC
+                LIMIT 10"#,
         )
         .fetch_all(self.pool)
         .await
@@ -199,7 +225,7 @@ impl<'a> WorkerRepo<'a> {
         sqlx::query_as::<_, Worker>(
             r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
                       worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
-                      branch_pushed, branch_merged, pr_url, delivery_checked_at
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
                  FROM workers WHERE worker_id = $1"#,
         )
         .bind(worker_id)

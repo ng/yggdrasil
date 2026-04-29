@@ -126,6 +126,7 @@ pub struct WorkerRow {
     pub branch_pushed: bool,
     pub branch_merged: bool,
     pub pr_url: Option<String>,
+    pub intent: Option<String>,
 }
 
 impl DashboardView {
@@ -613,12 +614,14 @@ impl DashboardView {
             bool,
             bool,
             Option<String>,
+            Option<String>,
         )> = sqlx::query_as(
             r#"SELECT r.task_prefix, t.seq, t.title,
                           a.agent_name, a.persona,
                           w.state::text, w.started_at, w.last_seen_at,
                           w.tmux_session, w.tmux_window,
-                          w.branch_pushed, w.branch_merged, w.pr_url
+                          w.branch_pushed, w.branch_merged, w.pr_url,
+                          w.intent
                      FROM workers w
                      JOIN tasks t ON t.task_id = w.task_id
                      JOIN repos r ON r.repo_id = t.repo_id
@@ -649,6 +652,7 @@ impl DashboardView {
                     pushed,
                     merged,
                     pr,
+                    intent,
                 )| {
                     WorkerRow {
                         task_ref: format!("{prefix}-{seq}"),
@@ -663,6 +667,7 @@ impl DashboardView {
                         branch_pushed: pushed,
                         branch_merged: merged,
                         pr_url: pr,
+                        intent,
                     }
                 },
             )
@@ -1055,6 +1060,15 @@ impl DashboardView {
                     Span::styled(format!("{age:<6}"), Style::default().fg(age_color)),
                     Span::raw(" "),
                     Span::styled(short_title(&w.title), title_style),
+                    if let Some(ref intent) = w.intent {
+                        let intent_color = if needs_attn { Color::Yellow } else { Color::DarkGray };
+                        Span::styled(
+                            format!("  · {}", short_cell(intent, 24)),
+                            Style::default().fg(intent_color),
+                        )
+                    } else {
+                        Span::raw("")
+                    },
                 ])
             })
             .collect();

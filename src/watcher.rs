@@ -6,6 +6,7 @@ use crate::config::AppConfig;
 use crate::lock::LockManager;
 use crate::models::event::{EventKind, EventRepo};
 use crate::models::worker::{Worker, WorkerRepo, WorkerState};
+use crate::tmux::TmuxManager;
 
 /// Background watcher daemon.
 /// Periodically: reap expired locks, flag stale agents, cleanup.
@@ -51,13 +52,15 @@ impl Watcher {
         let stale = self.flag_stale_agents().await?;
         let worker_updates = self.observe_workers().await.unwrap_or(0);
         let delivery_updates = self.check_delivery().await.unwrap_or(0);
+        let cleaned = self.cleanup_delivered().await.unwrap_or(0);
 
-        if reaped > 0 || stale > 0 || worker_updates > 0 || delivery_updates > 0 {
+        if reaped > 0 || stale > 0 || worker_updates > 0 || delivery_updates > 0 || cleaned > 0 {
             tracing::info!(
                 reaped_locks = reaped,
                 stale_agents = stale,
                 worker_updates = worker_updates,
                 delivery_updates = delivery_updates,
+                cleaned_workers = cleaned,
                 "watcher tick"
             );
         }
@@ -70,10 +73,10 @@ impl Watcher {
     /// merged, and whether a PR is open. Cheap — only runs on completed/
     /// failed rows and throttled by delivery_checked_at.
     async fn check_delivery(&self) -> Result<u64, anyhow::Error> {
-        let workers: Vec<Worker> = sqlx::query_as::<_, Worker>(
+        let workers: Vec<_> = sqlx::query_as::<_, crate::models::worker::Worker>(
             r#"SELECT worker_id, task_id, session_id, tmux_session, tmux_window,
                       worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
-                      branch_pushed, branch_merged, pr_url, delivery_checked_at
+                      branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
                  FROM workers
                 WHERE state IN ('completed', 'failed')
                   AND (branch_pushed = false OR branch_merged = false)
@@ -154,6 +157,10 @@ impl Watcher {
                     let _ = repo.set_state(w.worker_id, next, None).await;
                     changes += 1;
                 }
+                let intent = extract_intent(&pane, next);
+                if intent.as_deref() != w.intent.as_deref() {
+                    let _ = repo.set_intent(w.worker_id, intent.as_deref()).await;
+                }
             }
         }
         Ok(changes)
@@ -221,6 +228,28 @@ impl Watcher {
             count += 1;
         }
         Ok(count)
+    }
+
+    /// Clean up workers that are terminal AND fully delivered (merged) or
+    /// abandoned for >1h. Kills the tmux window and removes the worktree.
+    async fn cleanup_delivered(&self) -> Result<u64, anyhow::Error> {
+        let workers = WorkerRepo::new(&self.pool)
+            .list_cleanable()
+            .await
+            .unwrap_or_default();
+        let mut n = 0u64;
+        for w in workers {
+            TmuxManager::kill_window_sync(&w.tmux_session, &w.tmux_window);
+            remove_worktree(&w.worktree_path);
+            tracing::info!(
+                worker = %w.worker_id,
+                state = ?w.state,
+                worktree = %w.worktree_path,
+                "cleaned up delivered worker"
+            );
+            n += 1;
+        }
+        Ok(n)
     }
 }
 
@@ -341,8 +370,6 @@ fn inspect_delivery(worktree: &str, branch: Option<&str>) -> (bool, bool, Option
 }
 
 fn classify_pane(pane: &str) -> WorkerState {
-    // Trust-dialog / permission variants (shouldn't happen post pre-trust,
-    // but cheap to detect if Claude changes its schema out from under us).
     const ATTENTION: &[&str] = &[
         "Do you want to",
         "Bypass permissions",
@@ -351,6 +378,12 @@ fn classify_pane(pane: &str) -> WorkerState {
         "Do you trust",
         "Continue? [y/n]",
         "Select an option",
+        // Plan-mode approval prompts
+        "Would you like to proceed",
+        "Yes, and bypass permissions",
+        "Yes, manually approve",
+        "Tell Claude what to change",
+        "plan mode on",
     ];
     for m in ATTENTION {
         if pane.contains(m) {
@@ -358,15 +391,76 @@ fn classify_pane(pane: &str) -> WorkerState {
         }
     }
 
-    // "Active" heuristic: the Claude Code UI shows a thinking indicator
-    // or streaming content; very recent newlines indicate activity. We
-    // proxy with "is there a recognisable Claude prompt line in the
-    // last 40 lines?" — if so, Claude is active.
     let tail: String = pane.lines().rev().take(40).collect::<Vec<_>>().join("\n");
     if tail.contains("│ >") || tail.contains("Ctrl-C") || tail.contains("esc to interrupt") {
         return WorkerState::Running;
     }
 
-    // Fell through: claude may have exited or is just quiet.
     WorkerState::Idle
+}
+
+fn extract_intent(pane: &str, state: WorkerState) -> Option<String> {
+    if state == WorkerState::NeedsAttention {
+        if pane.contains("Would you like to proceed") || pane.contains("plan mode on") {
+            return Some("awaiting plan approval".into());
+        }
+        return Some("awaiting user input".into());
+    }
+
+    let tail: Vec<&str> = pane.lines().rev().take(60).collect();
+    let joined = tail.join("\n");
+
+    // Tool call patterns from Claude Code status line
+    if joined.contains("Compiling") || joined.contains("cargo build") || joined.contains("cargo check") {
+        return Some("building".into());
+    }
+    if joined.contains("cargo test") || joined.contains("running test") {
+        return Some("running tests".into());
+    }
+    if joined.contains("git push") {
+        return Some("pushing".into());
+    }
+    if joined.contains("git commit") {
+        return Some("committing".into());
+    }
+
+    // Claude Code tool indicators from the status bar
+    for line in &tail {
+        if line.contains("Read(") || line.contains("Reading") {
+            return Some("reading files".into());
+        }
+        if line.contains("Edit(") || line.contains("Editing") {
+            return Some("editing files".into());
+        }
+        if line.contains("Bash(") {
+            return Some("running command".into());
+        }
+        if line.contains("Write(") || line.contains("Writing") {
+            return Some("writing files".into());
+        }
+    }
+
+    if state == WorkerState::Running {
+        return Some("working".into());
+    }
+
+    // Check for shell prompt (agent exited, shell returned)
+    if let Some(last) = tail.first() {
+        let trimmed = last.trim();
+        if trimmed.ends_with('$') || trimmed.ends_with('#') || trimmed.ends_with('%') {
+            return Some("shell idle".into());
+        }
+    }
+
+    None
+}
+
+fn remove_worktree(path: &str) {
+    let wt = std::path::Path::new(path);
+    if !wt.exists() {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force", path])
+        .output();
 }
