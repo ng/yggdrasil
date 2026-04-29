@@ -16,7 +16,7 @@ pub async fn execute(
     config: &AppConfig,
     agent_name: &str,
 ) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let _node_repo = NodeRepo::new(pool);
 
     // Get or create the agent
@@ -126,7 +126,7 @@ async fn tail_transcript(
     session_id: &str,
 ) -> Result<(), anyhow::Error> {
     let node_repo = NodeRepo::new(pool);
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
 
     let file = tokio::fs::File::open(path).await?;
     let reader = BufReader::new(file);

@@ -75,7 +75,7 @@ async fn last_recipient(pool: &PgPool, from: &str) -> Result<Option<String>, any
 
 /// Build a row list (most-recent first) and run the user through a picker.
 async fn pick_recipient(pool: &PgPool) -> Result<String, anyhow::Error> {
-    let mut agents = AgentRepo::new(pool).list().await?;
+    let mut agents = AgentRepo::new(pool, crate::db::user_id()).list().await?;
     if agents.is_empty() {
         anyhow::bail!("no registered agents");
     }

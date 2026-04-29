@@ -48,7 +48,7 @@ async fn setup(pool: &sqlx::PgPool, suffix: &str) -> (Uuid, Uuid, Uuid, Uuid) {
         .await
         .unwrap();
 
-    let agent = AgentRepo::new(pool)
+    let agent = AgentRepo::new(pool, "test")
         .register(&format!("watcher-agent-{suffix}"))
         .await
         .unwrap();
@@ -130,7 +130,7 @@ async fn watcher_flag_stale_does_not_mutate_agent_state() {
     let (repo_id, _task_id, agent_id, _run_id) = setup(&pool, "noop").await;
 
     // Force the agent into a stale executing state.
-    AgentRepo::new(&pool)
+    AgentRepo::new(&pool, "test")
         .force_state(agent_id, AgentState::Executing, None)
         .await
         .unwrap();

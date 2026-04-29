@@ -366,7 +366,7 @@ async fn resolve_agent_id(
     agent_name: &str,
 ) -> Result<Option<Uuid>, anyhow::Error> {
     use crate::models::agent::AgentRepo;
-    Ok(AgentRepo::new(pool)
+    Ok(AgentRepo::new(pool, crate::db::user_id())
         .get_by_name(agent_name)
         .await?
         .map(|a| a.agent_id))

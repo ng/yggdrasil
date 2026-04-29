@@ -2,7 +2,7 @@ use crate::models::agent::AgentRepo;
 
 /// Detect and recover orphaned agents stuck in active states after a crash.
 pub async fn execute(pool: &sqlx::PgPool, stale_secs: Option<u64>) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let threshold = stale_secs.unwrap_or(300) as i64; // default 5 min
 
     let orphaned = agent_repo.find_orphaned(threshold).await?;

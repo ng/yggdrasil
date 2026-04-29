@@ -398,7 +398,7 @@ pub async fn abort(
     );
 
     println!("releasing locks held by agent '{agent_name}'…");
-    let lock_mgr = crate::lock::LockManager::new(pool, 300);
+    let lock_mgr = crate::lock::LockManager::new(pool, 300, crate::db::user_id());
     let locks = lock_mgr.list_all().await.unwrap_or_default();
     let agent_id =
         sqlx::query_scalar::<_, Option<Uuid>>("SELECT agent_id FROM agents WHERE agent_name = $1")

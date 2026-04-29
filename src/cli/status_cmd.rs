@@ -1,12 +1,15 @@
 use crate::lock::LockManager;
 use crate::models::agent::AgentRepo;
 
-/// Handle `ygg status [--agent <name>]`
-pub async fn execute(pool: &sqlx::PgPool, agent_name: Option<&str>) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+/// Handle `ygg status [--agent <name>] [--all-users]`
+pub async fn execute(
+    pool: &sqlx::PgPool,
+    agent_name: Option<&str>,
+    all_users: bool,
+) -> Result<(), anyhow::Error> {
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
 
     if let Some(name) = agent_name {
-        // Single agent status
         let agent = agent_repo
             .get_by_name(name)
             .await?
@@ -32,7 +35,7 @@ pub async fn execute(pool: &sqlx::PgPool, agent_name: Option<&str>) -> Result<()
         );
         println!("  Updated:  {}", agent.updated_at);
 
-        let lock_mgr = LockManager::new(pool, 300);
+        let lock_mgr = LockManager::new(pool, 300, crate::db::user_id());
         let locks = lock_mgr.list_agent_locks(agent.agent_id).await?;
         if locks.is_empty() {
             println!("  Locks:    none");
@@ -46,8 +49,11 @@ pub async fn execute(pool: &sqlx::PgPool, agent_name: Option<&str>) -> Result<()
             }
         }
     } else {
-        // All agents
-        let agents = agent_repo.list().await?;
+        let agents = if all_users {
+            agent_repo.list_all_users().await?
+        } else {
+            agent_repo.list().await?
+        };
 
         if agents.is_empty() {
             println!("No agents registered.");

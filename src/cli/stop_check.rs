@@ -50,7 +50,10 @@ pub async fn execute(pool: &sqlx::PgPool, agent_name: &str) -> Result<(), anyhow
 
     // Any tasks this agent still holds in_progress in the current repo.
     if let Ok(repo) = resolve_cwd_repo(pool).await {
-        if let Ok(Some(agent)) = AgentRepo::new(pool).get_by_name(agent_name).await {
+        if let Ok(Some(agent)) = AgentRepo::new(pool, crate::db::user_id())
+            .get_by_name(agent_name)
+            .await
+        {
             let open: Vec<(i32, String)> = sqlx::query_as(
                 r#"SELECT seq, title FROM tasks
                     WHERE repo_id = $1 AND assignee = $2 AND status = 'in_progress'

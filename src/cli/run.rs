@@ -18,7 +18,7 @@ pub async fn execute(
     session_id: &str,
 ) -> Result<(), anyhow::Error> {
     let node_repo = NodeRepo::new(pool);
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let ollama = OllamaClient::new(
         &config.ollama_base_url,
         &config.ollama_embed_model,

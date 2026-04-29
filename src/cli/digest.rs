@@ -17,7 +17,7 @@ pub async fn execute(
     agent_name: &str,
     transcript_path: &str,
 ) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let node_repo = NodeRepo::new(pool);
     let event_repo = EventRepo::new(pool);
 

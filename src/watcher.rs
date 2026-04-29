@@ -161,7 +161,8 @@ impl Watcher {
 
     /// Remove all expired locks.
     async fn reap_expired_locks(&self) -> Result<u64, anyhow::Error> {
-        let lock_mgr = LockManager::new(&self.pool, self.config.lock_ttl_secs);
+        let lock_mgr =
+            LockManager::new(&self.pool, self.config.lock_ttl_secs, crate::db::user_id());
         let count = lock_mgr.reap_expired().await?;
         Ok(count)
     }

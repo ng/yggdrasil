@@ -208,14 +208,14 @@ impl DashboardView {
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(3600);
 
-        let candidates = match AgentRepo::new(pool)
+        let candidates = match AgentRepo::new(pool, crate::db::user_id())
             .list_orphan_candidates(stale_secs)
             .await
         {
             Ok(c) => c,
             Err(_) => return,
         };
-        let repo = AgentRepo::new(pool);
+        let repo = AgentRepo::new(pool, crate::db::user_id());
         let mut archived: Vec<String> = Vec::new();
         for (agent_id, agent_name, worktree_path) in candidates {
             if !std::path::Path::new(&worktree_path).exists() {
@@ -271,7 +271,7 @@ impl DashboardView {
             self.flash = Some("rename cancelled (empty)".into());
             return;
         }
-        let repo = AgentRepo::new(pool);
+        let repo = AgentRepo::new(pool, crate::db::user_id());
         match repo.rename(agent_id, new_name).await {
             Ok(()) => {
                 self.flash = Some(format!("renamed → {new_name}"));
@@ -337,7 +337,7 @@ impl DashboardView {
         let Some(a) = self.agents.get(self.selected).cloned() else {
             return;
         };
-        let repo = AgentRepo::new(pool);
+        let repo = AgentRepo::new(pool, crate::db::user_id());
         match repo.archive(a.agent_id).await {
             Ok(()) => {
                 self.flash = Some(format!("archived '{}'", a.agent_name));
@@ -377,7 +377,7 @@ impl DashboardView {
         // index on this tick.
         let pinned_id = self.agents.get(self.selected).map(|a| a.agent_id);
 
-        let agent_repo = AgentRepo::new(pool);
+        let agent_repo = AgentRepo::new(pool, crate::db::user_id());
         let mut agents = agent_repo.list().await?;
         // Most-recently-active first. The repo orders by created_at,
         // which buries hot sessions under months-old identities in a
@@ -400,7 +400,7 @@ impl DashboardView {
             }
         }
 
-        let lock_mgr = LockManager::new(pool, 300);
+        let lock_mgr = LockManager::new(pool, 300, crate::db::user_id());
         self.locks = lock_mgr.list_all().await?;
 
         // Live session counts per agent — surfaces when one identity has

@@ -26,7 +26,7 @@ pub async fn take_over(
     config: &AppConfig,
     agent_name: &str,
 ) -> Result<InterruptSnapshot, anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let node_repo = NodeRepo::new(pool);
     let ollama = OllamaClient::new(
         &config.ollama_base_url,
@@ -92,7 +92,7 @@ pub async fn hand_back(
     agent_name: &str,
     summary: &str,
 ) -> Result<(), anyhow::Error> {
-    let agent_repo = AgentRepo::new(pool);
+    let agent_repo = AgentRepo::new(pool, crate::db::user_id());
     let node_repo = NodeRepo::new(pool);
 
     let agent = agent_repo

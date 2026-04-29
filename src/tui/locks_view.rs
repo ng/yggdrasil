@@ -34,7 +34,7 @@ impl LocksView {
     }
 
     pub async fn refresh(&mut self, pool: &PgPool, ttl_secs: u64) -> Result<(), anyhow::Error> {
-        let lock_mgr = LockManager::new(pool, ttl_secs);
+        let lock_mgr = LockManager::new(pool, ttl_secs, crate::db::user_id());
         let mut locks = lock_mgr.list_all().await?;
         let now = Utc::now();
         locks.retain(|l| (l.expires_at - now).num_seconds() > 0);
@@ -43,7 +43,7 @@ impl LocksView {
         locks.reverse();
         self.locks = locks;
 
-        let agent_repo = AgentRepo::new(pool);
+        let agent_repo = AgentRepo::new(pool, crate::db::user_id());
         let agents = agent_repo.list_all().await?;
         self.agent_name_by_id = agents
             .iter()
@@ -77,7 +77,7 @@ impl LocksView {
         let Some(lock) = self.locks.get(self.selected).cloned() else {
             return;
         };
-        let lock_mgr = LockManager::new(pool, ttl_secs);
+        let lock_mgr = LockManager::new(pool, ttl_secs, crate::db::user_id());
         match lock_mgr.release(&lock.resource_key, lock.agent_id).await {
             Ok(()) => self.flash = Some(format!("released {}", short_resource(&lock.resource_key))),
             Err(e) => self.flash = Some(format!("release failed: {e}")),

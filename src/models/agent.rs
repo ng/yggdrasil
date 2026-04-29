@@ -62,15 +62,18 @@ impl AgentWorkflow {
 
 pub struct AgentRepo<'a> {
     pool: &'a PgPool,
+    user_id: String,
 }
 
 impl<'a> AgentRepo<'a> {
-    pub fn new(pool: &'a PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: &'a PgPool, user_id: &str) -> Self {
+        Self {
+            pool,
+            user_id: user_id.to_string(),
+        }
     }
 
-    /// Register a new agent or return existing one by (name, persona).
-    /// The compound key means the same cwd can host multiple personas.
+    /// Register a new agent or return existing one by (user_id, name, persona).
     pub async fn register(&self, name: &str) -> Result<AgentWorkflow, sqlx::Error> {
         self.register_with_persona(name, None).await
     }
@@ -82,9 +85,9 @@ impl<'a> AgentRepo<'a> {
     ) -> Result<AgentWorkflow, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            INSERT INTO agents (agent_name, persona)
-            VALUES ($1, $2)
-            ON CONFLICT (agent_name, COALESCE(persona, ''))
+            INSERT INTO agents (agent_name, persona, user_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, agent_name, COALESCE(persona, ''))
               DO UPDATE SET updated_at = now()
             RETURNING agent_id, agent_name, current_state, head_node_id,
                       digest_id, context_tokens, metadata, created_at, updated_at, persona
@@ -92,6 +95,7 @@ impl<'a> AgentRepo<'a> {
         )
         .bind(name)
         .bind(persona)
+        .bind(&self.user_id)
         .fetch_one(self.pool)
         .await
     }
@@ -134,7 +138,6 @@ impl<'a> AgentRepo<'a> {
             Some(t) => serde_json::json!({"last_tool": t}),
             None => serde_json::json!({"last_tool": null}),
         };
-        // Returns (old_state, agent_name) so we can emit a transition event.
         let row: Option<(AgentState, String)> = sqlx::query_as(
             r#"
             WITH prior AS (
@@ -155,7 +158,6 @@ impl<'a> AgentRepo<'a> {
         .fetch_optional(self.pool)
         .await?;
 
-        // Emit only on actual change — no-op transitions aren't useful signal.
         if let Some((old, name)) = row {
             if old != to {
                 let payload = serde_json::json!({
@@ -164,13 +166,14 @@ impl<'a> AgentRepo<'a> {
                     "tool": last_tool,
                 });
                 let _ = sqlx::query(
-                    "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id)
-                     VALUES ('agent_state_changed', $1, $2, $3, $4)",
+                    "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id, user_id)
+                     VALUES ('agent_state_changed', $1, $2, $3, $4, $5)",
                 )
                 .bind(agent_id)
                 .bind(&name)
                 .bind(payload)
                 .bind(crate::models::event::cc_session_id())
+                .bind(&self.user_id)
                 .execute(self.pool)
                 .await;
             }
@@ -197,7 +200,6 @@ impl<'a> AgentRepo<'a> {
     }
 
     /// Atomically update head, digest, and token count in a single statement.
-    /// Use this instead of separate update_head + set_digest calls.
     pub async fn flush_context(
         &self,
         agent_id: Uuid,
@@ -241,22 +243,19 @@ impl<'a> AgentRepo<'a> {
         .await
     }
 
-    /// Get agent by name.
-    /// Lookup by bare agent_name. When multiple personas share the name,
-    /// returns the one with NULL persona if it exists, else the most
-    /// recently updated. Callers that care about persona should use
-    /// `get_by_name_persona`.
+    /// Get agent by name within the current user's namespace.
     pub async fn get_by_name(&self, name: &str) -> Result<Option<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
                    digest_id, context_tokens, metadata, created_at, updated_at, persona
-            FROM agents WHERE agent_name = $1
+            FROM agents WHERE agent_name = $1 AND user_id = $2
             ORDER BY (persona IS NOT NULL), updated_at DESC
             LIMIT 1
             "#,
         )
         .bind(name)
+        .bind(&self.user_id)
         .fetch_optional(self.pool)
         .await
     }
@@ -271,18 +270,48 @@ impl<'a> AgentRepo<'a> {
             SELECT agent_id, agent_name, current_state, head_node_id,
                    digest_id, context_tokens, metadata, created_at, updated_at, persona
             FROM agents
-            WHERE agent_name = $1 AND COALESCE(persona, '') = COALESCE($2, '')
+            WHERE agent_name = $1 AND COALESCE(persona, '') = COALESCE($2, '') AND user_id = $3
             "#,
         )
         .bind(name)
         .bind(persona)
+        .bind(&self.user_id)
         .fetch_optional(self.pool)
         .await
     }
 
-    /// List all agents.
-    /// List live agents only — the dashboard/statusline default.
+    /// List live agents for the current user.
     pub async fn list(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
+        sqlx::query_as::<_, AgentWorkflow>(
+            r#"
+            SELECT agent_id, agent_name, current_state, head_node_id,
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            FROM agents
+            WHERE archived_at IS NULL AND user_id = $1
+            ORDER BY created_at
+            "#,
+        )
+        .bind(&self.user_id)
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// Include archived agents for the current user.
+    pub async fn list_all(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
+        sqlx::query_as::<_, AgentWorkflow>(
+            r#"
+            SELECT agent_id, agent_name, current_state, head_node_id,
+                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            FROM agents WHERE user_id = $1 ORDER BY created_at
+            "#,
+        )
+        .bind(&self.user_id)
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// List live agents across ALL users — for `ygg status --all-users`.
+    pub async fn list_all_users(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
             SELECT agent_id, agent_name, current_state, head_node_id,
@@ -290,19 +319,6 @@ impl<'a> AgentRepo<'a> {
             FROM agents
             WHERE archived_at IS NULL
             ORDER BY created_at
-            "#,
-        )
-        .fetch_all(self.pool)
-        .await
-    }
-
-    /// Include archived agents — for `ygg agent list --all` and audit paths.
-    pub async fn list_all(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
-        sqlx::query_as::<_, AgentWorkflow>(
-            r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
-            FROM agents ORDER BY created_at
             "#,
         )
         .fetch_all(self.pool)
@@ -317,10 +333,6 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
-    /// Rename an agent. Preserves persona and agent_id so joined rows
-    /// (events, nodes, sessions) stay linked. Caller should check for
-    /// collision on the compound key (agent_name, persona); the DB will
-    /// reject otherwise via the agents_name_persona_uk index.
     pub async fn rename(&self, agent_id: Uuid, new_name: &str) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE agents SET agent_name = $2, updated_at = now() WHERE agent_id = $1")
             .bind(agent_id)
@@ -330,10 +342,6 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
-    /// Return live agents whose most-recent worker has a worktree_path
-    /// populated, filtered to those older than `min_idle_secs`. The caller
-    /// checks the filesystem; SQL only gives us the candidates. Returns
-    /// `(agent_id, agent_name, worktree_path)`.
     pub async fn list_orphan_candidates(
         &self,
         min_idle_secs: i64,
@@ -346,12 +354,14 @@ impl<'a> AgentRepo<'a> {
             JOIN tasks t   ON t.assignee = a.agent_id
             JOIN workers w ON w.task_id = t.task_id
             WHERE a.archived_at IS NULL
+              AND a.user_id = $2
               AND w.worktree_path <> ''
               AND a.updated_at < now() - make_interval(secs => $1)
             ORDER BY a.agent_id, w.started_at DESC
             "#,
         )
         .bind(min_idle_secs)
+        .bind(&self.user_id)
         .fetch_all(self.pool)
         .await
     }
@@ -364,9 +374,6 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
-    /// Return the number of stale live agents: no events, no sessions
-    /// started, in the last `days`. The result is how many SHOULD be
-    /// archived; caller decides to actually do it.
     pub async fn find_stale(&self, days: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
@@ -374,6 +381,7 @@ impl<'a> AgentRepo<'a> {
                    a.digest_id, a.context_tokens, a.metadata, a.created_at, a.updated_at
             FROM agents a
             WHERE a.archived_at IS NULL
+              AND a.user_id = $2
               AND a.updated_at < now() - ($1 || ' days')::interval
               AND NOT EXISTS (
                     SELECT 1 FROM events e
@@ -394,13 +402,11 @@ impl<'a> AgentRepo<'a> {
             "#,
         )
         .bind(days.to_string())
+        .bind(&self.user_id)
         .fetch_all(self.pool)
         .await
     }
 
-    /// Find orphaned agents stuck in active states (crash recovery).
-    /// Returns agents in Executing/WaitingTool/Planning that haven't been
-    /// updated within the staleness threshold.
     pub async fn find_orphaned(&self, stale_secs: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
@@ -409,10 +415,12 @@ impl<'a> AgentRepo<'a> {
             FROM agents
             WHERE current_state IN ('executing', 'waiting_tool', 'planning', 'context_flush')
               AND updated_at < now() - make_interval(secs => $1)
+              AND user_id = $2
             ORDER BY updated_at
             "#,
         )
         .bind(stale_secs as f64)
+        .bind(&self.user_id)
         .fetch_all(self.pool)
         .await
     }
