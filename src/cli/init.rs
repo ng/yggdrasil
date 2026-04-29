@@ -1031,17 +1031,21 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         }
         ok("slash commands", "installed");
 
-        // Install hooks into Claude Code settings
+        // Install hooks into Claude Code settings — use native `ygg hook`
+        // subcommand instead of shell scripts. The shell scripts are still
+        // installed above for backwards compatibility / manual use.
         let settings_path = claude_dir.join("settings.json");
-        let hooks_path = hooks_dir.to_string_lossy();
+
+        // Resolve the ygg binary path so the hook command is absolute.
+        let ygg_bin = find_bin("ygg").unwrap_or_else(|| "ygg".to_string());
 
         let settings = serde_json::json!({
             "hooks": {
-                "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/session-start.sh")}]}],
-                "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/pre-tool-use.sh")}]}],
-                "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/prompt-submit.sh")}]}],
-                "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/pre-compact.sh")}]}],
-                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{hooks_path}/stop.sh")}]}]
+                "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook session-start")}]}],
+                "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook pre-tool-use")}]}],
+                "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook prompt-submit")}]}],
+                "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook pre-compact")}]}],
+                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook stop")}]}]
             },
             "statusLine": {
                 "type": "command",
