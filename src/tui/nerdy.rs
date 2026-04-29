@@ -7,8 +7,10 @@
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 use sqlx::PgPool;
+
+use super::app::{OpsStats, cost_hidden, format_tokens_per_min};
 
 use super::ctx_usage::{
     HARD_DANGER, SOFT_DEGRADATION, SOFT_HARD_WARN, agent_usage_breakdown, ctx_color,
@@ -86,6 +88,11 @@ pub struct HookFire {
 
 pub struct NerdyView {
     pub stats: NerdyStats,
+    pub ops: OpsStats,
+    /// Events-per-hour sparkline, last 24h (24 buckets, oldest→newest).
+    pub events_hourly: Vec<u64>,
+    /// Per-agent context bars: (name, tokens, hard_cap) sorted desc by tokens.
+    pub agent_bars: Vec<(String, i64, i64)>,
 }
 
 impl Default for NerdyView {
@@ -98,11 +105,50 @@ impl NerdyView {
     pub fn new() -> Self {
         Self {
             stats: NerdyStats::default(),
+            ops: OpsStats::default(),
+            events_hourly: vec![0; 24],
+            agent_bars: vec![],
         }
+    }
+
+    pub fn update_ops(&mut self, ops: &OpsStats) {
+        self.ops = ops.clone();
     }
 
     pub async fn refresh(&mut self, pool: &PgPool) -> Result<(), anyhow::Error> {
         self.stats = collect(pool).await;
+
+        // Events-per-hour sparkline — 24 buckets.
+        let rows: Vec<(i32, i64)> = sqlx::query_as(
+            "SELECT (24 - FLOOR(EXTRACT(EPOCH FROM (now() - created_at)) / 3600))::int,
+                    COUNT(*)
+             FROM events
+             WHERE created_at >= now() - interval '24 hours'
+             GROUP BY 1 ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        let mut series = vec![0u64; 24];
+        for (b, n) in rows {
+            let idx = (b - 1).clamp(0, 23) as usize;
+            series[idx] = n as u64;
+        }
+        self.events_hourly = series;
+
+        // Per-agent context bars from live transcripts.
+        let mut bars: Vec<(String, i64, i64)> = Vec::new();
+        if let Ok(agents) = AgentRepo::new(pool, crate::db::user_id()).list().await {
+            for a in &agents {
+                if let Some(b) = agent_usage_breakdown(&a.agent_name) {
+                    bars.push((a.agent_name.clone(), b.total(), b.hard_cap));
+                }
+            }
+        }
+        bars.sort_by(|a, b| b.1.cmp(&a.1));
+        bars.truncate(15);
+        self.agent_bars = bars;
+
         Ok(())
     }
 
@@ -114,12 +160,58 @@ impl NerdyView {
             return;
         }
 
-        let mut lines: Vec<Line> = Vec::with_capacity(64);
+        // Split: left text panel (65%) | right sparkline + context bars (35%)
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+            .split(area);
+
+        let mut lines: Vec<Line> = Vec::with_capacity(80);
+
+        // ── Live Signals ─────────────────────────────────────────
+        lines.push(section_header("live signals"));
+        let o = &self.ops;
+        lines.push(kv("throughput", &format_tokens_per_min(o.tokens_per_min)));
+        if !cost_hidden() {
+            lines.push(kv("cost today", &format!("${:.2}", o.cost_today_usd)));
+            lines.push(kv("tokens today", &humanize_tokens(o.tokens_today)));
+        }
+        lines.push(kv("events/min", &format!("{}", o.events_per_min)));
+        let pool_pct = if o.pool_max > 0 {
+            format!(
+                "{}/{} ({:.0}%)",
+                o.pool_used,
+                o.pool_max,
+                o.pool_used as f64 / o.pool_max as f64 * 100.0
+            )
+        } else {
+            "?".into()
+        };
+        lines.push(kv("pool saturation", &pool_pct));
+        lines.push(kv("db latency", &format!("{}ms", o.db_ms)));
+        let health = |ok: bool| -> Span<'static> {
+            if ok {
+                Span::styled("OK", Style::default().fg(Color::Green))
+            } else {
+                Span::styled(
+                    "DOWN",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("    {:<26}", "ollama"),
+                Style::default().fg(Color::Gray),
+            ),
+            health(o.ollama_ok),
+            Span::raw("    "),
+            Span::styled("pgvector  ", Style::default().fg(Color::Gray)),
+            health(o.pgvector_ok),
+        ]));
+        lines.push(Line::from(""));
 
         // ── Tokens ───────────────────────────────────────────────
-        // Live context-window roll-up across all agents — flags how
-        // many sessions are sitting past the soft-degradation knee
-        // even when none individually trip the hard-cap alert.
         let t = &self.stats.tokens;
         lines.push(section_header(&format!(
             "tokens (live across {} session{})",
@@ -148,19 +240,13 @@ impl NerdyView {
                 ),
             ));
             lines.push(kv(
-                "input",
+                "input + output",
                 &format!(
-                    "{} ({:.0}%)",
+                    "{} + {} ({:.0}% + {:.0}%)",
                     humanize_tokens(t.input),
-                    100.0 * t.input as f64 / total as f64
-                ),
-            ));
-            lines.push(kv(
-                "output",
-                &format!(
-                    "{} ({:.0}%)",
                     humanize_tokens(t.output),
-                    100.0 * t.output as f64 / total as f64
+                    100.0 * t.input as f64 / total as f64,
+                    100.0 * t.output as f64 / total as f64,
                 ),
             ));
             if let Some((name, tokens, _hard)) = &t.largest {
@@ -176,30 +262,11 @@ impl NerdyView {
                     ),
                 ]));
             }
-            lines.push(kv(
-                &format!("past soft (≥{})", humanize_tokens(SOFT_DEGRADATION)),
-                &format!(
-                    "{} session{}",
-                    t.past_soft,
-                    if t.past_soft == 1 { "" } else { "s" }
-                ),
-            ));
-            lines.push(kv(
-                &format!("past warn (≥{})", humanize_tokens(SOFT_HARD_WARN)),
-                &format!(
-                    "{} session{}",
-                    t.past_warn,
-                    if t.past_warn == 1 { "" } else { "s" }
-                ),
-            ));
-            lines.push(kv(
-                &format!("past danger (≥{})", humanize_tokens(HARD_DANGER)),
-                &format!(
-                    "{} session{}",
-                    t.past_hard,
-                    if t.past_hard == 1 { "" } else { "s" }
-                ),
-            ));
+            let thresholds = format!(
+                "{} soft / {} warn / {} danger",
+                t.past_soft, t.past_warn, t.past_hard
+            );
+            lines.push(kv("past thresholds", &thresholds));
         }
         lines.push(Line::from(""));
 
@@ -210,10 +277,6 @@ impl NerdyView {
             "used / idle / max",
             &format!("{} / {} / {}", p.used, p.idle, p.max),
         ));
-        if p.max > 0 {
-            let pct = (p.used as f64 / p.max as f64) * 100.0;
-            lines.push(kv("saturation", &format!("{pct:.0}%")));
-        }
         lines.push(Line::from(""));
 
         // ── Tables ───────────────────────────────────────────────
@@ -275,9 +338,83 @@ impl NerdyView {
         let para = Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Nerdy · tokens / pool / tables / pgvector / hooks "),
+                .title(" Nerdy · live / tokens / pool / tables / pgvector / hooks "),
         );
-        frame.render_widget(para, area);
+        frame.render_widget(para, cols[0]);
+
+        // ── Right panel: sparkline + context bars ────────────────
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(6), // events sparkline
+                Constraint::Min(4),    // per-agent context bars
+            ])
+            .split(cols[1]);
+
+        // Events/hour sparkline
+        let max = *self.events_hourly.iter().max().unwrap_or(&1);
+        let spark = Sparkline::default()
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" Events/hour 24h · peak {} ", max)),
+            )
+            .data(&self.events_hourly)
+            .max(max.max(1))
+            .style(Style::default().fg(Color::Magenta));
+        frame.render_widget(spark, right[0]);
+
+        // Per-agent context bars — horizontal bars sized relative to
+        // the largest session's hard_cap.
+        let bar_width = right[1].width.saturating_sub(2) as usize; // inside borders
+        let max_cap = self
+            .agent_bars
+            .iter()
+            .map(|(_, _, cap)| *cap)
+            .max()
+            .unwrap_or(300_000)
+            .max(1);
+        let mut bar_lines: Vec<Line> = Vec::new();
+        for (name, tokens, cap) in &self.agent_bars {
+            let label_width = 16.min(bar_width / 3);
+            let bar_space = bar_width.saturating_sub(label_width + 10);
+            let filled = if *cap > 0 {
+                ((*tokens as f64 / *cap as f64) * bar_space as f64).round() as usize
+            } else {
+                ((*tokens as f64 / max_cap as f64) * bar_space as f64).round() as usize
+            }
+            .min(bar_space);
+            let color = ctx_color(*tokens);
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_space.saturating_sub(filled));
+            let truncated_name = if name.len() > label_width {
+                &name[..label_width]
+            } else {
+                name
+            };
+            bar_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<width$}", truncated_name, width = label_width),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(bar, Style::default().fg(color)),
+                Span::styled(
+                    format!(" {}", humanize_tokens(*tokens)),
+                    Style::default().fg(color),
+                ),
+            ]));
+        }
+        if bar_lines.is_empty() {
+            bar_lines.push(Line::from(Span::styled(
+                " (no live transcripts)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        let bars_widget = Paragraph::new(bar_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Context per agent "),
+        );
+        frame.render_widget(bars_widget, right[1]);
     }
 }
 

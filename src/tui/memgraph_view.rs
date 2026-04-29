@@ -15,6 +15,9 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use sqlx::{PgPool, Row as SqlxRow};
 use uuid::Uuid;
 
+use crate::embed::Embedder;
+use crate::models::node::NodeKind;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemSource {
     Node,
@@ -51,6 +54,11 @@ pub struct MemGraphView {
     /// Which recent row's neighbors are currently loaded. Tracks the cursor
     /// so we don't re-query on every render tick — only when it moved.
     loaded_for: Option<Uuid>,
+    /// Search mode: when Some, the bottom panel shows search results instead
+    /// of neighbors. `/` enters, Esc exits, Enter runs.
+    pub search_input: Option<String>,
+    pub search_status: String,
+    pub search_results: Vec<Neighbor>,
 }
 
 impl MemGraphView {
@@ -64,6 +72,9 @@ impl MemGraphView {
             last_status: String::new(),
             detail_open: false,
             loaded_for: None,
+            search_input: None,
+            search_status: String::new(),
+            search_results: vec![],
         }
     }
 
@@ -83,6 +94,99 @@ impl MemGraphView {
         }
         let i = self.recent_state.selected().unwrap_or(0);
         self.recent_state.select(Some((i + 1) % self.recent.len()));
+    }
+
+    pub fn search_mode(&self) -> bool {
+        self.search_input.is_some()
+    }
+
+    pub fn search_begin(&mut self) {
+        self.search_input = Some(String::new());
+        self.search_status = "type query, Enter to search".into();
+    }
+
+    pub fn search_cancel(&mut self) {
+        self.search_input = None;
+        self.search_results.clear();
+        self.search_status.clear();
+    }
+
+    pub fn search_push(&mut self, c: char) {
+        if let Some(ref mut buf) = self.search_input {
+            buf.push(c);
+        }
+    }
+
+    pub fn search_pop(&mut self) {
+        if let Some(ref mut buf) = self.search_input {
+            buf.pop();
+        }
+    }
+
+    pub async fn search_run(&mut self, pool: &PgPool) {
+        let query = match &self.search_input {
+            Some(q) if !q.trim().is_empty() => q.trim().to_string(),
+            _ => {
+                self.search_status = "empty query".into();
+                self.search_results.clear();
+                return;
+            }
+        };
+        self.search_status = "embedding...".into();
+        let embedder = Embedder::default_ollama();
+        if !embedder.health_check().await {
+            self.search_status = "ollama unavailable".into();
+            return;
+        }
+        let start = std::time::Instant::now();
+        let (vec, cached) = match embedder.embed_cached(pool, &query).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.search_status = format!("embed failed: {e}");
+                return;
+            }
+        };
+        let node_repo = crate::models::node::NodeRepo::new(pool);
+        let kinds = [NodeKind::UserMessage, NodeKind::Directive, NodeKind::Digest];
+        let hits = match node_repo
+            .hybrid_search_global(&vec, &query, &kinds, 12, 0.8)
+            .await
+        {
+            Ok(h) => h,
+            Err(_) => node_repo
+                .similarity_search_global(&vec, &kinds, 12, 0.8)
+                .await
+                .unwrap_or_default(),
+        };
+        let elapsed = start.elapsed();
+        self.search_status = format!(
+            "{} result(s) in {:.0}ms {}",
+            hits.len(),
+            elapsed.as_secs_f64() * 1000.0,
+            if cached { "(cached)" } else { "(fresh)" }
+        );
+        self.search_results = hits
+            .into_iter()
+            .map(|h| {
+                let snippet_text = h
+                    .content
+                    .get("text")
+                    .or_else(|| h.content.get("directive"))
+                    .or_else(|| h.content.get("summary"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no text)")
+                    .replace('\n', " ");
+                let sim = h.similarity();
+                Neighbor {
+                    id: h.id,
+                    kind: format!("{:?}", h.kind).to_lowercase(),
+                    agent_name: h.agent_name,
+                    similarity: sim,
+                    snippet: snippet_text,
+                    created_at: h.created_at,
+                }
+            })
+            .collect();
     }
 
     pub fn toggle_detail(&mut self) {
@@ -292,18 +396,33 @@ impl MemGraphView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
-            .split(area);
+        if self.search_mode() {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(50),
+                ])
+                .split(area);
 
-        self.render_stats(frame, chunks[0]);
-        self.render_recent(frame, chunks[1]);
-        self.render_neighbors(frame, chunks[2]);
+            self.render_search_bar(frame, chunks[0]);
+            self.render_recent(frame, chunks[1]);
+            self.render_search_results(frame, chunks[2]);
+        } else {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(50),
+                ])
+                .split(area);
+
+            self.render_stats(frame, chunks[0]);
+            self.render_recent(frame, chunks[1]);
+            self.render_neighbors(frame, chunks[2]);
+        }
 
         if self.detail_open {
             if let Some(n) = self.selected_node().cloned() {
@@ -545,6 +664,107 @@ impl MemGraphView {
                 .borders(Borders::ALL)
                 .title(title)
                 .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        frame.render_widget(table, area);
+    }
+
+    fn render_search_bar(&self, frame: &mut Frame, area: Rect) {
+        let query_text = self.search_input.as_deref().unwrap_or("");
+        let title = format!(
+            " Search — {}  (/=search  Enter=run  Esc=cancel) ",
+            self.search_status
+        );
+        let para = Paragraph::new(query_text.to_string())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_style(Style::default().fg(Color::Magenta)),
+            )
+            .style(Style::default().fg(Color::White));
+        frame.render_widget(para, area);
+    }
+
+    fn render_search_results(&self, frame: &mut Frame, area: Rect) {
+        if self.search_results.is_empty() {
+            let msg = if self.search_status.is_empty() {
+                "type a query and press Enter"
+            } else {
+                &self.search_status
+            };
+            let para = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  {msg}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Search results ")
+                    .border_style(Style::default().fg(Color::Magenta)),
+            );
+            frame.render_widget(para, area);
+            return;
+        }
+
+        let header = Row::new(vec![
+            Cell::from("SIM").style(Style::default().fg(Color::Gray)),
+            Cell::from("KIND").style(Style::default().fg(Color::Gray)),
+            Cell::from("AGENT").style(Style::default().fg(Color::Gray)),
+            Cell::from("AGE").style(Style::default().fg(Color::Gray)),
+            Cell::from("SNIPPET").style(Style::default().fg(Color::Gray)),
+        ]);
+        let rows: Vec<Row> = self
+            .search_results
+            .iter()
+            .map(|n| {
+                let (glyph, color) = kind_style(&n.kind);
+                let sim_pct = (n.similarity * 100.0) as u32;
+                let bar_blocks = (sim_pct / 10).min(10) as usize;
+                let bar = format!(
+                    "{}{}  {sim_pct:>3}%",
+                    "█".repeat(bar_blocks),
+                    "░".repeat(10 - bar_blocks)
+                );
+                let sim_color = if sim_pct >= 80 {
+                    Color::Green
+                } else if sim_pct >= 60 {
+                    Color::Cyan
+                } else if sim_pct >= 40 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                let age = humanize_since(n.created_at);
+                Row::new(vec![
+                    Cell::from(bar).style(Style::default().fg(sim_color)),
+                    Cell::from(format!("{glyph} {}", n.kind)).style(Style::default().fg(color)),
+                    Cell::from(short(&n.agent_name, 16)).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(age).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(short(&n.snippet, 120)),
+                ])
+            })
+            .collect();
+
+        let title = format!(" {} search results ", self.search_results.len());
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(18),
+                Constraint::Length(18),
+                Constraint::Length(18),
+                Constraint::Length(6),
+                Constraint::Min(20),
+            ],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Magenta)),
         );
         frame.render_widget(table, area);
     }

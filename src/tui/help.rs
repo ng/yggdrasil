@@ -131,20 +131,6 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             keys: "↑↓",
             effect: "select node",
         }],
-        "Query" => &[
-            KeyHint {
-                keys: "type then Enter",
-                effect: "run similarity query",
-            },
-            KeyHint {
-                keys: "↑↓",
-                effect: "browse hits",
-            },
-            KeyHint {
-                keys: "Esc",
-                effect: "leave input mode",
-            },
-        ],
         "Logs" => &[
             KeyHint {
                 keys: "f",
@@ -163,6 +149,10 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             KeyHint {
                 keys: "Enter",
                 effect: "show node detail",
+            },
+            KeyHint {
+                keys: "/",
+                effect: "semantic search (Enter=run, Esc=cancel)",
             },
         ],
         "Eval" => &[KeyHint {
