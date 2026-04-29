@@ -671,14 +671,8 @@ impl DashboardView {
                     .as_f64()
                     .or_else(|| payload["similarity"].as_f64())
                     .unwrap_or(0.0);
-                let snippet = payload["snippet"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                let source_agent = payload["source_agent"]
-                    .as_str()
-                    .unwrap_or("?")
-                    .to_string();
+                let snippet = payload["snippet"].as_str().unwrap_or("").to_string();
+                let source_agent = payload["source_agent"].as_str().unwrap_or("?").to_string();
                 RecentHit {
                     score,
                     snippet,
@@ -898,8 +892,10 @@ impl DashboardView {
                AND created_at >= now() - interval '{interval_sql}' \
              ORDER BY created_at"
         );
-        let spark_rows: Vec<(chrono::DateTime<chrono::Utc>, i64)> =
-            sqlx::query_as(&query).fetch_all(pool).await.unwrap_or_default();
+        let spark_rows: Vec<(chrono::DateTime<chrono::Utc>, i64)> = sqlx::query_as(&query)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
         let mut spark = vec![0u64; bucket_count];
         let window_start = now - CDuration::seconds(bucket_secs * bucket_count as i64);
         for (ts, _) in &spark_rows {
@@ -1221,10 +1217,7 @@ impl DashboardView {
                         .fg(score_color)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("\"{snip}\" "),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("\"{snip}\" "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{} {age}", hit.source_agent),
                     Style::default().fg(Color::DarkGray),

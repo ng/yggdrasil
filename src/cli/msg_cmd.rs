@@ -209,6 +209,119 @@ pub fn print_inbox(msgs: &[Message]) {
     }
 }
 
+/// Send a broadcast message (no specific recipient). Any agent can claim it.
+pub async fn broadcast(
+    pool: &PgPool,
+    from_agent_name: &str,
+    body: &str,
+) -> Result<Uuid, anyhow::Error> {
+    let repo = AgentRepo::new(pool, crate::db::user_id());
+    let from = repo.get_by_name(from_agent_name).await?;
+    let from_id = from.as_ref().map(|a| a.agent_id);
+    let payload = serde_json::json!({ "body": body });
+
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (event_kind, agent_id, agent_name, recipient_agent_id, payload)
+         VALUES ('message', $1, $2, NULL, $3)
+         RETURNING id",
+    )
+    .bind(from_id)
+    .bind(from_agent_name)
+    .bind(&payload)
+    .fetch_one(pool)
+    .await?;
+
+    println!("broadcast sent (id: {id})");
+    Ok(id)
+}
+
+/// Claim an unclaimed broadcast message for a specific agent.
+pub async fn claim_broadcast(
+    pool: &PgPool,
+    event_id: Uuid,
+    agent_name: &str,
+) -> Result<(), anyhow::Error> {
+    let repo = AgentRepo::new(pool, crate::db::user_id());
+    let agent = repo
+        .get_by_name(agent_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("agent '{agent_name}' not found"))?;
+
+    let rows = sqlx::query(
+        "UPDATE events SET recipient_agent_id = $1
+          WHERE id = $2
+            AND event_kind = 'message'
+            AND recipient_agent_id IS NULL",
+    )
+    .bind(agent.agent_id)
+    .bind(event_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    if rows == 0 {
+        anyhow::bail!("message {event_id} not found or already claimed");
+    }
+    println!("claimed by {agent_name}");
+    Ok(())
+}
+
+/// Fetch all recent messages (directed + broadcast) for the TUI chat panel.
+pub async fn all_messages(
+    pool: &PgPool,
+    hours: i64,
+    limit: i64,
+) -> Result<Vec<ChatMessage>, anyhow::Error> {
+    let rows: Vec<(
+        Uuid,
+        Option<Uuid>,
+        String,
+        Option<String>,
+        serde_json::Value,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        r#"SELECT e.id, e.agent_id, e.agent_name,
+                      a.agent_name AS to_name,
+                      e.payload, e.created_at
+                 FROM events e
+                 LEFT JOIN agents a ON a.agent_id = e.recipient_agent_id
+                WHERE e.event_kind = 'message'
+                  AND e.created_at > now() - make_interval(hours => $1)
+                ORDER BY e.created_at DESC
+                LIMIT $2"#,
+    )
+    .bind(hours)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, _from_id, from_name, to_name, payload, ts)| ChatMessage {
+                id,
+                from_name,
+                to_name,
+                body: payload
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                created_at: ts,
+            },
+        )
+        .collect())
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub id: Uuid,
+    pub from_name: String,
+    pub to_name: Option<String>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
 fn push_via_tmux(to_agent: &str, body: &str) -> Result<(), anyhow::Error> {
     // Find a tmux session whose name starts with `ygg-<to_agent>·` — the
     // naming convention plan_cmd::sanitize_tmux_name uses. First match wins.
