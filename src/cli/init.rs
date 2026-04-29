@@ -929,7 +929,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             }
         }
 
-        if probe_ok {
+        if probe_ok && !skipping(&all_skips, "migrations") {
             let pb = spin("running migrations...");
             match async {
                 let pool = db::create_pool(&db_url).await?;
