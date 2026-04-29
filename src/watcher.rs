@@ -411,7 +411,10 @@ fn extract_intent(pane: &str, state: WorkerState) -> Option<String> {
     let joined = tail.join("\n");
 
     // Tool call patterns from Claude Code status line
-    if joined.contains("Compiling") || joined.contains("cargo build") || joined.contains("cargo check") {
+    if joined.contains("Compiling")
+        || joined.contains("cargo build")
+        || joined.contains("cargo check")
+    {
         return Some("building".into());
     }
     if joined.contains("cargo test") || joined.contains("running test") {

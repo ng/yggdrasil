@@ -67,7 +67,11 @@ enum Commands {
     },
 
     /// Run database migrations
-    Migrate,
+    Migrate {
+        /// Exit 0 if up-to-date, exit 1 if pending migrations exist (no changes applied)
+        #[arg(long)]
+        check: bool,
+    },
 
     /// Agent run loop + task-run lifecycle (claim, finalize, heartbeat, show)
     Run {
@@ -1091,11 +1095,33 @@ async fn main() -> anyhow::Result<()> {
             }
             ygg::cli::init::execute_with_options(verbose, &skip).await?;
         }
-        Commands::Migrate => {
+        Commands::Migrate { check } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::db::run_migrations(&pool).await?;
-            println!("Migrations complete.");
+            if check {
+                let pending = ygg::db::pending_migrations(&pool).await?;
+                if pending.is_empty() {
+                    println!("Schema is up to date.");
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "pending_count": pending.len(),
+                            "pending": pending,
+                        })
+                    );
+                    std::process::exit(1);
+                }
+            } else {
+                let pending = ygg::db::pending_migrations(&pool).await?;
+                let count = pending.len();
+                ygg::db::run_migrations(&pool).await?;
+                if count > 0 {
+                    println!("Applied {count} migration(s).");
+                } else {
+                    println!("Schema already up to date.");
+                }
+            }
         }
         Commands::Run { action } => {
             let config = ygg::config::AppConfig::from_env()?;

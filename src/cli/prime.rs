@@ -37,6 +37,7 @@ struct PrimeContext {
     repo_label: Option<String>,
     ready_tasks: Vec<Task>,
     open_count: i64,
+    pending_migrations: usize,
 }
 
 struct DigestInfo {
@@ -139,6 +140,11 @@ async fn try_with_db(
     // Best-effort: detect current repo, surface a few ready tasks.
     let (repo_label, ready_tasks, open_count) = resolve_repo_context(&pool).await;
 
+    let pending_migrations = db::pending_migrations(&pool)
+        .await
+        .map(|v| v.len())
+        .unwrap_or(0);
+
     Ok(PrimeContext {
         state: agent.current_state.to_string(),
         context_tokens: agent.context_tokens,
@@ -151,6 +157,7 @@ async fn try_with_db(
         repo_label,
         ready_tasks,
         open_count,
+        pending_migrations,
     })
 }
 
@@ -224,6 +231,14 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
         "**state** {state}  ·  **context** {bar}{pct}% ({tok_display})  ·  **locks** {lock_str}",
         state = ctx.state,
     );
+
+    if ctx.pending_migrations > 0 {
+        println!();
+        println!(
+            "**⚠ migrations** {} pending — run `ygg migrate` or `ygg init`",
+            ctx.pending_migrations,
+        );
+    }
 
     // Session recovery indicator
     if let Some(ref digest) = ctx.last_digest {

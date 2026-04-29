@@ -1061,7 +1061,11 @@ impl DashboardView {
                     Span::raw(" "),
                     Span::styled(short_title(&w.title), title_style),
                     if let Some(ref intent) = w.intent {
-                        let intent_color = if needs_attn { Color::Yellow } else { Color::DarkGray };
+                        let intent_color = if needs_attn {
+                            Color::Yellow
+                        } else {
+                            Color::DarkGray
+                        };
                         Span::styled(
                             format!("  · {}", short_cell(intent, 24)),
                             Style::default().fg(intent_color),
