@@ -164,7 +164,7 @@ fn find_bin(name: &str) -> Option<String> {
             }
         }
     }
-    // Fallback: which
+    // Fallback: which — return the absolute path it resolves, not the bare name.
     if let Ok(o) = std::process::Command::new("which")
         .arg(name)
         .stdout(Stdio::piped())
@@ -172,7 +172,10 @@ fn find_bin(name: &str) -> Option<String> {
         .output()
     {
         if o.status.success() {
-            return Some(name.to_string());
+            let resolved = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !resolved.is_empty() {
+                return Some(resolved);
+            }
         }
     }
     None

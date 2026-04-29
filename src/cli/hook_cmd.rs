@@ -112,8 +112,17 @@ async fn handle_session_start(
 /// 4. Call mark-read (silent)
 async fn handle_prompt_submit(agent_name: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
     let prompt_raw = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-    // Truncate to 2000 chars (matching the shell script's head -c 2000).
-    let prompt: String = prompt_raw.chars().take(2000).collect();
+    // Truncate to 2000 bytes (matching the shell script's `head -c 2000`).
+    // Use byte length with char-boundary snapping to avoid splitting multi-byte UTF-8.
+    let prompt = if prompt_raw.len() <= 2000 {
+        prompt_raw.to_string()
+    } else {
+        let mut end = 2000;
+        while !prompt_raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        prompt_raw[..end].to_string()
+    };
 
     let prompt_opt = if prompt.is_empty() {
         None
@@ -289,58 +298,71 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
         .unwrap_or("")
         .to_string();
 
-    let config = match AppConfig::from_env() {
-        Ok(c) => c,
+    // Attempt config + pool. If unavailable, warn but still try stop_check
+    // at the end — a transient DB failure must not silently skip the blocker
+    // check that prevents premature session exits.
+    let db = match AppConfig::from_env() {
+        Ok(config) => match crate::db::create_pool(&config.database_url).await {
+            Ok(pool) => Some((pool, config)),
+            Err(e) => {
+                warn!("hook stop: db pool error: {e}");
+                None
+            }
+        },
         Err(e) => {
             warn!("hook stop: config error: {e}");
-            return Ok(());
+            None
         }
     };
-    let pool = match crate::db::create_pool(&config.database_url).await {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("hook stop: db pool error: {e}");
-            return Ok(());
-        }
-    };
-    let user_id = crate::db::user_id().to_string();
 
-    // 1. Digest with --stop semantics.
-    if !transcript_path.is_empty() && std::path::Path::new(&transcript_path).is_file() {
-        if let Err(e) =
-            crate::cli::digest::execute(&pool, &config, agent_name, &transcript_path).await
-        {
-            warn!("hook stop: digest failed: {e}");
-        }
+    if let Some((ref pool, ref config)) = db {
+        let user_id = crate::db::user_id().to_string();
 
-        // --stop: end session + release locks (matching the Digest dispatch in main.rs).
-        if let Ok(Some(a)) = AgentRepo::new(&pool, &user_id)
-            .get_by_name(agent_name)
-            .await
-        {
-            if let Some(sid) =
-                crate::models::session::resolve_current_session(&pool, a.agent_id, None).await
+        // 1. Digest with --stop semantics.
+        if !transcript_path.is_empty() && std::path::Path::new(&transcript_path).is_file() {
+            if let Err(e) =
+                crate::cli::digest::execute(pool, config, agent_name, &transcript_path).await
             {
-                let _ = crate::models::session::SessionRepo::new(&pool)
-                    .end(sid)
-                    .await;
+                warn!("hook stop: digest failed: {e}");
             }
-            let lock_mgr = LockManager::new(&pool, config.lock_ttl_secs, &user_id);
-            let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
+
+            // --stop: end session + release locks (matching the Digest dispatch in main.rs).
+            if let Ok(Some(a)) = AgentRepo::new(pool, &user_id).get_by_name(agent_name).await {
+                if let Some(sid) =
+                    crate::models::session::resolve_current_session(pool, a.agent_id, None).await
+                {
+                    let _ = crate::models::session::SessionRepo::new(pool)
+                        .end(sid)
+                        .await;
+                }
+                let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, &user_id);
+                let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
+            }
+        }
+
+        // 2. Capture outcome (unless YGG_RUN_CAPTURE=0).
+        let skip_capture = std::env::var("YGG_RUN_CAPTURE")
+            .map(|v| v == "0")
+            .unwrap_or(false);
+        if !skip_capture {
+            let _ = crate::cli::run_cmd::capture_outcome_cli(pool, agent_name, None).await;
         }
     }
 
-    // 2. Capture outcome (unless YGG_RUN_CAPTURE=0).
-    let skip_capture = std::env::var("YGG_RUN_CAPTURE")
-        .map(|v| v == "0")
-        .unwrap_or(false);
-    if !skip_capture {
-        let _ = crate::cli::run_cmd::capture_outcome_cli(&pool, agent_name, None).await;
-    }
-
-    // 3. Stop-check (output to stdout).
-    if let Err(e) = crate::cli::stop_check::execute(&pool, agent_name).await {
-        warn!("hook stop: stop-check failed: {e}");
+    // 3. Stop-check (output to stdout) — runs regardless of whether
+    // digest/capture-outcome succeeded or DB was unavailable.
+    match &db {
+        Some((pool, _)) => {
+            if let Err(e) = crate::cli::stop_check::execute(pool, agent_name).await {
+                warn!("hook stop: stop-check failed: {e}");
+            }
+        }
+        None => {
+            // DB unavailable — we cannot run the blocker query, but we must
+            // not silently swallow the fact that stop_check was skipped.
+            warn!("hook stop: stop-check skipped — no DB connection available");
+            eprintln!("ygg: warning: stop-check could not run (no DB connection)");
+        }
     }
 
     Ok(())
@@ -351,11 +373,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_truncation() {
-        // Verify our char-based truncation matches the shell's head -c 2000
+    fn prompt_truncation_ascii() {
+        // ASCII: byte length == char length, should truncate to exactly 2000 bytes.
         let long = "a".repeat(3000);
-        let truncated: String = long.chars().take(2000).collect();
+        let truncated = if long.len() <= 2000 {
+            long.clone()
+        } else {
+            let mut end = 2000;
+            while !long.is_char_boundary(end) {
+                end -= 1;
+            }
+            long[..end].to_string()
+        };
         assert_eq!(truncated.len(), 2000);
+    }
+
+    #[test]
+    fn prompt_truncation_multibyte() {
+        // Multi-byte UTF-8: must not exceed 2000 bytes and must not split a char.
+        // "ä" is 2 bytes in UTF-8 — 1500 of them = 3000 bytes.
+        let long = "ä".repeat(1500);
+        assert_eq!(long.len(), 3000);
+        let truncated = if long.len() <= 2000 {
+            long.clone()
+        } else {
+            let mut end = 2000;
+            while !long.is_char_boundary(end) {
+                end -= 1;
+            }
+            long[..end].to_string()
+        };
+        assert!(truncated.len() <= 2000);
+        assert!(truncated.len() >= 1998); // snapped to nearest char boundary
+        // Must be valid UTF-8 (String guarantees this, but be explicit).
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
     }
 
     #[test]
