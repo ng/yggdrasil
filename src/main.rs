@@ -1103,10 +1103,13 @@ async fn main() -> anyhow::Result<()> {
                 if pending.is_empty() {
                     println!("Schema is up to date.");
                 } else {
-                    println!("{} pending migration(s):", pending.len());
-                    for name in &pending {
-                        println!("  - {name}");
-                    }
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "pending_count": pending.len(),
+                            "pending": pending,
+                        })
+                    );
                     std::process::exit(1);
                 }
             } else {

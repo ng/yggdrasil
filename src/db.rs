@@ -59,13 +59,17 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
 pub async fn pending_migrations(pool: &PgPool) -> Result<Vec<String>, anyhow::Error> {
     let migrator = sqlx::migrate!("./migrations");
 
-    let applied: HashSet<i64> =
-        sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations WHERE success = true")
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+    let applied: HashSet<i64> = match sqlx::query_scalar::<_, i64>(
+        "SELECT version FROM _sqlx_migrations WHERE success = true",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows.into_iter().collect(),
+        // 42P01 = undefined_table — fresh DB, no migrations applied yet.
+        Err(sqlx::Error::Database(ref e)) if e.code().as_deref() == Some("42P01") => HashSet::new(),
+        Err(e) => return Err(e.into()),
+    };
 
     let pending: Vec<String> = migrator
         .migrations
