@@ -292,7 +292,10 @@ async fn pg_enable_extension(
             }
             false
         }
-        Err(_) => false,
+        Err(e) => {
+            hint(&format!("psql invocation failed: {e}"));
+            false
+        }
     }
 }
 
