@@ -1216,8 +1216,7 @@ async fn embed_task_best_effort(
     if source.trim().chars().count() < 5 {
         return;
     }
-    // Truncate to the embedder's token ceiling (all-minilm caps at 256 tokens,
-    // ~1500 chars is well under).
+    // Truncate to ~1500 chars — keeps embedding input manageable.
     let source = if source.len() > 1500 {
         &source[..1500]
     } else {

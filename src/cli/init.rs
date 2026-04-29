@@ -567,7 +567,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         // Write config immediately so it's saved
         let env_content = format!(
             "DATABASE_URL={url}\n\
-             EMBEDDING_DIMENSIONS=384\n\
+             EMBEDDING_DIMENSIONS=768\n\
              CONTEXT_LIMIT_TOKENS=250000\n\
              CONTEXT_HARD_CAP_TOKENS=300000\n\
              LOCK_TTL_SECS=300\n\
@@ -591,7 +591,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let (pg_user, pg_host, pg_port, pg_pass) = parse_pg_url_parts(&db_url, &sys_user);
     let pg_is_local = pg_host == "localhost" || pg_host == "127.0.0.1";
 
-    let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "384".into());
+    let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "768".into());
 
     let db_show = db_url
         .find('@')
@@ -604,7 +604,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     println!("  {D}pkg{X}     {pkg}");
     println!("  {D}pg{X}      {db_show}");
-    println!("  {D}embed{X}   all-MiniLM-L6-v2 {D}({embed_dim}d, in-process){X}");
+    println!("  {D}embed{X}   embeddinggemma {D}({embed_dim}d, ollama){X}");
     println!();
     println!("  {BR}╭─────────────────────────────────────────────╮{X}");
 
@@ -837,15 +837,15 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
         // Pull embed model
         let embedder = crate::embed::Embedder::default_ollama();
-        let pb = spin("pulling all-minilm embedding model...");
+        let pb = spin("pulling embedding model...");
         match embedder.pull_model().await {
             Ok(()) => {
                 pb.finish_and_clear();
-                ok("all-minilm", "pulled");
+                ok("embed model", "pulled");
             }
             Err(e) => {
                 pb.finish_and_clear();
-                bad("all-minilm", &format!("{e}"));
+                bad("embed model", &format!("{e}"));
             }
         }
 
@@ -854,7 +854,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         match embedder.embed("hello world").await {
             Ok(_) => {
                 pb.finish_and_clear();
-                ok("embedding", "ok (384d)");
+                ok("embedding", &format!("ok ({embed_dim}d)"));
             }
             Err(e) => {
                 pb.finish_and_clear();
@@ -955,7 +955,7 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         if !new_url.is_empty() {
                             let new_content = format!(
                                 "DATABASE_URL={new_url}\n\
-                                 EMBEDDING_DIMENSIONS=384\n\
+                                 EMBEDDING_DIMENSIONS=768\n\
                                  CONTEXT_LIMIT_TOKENS=250000\n\
                                  CONTEXT_HARD_CAP_TOKENS=300000\n\
                                  LOCK_TTL_SECS=300\n\

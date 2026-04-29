@@ -111,6 +111,12 @@ Claude Code `--permission-mode` flag for spawned agents (default
 git worktree under `.ygg/worktrees/<name>` to avoid working-directory
 collisions between concurrent agents.
 
+**Similarity threshold:** `YGG_SIMILARITY_THRESHOLD` overrides the
+cosine distance threshold for vector search (default `0.5`, meaning
+similarity ≥ 0.5). Lower values return more results with weaker
+matches; higher values are stricter. The default is tuned for
+`embeddinggemma` (768d).
+
 ## Architecture Overview
 
 - **src/models/**: `agent` (state machine), `node` (DAG ledger with embeddings), `event` (live stream).

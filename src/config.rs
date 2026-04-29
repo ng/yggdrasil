@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub lock_ttl_secs: u64,
     pub heartbeat_interval_secs: u64,
     pub watcher_interval_secs: u64,
+    pub similarity_threshold: f64,
     pub rtk_binary_path: String,
 }
 
@@ -33,12 +34,12 @@ impl AppConfig {
             ollama_base_url: env::var("OLLAMA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
             ollama_embed_model: env::var("OLLAMA_EMBED_MODEL")
-                .unwrap_or_else(|_| "all-minilm".into()),
+                .unwrap_or_else(|_| "embeddinggemma".into()),
             ollama_chat_model: env::var("OLLAMA_CHAT_MODEL").unwrap_or_default(), // optional — digest is deterministic
             embedding_dimensions: env::var("EMBEDDING_DIMENSIONS")
-                .unwrap_or_else(|_| "384".into())
+                .unwrap_or_else(|_| "768".into())
                 .parse()
-                .unwrap_or(384),
+                .unwrap_or(768),
             context_limit_tokens: env::var("CONTEXT_LIMIT_TOKENS")
                 .unwrap_or_else(|_| "250000".into())
                 .parse()
@@ -59,6 +60,10 @@ impl AppConfig {
                 .unwrap_or_else(|_| "30".into())
                 .parse()
                 .unwrap_or(30),
+            similarity_threshold: env::var("YGG_SIMILARITY_THRESHOLD")
+                .unwrap_or_else(|_| "0.5".into())
+                .parse()
+                .unwrap_or(0.5),
             rtk_binary_path: env::var("RTK_BINARY_PATH").unwrap_or_else(|_| "rtk".into()),
         })
     }
