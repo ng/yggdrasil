@@ -78,6 +78,10 @@ pub struct DagView {
     /// Stored with the display label so the confirm line stays accurate
     /// even if the selection moves.
     pub pending_delete: Option<(Uuid, String)>,
+    // Dependency edge maps — persisted from refresh for the dep tree panel.
+    children_of: HashMap<Uuid, Vec<Uuid>>,
+    blockers_of: HashMap<Uuid, Vec<Uuid>>,
+    tasks_by_id: HashMap<Uuid, (Task, String)>,
 }
 
 pub enum RenderRow {
@@ -115,6 +119,9 @@ impl DagView {
             add_buffer: String::new(),
             flash: String::new(),
             pending_delete: None,
+            children_of: HashMap::new(),
+            blockers_of: HashMap::new(),
+            tasks_by_id: HashMap::new(),
         }
     }
 
@@ -422,11 +429,28 @@ impl DagView {
         }
 
         // Build the forward/backward edge maps from the preloaded edges.
-        let mut children_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        let mut blockers_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        // Persist on self so the dep-tree panel can render them.
+        self.children_of.clear();
+        self.blockers_of.clear();
         for (t, b) in &edges_all {
-            children_of.entry(*b).or_default().push(*t);
-            blockers_of.entry(*t).or_default().push(*b);
+            self.children_of.entry(*b).or_default().push(*t);
+            self.blockers_of.entry(*t).or_default().push(*b);
+        }
+        let children_of = &self.children_of;
+        let blockers_of = &self.blockers_of;
+
+        // Build tasks_by_id lookup for the dep-tree panel.
+        self.tasks_by_id.clear();
+        for tasks in by_repo.values() {
+            for t in tasks {
+                let prefix = repos
+                    .iter()
+                    .find(|r| r.repo_id == t.repo_id)
+                    .map(|r| r.task_prefix.clone())
+                    .unwrap_or_default();
+                self.tasks_by_id
+                    .insert(t.task_id, (t.clone(), prefix));
+            }
         }
 
         // Stable repo order: by name asc.
@@ -686,6 +710,14 @@ impl DagView {
             title
         };
 
+        // Split: dep tree panel on top, task list on bottom.
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(7), Constraint::Percentage(60)])
+            .split(area);
+
+        self.render_dep_tree(frame, chunks[0]);
+
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(
@@ -693,9 +725,9 @@ impl DagView {
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
             );
-        frame.render_stateful_widget(list, area, &mut self.state);
+        frame.render_stateful_widget(list, chunks[1], &mut self.state);
 
-        // Detail overlay floats over the list when toggled on.
+        // Detail overlay floats over the full area.
         if self.detail_open {
             if let Some((task, prefix)) = self.selected_task() {
                 render_detail_overlay(frame, area, task, prefix);
@@ -712,6 +744,137 @@ impl DagView {
             );
         }
     }
+
+    fn render_dep_tree(&self, frame: &mut Frame, area: Rect) {
+        let selected = match self.selected_task() {
+            Some((task, prefix)) => (task.clone(), prefix.to_string()),
+            None => {
+                let para = ratatui::widgets::Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "  select a task to see its dependency tree",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ])
+                .block(Block::default().borders(Borders::ALL).title(" Dependencies "));
+                frame.render_widget(para, area);
+                return;
+            }
+        };
+        let (task, prefix) = &selected;
+        let task_ref = format!("{}-{}", prefix, task.seq);
+
+        let blockers: Vec<&(Task, String)> = self
+            .blockers_of
+            .get(&task.task_id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.tasks_by_id.get(id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let dependents: Vec<&(Task, String)> = self
+            .children_of
+            .get(&task.task_id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.tasks_by_id.get(id))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let title = format!(
+            " Dependencies · {task_ref}: {} ",
+            truncate(&task.title, 40)
+        );
+
+        if blockers.is_empty() && dependents.is_empty() {
+            let para = ratatui::widgets::Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  no dependencies — this task is independent",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(Block::default().borders(Borders::ALL).title(title));
+            frame.render_widget(para, area);
+            return;
+        }
+
+        // Two-column layout: blockers left, dependents right.
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+
+        // Left: blocked by
+        let mut left_lines: Vec<Line> = vec![Line::from(Span::styled(
+            " blocked by:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        if blockers.is_empty() {
+            left_lines.push(Line::from(Span::styled(
+                "   (none)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        for (t, p) in &blockers {
+            left_lines.push(dep_line(t, p));
+        }
+        let left = ratatui::widgets::Paragraph::new(left_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title.clone()),
+        );
+        frame.render_widget(left, cols[0]);
+
+        // Right: blocks
+        let mut right_lines: Vec<Line> = vec![Line::from(Span::styled(
+            " blocks:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        if dependents.is_empty() {
+            right_lines.push(Line::from(Span::styled(
+                "   (none)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        for (t, p) in &dependents {
+            right_lines.push(dep_line(t, p));
+        }
+        let right = ratatui::widgets::Paragraph::new(right_lines)
+            .block(Block::default().borders(Borders::ALL).title(" Dependents "));
+        frame.render_widget(right, cols[1]);
+    }
+}
+
+fn dep_line<'a>(t: &Task, prefix: &str) -> Line<'a> {
+    let (status_color, glyph) = match t.status {
+        TaskStatus::Open => (Color::DarkGray, "◯"),
+        TaskStatus::InProgress => (Color::Green, "▶"),
+        TaskStatus::Blocked => (Color::Red, "⏸"),
+        TaskStatus::Closed => (Color::DarkGray, "✓"),
+    };
+    let prio_color = match t.priority {
+        0 => Color::Red,
+        1 => Color::Yellow,
+        2 => Color::White,
+        _ => Color::DarkGray,
+    };
+    let id = format!("{}-{}", prefix, t.seq);
+    Line::from(vec![
+        Span::styled(format!("   {glyph} "), Style::default().fg(status_color)),
+        Span::styled(
+            format!("P{} ", t.priority),
+            Style::default().fg(prio_color),
+        ),
+        Span::styled(format!("{id} "), Style::default().fg(Color::DarkGray)),
+        Span::styled(truncate(&t.title, 35), Style::default()),
+    ])
 }
 
 fn render_add_overlay(frame: &mut Frame, area: Rect, buffer: &str, parent: Option<&str>) {
