@@ -276,24 +276,27 @@ async fn pg_ensure_role(
         }
     }
 
+    let esc_id = role.replace('"', "\"\"");
+    let quoted_role = format!("\"{esc_id}\"");
     let create_sql = if let Some(p) = pass {
+        let esc_pass = p.replace('\'', "''");
         format!(
             "DO $$ BEGIN \
-             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN \
-             CREATE ROLE {role} WITH LOGIN PASSWORD '{p}' CREATEDB; \
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{esc_id}') THEN \
+             CREATE ROLE {quoted_role} WITH LOGIN PASSWORD '{esc_pass}' CREATEDB; \
              END IF; \
              END $$"
         )
     } else {
         format!(
             "DO $$ BEGIN \
-             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN \
-             CREATE ROLE {role} WITH LOGIN CREATEDB; \
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{esc_id}') THEN \
+             CREATE ROLE {quoted_role} WITH LOGIN CREATEDB; \
              END IF; \
              END $$"
         )
     };
-    let grant_sql = format!("GRANT ALL ON SCHEMA public TO {role}");
+    let grant_sql = format!("GRANT ALL ON SCHEMA public TO {quoted_role}");
 
     // Try connecting as common superusers to create the role
     let candidates: Vec<&str> = ["postgres", sys_user]
@@ -745,9 +748,8 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             hint(&format!(
                 "then: psql -U postgres -h {pg_host} -p {pg_port} -d postgres -c \"GRANT ALL ON SCHEMA public TO {pg_user};\""
             ));
-            if !prompt_skip("role") {
-                std::process::exit(1);
-            }
+            hint("then re-run: ygg init");
+            std::process::exit(1);
         }
 
         // Create database
