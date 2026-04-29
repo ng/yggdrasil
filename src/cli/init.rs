@@ -331,7 +331,7 @@ async fn detect_pg_version() -> String {
     // Fallback: check common install locations
     let prefixes = ["/opt/homebrew/opt", "/usr/local/opt", "/usr/lib/postgresql"];
     for prefix in prefixes {
-        for ver in ["16", "15", "14"] {
+        for ver in ["18", "17", "16", "15", "14"] {
             let path = format!("{prefix}/postgresql@{ver}");
             let path2 = format!("{prefix}/{ver}");
             if Path::new(&path).exists() {
@@ -343,96 +343,7 @@ async fn detect_pg_version() -> String {
         }
     }
 
-    "postgresql@16".to_string()
-}
-
-/// Get the pg_config bin directory for a given postgres version.
-/// Uses pg_config --bindir if available, falls back to known paths.
-async fn get_pg_bin_dir(pg_version: &str) -> Option<String> {
-    // Try pg_config directly
-    if let Ok(output) = Command::new("pg_config")
-        .arg("--bindir")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-    {
-        if output.status.success() {
-            let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if Path::new(&dir).exists() {
-                return Some(dir);
-            }
-        }
-    }
-
-    // Check known locations
-    let candidates = [
-        format!("/opt/homebrew/opt/{pg_version}/bin"),
-        format!("/usr/local/opt/{pg_version}/bin"),
-        format!(
-            "/usr/lib/postgresql/{}/bin",
-            pg_version.trim_start_matches("postgresql@")
-        ),
-    ];
-    for dir in candidates {
-        if Path::new(&dir).exists() {
-            return Some(dir);
-        }
-    }
-
-    None
-}
-
-/// Build pgvector from git source using the system's pg_config.
-/// This bypasses brew's formula which only targets the latest 2 pg versions.
-async fn build_pgvector_from_source() -> bool {
-    let tmp = format!(
-        "{}/ygg-pgvector-build",
-        std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())
-    );
-
-    // Clean up any previous attempt
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    // Clone
-    if !run_show(
-        "git",
-        &[
-            "clone",
-            "--depth",
-            "1",
-            "https://github.com/pgvector/pgvector.git",
-            &tmp,
-        ],
-    )
-    .await
-    {
-        return false;
-    }
-
-    // Build — uses pg_config from PATH (which we set earlier)
-    let make_ok = Command::new("make")
-        .current_dir(&tmp)
-        .status()
-        .await
-        .is_ok_and(|s| s.success());
-
-    if !make_ok {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return false;
-    }
-
-    // Install — may need sudo on Linux, but on macOS with brew postgres
-    // the lib dir is user-writable
-    let install_ok = Command::new("make")
-        .args(["install"])
-        .current_dir(&tmp)
-        .status()
-        .await
-        .is_ok_and(|s| s.success());
-
-    let _ = std::fs::remove_dir_all(&tmp);
-    install_ok
+    "postgresql@18".to_string()
 }
 
 // ─── init ────────────────────────────────────────────────
@@ -687,44 +598,27 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         // Local postgres not responding — try to start or install it
         if has("psql").await {
             ok("postgresql", "installed");
+            let pg_ver = detect_pg_version().await;
             if has_brew {
-                run_show("brew", &["services", "start", "postgresql@16"]).await;
+                run_show("brew", &["services", "start", &pg_ver]).await;
             }
             if wait_port(5432, 10).await {
                 ok("postgresql", "started");
             } else {
                 bad("postgresql", "not responding on :5432");
                 if has_brew {
-                    hint("try: brew services restart postgresql@16");
+                    hint(&format!("try: brew services restart {pg_ver}"));
                 }
-                if !prompt_skip("postgresql") {
-                    std::process::exit(1);
-                }
-            }
-        } else if has_brew {
-            let pb = spin("brew install postgresql@16...");
-            let installed = run_show("brew", &["install", "postgresql@16"]).await;
-            pb.finish_and_clear();
-            if installed {
-                run_show("brew", &["services", "start", "postgresql@16"]).await;
-                if wait_port(5432, 10).await {
-                    ok("postgresql", "installed");
-                } else {
-                    bad("postgresql", "installed but won't start");
-                    hint("try: brew services restart postgresql@16");
-                    if !prompt_skip("postgresql") {
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                bad("postgresql", "brew install failed");
                 if !prompt_skip("postgresql") {
                     std::process::exit(1);
                 }
             }
         } else {
             bad("postgresql", "not installed");
-            if has_apt {
+            if has_brew {
+                hint("run: brew install postgresql@18");
+                hint("then: brew services start postgresql@18");
+            } else if has_apt {
                 hint("run: sudo apt-get install -y postgresql postgresql-client");
                 hint("then: sudo systemctl start postgresql");
             } else {
@@ -760,69 +654,20 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             ok("pgvector", "enabled");
         } else {
             bad("pgvector", "not available");
+            let pg_version = detect_pg_version().await;
+            let major = pg_version.trim_start_matches("postgresql@");
             if has_brew {
-                // Detect which postgres version is running
-                let pg_version = detect_pg_version().await;
-                hint(&format!("detected postgres: {pg_version}"));
-
-                if prompt_yes(&format!("install pgvector for {pg_version}?")) {
-                    // Ensure pg_config points to the running version
-                    if let Some(pg_bin) = get_pg_bin_dir(&pg_version).await {
-                        hint(&format!("using pg_config from: {pg_bin}"));
-                        let current_path = std::env::var("PATH").unwrap_or_default();
-                        unsafe {
-                            std::env::set_var("PATH", format!("{pg_bin}:{current_path}"));
-                        }
-                    }
-
-                    // Build pgvector from source directly — brew formula
-                    // only targets the latest 2 pg versions
-                    let pb = spin("building pgvector from source...");
-                    let ok_built = build_pgvector_from_source().await;
-                    pb.finish_and_clear();
-
-                    if ok_built {
-                        run_show("brew", &["services", "restart", &pg_version]).await;
-                        wait_port(5432, 10).await;
-
-                        if pg_enable_extension(
-                            &pg_user,
-                            &pg_host,
-                            pg_port,
-                            pg_pass.as_deref(),
-                            "vector",
-                        )
-                        .await
-                        {
-                            ok("pgvector", "built + enabled");
-                        } else {
-                            bad("pgvector", "built but can't enable");
-                            hint("check: psql -d ygg -c \"CREATE EXTENSION vector\" 2>&1");
-                            if !prompt_skip("pgvector") {
-                                std::process::exit(1);
-                            }
-                        }
-                    } else {
-                        bad("pgvector", "build failed");
-                        hint("requires: make, gcc/clang, postgresql server dev headers");
-                        if !prompt_skip("pgvector") {
-                            std::process::exit(1);
-                        }
-                    }
-                } else if !prompt_skip("pgvector") {
-                    std::process::exit(1);
-                }
+                hint("run: brew install pgvector");
             } else if has_apt {
-                hint("run: sudo apt-get install -y postgresql-16-pgvector");
-                hint("then: psql -d ygg -c 'CREATE EXTENSION vector'");
-                if !prompt_skip("pgvector") {
-                    std::process::exit(1);
-                }
+                hint(&format!(
+                    "run: sudo apt-get install -y postgresql-{major}-pgvector"
+                ));
             } else {
                 hint("install: https://github.com/pgvector/pgvector");
-                if !prompt_skip("pgvector") {
-                    std::process::exit(1);
-                }
+            }
+            hint("then: psql -d ygg -c 'CREATE EXTENSION vector'");
+            if !prompt_skip("pgvector") {
+                std::process::exit(1);
             }
         }
     }
