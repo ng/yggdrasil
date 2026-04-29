@@ -35,11 +35,9 @@ pub struct ComposeState {
 
 impl ChatView {
     pub fn new() -> Self {
-        let mut st = ListState::default();
-        st.select(Some(0));
         Self {
             messages: Vec::new(),
-            state: st,
+            state: ListState::default(),
             loaded: false,
             compose: None,
             flash: None,
@@ -51,15 +49,7 @@ impl ChatView {
     }
 
     pub fn compose_begin(&mut self) {
-        self.compose = Some(ComposeState {
-            buf: String::new(),
-        });
-    }
-
-    pub fn compose_begin_broadcast(&mut self) {
-        self.compose = Some(ComposeState {
-            buf: String::new(),
-        });
+        self.compose = Some(ComposeState { buf: String::new() });
     }
 
     pub fn compose_cancel(&mut self) {
@@ -133,7 +123,8 @@ impl ChatView {
     pub fn select_next(&mut self) {
         if !self.messages.is_empty() {
             let i = self.state.selected().unwrap_or(0);
-            self.state.select(Some((i + 1).min(self.messages.len() - 1)));
+            self.state
+                .select(Some((i + 1).min(self.messages.len() - 1)));
         }
     }
 
@@ -161,10 +152,9 @@ impl ChatView {
         if self.messages.is_empty() {
             self.state.select(None);
         } else {
-            // Keep selection at bottom (newest) unless user scrolled up
-            let cur = self.state.selected().unwrap_or(0);
-            if cur >= self.messages.len() {
-                self.state.select(Some(self.messages.len() - 1));
+            match self.state.selected() {
+                Some(cur) if cur < self.messages.len() => {}
+                _ => self.state.select(Some(self.messages.len() - 1)),
             }
         }
         Ok(())
@@ -184,8 +174,8 @@ impl ChatView {
             } else {
                 " no messages in last 24h · press [c] to compose ".into()
             };
-            let p = Paragraph::new(hint)
-                .block(Block::default().borders(Borders::ALL).title(" Chat "));
+            let p =
+                Paragraph::new(hint).block(Block::default().borders(Borders::ALL).title(" Chat "));
             frame.render_widget(p, area);
             if self.compose.is_some() {
                 self.render_compose_overlay(frame, area);
