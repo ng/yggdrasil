@@ -41,8 +41,7 @@ impl Embedder {
     pub fn default_ollama() -> Self {
         let base_url =
             std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-        let model =
-            std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "embeddinggemma".into());
+        let model = std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "embeddinggemma".into());
         Self::new(&base_url, &model)
     }
 

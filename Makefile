@@ -40,7 +40,13 @@ install: build
 		echo "      to use the new build: export PATH=$(PREFIX):\$$PATH"; \
 		echo "      or update it with: sudo cp $(PREFIX)/ygg $$(which ygg)"; \
 	fi
-	@echo "run 'ygg init' to finish setup"
+	@if $(PREFIX)/ygg migrate --check >/dev/null 2>&1; then \
+		echo "schema up to date"; \
+	else \
+		echo "pending migrations detected — running ygg migrate..."; \
+		$(PREFIX)/ygg migrate 2>&1 && echo "migrations applied" || \
+			echo "NOTE: migration failed — run 'ygg migrate' or 'ygg init' manually"; \
+	fi
 
 # Force a re-sign + verify against the currently-installed binary. Useful
 # after a manual `cp` that bypassed `make install` and now hangs (the

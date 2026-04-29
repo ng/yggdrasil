@@ -197,7 +197,11 @@ impl<'a> WorkerRepo<'a> {
         .await
     }
 
-    pub async fn set_intent(&self, worker_id: Uuid, intent: Option<&str>) -> Result<(), sqlx::Error> {
+    pub async fn set_intent(
+        &self,
+        worker_id: Uuid,
+        intent: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE workers SET intent = $2 WHERE worker_id = $1")
             .bind(worker_id)
             .bind(intent)
