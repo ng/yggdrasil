@@ -1,5 +1,6 @@
 use crate::lock::LockManager;
 use crate::models::agent::AgentRepo;
+use crate::models::worker::WorkerRepo;
 
 /// Handle `ygg status [--agent <name>] [--all-users]`
 pub async fn execute(
@@ -74,6 +75,34 @@ pub async fn execute(
             );
         }
         println!("\n{} agent(s).", agents.len());
+
+        // Live workers with intent
+        let workers = WorkerRepo::new(pool).list_live().await.unwrap_or_default();
+        if !workers.is_empty() {
+            println!(
+                "\n{:<16} {:<14} {:<12} {:<30}",
+                "WORKER", "STATE", "DELIVERY", "INTENT"
+            );
+            for w in &workers {
+                let delivery = if w.branch_merged {
+                    "merged"
+                } else if w.pr_url.is_some() {
+                    "pr-open"
+                } else if w.branch_pushed {
+                    "pushed"
+                } else {
+                    "local"
+                };
+                println!(
+                    "{:<16} {:<14} {:<12} {:<30}",
+                    w.tmux_window,
+                    format!("{:?}", w.state).to_lowercase(),
+                    delivery,
+                    w.intent.as_deref().unwrap_or("—"),
+                );
+            }
+            println!("\n{} worker(s).", workers.len());
+        }
     }
 
     Ok(())

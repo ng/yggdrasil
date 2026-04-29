@@ -152,6 +152,17 @@ impl TmuxManager {
         Ok(ws.iter().any(|w| w == agent_name))
     }
 
+    /// Kill a window by name in the given session. Silently succeeds if
+    /// the window is already gone.
+    pub fn kill_window_sync(session: &str, window: &str) {
+        let target = format!("{session}:{window}");
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-window", "-t", &target])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
     /// List all windows in the ygg session.
     pub async fn list_windows() -> Result<Vec<String>, crate::YggError> {
         let output = Command::new("tmux")
