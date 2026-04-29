@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::config::AppConfig;
 
+use super::chat_view::ChatView;
 use super::dag_view::DagView;
 use super::dashboard::DashboardView;
 use super::eval_view::EvalView;
@@ -36,6 +37,7 @@ pub enum ActiveView {
     Runs,
     RunGrid,
     Nerdy,
+    Chat,
 }
 
 pub struct App {
@@ -53,6 +55,7 @@ pub struct App {
     pub runs: RunsView,
     pub run_grid: RunGridView,
     pub nerdy: super::nerdy::NerdyView,
+    pub chat: ChatView,
     pub agent_name: String,
     /// Recent events shown in the global bottom status bar across all panes.
     pub status_tail: Vec<(String, String, String)>, // (hh:mm:ss, kind, one-line detail)
@@ -410,6 +413,7 @@ impl App {
             runs: RunsView::new(),
             run_grid: RunGridView::new(),
             nerdy: super::nerdy::NerdyView::new(),
+            chat: ChatView::new(),
             agent_name,
             status_tail: Vec::new(),
             ops_stats: OpsStats::default(),
@@ -683,6 +687,29 @@ impl App {
             return;
         }
 
+        // Chat compose overlay captures keys while active.
+        if self.active_view == ActiveView::Chat && self.chat.composing() {
+            match code {
+                KeyCode::Esc => self.chat.compose_cancel(),
+                KeyCode::Backspace => self.chat.compose_pop(),
+                KeyCode::Enter => {
+                    let from = std::env::var("YGG_AGENT_NAME")
+                        .ok()
+                        .unwrap_or_else(|| self.agent_name.clone());
+                    self.chat.compose_commit(pool, &from).await;
+                }
+                KeyCode::Char(c) => {
+                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        self.should_quit = true;
+                    } else {
+                        self.chat.compose_push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // MemGraph search mode captures keys while active.
         if self.active_view == ActiveView::MemGraph && self.memgraph.search_mode() {
             match code {
@@ -799,6 +826,7 @@ impl App {
             KeyCode::Char('0') => self.set_view(ActiveView::Runs),
             KeyCode::Char('G') => self.set_view(ActiveView::RunGrid),
             KeyCode::Char('N') => self.set_view(ActiveView::Nerdy),
+            KeyCode::Char('C') => self.set_view(ActiveView::Chat),
             // yggdrasil-151: open the detail overlay populated from the
             // current pane's selected row. Per-pane adapters: Tasks
             // shows the full title + description + acceptance + design
@@ -856,6 +884,15 @@ impl App {
             KeyCode::Char('c') if self.active_view == ActiveView::Dag => {
                 self.dag.clear_filters();
                 let _ = self.dag.refresh(pool).await;
+            }
+            KeyCode::Char('c') if self.active_view == ActiveView::Chat => {
+                self.chat.compose_begin();
+            }
+            KeyCode::Enter if self.active_view == ActiveView::Chat => {
+                let agent = std::env::var("YGG_AGENT_NAME")
+                    .ok()
+                    .unwrap_or_else(|| self.agent_name.clone());
+                self.chat.claim_selected(pool, &agent).await;
             }
             // yggdrasil-155: lazygit-style inline rename of the selected
             // task's title. 'r' is already taken (run-task), so 'e' for
@@ -972,6 +1009,7 @@ impl App {
                 ActiveView::Locks => self.locks.select_prev(),
                 ActiveView::Runs => self.runs.select_prev(),
                 ActiveView::RunGrid => self.run_grid.select_prev(),
+                ActiveView::Chat => self.chat.select_prev(),
                 _ => {}
             },
             KeyCode::Down => match self.active_view {
@@ -988,6 +1026,7 @@ impl App {
                 ActiveView::Locks => self.locks.select_next(),
                 ActiveView::Runs => self.runs.select_next(),
                 ActiveView::RunGrid => self.run_grid.select_next(),
+                ActiveView::Chat => self.chat.select_next(),
                 _ => {}
             },
             KeyCode::PageUp if self.active_view == ActiveView::Prompt => {
@@ -1053,13 +1092,14 @@ impl App {
             ActiveView::Locks => ActiveView::Runs,
             ActiveView::Runs => ActiveView::RunGrid,
             ActiveView::RunGrid => ActiveView::Nerdy,
-            ActiveView::Nerdy => ActiveView::Dashboard,
+            ActiveView::Nerdy => ActiveView::Chat,
+            ActiveView::Chat => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::Nerdy,
+            ActiveView::Dashboard => ActiveView::Chat,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Trace => ActiveView::Tasks,
@@ -1071,6 +1111,7 @@ impl App {
             ActiveView::Runs => ActiveView::Locks,
             ActiveView::RunGrid => ActiveView::Runs,
             ActiveView::Nerdy => ActiveView::RunGrid,
+            ActiveView::Chat => ActiveView::Nerdy,
         };
         self.set_view(prev);
     }
@@ -1166,6 +1207,7 @@ impl App {
                 tab("[0] Runs", self.active_view == ActiveView::Runs),
                 tab("[G] Grid", self.active_view == ActiveView::RunGrid),
                 tab("[N] Nerdy", self.active_view == ActiveView::Nerdy),
+                tab("[C] Chat", self.active_view == ActiveView::Chat),
             ]
         };
         frame.render_widget(Line::from(tabs), chunks[0]);
@@ -1193,6 +1235,7 @@ impl App {
                 "↑↓ select  ·  rows=tasks  ·  cols=recent attempts (newest left)"
             }
             ActiveView::Nerdy => "pool / tables / pgvector / hooks (read-only deep-dive)",
+            ActiveView::Chat => "c=compose  ↑↓=scroll  Enter=claim broadcast",
         };
         // yggdrasil-134: scope chip on the right of the help row makes
         // the current scope (repo / all) and the toggle key visible.
@@ -1227,6 +1270,7 @@ impl App {
             ActiveView::Runs => self.runs.render(frame, chunks[2]),
             ActiveView::RunGrid => self.run_grid.render(frame, chunks[2]),
             ActiveView::Nerdy => self.nerdy.render(frame, chunks[2]),
+            ActiveView::Chat => self.chat.render(frame, chunks[2]),
         }
 
         // Render any pending toasts above the persistent status strip.
@@ -1441,6 +1485,7 @@ impl App {
             ActiveView::Runs => "Runs",
             ActiveView::RunGrid => "RunGrid",
             ActiveView::Nerdy => "Nerdy",
+            ActiveView::Chat => "Chat",
         }
     }
 }
@@ -1731,6 +1776,9 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                 ActiveView::Nerdy => {
                     app.nerdy.update_ops(&app.ops_stats);
                     app.nerdy.refresh(pool).await?;
+                }
+                ActiveView::Chat => {
+                    app.chat.refresh(pool).await?;
                 }
                 _ => {}
             }

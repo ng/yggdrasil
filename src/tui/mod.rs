@@ -2,6 +2,7 @@ pub mod app;
 pub mod arc_diagram;
 pub mod attention;
 pub mod calendar_heatmap;
+pub mod chat_view;
 pub mod constellation;
 pub mod ctx_usage;
 pub mod dag_box;

@@ -19,7 +19,7 @@ pub struct KeyHint {
 /// Built-in global keymap rendered above every pane-specific section.
 pub const GLOBAL_KEYS: &[KeyHint] = &[
     KeyHint {
-        keys: "1..0, R, G, N",
+        keys: "1..0, G, N, C",
         effect: "switch view",
     },
     KeyHint {
@@ -215,6 +215,20 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             keys: "(read-only)",
             effect: "pool / tables / pgvector / hooks deep-dive",
         }],
+        "Chat" => &[
+            KeyHint {
+                keys: "↑↓",
+                effect: "scroll messages",
+            },
+            KeyHint {
+                keys: "c",
+                effect: "compose (@agent msg = directed, plain = broadcast)",
+            },
+            KeyHint {
+                keys: "Enter",
+                effect: "claim selected broadcast",
+            },
+        ],
         _ => &[],
     }
 }

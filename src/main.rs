@@ -525,6 +525,19 @@ enum MsgAction {
         #[arg(short, long)]
         agent: Option<String>,
     },
+    /// Send a broadcast message (no recipient). Any agent can claim it.
+    Broadcast {
+        #[arg(long)]
+        from: Option<String>,
+        body: Vec<String>,
+    },
+    /// Claim an unclaimed broadcast message for this agent.
+    Claim {
+        /// Event UUID of the broadcast message
+        id: String,
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1370,6 +1383,21 @@ async fn main() -> anyhow::Result<()> {
                 MsgAction::MarkRead { agent } => {
                     let name = agent.unwrap_or_else(default_agent);
                     ygg::cli::msg_cmd::mark_read(&pool, &name).await?;
+                }
+                MsgAction::Broadcast { from, body } => {
+                    let from_name = from.unwrap_or_else(default_agent);
+                    let joined = body.join(" ");
+                    if joined.trim().is_empty() {
+                        anyhow::bail!("empty body — pass the message as trailing args");
+                    }
+                    ygg::cli::msg_cmd::broadcast(&pool, &from_name, &joined).await?;
+                }
+                MsgAction::Claim { id, agent } => {
+                    let name = agent.unwrap_or_else(default_agent);
+                    let event_id: uuid::Uuid = id.parse().map_err(|_| {
+                        anyhow::anyhow!("invalid UUID: {id}")
+                    })?;
+                    ygg::cli::msg_cmd::claim_broadcast(&pool, event_id, &name).await?;
                 }
             }
         }
