@@ -87,24 +87,15 @@ pub struct DashboardView {
     /// run (default 300s).
     orphan_last_check: Option<Instant>,
 
-    /// yggdrasil-142 scheduler tile: rolling totals for the last hour of
-    /// `scheduler_tick` events (sum across the whole window) plus the most
-    /// recent ts so we can flag a stale daemon.
-    sched_finalized_1h: i64,
-    sched_dispatched_1h: i64,
-    sched_retried_1h: i64,
-    sched_reaped_1h: i64,
-    sched_poisoned_1h: i64,
-    sched_deadlined_1h: i64,
-    sched_last_tick_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// 30-bucket sparkline of dispatched-runs-per-2-minutes for the last hour.
-    sched_dispatch_spark: Vec<u64>,
-    /// Live queue depth: count of task_runs in non-terminal pre-running states.
-    sched_queue_depth: i64,
-    sched_running: i64,
-    /// Most-frequent loop-detection fingerprint repeat count (>1 means an
-    /// agent's been doing the same thing N times in a row).
-    sched_top_loop_count: i64,
+    // Task runs activity tile
+    runs_succeeded: i64,
+    runs_failed: i64,
+    runs_running: i64,
+    runs_queued: i64,
+    runs_total: i64,
+    runs_recent: Vec<RunSnap>,
+    run_spark: Vec<u64>,
+    runs_top_loop: i64,
 
     /// When true, only show agents belonging to the current user_id.
     /// Default false (show all users). Persisted in ~/.config/ygg/dashboard.json.
@@ -144,6 +135,13 @@ pub struct WorkerRow {
     pub intent: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct RunSnap {
+    task_ref: String,
+    state: String,
+    ended_at: chrono::DateTime<chrono::Utc>,
+}
+
 impl DashboardView {
     pub fn new() -> Self {
         Self {
@@ -175,17 +173,14 @@ impl DashboardView {
             msg: None,
             flash: None,
             orphan_last_check: None,
-            sched_finalized_1h: 0,
-            sched_dispatched_1h: 0,
-            sched_retried_1h: 0,
-            sched_reaped_1h: 0,
-            sched_poisoned_1h: 0,
-            sched_deadlined_1h: 0,
-            sched_last_tick_at: None,
-            sched_dispatch_spark: vec![0; 30],
-            sched_queue_depth: 0,
-            sched_running: 0,
-            sched_top_loop_count: 0,
+            runs_succeeded: 0,
+            runs_failed: 0,
+            runs_running: 0,
+            runs_queued: 0,
+            runs_total: 0,
+            runs_recent: Vec::new(),
+            run_spark: vec![0; 24],
+            runs_top_loop: 0,
             filter_my_agents: load_filter_my_agents(),
             embed_calls_1h: 0,
             embed_cache_hits_1h: 0,
@@ -740,70 +735,70 @@ impl DashboardView {
             self.worker_sel = self.workers.len().saturating_sub(1);
         }
 
-        // yggdrasil-142 scheduler tile: aggregate the last 60 min of
-        // `scheduler_tick` payloads. Each tick emits a TickStats JSON
-        // (finalized/scheduled/dispatched/reaped/deadlined/retried/poisoned),
-        // so a SUM over the window gives us hour totals + a sparkline.
-        let tick_rows: Vec<(chrono::DateTime<chrono::Utc>, serde_json::Value)> = sqlx::query_as(
-            "SELECT created_at, payload FROM events
-             WHERE event_kind::text = 'scheduler_tick'
-               AND created_at >= now() - interval '1 hour'
-             ORDER BY created_at",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-
-        let mut fin = 0i64;
-        let mut disp = 0i64;
-        let mut ret = 0i64;
-        let mut reap = 0i64;
-        let mut pois = 0i64;
-        let mut dead = 0i64;
-        let mut last_ts: Option<chrono::DateTime<chrono::Utc>> = None;
-        let mut spark = vec![0u64; 30]; // 30 buckets × 2min = 60min
-        let now = Utc::now();
-        for (ts, p) in &tick_rows {
-            let get = |k: &str| -> i64 { p.get(k).and_then(|v| v.as_i64()).unwrap_or(0) };
-            fin += get("finalized");
-            disp += get("dispatched");
-            ret += get("retried");
-            reap += get("reaped");
-            pois += get("poisoned");
-            dead += get("deadlined");
-            last_ts = Some(*ts);
-            // Bucket dispatched count into 2-min slots, oldest→newest.
-            let mins_ago = (now - *ts).num_minutes().max(0);
-            if mins_ago < 60 {
-                let idx = (29 - (mins_ago / 2).min(29)) as usize;
-                spark[idx] = spark[idx].saturating_add(get("dispatched") as u64);
-            }
-        }
-        self.sched_finalized_1h = fin;
-        self.sched_dispatched_1h = disp;
-        self.sched_retried_1h = ret;
-        self.sched_reaped_1h = reap;
-        self.sched_poisoned_1h = pois;
-        self.sched_deadlined_1h = dead;
-        self.sched_last_tick_at = last_ts;
-        self.sched_dispatch_spark = spark;
-
-        // Queue depth + running count: live snapshot of task_runs.
-        let (queue, running): (i64, i64) = sqlx::query_as(
+        // Task runs activity tile: state breakdown + recent terminal runs + sparkline.
+        let (succ, fail, running, queued, total): (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
+               COUNT(*) FILTER (WHERE state = 'succeeded'),
+               COUNT(*) FILTER (WHERE state = 'failed'),
+               COUNT(*) FILTER (WHERE state = 'running'),
                COUNT(*) FILTER (WHERE state IN ('scheduled', 'ready', 'retrying')),
-               COUNT(*) FILTER (WHERE state = 'running')
+               COUNT(*)
              FROM task_runs",
         )
         .fetch_one(pool)
         .await
-        .unwrap_or((0, 0));
-        self.sched_queue_depth = queue;
-        self.sched_running = running;
+        .unwrap_or((0, 0, 0, 0, 0));
+        self.runs_succeeded = succ;
+        self.runs_failed = fail;
+        self.runs_running = running;
+        self.runs_queued = queued;
+        self.runs_total = total;
 
-        // Top loop-detection fingerprint repeat count: surfaces "an agent's
-        // been hammering the same fingerprint N times". Read direct from the
-        // task_runs.fingerprint groups in the last hour.
+        let recent_rows: Vec<(String, String, chrono::DateTime<chrono::Utc>, String)> =
+            sqlx::query_as(
+                "SELECT r.state::text, r.reason::text, r.ended_at,
+                    COALESCE(rp.prefix || '-' || t.seq::text, LEFT(t.task_id::text, 8)) AS task_ref
+                 FROM task_runs r
+                 JOIN tasks t ON t.task_id = r.task_id
+                 LEFT JOIN repos rp ON rp.repo_id = t.repo_id
+                 WHERE r.state IN ('succeeded', 'failed')
+                 ORDER BY r.ended_at DESC NULLS LAST
+                 LIMIT 5",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        self.runs_recent = recent_rows
+            .into_iter()
+            .map(|(state, _reason, ended_at, task_ref)| RunSnap {
+                task_ref,
+                state,
+                ended_at,
+            })
+            .collect();
+
+        // Hourly sparkline from run_terminal events (24 buckets).
+        let now = Utc::now();
+        let spark_rows: Vec<(chrono::DateTime<chrono::Utc>, i64)> = sqlx::query_as(
+            "SELECT date_trunc('hour', created_at) AS bucket, COUNT(*)
+             FROM events
+             WHERE event_kind::text = 'run_terminal'
+               AND created_at >= now() - interval '24 hours'
+             GROUP BY 1 ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        let mut spark = vec![0u64; 24];
+        for (bucket, count) in &spark_rows {
+            let hours_ago = (now - *bucket).num_hours().max(0);
+            if hours_ago < 24 {
+                let idx = (23 - hours_ago) as usize;
+                spark[idx] = *count as u64;
+            }
+        }
+        self.run_spark = spark;
+
         let top_loop: Option<i64> = sqlx::query_scalar(
             "SELECT COUNT(*) c FROM task_runs
               WHERE fingerprint IS NOT NULL
@@ -814,7 +809,7 @@ impl DashboardView {
         .fetch_optional(pool)
         .await
         .unwrap_or(None);
-        self.sched_top_loop_count = top_loop.unwrap_or(0);
+        self.runs_top_loop = top_loop.unwrap_or(0);
 
         Ok(())
     }
@@ -839,13 +834,13 @@ impl DashboardView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        // Layout: alerts · pulse · scheduler · vector · agents (stretch) · workers · locks
+        // Layout: alerts · pulse · runs · vector · agents (stretch) · workers · locks
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // alerts
                 Constraint::Length(6), // system pulse + latest transition
-                Constraint::Length(5), // scheduler tile
+                Constraint::Length(5), // runs tile
                 Constraint::Length(5), // vector & retrieval tile
                 Constraint::Min(8),    // agents
                 Constraint::Length(6), // workers
@@ -855,7 +850,7 @@ impl DashboardView {
 
         self.render_alerts(frame, chunks[0]);
         self.render_pulse(frame, chunks[1]);
-        self.render_scheduler_tile(frame, chunks[2]);
+        self.render_runs_tile(frame, chunks[2]);
         self.render_vector_tile(frame, chunks[3]);
         self.render_agents_table(frame, chunks[4]);
         self.render_workers(frame, chunks[5]);
@@ -869,142 +864,141 @@ impl DashboardView {
         }
     }
 
-    /// yggdrasil-142: scheduler observability tile. Left = sparkline of
-    /// dispatched-runs over the last hour (30 buckets × 2 min); right =
-    /// numeric snapshot of last-hour totals + live queue/running + an
-    /// "alive?" hint via last-tick age.
-    fn render_scheduler_tile(&self, frame: &mut Frame, area: Rect) {
+    fn render_runs_tile(&self, frame: &mut Frame, area: Rect) {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
 
-        let max = *self.sched_dispatch_spark.iter().max().unwrap_or(&0);
+        let max = *self.run_spark.iter().max().unwrap_or(&0);
         let spark = Sparkline::default()
-            .block(Block::default().borders(Borders::ALL).title(format!(
-                " Dispatched / 2min — 1h  ·  peak {}  ·  ← old · now → ",
-                max
-            )))
-            .data(&self.sched_dispatch_spark)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" Runs/hour — 24h · peak {} ", max)),
+            )
+            .data(&self.run_spark)
             .max(max.max(1))
             .style(Style::default().fg(Color::Yellow));
         frame.render_widget(spark, cols[0]);
 
-        // Last-tick age decides the daemon-alive hint. Scheduler default
-        // tick interval is 2s; >30s with no tick = the daemon isn't running
-        // (or is wedged). Don't say "stuck" if there's been zero activity in
-        // the entire hour — emit the no-data hint instead.
-        let alive_label = match self.sched_last_tick_at {
-            None => Span::styled(
-                "no recent ticks · scheduler may be off",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Some(ts) => {
-                let age = (Utc::now() - ts).num_seconds().max(0);
-                if age > 30 {
-                    Span::styled(
-                        format!("STALE · last tick {age}s ago"),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Span::styled(
-                        format!("alive · last tick {age}s ago"),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                }
-            }
+        let pass_pct = if self.runs_total > 0 {
+            (self.runs_succeeded as f64 / self.runs_total as f64 * 100.0) as i64
+        } else {
+            0
         };
 
-        let lines: Vec<Line> = vec![
-            Line::from(vec![
-                Span::styled("status    ", Style::default().fg(Color::DarkGray)),
-                alive_label,
-            ]),
-            Line::from(vec![
-                Span::styled("queue     ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} ready ", self.sched_queue_depth),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("· {} running ", self.sched_running),
-                    if self.sched_running > 0 {
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-                Span::styled(
-                    format!(
-                        "· loop-top {}",
-                        if self.sched_top_loop_count > 1 {
-                            self.sched_top_loop_count.to_string()
-                        } else {
-                            "—".into()
-                        }
-                    ),
-                    if self.sched_top_loop_count >= 3 {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("last 1h   ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} dispatched ", self.sched_dispatched_1h),
+        // Line 1: live status
+        let line1 = Line::from(vec![
+            Span::styled("live      ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} running ", self.runs_running),
+                if self.runs_running > 0 {
                     Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("· {} finalized ", self.sched_finalized_1h),
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled(
-                    format!("· {} retried ", self.sched_retried_1h),
-                    if self.sched_retried_1h > 0 {
-                        Style::default().fg(Color::Magenta)
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(
+                format!("· {} queued ", self.runs_queued),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!(
+                    "· loop-top {}",
+                    if self.runs_top_loop > 1 {
+                        self.runs_top_loop.to_string()
                     } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
+                        "—".into()
+                    }
                 ),
-                Span::styled(
-                    format!("· {} reaped ", self.sched_reaped_1h),
-                    if self.sched_reaped_1h > 0 {
-                        Style::default().fg(Color::Red)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-                Span::styled(
-                    format!("· {} poisoned", self.sched_poisoned_1h),
-                    if self.sched_poisoned_1h > 0 {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-            ]),
-        ];
+                if self.runs_top_loop >= 3 {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+        ]);
 
-        let title = format!(
-            " Scheduler  ·  [R] runs detail  ·  ygg scheduler status  ·  YGG_AUTO_APPROVE={} ",
-            if std::env::var("YGG_AUTO_APPROVE")
-                .map(|v| matches!(v.trim(), "1") || v.trim().eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
-                "on"
-            } else {
-                "off"
+        // Line 2: all-time totals
+        let line2 = Line::from(vec![
+            Span::styled("all-time  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ✓ ", self.runs_succeeded),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!("· {} ✗ ", self.runs_failed),
+                if self.runs_failed > 0 {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(
+                format!("· {} total ", self.runs_total),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("· {pass_pct}% pass"),
+                if pass_pct >= 80 {
+                    Style::default().fg(Color::Green)
+                } else if pass_pct >= 50 {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
+            ),
+        ]);
+
+        // Line 3: recent terminal runs
+        let mut recent_spans: Vec<Span> = vec![Span::styled(
+            "recent    ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        let now = Utc::now();
+        for (i, snap) in self.runs_recent.iter().take(3).enumerate() {
+            if i > 0 {
+                recent_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
             }
-        );
-        let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
+            let (glyph, color) = if snap.state == "succeeded" {
+                ("✓", Color::Green)
+            } else {
+                ("✗", Color::Red)
+            };
+            let age_s = (now - snap.ended_at).num_seconds().max(0);
+            let age = if age_s < 60 {
+                format!("{age_s}s")
+            } else if age_s < 3600 {
+                format!("{}m", age_s / 60)
+            } else if age_s < 86400 {
+                format!("{}h", age_s / 3600)
+            } else {
+                format!("{}d", age_s / 86400)
+            };
+            let ref_label = if snap.task_ref.len() > 12 {
+                &snap.task_ref[..12]
+            } else {
+                &snap.task_ref
+            };
+            recent_spans.push(Span::styled(
+                format!("{ref_label} {glyph} {age}"),
+                Style::default().fg(color),
+            ));
+        }
+        if self.runs_recent.is_empty() {
+            recent_spans.push(Span::styled(
+                "no completed runs yet",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let line3 = Line::from(recent_spans);
+
+        let title = format!(" Runs · pass {pass_pct}% ");
+        let para = Paragraph::new(vec![line1, line2, line3])
+            .block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(para, cols[1]);
     }
 
