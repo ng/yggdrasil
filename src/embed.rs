@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Embedder using Ollama's /api/embed endpoint.
-/// Default: qwen3-embedding:0.6b (1024d native, truncated to 384d via MRL).
+/// Default: embeddinggemma (768d native).
 pub struct Embedder {
     http: reqwest::Client,
     base_url: String,
@@ -26,9 +26,9 @@ struct EmbedResponse {
 impl Embedder {
     pub fn new(base_url: &str, model: &str) -> Self {
         let dimensions: usize = std::env::var("EMBEDDING_DIMENSIONS")
-            .unwrap_or_else(|_| "384".into())
+            .unwrap_or_else(|_| "768".into())
             .parse()
-            .unwrap_or(384);
+            .unwrap_or(768);
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -42,7 +42,7 @@ impl Embedder {
         let base_url =
             std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
         let model =
-            std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "qwen3-embedding:0.6b".into());
+            std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "embeddinggemma".into());
         Self::new(&base_url, &model)
     }
 
@@ -76,9 +76,7 @@ impl Embedder {
             .next()
             .ok_or_else(|| crate::YggError::Ollama("no embedding returned".into()))?;
 
-        // MRL truncation: models like Qwen3 return 1024d natively but
-        // support Matryoshka truncation to smaller dims with minimal
-        // quality loss. Truncate to match the schema's vector(N) column.
+        // Truncate if the model returns more dims than the schema expects.
         if vec.len() > self.dimensions {
             vec.truncate(self.dimensions);
         }

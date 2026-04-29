@@ -1221,12 +1221,13 @@ mod tests {
             ollama_base_url: "test".into(),
             ollama_embed_model: "test".into(),
             ollama_chat_model: String::new(),
-            embedding_dimensions: 384,
+            embedding_dimensions: 768,
             context_limit_tokens: 250_000,
             context_hard_cap_tokens: 300_000,
             lock_ttl_secs: 300,
             heartbeat_interval_secs: 60,
             watcher_interval_secs: 30,
+            similarity_threshold: 0.5,
             rtk_binary_path: "rtk".into(),
         };
         unsafe { std::env::remove_var("YGG_SCHEDULER_TICK_MS") };

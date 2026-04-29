@@ -214,7 +214,7 @@ pub async fn execute(
                     // (e.g. pre-migration DB without content_tsv column).
                     let kinds = [NodeKind::UserMessage, NodeKind::Directive, NodeKind::Digest];
                     let hits = match node_repo
-                        .hybrid_search_global(&query_vec, query_text, &kinds, 8, 0.6)
+                        .hybrid_search_global(&query_vec, query_text, &kinds, 8, config.similarity_threshold)
                         .await
                     {
                         Ok(h) => h,
@@ -223,7 +223,7 @@ pub async fn execute(
                                 "inject: hybrid search failed ({e}), falling back to vector-only"
                             );
                             node_repo
-                                .similarity_search_global(&query_vec, &kinds, 8, 0.6)
+                                .similarity_search_global(&query_vec, &kinds, 8, config.similarity_threshold)
                                 .await?
                         }
                     };
