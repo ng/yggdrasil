@@ -1673,3 +1673,64 @@ async fn test_scheduler_backfill_idempotent() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_pending_migrations_returns_empty_when_up_to_date() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    let pending = ygg::db::pending_migrations(&pool).await.unwrap();
+    assert!(
+        pending.is_empty(),
+        "expected 0 pending after migrate, got {}: {:?}",
+        pending.len(),
+        pending,
+    );
+}
+
+#[tokio::test]
+async fn test_no_empty_user_id_agents() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE user_id = ''")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "found {count} agents with empty user_id after backfill migration"
+    );
+}
+
+#[tokio::test]
+async fn test_agent_list_returns_current_user_agents() {
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    let user_id = "test-user-visibility";
+    let other_user = "other-user-visibility";
+
+    let repo = ygg::models::agent::AgentRepo::new(&pool, user_id);
+    let other_repo = ygg::models::agent::AgentRepo::new(&pool, other_user);
+
+    let mine = repo.register("vis-test-mine").await.unwrap();
+    let theirs = other_repo.register("vis-test-theirs").await.unwrap();
+
+    let my_list = repo.list().await.unwrap();
+    assert!(
+        my_list.iter().any(|a| a.agent_name == "vis-test-mine"),
+        "my agent should be visible"
+    );
+    assert!(
+        !my_list.iter().any(|a| a.agent_name == "vis-test-theirs"),
+        "other user's agent should NOT be visible"
+    );
+
+    sqlx::query("DELETE FROM agents WHERE agent_id IN ($1, $2)")
+        .bind(mine.agent_id)
+        .bind(theirs.agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
