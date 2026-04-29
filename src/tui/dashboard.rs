@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -104,6 +105,10 @@ pub struct DashboardView {
     /// Most-frequent loop-detection fingerprint repeat count (>1 means an
     /// agent's been doing the same thing N times in a row).
     sched_top_loop_count: i64,
+
+    /// When true, only show agents belonging to the current user_id.
+    /// Default false (show all users). Persisted in ~/.config/ygg/dashboard.json.
+    pub filter_my_agents: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,6 +176,7 @@ impl DashboardView {
             sched_queue_depth: 0,
             sched_running: 0,
             sched_top_loop_count: 0,
+            filter_my_agents: load_filter_my_agents(),
         }
     }
 
@@ -355,6 +361,11 @@ impl DashboardView {
         self.session_scoped = !self.session_scoped;
     }
 
+    pub fn toggle_user_filter(&mut self) {
+        self.filter_my_agents = !self.filter_my_agents;
+        save_filter_my_agents(self.filter_my_agents);
+    }
+
     fn cached_pressure(&mut self, agent_name: &str) -> Option<(i64, i64)> {
         let now = Instant::now();
         if let Some((t, v)) = self.pressure_cache.get(agent_name) {
@@ -379,7 +390,11 @@ impl DashboardView {
         let pinned_id = self.agents.get(self.selected).map(|a| a.agent_id);
 
         let agent_repo = AgentRepo::new(pool, crate::db::user_id());
-        let mut agents = agent_repo.list().await?;
+        let mut agents = if self.filter_my_agents {
+            agent_repo.list().await?
+        } else {
+            agent_repo.list_all_users().await?
+        };
         // Most-recently-active first. The repo orders by created_at,
         // which buries hot sessions under months-old identities in a
         // 50+ agent fleet.
@@ -1566,9 +1581,12 @@ impl DashboardView {
 
         // Surface action status (rename/archive) in the panel title so the
         // user gets feedback without a separate status line.
+        let scope_label = if self.filter_my_agents { "mine" } else { "all" };
         let title = match self.flash.as_deref() {
-            Some(msg) => format!(" Agents  ·  {msg}  ·  r=rename a=archive m=msg"),
-            None => " Agents  ·  r=rename a=archive m=msg".to_string(),
+            Some(msg) => {
+                format!(" Agents ({scope_label})  ·  {msg}  ·  u=filter r=rename a=archive m=msg")
+            }
+            None => format!(" Agents ({scope_label})  ·  u=filter r=rename a=archive m=msg"),
         };
         let table = Table::new(
             rows,
@@ -1860,4 +1878,37 @@ fn render_msg_overlay(frame: &mut Frame, area: Rect, dash: &DashboardView) {
             .border_style(Style::default().fg(Color::Yellow)),
     );
     frame.render_widget(para, popup);
+}
+
+fn dashboard_settings_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".config/ygg/dashboard.json")
+}
+
+fn load_filter_my_agents() -> bool {
+    let path = dashboard_settings_path();
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return false;
+    };
+    v.get("filter_my_agents")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn save_filter_my_agents(val: bool) {
+    let path = dashboard_settings_path();
+    let mut obj = match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+    {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("filter_my_agents".into(), serde_json::Value::Bool(val));
+    if let Ok(json) = serde_json::to_string_pretty(&obj) {
+        let _ = std::fs::write(&path, json);
+    }
 }

@@ -914,6 +914,10 @@ impl App {
             KeyCode::Char('n') if self.active_view == ActiveView::Dag && !self.dag.add_mode() => {
                 self.dag.add_begin();
             }
+            KeyCode::Char('u') if self.active_view == ActiveView::Dashboard => {
+                self.dashboard.toggle_user_filter();
+                let _ = self.dashboard.refresh(pool).await;
+            }
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
