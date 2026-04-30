@@ -50,6 +50,52 @@ pub async fn record_stats(
     Ok(())
 }
 
+/// Write stats with REPLACE semantics — overwrites the current hour's row
+/// with the running aggregate instead of adding to it. Safe to call on every
+/// PromptSubmit turn without double-counting.
+pub async fn replace_stats(
+    pool: &PgPool,
+    agent_id: Uuid,
+    usage: &TokenUsage,
+    category: &TaskCategory,
+) -> Result<(), sqlx::Error> {
+    let now = Utc::now();
+    let period = now
+        .date_naive()
+        .and_hms_opt(now.time().hour() as u32, 0, 0)
+        .unwrap()
+        .and_utc();
+
+    sqlx::query(
+        r#"
+        INSERT INTO agent_stats (agent_id, period, input_tokens, output_tokens,
+                                  cache_read, cache_write, tool_calls, task_category, estimated_cost)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (agent_id, period, task_category)
+        DO UPDATE SET
+            input_tokens = EXCLUDED.input_tokens,
+            output_tokens = EXCLUDED.output_tokens,
+            cache_read = EXCLUDED.cache_read,
+            cache_write = EXCLUDED.cache_write,
+            tool_calls = EXCLUDED.tool_calls,
+            estimated_cost = EXCLUDED.estimated_cost
+        "#,
+    )
+    .bind(agent_id)
+    .bind(period)
+    .bind(usage.input_tokens as i64)
+    .bind(usage.output_tokens as i64)
+    .bind(usage.cache_read as i64)
+    .bind(usage.cache_write as i64)
+    .bind(1i32)
+    .bind(category.to_string())
+    .bind(estimate_cost(usage))
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Estimate cost in USD based on Claude Sonnet pricing.
 /// Input: $3/MTok, Output: $15/MTok, Cache read: $0.30/MTok, Cache write: $3.75/MTok
 fn estimate_cost(usage: &TokenUsage) -> f64 {
