@@ -326,8 +326,29 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
                 warn!("hook stop: digest failed: {e}");
             }
 
-            // --stop: end session + release locks (matching the Digest dispatch in main.rs).
+            // --stop: record token stats + end session + release locks.
             if let Ok(Some(a)) = AgentRepo::new(pool, &user_id).get_by_name(agent_name).await {
+                // Record token stats from the transcript to agent_stats (ygg-2).
+                let turns = crate::stats::collector::parse_session(
+                    std::path::Path::new(&transcript_path),
+                );
+                if !turns.is_empty() {
+                    let usage = crate::stats::collector::aggregate_usage(&turns);
+                    let tool_names: Vec<String> =
+                        turns.iter().flat_map(|t| t.tool_names.clone()).collect();
+                    let category = crate::stats::classifier::classify(&tool_names);
+                    if let Err(e) = crate::stats::tracker::record_stats(
+                        pool,
+                        a.agent_id,
+                        &usage,
+                        &category,
+                    )
+                    .await
+                    {
+                        warn!("hook stop: record_stats failed: {e}");
+                    }
+                }
+
                 if let Some(sid) =
                     crate::models::session::resolve_current_session(pool, a.agent_id, None).await
                 {
@@ -485,6 +506,17 @@ mod tests {
         assert!(
             src.contains("stop_check::execute"),
             "hook_cmd.rs handle_stop must call stop_check::execute"
+        );
+    }
+
+    /// Drift regression: native stop handler must record token stats
+    /// (ygg-2). Removing the call silently breaks cost/throughput tracking.
+    #[test]
+    fn native_stop_calls_record_stats() {
+        let src = include_str!("hook_cmd.rs");
+        assert!(
+            src.contains("record_stats"),
+            "hook_cmd.rs handle_stop must call record_stats (ygg-2)"
         );
     }
 }
