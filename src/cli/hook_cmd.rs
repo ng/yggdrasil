@@ -151,6 +151,32 @@ async fn handle_prompt_submit(agent_name: &str, payload: &serde_json::Value) -> 
         warn!("hook prompt-submit: inject failed: {e}");
     }
 
+    // Record incremental token stats from the live transcript (ygg-2).
+    // Uses replace semantics so repeated calls overwrite (no double-counting).
+    if let Some(tp) = crate::cli::digest::find_latest_transcript() {
+        let turns =
+            crate::stats::collector::parse_session(std::path::Path::new(&tp));
+        if !turns.is_empty() {
+            let usage = crate::stats::collector::aggregate_usage(&turns);
+            let tool_names: Vec<String> =
+                turns.iter().flat_map(|t| t.tool_names.clone()).collect();
+            let category = crate::stats::classifier::classify(&tool_names);
+            let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
+            if let Ok(Some(agent)) = agent_repo.get_by_name(agent_name).await {
+                if let Err(e) = crate::stats::tracker::replace_stats(
+                    &pool,
+                    agent.agent_id,
+                    &usage,
+                    &category,
+                )
+                .await
+                {
+                    warn!("hook prompt-submit: replace_stats failed: {e}");
+                }
+            }
+        }
+    }
+
     // Inject unread agent-to-agent messages and advance cursor.
     match crate::cli::msg_cmd::inbox(&pool, agent_name, false).await {
         Ok(msgs) => {
@@ -337,7 +363,7 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
                     let tool_names: Vec<String> =
                         turns.iter().flat_map(|t| t.tool_names.clone()).collect();
                     let category = crate::stats::classifier::classify(&tool_names);
-                    if let Err(e) = crate::stats::tracker::record_stats(
+                    if let Err(e) = crate::stats::tracker::replace_stats(
                         pool,
                         a.agent_id,
                         &usage,
@@ -345,7 +371,7 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
                     )
                     .await
                     {
-                        warn!("hook stop: record_stats failed: {e}");
+                        warn!("hook stop: replace_stats failed: {e}");
                     }
                 }
 
@@ -512,11 +538,11 @@ mod tests {
     /// Drift regression: native stop handler must record token stats
     /// (ygg-2). Removing the call silently breaks cost/throughput tracking.
     #[test]
-    fn native_stop_calls_record_stats() {
+    fn native_stop_calls_replace_stats() {
         let src = include_str!("hook_cmd.rs");
         assert!(
-            src.contains("record_stats"),
-            "hook_cmd.rs handle_stop must call record_stats (ygg-2)"
+            src.contains("replace_stats"),
+            "hook_cmd.rs must call replace_stats (ygg-2)"
         );
     }
 }
