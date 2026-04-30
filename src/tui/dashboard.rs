@@ -32,6 +32,7 @@ pub struct DashboardView {
     redactions_24h: i64,
     prompts_hourly: Vec<u64>, // global, last 24h, oldest→newest
     per_agent_hourly: HashMap<Uuid, [u64; 24]>, // per agent, last 24h
+    per_agent_tokens: HashMap<Uuid, (i64, i64)>, // (input, output) from agent_stats
     recent_transitions: Vec<(
         chrono::DateTime<chrono::Utc>,
         String,
@@ -219,6 +220,7 @@ impl DashboardView {
             redactions_24h: 0,
             prompts_hourly: vec![0; 24],
             per_agent_hourly: HashMap::new(),
+            per_agent_tokens: HashMap::new(),
             recent_transitions: Vec::new(),
             workers: Vec::new(),
             worker_sel: 0,
@@ -724,6 +726,21 @@ impl DashboardView {
             let idx = (b - 1).clamp(0, 23) as usize;
             let entry = self.per_agent_hourly.entry(aid).or_insert([0u64; 24]);
             entry[idx] = n as u64;
+        }
+
+        // Per-agent cumulative token totals from agent_stats.
+        let agent_tokens: Vec<(Uuid, i64, i64)> = sqlx::query_as(
+            "SELECT agent_id,
+                    COALESCE(SUM(input_tokens + cache_read + cache_write), 0)::bigint,
+                    COALESCE(SUM(output_tokens), 0)::bigint
+             FROM agent_stats GROUP BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        self.per_agent_tokens.clear();
+        for (aid, inp, out) in agent_tokens {
+            self.per_agent_tokens.insert(aid, (inp, out));
         }
 
         // Last 5 agent state transitions for the timeline widget.
@@ -1651,6 +1668,7 @@ impl DashboardView {
             ),
             Cell::from("STATE"),
             Cell::from("CTX"),
+            Cell::from("TOKENS"),
             Cell::from("24H"),
             Cell::from("UPDATED"),
         ])
@@ -1675,6 +1693,7 @@ impl DashboardView {
 
         let selected = self.selected;
         let per_agent = &self.per_agent_hourly;
+        let per_tokens = &self.per_agent_tokens;
         let rows: Vec<Row> = self
             .agents
             .iter()
@@ -1794,16 +1813,25 @@ impl DashboardView {
                 } else {
                     Color::DarkGray
                 };
-                let (name_color, state_fg, ctx_fg, spark_fg) = if is_dormant {
-                    (dormant_fg, dormant_fg, dormant_fg, dormant_fg)
+                // Token totals from agent_stats (in + out).
+                let token_label = match per_tokens.get(&agent.agent_id) {
+                    Some((inp, out)) if *inp + *out > 0 => {
+                        format!("{}↓ {}↑", humanize_tokens(*inp), humanize_tokens(*out))
+                    }
+                    _ => "—".to_string(),
+                };
+
+                let (name_color, state_fg, ctx_fg, tok_fg, spark_fg) = if is_dormant {
+                    (dormant_fg, dormant_fg, dormant_fg, dormant_fg, dormant_fg)
                 } else {
-                    (Color::Reset, state_color, pressure_color, Color::Cyan)
+                    (Color::Reset, state_color, pressure_color, Color::White, Color::Cyan)
                 };
 
                 Row::new(vec![
                     Cell::from(name_cell).style(Style::default().fg(name_color)),
                     Cell::from(state_label).style(Style::default().fg(state_fg)),
                     Cell::from(pressure_bar).style(Style::default().fg(ctx_fg)),
+                    Cell::from(token_label).style(Style::default().fg(tok_fg)),
                     Cell::from(sparkline).style(Style::default().fg(spark_fg)),
                     Cell::from(humanize_since(agent.updated_at))
                         .style(Style::default().fg(name_color)),
@@ -1824,11 +1852,12 @@ impl DashboardView {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(25),
-                Constraint::Percentage(15),
-                Constraint::Percentage(25),
-                Constraint::Percentage(15),
                 Constraint::Percentage(20),
+                Constraint::Percentage(13),
+                Constraint::Percentage(22),
+                Constraint::Percentage(15),
+                Constraint::Percentage(12),
+                Constraint::Percentage(18),
             ],
         )
         .header(header)

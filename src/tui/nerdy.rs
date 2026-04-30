@@ -136,12 +136,30 @@ impl NerdyView {
         }
         self.events_hourly = series;
 
-        // Per-agent context bars from live transcripts.
+        // Per-agent token bars: prefer live transcript usage, fall back
+        // to cumulative agent_stats from the database.
         let mut bars: Vec<(String, i64, i64)> = Vec::new();
         if let Ok(agents) = AgentRepo::new(pool, crate::db::user_id()).list().await {
+            // DB totals as fallback when live transcript isn't parseable.
+            let db_totals: Vec<(uuid::Uuid, i64, i64)> = sqlx::query_as(
+                "SELECT agent_id,
+                        COALESCE(SUM(input_tokens + output_tokens + cache_read + cache_write), 0)::bigint,
+                        COALESCE(SUM(output_tokens), 0)::bigint
+                 FROM agent_stats GROUP BY 1",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+            let db_map: std::collections::HashMap<uuid::Uuid, i64> =
+                db_totals.into_iter().map(|(id, total, _)| (id, total)).collect();
+
             for a in &agents {
                 if let Some(b) = agent_usage_breakdown(&a.agent_name) {
                     bars.push((a.agent_name.clone(), b.total(), b.hard_cap));
+                } else if let Some(&total) = db_map.get(&a.agent_id) {
+                    if total > 0 {
+                        bars.push((a.agent_name.clone(), total, HARD_DANGER));
+                    }
                 }
             }
         }
