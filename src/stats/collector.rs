@@ -26,12 +26,22 @@ struct JsonlMessage {
     #[serde(default)]
     usage: Option<JsonlUsage>,
     #[serde(default)]
+    message: Option<JsonlNestedMessage>,
+    #[serde(default)]
     content: Option<serde_json::Value>,
     #[serde(default)]
     uuid: Option<String>,
 }
 
 #[derive(Deserialize)]
+struct JsonlNestedMessage {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    usage: Option<JsonlUsage>,
+}
+
+#[derive(Deserialize, Clone)]
 struct JsonlUsage {
     #[serde(default)]
     input_tokens: u64,
@@ -90,8 +100,11 @@ pub fn parse_session(path: &Path) -> Vec<Turn> {
             continue;
         }
 
-        let usage = msg
+        // Check top-level usage first, fall back to message.usage.
+        let raw_usage = msg
             .usage
+            .or_else(|| msg.message.as_ref().and_then(|m| m.usage.clone()));
+        let usage = raw_usage
             .map(|u| TokenUsage {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
@@ -100,11 +113,21 @@ pub fn parse_session(path: &Path) -> Vec<Turn> {
             })
             .unwrap_or_default();
 
+        // Prefer top-level role, fall back to message.role.
+        let role = if msg.role.is_empty() {
+            msg.message
+                .as_ref()
+                .and_then(|m| m.role.clone())
+                .unwrap_or_default()
+        } else {
+            msg.role
+        };
+
         // Extract tool names from content array
         let tool_names = extract_tool_names(&msg.content);
 
         turns.push(Turn {
-            role: msg.role,
+            role,
             usage,
             tool_names,
             message_id: msg_id,

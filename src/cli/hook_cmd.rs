@@ -153,28 +153,37 @@ async fn handle_prompt_submit(agent_name: &str, payload: &serde_json::Value) -> 
 
     // Record incremental token stats from the live transcript (ygg-2).
     // Uses replace semantics so repeated calls overwrite (no double-counting).
-    if let Some(tp) = crate::cli::digest::find_latest_transcript() {
-        let turns =
-            crate::stats::collector::parse_session(std::path::Path::new(&tp));
-        if !turns.is_empty() {
-            let usage = crate::stats::collector::aggregate_usage(&turns);
-            let tool_names: Vec<String> =
-                turns.iter().flat_map(|t| t.tool_names.clone()).collect();
-            let category = crate::stats::classifier::classify(&tool_names);
-            let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
-            if let Ok(Some(agent)) = agent_repo.get_by_name(agent_name).await {
-                if let Err(e) = crate::stats::tracker::replace_stats(
-                    &pool,
-                    agent.agent_id,
-                    &usage,
-                    &category,
-                )
-                .await
-                {
-                    warn!("hook prompt-submit: replace_stats failed: {e}");
+    match crate::cli::digest::find_latest_transcript() {
+        Some(tp) => {
+            let turns =
+                crate::stats::collector::parse_session(std::path::Path::new(&tp));
+            if turns.is_empty() {
+                warn!("hook prompt-submit: transcript has 0 parseable turns: {tp}");
+            } else {
+                let usage = crate::stats::collector::aggregate_usage(&turns);
+                let tool_names: Vec<String> =
+                    turns.iter().flat_map(|t| t.tool_names.clone()).collect();
+                let category = crate::stats::classifier::classify(&tool_names);
+                let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
+                match agent_repo.get_by_name(agent_name).await {
+                    Ok(Some(agent)) => {
+                        if let Err(e) = crate::stats::tracker::replace_stats(
+                            &pool,
+                            agent.agent_id,
+                            &usage,
+                            &category,
+                        )
+                        .await
+                        {
+                            warn!("hook prompt-submit: replace_stats failed: {e}");
+                        }
+                    }
+                    Ok(None) => warn!("hook prompt-submit: agent '{agent_name}' not found for stats"),
+                    Err(e) => warn!("hook prompt-submit: agent lookup failed: {e}"),
                 }
             }
         }
+        None => warn!("hook prompt-submit: no transcript found for stats"),
     }
 
     // Inject unread agent-to-agent messages and advance cursor.
