@@ -505,14 +505,7 @@ fn extract_corrections(turns: &[Turn]) -> Vec<CorrectionSignal> {
                 .iter()
                 .rev()
                 .find(|t| t.role == "assistant")
-                .map(|t| {
-                    let s = t.text.trim();
-                    if s.len() > 200 {
-                        format!("{}…", &s[..197])
-                    } else {
-                        s.to_string()
-                    }
-                })
+                .map(|t| truncate_with_ellipsis(t.text.trim(), 200))
                 .unwrap_or_default();
 
             out.push(CorrectionSignal {
@@ -536,14 +529,7 @@ fn extract_reinforcements(turns: &[Turn]) -> Vec<ReinforcementSignal> {
                 .iter()
                 .rev()
                 .find(|t| t.role == "assistant")
-                .map(|t| {
-                    let s = t.text.trim();
-                    if s.len() > 200 {
-                        format!("{}…", &s[..197])
-                    } else {
-                        s.to_string()
-                    }
-                })
+                .map(|t| truncate_with_ellipsis(t.text.trim(), 200))
                 .unwrap_or_default();
 
             out.push(ReinforcementSignal {
@@ -588,12 +574,7 @@ fn build_summary(turns: &[Turn], corrections: &[CorrectionSignal]) -> String {
 
     // First user message = the task
     if let Some(first) = turns.iter().find(|t| t.role == "user") {
-        let s = first.text.trim();
-        parts.push(if s.len() > 300 {
-            format!("{}…", &s[..297])
-        } else {
-            s.to_string()
-        });
+        parts.push(truncate_with_ellipsis(first.text.trim(), 300));
     }
 
     // Corrections become negative directives
@@ -610,12 +591,7 @@ fn build_summary(turns: &[Turn], corrections: &[CorrectionSignal]) -> String {
             .map(|f| f.text == last_user.text)
             .unwrap_or(false);
         if !is_correction && !is_first && last_user.text.len() > 10 {
-            let s = last_user.text.trim();
-            parts.push(if s.len() > 200 {
-                format!("{}…", &s[..197])
-            } else {
-                s.to_string()
-            });
+            parts.push(truncate_with_ellipsis(last_user.text.trim(), 200));
         }
     }
 
@@ -624,6 +600,21 @@ fn build_summary(turns: &[Turn], corrections: &[CorrectionSignal]) -> String {
 
 fn estimate_tokens(text: &str) -> i32 {
     (text.len() / 4).max(1) as i32
+}
+
+/// Truncate `s` to at most `max_bytes` bytes on a UTF-8 char boundary,
+/// appending "…" if shortened. Slicing on a raw byte index panics when it
+/// lands inside a multi-byte codepoint (e.g. an emoji).
+fn truncate_with_ellipsis(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // "…" is 3 bytes; reserve room so the result stays within max_bytes.
+    let mut end = max_bytes.saturating_sub(3);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// Locate the most recently modified Claude Code transcript for the current
@@ -655,4 +646,32 @@ pub fn find_latest_transcript() -> Option<String> {
         }
     }
     newest.map(|(_, p)| p.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_with_ellipsis;
+
+    #[test]
+    fn truncate_does_not_panic_on_emoji_at_boundary() {
+        // 🟠 is 4 bytes (U+1F7E0). Pad ASCII so the orange-circle straddles
+        // the requested cutoff — exactly the digest panic from 2026-05-06.
+        let s = format!("{}🟠 trailing", "x".repeat(196));
+        let out = truncate_with_ellipsis(&s, 200);
+        assert!(out.ends_with('…'));
+        assert!(out.is_char_boundary(out.len() - "…".len()));
+    }
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate_with_ellipsis("hello", 200), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_long_string() {
+        let s = "x".repeat(500);
+        let out = truncate_with_ellipsis(&s, 200);
+        assert!(out.ends_with('…'));
+        assert!(out.len() <= 200);
+    }
 }
