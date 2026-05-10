@@ -326,6 +326,13 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
             }
             let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, &user_id);
             let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
+
+            // Mark the agent Shutdown. Subsequent prompts re-enter Executing
+            // via inject (force_state is unconditional); the watcher's reap
+            // pass will close the tmux window once the process is truly gone.
+            let _ = AgentRepo::new(pool, &user_id)
+                .force_state(a.agent_id, crate::models::agent::AgentState::Shutdown, None)
+                .await;
         }
 
         // 2. Capture outcome (unless YGG_RUN_CAPTURE=0).

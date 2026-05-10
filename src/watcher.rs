@@ -53,14 +53,22 @@ impl Watcher {
         let worker_updates = self.observe_workers().await.unwrap_or(0);
         let delivery_updates = self.check_delivery().await.unwrap_or(0);
         let cleaned = self.cleanup_delivered().await.unwrap_or(0);
+        let zombies = self.cleanup_zombie_agents().await.unwrap_or(0);
 
-        if reaped > 0 || stale > 0 || worker_updates > 0 || delivery_updates > 0 || cleaned > 0 {
+        if reaped > 0
+            || stale > 0
+            || worker_updates > 0
+            || delivery_updates > 0
+            || cleaned > 0
+            || zombies > 0
+        {
             tracing::info!(
                 reaped_locks = reaped,
                 stale_agents = stale,
                 worker_updates = worker_updates,
                 delivery_updates = delivery_updates,
                 cleaned_workers = cleaned,
+                zombie_agents = zombies,
                 "watcher tick"
             );
         }
@@ -228,6 +236,74 @@ impl Watcher {
             count += 1;
         }
         Ok(count)
+    }
+
+    /// Reap zombie spawn-agents — agents whose tmux window is gone but
+    /// whose `agents` row is still in a non-terminal state. The window
+    /// disappearing is dispositive: tmux closes the window when its last
+    /// pane's process exits, so if it's gone the Claude harness exited
+    /// without (or before) the Stop hook could finalize state.
+    ///
+    /// We only touch agents that have a worktree under `.ygg/worktrees/` —
+    /// that's our marker for "spawned via `ygg spawn`." Agents launched
+    /// from an interactive shell (no worktree) are managed by their owner
+    /// and don't get reaped here.
+    async fn cleanup_zombie_agents(&self) -> Result<u64, anyhow::Error> {
+        // Stale threshold: 4× the lock TTL. Long enough that an idle but
+        // alive harness doesn't get reaped during a slow turn; short enough
+        // that genuinely-dead agents clear within minutes.
+        let min_idle_secs = (self.config.lock_ttl_secs as i64) * 4;
+
+        let agent_repo = crate::models::agent::AgentRepo::new(&self.pool, crate::db::user_id());
+        let candidates = agent_repo
+            .list_reap_candidates(min_idle_secs)
+            .await
+            .unwrap_or_default();
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        // Snapshot live windows once per tick. Empty when tmux isn't
+        // running or the `ygg` session doesn't exist — both mean every
+        // candidate's window is gone.
+        let live_windows = list_tmux_windows("ygg");
+        let live: std::collections::HashSet<&str> =
+            live_windows.iter().map(String::as_str).collect();
+
+        let lock_mgr =
+            LockManager::new(&self.pool, self.config.lock_ttl_secs, crate::db::user_id());
+        let session_repo = crate::models::session::SessionRepo::new(&self.pool);
+
+        let mut n = 0u64;
+        for a in candidates {
+            let worktree = format!(".ygg/worktrees/{}", a.agent_name);
+            // No worktree → not a `ygg spawn` agent → leave alone.
+            if !std::path::Path::new(&worktree).exists() {
+                continue;
+            }
+            // Window still alive → harness is running, not a zombie.
+            if live.contains(a.agent_name.as_str()) {
+                continue;
+            }
+
+            let _ = session_repo.end_all_for_agent(a.agent_id).await;
+            let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
+            let _ = agent_repo
+                .force_state(a.agent_id, crate::models::agent::AgentState::Shutdown, None)
+                .await;
+            // Killing the window is mostly a no-op (it's already gone) but
+            // covers the rare case where tmux still has a stub window with
+            // a dead pane after a panic.
+            TmuxManager::kill_window_sync("ygg", &a.agent_name);
+            remove_worktree(&worktree);
+            tracing::info!(
+                agent = %a.agent_name,
+                prior_state = %a.current_state,
+                "reaped zombie agent"
+            );
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// Clean up workers that are terminal AND fully delivered (merged) or
