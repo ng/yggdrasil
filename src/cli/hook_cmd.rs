@@ -52,12 +52,9 @@ pub async fn handle(action: HookAction) -> anyhow::Result<()> {
             .unwrap_or_else(|| "ygg".to_string())
     });
 
-    // Propagate session_id to env so downstream DB calls tag correctly.
-    if !session_id.is_empty() {
-        unsafe {
-            std::env::set_var("CLAUDE_SESSION_ID", &session_id);
-        }
-    }
+    // Record session_id process-globally so downstream DB calls tag correctly.
+    // Avoids the unsafe, non-thread-safe std::env::set_var.
+    crate::models::event::set_cc_session_id(&session_id);
 
     match action {
         HookAction::SessionStart => handle_session_start(&agent_name, &session_id, &payload).await,

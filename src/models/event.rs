@@ -75,10 +75,28 @@ pub struct Event {
     pub created_at: DateTime<Utc>,
 }
 
-/// Claude Code session id, read lazily from the environment. The hook scripts
-/// export CLAUDE_SESSION_ID; spawn/inject/digest inherit it from the shell
-/// that invoked them. Missing env var => None, the column stays NULL.
+/// Process-global CC session id, set once by the hook entry point. Preferred
+/// over mutating `CLAUDE_SESSION_ID` in the environment, which is `unsafe` and
+/// not thread-safe under edition 2024.
+static SESSION_ID_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the CC session id for this process. Called from the hook handler
+/// when Claude Code supplies `session_id` in the payload. First non-empty
+/// value wins; a hook process handles exactly one session.
+pub fn set_cc_session_id(session_id: &str) {
+    if !session_id.is_empty() {
+        let _ = SESSION_ID_OVERRIDE.set(session_id.to_string());
+    }
+}
+
+/// Claude Code session id for the current process. Prefers the value the hook
+/// entry recorded via [`set_cc_session_id`]; otherwise falls back to the
+/// `CLAUDE_SESSION_ID` environment variable, which spawn/inject/digest inherit
+/// from the shell that invoked them. Neither set => None, the column stays NULL.
 pub fn cc_session_id() -> Option<String> {
+    if let Some(sid) = SESSION_ID_OVERRIDE.get() {
+        return Some(sid.clone());
+    }
     std::env::var("CLAUDE_SESSION_ID")
         .ok()
         .filter(|s| !s.is_empty())
