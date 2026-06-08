@@ -269,7 +269,17 @@ fn classify(content: &str, current_hash: &str) -> FoundBlock {
 /// Install or update the block in `content`. Returns the new content.
 fn install_block(content: &str, body: &str) -> String {
     let hash = block_hash(body);
-    let managed = format!("{}\n{}\n{}", begin_marker(&hash), body.trim_end(), END);
+    // The managed block intentionally restates sections (Quick Reference,
+    // Rules, Session Completion, …) that hand-authored content above it may
+    // also use, so it stays self-contained. Wrap it in a scoped MD024 disable
+    // so markdownlint doesn't flag those by-design duplicate headings; the
+    // hand-authored region above the block is still linted.
+    let managed = format!(
+        "{}\n<!-- markdownlint-disable MD024 -->\n{}\n<!-- markdownlint-enable MD024 -->\n{}",
+        begin_marker(&hash),
+        body.trim_end(),
+        END
+    );
 
     if let Some((s, e)) = find_block(content) {
         // Replace existing block in place.

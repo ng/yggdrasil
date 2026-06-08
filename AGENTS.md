@@ -62,6 +62,7 @@ cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 ```
 
 <!-- BEGIN YGG INTEGRATION v:4 hash:3fa7ef6e -->
+<!-- markdownlint-disable MD024 -->
 ## Yggdrasil Coordination
 
 This project uses **Yggdrasil** (`ygg`) for resource coordination and issue
@@ -124,4 +125,5 @@ Some systems alias `cp`/`mv`/`rm` to interactive mode which hangs agents. Use:
 cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 # scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
+<!-- markdownlint-enable MD024 -->
 <!-- END YGG INTEGRATION -->

@@ -119,6 +119,7 @@ collisions between concurrent agents.
 - **Hooks** → native `ygg hook <event>` handlers, installed by `ygg init` at Claude Code lifecycle events.
 
 <!-- BEGIN YGG INTEGRATION v:4 hash:8de7570e -->
+<!-- markdownlint-disable MD024 -->
 ## Yggdrasil Agent Coordination
 
 This project uses **Yggdrasil** (`ygg`) for resource coordination and issue
@@ -254,4 +255,5 @@ Some systems alias `cp`/`mv`/`rm` to interactive mode which hangs agents. Use:
 cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 # scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
+<!-- markdownlint-enable MD024 -->
 <!-- END YGG INTEGRATION -->
