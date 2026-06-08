@@ -1,8 +1,8 @@
 //! Nerdy stats pane (yggdrasil-178). The deep-dive companion to the
 //! status strip's three-line summary: pool internals, table sizes,
-//! pgvector index state, and per-hook fire timestamps. Refresh is
-//! deliberately *slow* (5 s default) — these aren't liveness signals,
-//! they're "why is the system slow / how big has the corpus grown."
+//! and per-hook fire timestamps. Refresh is deliberately *slow* (5 s
+//! default) — these aren't liveness signals, they're "why is the system
+//! slow / how big has the corpus grown."
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
@@ -22,7 +22,6 @@ use crate::models::agent::AgentRepo;
 pub struct NerdyStats {
     pub pool: PoolStats,
     pub tables: Vec<TableStat>,
-    pub pgvector: PgvectorStats,
     pub hook_kinds: Vec<HookFire>,
     pub tokens: TokenStats,
     pub loaded: bool,
@@ -69,14 +68,6 @@ pub struct TableStat {
     /// Ratio of dead tuples to live tuples — high values indicate
     /// autovacuum is falling behind.
     pub dead_ratio: f64,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct PgvectorStats {
-    pub installed: bool,
-    pub version: Option<String>,
-    /// (table, index_name, dimensions) per pgvector index.
-    pub indexes: Vec<(String, String, Option<i32>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,8 +141,10 @@ impl NerdyView {
             .fetch_all(pool)
             .await
             .unwrap_or_default();
-            let db_map: std::collections::HashMap<uuid::Uuid, i64> =
-                db_totals.into_iter().map(|(id, total, _)| (id, total)).collect();
+            let db_map: std::collections::HashMap<uuid::Uuid, i64> = db_totals
+                .into_iter()
+                .map(|(id, total, _)| (id, total))
+                .collect();
 
             for a in &agents {
                 if let Some(b) = agent_usage_breakdown(&a.agent_name) {
@@ -207,26 +200,6 @@ impl NerdyView {
         };
         lines.push(kv("pool saturation", &pool_pct));
         lines.push(kv("db latency", &format!("{}ms", o.db_ms)));
-        let health = |ok: bool| -> Span<'static> {
-            if ok {
-                Span::styled("OK", Style::default().fg(Color::Green))
-            } else {
-                Span::styled(
-                    "DOWN",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )
-            }
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("    {:<26}", "ollama"),
-                Style::default().fg(Color::Gray),
-            ),
-            health(o.ollama_ok),
-            Span::raw("    "),
-            Span::styled("pgvector  ", Style::default().fg(Color::Gray)),
-            health(o.pgvector_ok),
-        ]));
         lines.push(Line::from(""));
 
         // ── Tokens ───────────────────────────────────────────────
@@ -317,27 +290,6 @@ impl NerdyView {
         }
         lines.push(Line::from(""));
 
-        // ── pgvector ─────────────────────────────────────────────
-        lines.push(section_header("pgvector"));
-        let v = &self.stats.pgvector;
-        if v.installed {
-            lines.push(kv("extension", v.version.as_deref().unwrap_or("?")));
-            if v.indexes.is_empty() {
-                lines.push(dim("  no vector indexes"));
-            } else {
-                for (table, name, dims) in &v.indexes {
-                    let dims_str = dims.map(|d| format!("{d}d")).unwrap_or_else(|| "?".into());
-                    lines.push(kv(&format!("  {table}.{name}"), &dims_str));
-                }
-            }
-        } else {
-            lines.push(Line::from(Span::styled(
-                "  ✗ pgvector NOT installed",
-                Style::default().fg(Color::Red),
-            )));
-        }
-        lines.push(Line::from(""));
-
         // ── Hooks ────────────────────────────────────────────────
         lines.push(section_header("hooks (last fire / 24h count)"));
         if self.stats.hook_kinds.is_empty() {
@@ -356,7 +308,7 @@ impl NerdyView {
         let para = Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Nerdy · live / tokens / pool / tables / pgvector / hooks "),
+                .title(" Nerdy · live / tokens / pool / tables / hooks "),
         );
         frame.render_widget(para, cols[0]);
 
@@ -491,8 +443,8 @@ async fn collect(pool: &PgPool) -> NerdyStats {
     let table_query = r#"
         WITH wanted AS (
           SELECT unnest(ARRAY[
-            'tasks', 'task_runs', 'nodes', 'events',
-            'agent_stats', 'learnings', 'memories',
+            'tasks', 'task_runs', 'events',
+            'agent_stats', 'learnings',
             'task_deps', 'locks'
           ]) AS name
         )
@@ -525,38 +477,6 @@ async fn collect(pool: &PgPool) -> NerdyStats {
                 dead_ratio,
             })
             .collect();
-    }
-
-    // pgvector — extension version + index list.
-    if let Ok(version) = sqlx::query_scalar::<_, String>(
-        "SELECT extversion FROM pg_extension WHERE extname = 'vector'",
-    )
-    .fetch_optional(pool)
-    .await
-    {
-        if let Some(v) = version {
-            out.pgvector.installed = true;
-            out.pgvector.version = Some(v);
-            let idx_q = r#"
-                SELECT
-                  c2.relname AS table_name,
-                  c.relname  AS index_name,
-                  CASE WHEN a.atttypmod > 0 THEN a.atttypmod ELSE NULL END AS dimensions
-                FROM pg_class c
-                JOIN pg_index i      ON i.indexrelid = c.oid
-                JOIN pg_class c2     ON c2.oid = i.indrelid
-                JOIN pg_am am        ON am.oid = c.relam
-                JOIN pg_attribute a  ON a.attrelid = c2.oid AND a.attnum = i.indkey[0]
-                WHERE am.amname IN ('hnsw', 'ivfflat')
-                ORDER BY c2.relname, c.relname
-            "#;
-            if let Ok(rows) = sqlx::query_as::<_, (String, String, Option<i32>)>(idx_q)
-                .fetch_all(pool)
-                .await
-            {
-                out.pgvector.indexes = rows;
-            }
-        }
     }
 
     // Hooks — last fire + 24h count per hook_fired payload kind.

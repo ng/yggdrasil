@@ -1,30 +1,18 @@
 pub mod analytics;
 pub mod bench;
 pub mod blob;
-pub mod classifier;
 pub mod cli;
 pub mod config;
 pub mod db;
-pub mod embed;
-pub mod epoch;
 pub mod executor;
-pub mod hyde;
 pub mod interrupt;
-pub mod llm_digest;
 pub mod lock;
 pub mod models;
 pub mod notify;
-pub mod ollama;
-pub mod pressure;
-pub mod prompt;
 pub mod redaction;
-pub mod references;
-pub mod salience;
 pub mod scheduler;
-pub mod scoring;
 pub mod stats;
 pub mod status;
-pub mod task_classify;
 pub mod tmux;
 pub mod tui;
 pub mod watcher;
@@ -45,9 +33,6 @@ pub struct AppState {
 pub enum YggError {
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
-
-    #[error("ollama: {0}")]
-    Ollama(String),
 
     #[error("executor failed (exit {exit_code}): {stderr}")]
     Executor { exit_code: i32, stderr: String },

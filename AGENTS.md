@@ -11,11 +11,6 @@ ygg task create "title"                        # New task
 ygg task claim <ref>                           # Take a task
 ygg task close <ref>                           # Complete a task
 
-ygg memory create "..." --scope repo           # First-class scoped note (global|repo|session)
-ygg memory search "<query>"                    # Semantic search over memories
-ygg memory pin <id>                            # Surface a memory first in retrieval
-ygg remember "..."                             # Back-compat alias — writes a directive node
-
 ygg status                                     # See all agents' state, locks, recent activity
 ygg lock acquire <resource-key>                # Lease a shared resource before editing
 ygg lock release <resource-key>                # Release when done
@@ -23,17 +18,14 @@ ygg spawn --task "..."                         # Spawn a parallel agent in a new
 ygg logs --follow [--kind K] [--session SID]   # Live event stream (filterable)
 ygg rollup --days 7                            # Per-repo activity summary
 ygg reap --dry-run                             # Preview stale-row cleanup
-ygg eval                                       # Retrieval effectiveness (CLI; pane [8] in TUI)
 ```
 
 ### Rules
 
 - Acquire a lock before editing a resource another agent might touch. Release when done.
 - Prefer `ygg spawn` over a native Task/Agent tool for parallel work that warrants its own context.
-- Read `[ygg memory | ...]` hints injected above user prompts — they are real prior context.
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking. Intra-turn checklists can stay in a native TodoList.
-- `ygg memory create --scope repo|session|global` is the preferred way to persist notes; `ygg remember` still works.
 - Do NOT use `bd` / beads. This project has migrated to Yggdrasil.
 
 ## Agent naming
@@ -69,13 +61,13 @@ cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 # scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
 
-<!-- BEGIN YGG INTEGRATION v:3 hash:4aca3e95 -->
+<!-- BEGIN YGG INTEGRATION v:4 hash:3fa7ef6e -->
+<!-- markdownlint-disable MD024 -->
 ## Yggdrasil Coordination
 
-This project uses **Yggdrasil** (`ygg`) for cross-session memory and
-coordination. Hooks fire at Claude Code lifecycle events; you do not invoke
-them manually. Above each user prompt you will see `[ygg memory | ... ]` lines —
-those are real prior context surfaced by similarity.
+This project uses **Yggdrasil** (`ygg`) for resource coordination and issue
+tracking across parallel agents. Hooks fire at Claude Code lifecycle events;
+you do not invoke them manually.
 
 ### Quick Reference
 
@@ -86,7 +78,7 @@ ygg task create "title"                     # New task
 ygg task claim <ref>                        # Take a task
 ygg task close <ref>                        # Complete a task
 ygg task dep <task> <blocker>               # Record dependency
-ygg remember "..."                          # Durable note; retriever can surface later
+ygg task dupes [--all]                      # Probable duplicate pairs (string similarity)
 
 ygg status                                  # Agents + outstanding locks
 ygg lock acquire <key> / release <key> / list
@@ -99,21 +91,11 @@ ygg logs --follow                           # Live event stream
 
 - Acquire a lock before editing a resource another agent might touch. Release when done.
 - Prefer `ygg spawn` over a native Task/Agent tool for parallel work.
-- Read `[ygg memory | ...]` hints — real prior context.
 - Check `ygg status` before assuming you're working alone.
-- Use `ygg task` for cross-session work tracking; `ygg remember` for durable notes.
+- Use `ygg task` for cross-session work tracking.
+- Before `ygg task create`, run `ygg task dupes` to surface near-dups.
+- For recurring engineering corrections, `ygg learn add` with a file glob.
 - Do NOT use `bd` / beads.
-
-### Vector memory
-
-Active retrieval, not just passive injections:
-- Before `ygg task create` → `ygg task dupes` to surface near-dups.
-- Before a hard problem → `ygg memory search "<topic>"`.
-- On a non-obvious rule → `ygg remember "<one-sentence>"`.
-- On a recurring engineering correction → `ygg learn add` with a glob.
-
-Anti-patterns: don't write narration, scratch, or speculation.
-`ygg trace` shows what the retriever surfaced last turn.
 
 ### Ticket body structure
 
@@ -125,7 +107,7 @@ SHAs, paths, commands, numeric thresholds), **Refs:** (optional —
 related ticket, ADR, URL).
 
 Be terse in `ygg task create` titles/descriptions/acceptance/notes and
-`ygg remember`. Drop filler and articles when meaning survives.
+`ygg learn` rules. Drop filler and articles when meaning survives.
 Preserve identifiers, paths, commands, numbers, URLs, and modal
 keywords (always/never/must/should/cannot/don't) verbatim. Does NOT
 apply to commit messages, PR descriptions, or chat — those stay
@@ -143,4 +125,5 @@ Some systems alias `cp`/`mv`/`rm` to interactive mode which hangs agents. Use:
 cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 # scp / ssh: -o BatchMode=yes         apt-get: -y         brew: HOMEBREW_NO_AUTO_UPDATE=1
 ```
+<!-- markdownlint-enable MD024 -->
 <!-- END YGG INTEGRATION -->

@@ -1,7 +1,13 @@
 # ADR 0015 — Retrieval scope reduction (pivot toward orchestrator-only)
 
-**Status:** accepted (Phase 1 landed via yggdrasil-76; Phases 2–4 gated on observation)
-**Date:** 2026-04-18
+**Status:** implemented. Phase 1 landed via yggdrasil-76; Phases 2–4
+landed 2026-06-07 (yggdrasil-77/78/79) — the `nodes`, `memories`, and
+`embedding_cache` tables, the `tasks.embedding` column, pgvector, and the
+Ollama dependency are all gone. `ygg remember` / `ygg memory` / `ygg
+trace` / `ygg eval` / `ygg digest` / `ygg observe` / `ygg recovery-test`
+and the legacy `ygg run` loop were removed. Task dupe-detection now uses
+token-set (Jaccard) string similarity instead of embeddings.
+**Date:** 2026-04-18 (decision); 2026-06-07 (implementation)
 
 ## Context
 
@@ -129,9 +135,11 @@ Schema churn:
   `src/tui/trace_view.rs`, `src/tui/query_view.rs`, `src/tui/eval_view.rs` — all delete-candidates
 - Ollama dependency removed from `ygg init` entirely
 
-Tasks retain the `embedding` column (just shipped for dupe detection);
-that's the only pgvector usage that survives Phase 4 since it powers a
-pure-orchestration feature.
+Task dupe detection no longer uses embeddings. `tasks.embedding` was
+dropped in Phase 4 (see
+`migrations/20260607000001_drop_embeddings_and_nodes.sql`); dupe
+detection now uses token-set (Jaccard) string similarity on
+title+description.
 
 ## Consequences
 

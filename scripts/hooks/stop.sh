@@ -1,16 +1,14 @@
 #!/bin/bash
-# Claude Code Stop hook — digest session transcript, extract corrections + summary
+# Claude Code Stop hook — capture task-run outcome + enforce stop-check
 # Installed by: ygg init
+#
+# Note: the authoritative Stop handler is `ygg hook stop` (installed into
+# settings.json by `ygg init`); this script is a manual/compat fallback.
 
 INPUT=$(cat)
 AGENT="${YGG_AGENT_NAME:-$(basename "$(pwd)")}"
 SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 [ -n "$SID" ] && export CLAUDE_SESSION_ID="$SID"
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
-
-if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    ygg digest --agent "$AGENT" --transcript "$TRANSCRIPT" --stop 2>/dev/null
-fi
 
 # ADR 0016 / yggdrasil-97: capture commits + branch into the agent's latest
 # running task_run row, then heuristically transition the run terminal so

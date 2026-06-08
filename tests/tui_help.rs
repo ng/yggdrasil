@@ -31,6 +31,10 @@ fn global_keymap_lists_quit_and_navigation() {
     assert!(keys.iter().any(|k| k.contains("q")), "missing quit");
     assert!(keys.iter().any(|k| k.contains("Tab")), "missing nav");
     assert!(keys.iter().any(|k| k.contains("?")), "missing self-toggle");
+    assert!(
+        keys.iter().any(|k| *k == "1,2,3,5,9,0,G,N,C"),
+        "missing exact switch-view key legend"
+    );
 }
 
 #[test]
@@ -39,15 +43,12 @@ fn each_active_pane_has_a_keymap_section() {
         "Dashboard",
         "Dag",
         "Tasks",
-        "Trace",
-        "Query",
         "Logs",
-        "MemGraph",
-        "Eval",
-        "Prompt",
         "Locks",
         "Runs",
         "RunGrid",
+        "Nerdy",
+        "Chat",
     ] {
         let keys = pane_keys(v);
         // RunGrid has its own narrow "rows = tasks" pseudo-bindings; every

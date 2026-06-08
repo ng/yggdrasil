@@ -36,9 +36,10 @@ impl std::str::FromStr for TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, sqlx::Type, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, sqlx::Type, Serialize, Deserialize)]
 #[sqlx(type_name = "task_kind", rename_all = "snake_case")]
 pub enum TaskKind {
+    #[default]
     Task,
     Bug,
     Feature,
@@ -110,12 +111,6 @@ pub struct TaskCreate<'a> {
     pub assignee: Option<Uuid>,
     pub labels: &'a [String],
     pub external_ref: Option<&'a str>,
-}
-
-impl Default for TaskKind {
-    fn default() -> Self {
-        TaskKind::Task
-    }
 }
 
 #[derive(Debug, Default)]
@@ -596,84 +591,81 @@ impl<'a> TaskRepo<'a> {
         Ok(())
     }
 
-    pub async fn set_embedding(
-        &self,
-        task_id: Uuid,
-        embedding: &pgvector::Vector,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE tasks SET embedding = $2 WHERE task_id = $1")
-            .bind(task_id)
-            .bind(embedding)
-            .execute(self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Find probable duplicate pairs: tasks whose embedding cosine is below
-    /// `max_distance` (lower = more similar; 0.0 = identical). Returns pairs
-    /// `(older, newer, similarity)` deduplicated so each pair appears once.
-    /// Scoped to `repo_id`, or global when None.
+    /// Find probable duplicate pairs using token-set Jaccard similarity on
+    /// title+description — no embeddings (ADR 0015). Returns pairs
+    /// `(older, newer, similarity)` with similarity >= `min_similarity`,
+    /// sorted most-similar first, capped at `limit`. Scoped to `repo_id`,
+    /// or global when None. Open, non-deleted tasks only.
     pub async fn find_dupes(
         &self,
         repo_id: Option<Uuid>,
-        max_distance: f64,
+        min_similarity: f64,
         limit: i64,
     ) -> Result<Vec<(Task, Task, f64)>, sqlx::Error> {
-        // SELF JOIN with a.created_at < b.created_at gives each pair once.
-        // Fetch only (a_id, b_id, distance) then hydrate Task rows — avoids
-        // sqlx's FromRow tuple arity limit.
-        let id_rows: Vec<(Uuid, Uuid, f64)> = sqlx::query_as(
-            r#"
-            SELECT a.task_id, b.task_id, (a.embedding <=> b.embedding)::float8
-            FROM tasks a
-            JOIN tasks b
-              ON a.task_id <> b.task_id
-             AND a.created_at < b.created_at
-             AND a.embedding IS NOT NULL
-             AND b.embedding IS NOT NULL
-             AND ($1::UUID IS NULL OR (a.repo_id = $1 AND b.repo_id = $1))
-             AND (a.embedding <=> b.embedding) < $2
-             AND a.status <> 'closed' AND b.status <> 'closed'
-             AND a.deleted_at IS NULL AND b.deleted_at IS NULL
-            ORDER BY (a.embedding <=> b.embedding) ASC
-            LIMIT $3
-            "#,
-        )
-        .bind(repo_id)
-        .bind(max_distance)
-        .bind(limit)
-        .fetch_all(self.pool)
-        .await?;
-
-        if id_rows.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut all_ids: Vec<Uuid> = Vec::with_capacity(id_rows.len() * 2);
-        for (a, b, _) in &id_rows {
-            all_ids.push(*a);
-            all_ids.push(*b);
-        }
         let tasks: Vec<Task> = sqlx::query_as::<_, Task>(
             r#"SELECT task_id, repo_id, seq, title, description, acceptance, design, notes,
                       kind, status, priority, created_by, assignee, human_flag,
                       created_at, updated_at, closed_at, close_reason, relevance, external_ref
                FROM tasks
-               WHERE task_id = ANY($1)"#,
+               WHERE ($1::UUID IS NULL OR repo_id = $1)
+                 AND status <> 'closed'
+                 AND deleted_at IS NULL
+               ORDER BY created_at"#,
         )
-        .bind(&all_ids)
+        .bind(repo_id)
         .fetch_all(self.pool)
         .await?;
-        let by_id: std::collections::HashMap<Uuid, Task> =
-            tasks.into_iter().map(|t| (t.task_id, t)).collect();
 
-        Ok(id_rows
-            .into_iter()
-            .filter_map(|(a_id, b_id, dist)| {
-                let a = by_id.get(&a_id)?.clone();
-                let b = by_id.get(&b_id)?.clone();
-                Some((a, b, (1.0 - dist).clamp(0.0, 1.0)))
-            })
-            .collect())
+        // Precompute a token set per task.
+        let token_sets: Vec<std::collections::HashSet<String>> = tasks
+            .iter()
+            .map(|t| tokenize(&format!("{} {}", t.title, t.description)))
+            .collect();
+
+        // Inverted index: token -> task indices. Two tasks with no shared
+        // token have Jaccard 0, so only pairs that co-occur on some token
+        // can clear the threshold. Comparing just those candidate pairs
+        // avoids the all-pairs O(n²) sweep on disjoint tasks.
+        let mut by_token: std::collections::HashMap<&str, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, set) in token_sets.iter().enumerate() {
+            for tok in set {
+                by_token.entry(tok.as_str()).or_default().push(i);
+            }
+        }
+        // A token appearing in more than `df_cap` tasks is non-discriminative
+        // (a near stop-word for this corpus) and its bucket would reintroduce
+        // the O(n²) sweep. Skip it as a blocking key: a pair sharing only such
+        // ubiquitous tokens has a low Jaccard and never clears the threshold,
+        // while a pair sharing any rarer token is still compared via that
+        // token's bucket. Floored so small corpora are unaffected.
+        let df_cap = (tasks.len() / 10).max(64);
+        let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+        let mut pairs: Vec<(Task, Task, f64)> = Vec::new();
+        for idxs in by_token.values() {
+            if idxs.len() > df_cap {
+                continue;
+            }
+            for a in 0..idxs.len() {
+                for b in (a + 1)..idxs.len() {
+                    // tasks are ordered by created_at, so the smaller index
+                    // is the older task; normalize so each pair is unique.
+                    let (i, j) = (idxs[a].min(idxs[b]), idxs[a].max(idxs[b]));
+                    if !seen.insert((i, j)) {
+                        continue;
+                    }
+                    let sim = jaccard(&token_sets[i], &token_sets[j]);
+                    if sim >= min_similarity {
+                        pairs.push((tasks[i].clone(), tasks[j].clone(), sim));
+                    }
+                }
+            }
+        }
+        pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        if limit > 0 {
+            pairs.truncate(limit as usize);
+        }
+        Ok(pairs)
     }
 
     pub async fn add_label(&self, task_id: Uuid, label: &str) -> Result<(), sqlx::Error> {
@@ -889,4 +881,24 @@ pub struct TaskStats {
     pub in_progress: i64,
     pub blocked: i64,
     pub closed: i64,
+}
+
+/// Lowercase alphanumeric word tokens, dropping very short noise tokens.
+/// Used by `find_dupes` for embedding-free similarity (ADR 0015).
+fn tokenize(text: &str) -> std::collections::HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Jaccard similarity of two token sets: |A∩B| / |A∪B|. Returns 0.0 when
+/// both sets are empty.
+fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
+    if union == 0.0 { 0.0 } else { inter / union }
 }

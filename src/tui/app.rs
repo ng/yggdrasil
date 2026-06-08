@@ -13,26 +13,18 @@ use crate::config::AppConfig;
 use super::chat_view::ChatView;
 use super::dag_view::DagView;
 use super::dashboard::DashboardView;
-use super::eval_view::EvalView;
 use super::locks_view::LocksView;
 use super::log_view::LogView;
-use super::memgraph_view::MemGraphView;
-use super::prompt_view::PromptView;
 use super::run_grid::RunGridView;
 use super::runs_view::RunsView;
 use super::tasks_view::TasksView;
-use super::trace_view::TraceView;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ActiveView {
     Dashboard,
     Dag,
     Tasks,
-    Trace,
     Logs,
-    MemGraph,
-    Eval,
-    Prompt,
     Locks,
     Runs,
     RunGrid,
@@ -46,11 +38,7 @@ pub struct App {
     pub dashboard: DashboardView,
     pub dag: DagView,
     pub tasks: TasksView,
-    pub trace: TraceView,
     pub logs: LogView,
-    pub memgraph: MemGraphView,
-    pub eval: EvalView,
-    pub prompt: PromptView,
     pub locks: LocksView,
     pub runs: RunsView,
     pub run_grid: RunGridView,
@@ -280,8 +268,7 @@ pub struct OpsStats {
     pub agents_stuck: i64,  // active-state but updated > 10m ago
     pub tasks_running: i64, // tasks.status = in_progress
     pub live_sessions: i64, // sessions.ended_at IS NULL
-    pub ollama_ok: bool,
-    pub db_ms: u64, // round-trip ping
+    pub db_ms: u64,         // round-trip ping
 
     /// yggdrasil-148: rolling burn rate. `agent_stats.period` is
     /// hour-bucketed (see `src/stats/tracker.rs`), so the finest-grain
@@ -293,13 +280,11 @@ pub struct OpsStats {
     pub tokens_today: i64,
 
     /// yggdrasil-177: live DB-side signals. The status strip shows
-    /// pool saturation + event throughput + pgvector availability so
-    /// "is anything broken" is answerable without leaving the
-    /// dashboard.
+    /// pool saturation + event throughput so "is anything broken" is
+    /// answerable without leaving the dashboard.
     pub pool_used: u32,
     pub pool_max: u32,
     pub events_per_min: i64,
-    pub pgvector_ok: bool,
 }
 
 /// yggdrasil-148: hide cost displays during screencasts / demos. Honors
@@ -404,11 +389,7 @@ impl App {
             dashboard: DashboardView::new(),
             dag: DagView::new(),
             tasks: TasksView::new(),
-            trace: TraceView::new(),
             logs: LogView::new(),
-            memgraph: MemGraphView::new(),
-            eval: EvalView::new(),
-            prompt: PromptView::new(),
             locks: LocksView::new(),
             runs: RunsView::new(),
             run_grid: RunGridView::new(),
@@ -472,8 +453,7 @@ impl App {
             .collect();
 
         // Orchestration snapshot. One roundtrip: agents live/stuck, tasks
-        // running, sessions live. Ollama health is a bounded HTTP ping so
-        // it can't block the tick.
+        // running, sessions live.
         let db_start = std::time::Instant::now();
         let (alive, stuck, running, sessions): (i64, i64, i64, i64) = sqlx::query_as(
             r#"
@@ -502,7 +482,6 @@ impl App {
             agents_stuck: stuck,
             tasks_running: running,
             live_sessions: sessions,
-            ollama_ok: self.ops_stats.ollama_ok,
             db_ms: db_start.elapsed().as_millis() as u64,
             // Burn-rate fields are populated below once the cost-hidden
             // gate clears; carry forward the previous tick's values
@@ -510,44 +489,30 @@ impl App {
             tokens_per_min: self.ops_stats.tokens_per_min,
             cost_today_usd: self.ops_stats.cost_today_usd,
             tokens_today: self.ops_stats.tokens_today,
-            // yggdrasil-177: pool / events-per-min / pgvector get
-            // populated in the dedicated query block further down.
-            // Carry forward to keep flash markings stable.
+            // yggdrasil-177: pool / events-per-min get populated in the
+            // dedicated query block further down. Carry forward to keep
+            // flash markings stable.
             pool_used: self.ops_stats.pool_used,
             pool_max: self.ops_stats.pool_max,
             events_per_min: self.ops_stats.events_per_min,
-            pgvector_ok: self.ops_stats.pgvector_ok,
         };
         self.flash.mark_changes(&prev, &next, 2);
         self.ops_stats = next;
         // yggdrasil-150: feed the in-panel sparkline.
         self.alive_history.push(alive.max(0) as u64);
 
-        // yggdrasil-177: pool saturation + event-rate + pgvector probe.
-        // sqlx::Pool exposes size + num_idle synchronously; the rest
-        // is one round-trip joining a 60s event count + a pg_extension
-        // existence check.
+        // yggdrasil-177: pool saturation + event-rate. sqlx::Pool exposes
+        // size + num_idle synchronously; the event count is one round-trip.
         self.ops_stats.pool_used = pool.size().saturating_sub(pool.num_idle() as u32);
         self.ops_stats.pool_max = pool.options().get_max_connections();
-        if let Ok(row) = sqlx::query_as::<_, (i64, bool)>(
-            r#"SELECT
-                 (SELECT COUNT(*) FROM events WHERE created_at > now() - interval '1 minute')::bigint,
-                 EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')"#,
+        if let Ok(count) = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::bigint FROM events WHERE created_at > now() - interval '1 minute'",
         )
         .fetch_one(pool)
         .await
         {
-            self.ops_stats.events_per_min = row.0;
-            self.ops_stats.pgvector_ok = row.1;
+            self.ops_stats.events_per_min = count;
         }
-
-        // Tight 150ms timeout — local Ollama answers in <20ms when
-        // running; 150ms is plenty to catch "it's alive" without
-        // stalling the refresh if it's down.
-        self.ops_stats.ollama_ok =
-            tokio::time::timeout(std::time::Duration::from_millis(150), reqwest_ping())
-                .await
-                .unwrap_or(false);
 
         // yggdrasil-148: burn-rate snapshot. One round-trip pulls the
         // current-hour tokens (for tokens/min extrapolation) and the
@@ -740,26 +705,6 @@ impl App {
             return;
         }
 
-        // MemGraph search mode captures keys while active.
-        if self.active_view == ActiveView::MemGraph && self.memgraph.search_mode() {
-            match code {
-                KeyCode::Esc => self.memgraph.search_cancel(),
-                KeyCode::Backspace => self.memgraph.search_pop(),
-                KeyCode::Enter => {
-                    self.memgraph.search_run(pool).await;
-                }
-                KeyCode::Char(c) => {
-                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                        self.should_quit = true;
-                    } else {
-                        self.memgraph.search_push(c);
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-
         // Pending delete-confirm takes precedence — whatever the next key is,
         // it either commits (`y`) or cancels. Ctrl-C still quits. Prevents a
         // stray keystroke from firing a tab switch while the prompt is armed.
@@ -847,11 +792,7 @@ impl App {
             KeyCode::Char('1') => self.set_view(ActiveView::Dashboard),
             KeyCode::Char('2') => self.set_view(ActiveView::Dag),
             KeyCode::Char('3') => self.set_view(ActiveView::Tasks),
-            KeyCode::Char('4') => self.set_view(ActiveView::Trace),
             KeyCode::Char('5') => self.set_view(ActiveView::Logs),
-            KeyCode::Char('6') => self.set_view(ActiveView::MemGraph),
-            KeyCode::Char('7') => self.set_view(ActiveView::Eval),
-            KeyCode::Char('8') => self.set_view(ActiveView::Prompt),
             KeyCode::Char('9') => self.set_view(ActiveView::Locks),
             KeyCode::Char('0') => self.set_view(ActiveView::Runs),
             KeyCode::Char('G') => self.set_view(ActiveView::RunGrid),
@@ -992,9 +933,6 @@ impl App {
                 self.dashboard.cycle_runs_window();
                 let _ = self.dashboard.refresh(pool).await;
             }
-            KeyCode::Char('/') if self.active_view == ActiveView::MemGraph => {
-                self.memgraph.search_begin();
-            }
             KeyCode::Char('S') if self.active_view == ActiveView::Dashboard => {
                 self.dashboard.toggle_session_scope();
                 let _ = self.dashboard.refresh(pool).await;
@@ -1032,10 +970,6 @@ impl App {
                     super::dashboard::DashboardFocus::Workers => self.dashboard.agents_focus(),
                 }
             }
-            KeyCode::Char('w') if self.active_view == ActiveView::Eval => {
-                self.eval.cycle_window();
-                let _ = self.eval.refresh(pool).await;
-            }
             KeyCode::Char('r') if self.active_view == ActiveView::Locks => {
                 let cfg = AppConfig::from_env().ok();
                 let ttl = cfg.as_ref().map(|c| c.lock_ttl_secs).unwrap_or(300);
@@ -1048,10 +982,7 @@ impl App {
                     super::dashboard::DashboardFocus::Workers => self.dashboard.worker_up(),
                 },
                 ActiveView::Tasks => self.tasks.select_prev(),
-                ActiveView::Trace => self.trace.select_prev(),
                 ActiveView::Logs => self.logs.scroll_up(),
-                ActiveView::MemGraph => self.memgraph.scroll_up(),
-                ActiveView::Prompt => self.prompt.select_prev(),
                 ActiveView::Locks => self.locks.select_prev(),
                 ActiveView::Runs => self.runs.select_prev(),
                 ActiveView::RunGrid => self.run_grid.select_prev(),
@@ -1065,22 +996,13 @@ impl App {
                     super::dashboard::DashboardFocus::Workers => self.dashboard.worker_down(),
                 },
                 ActiveView::Tasks => self.tasks.select_next(),
-                ActiveView::Trace => self.trace.select_next(),
                 ActiveView::Logs => self.logs.scroll_down(),
-                ActiveView::MemGraph => self.memgraph.scroll_down(),
-                ActiveView::Prompt => self.prompt.select_next(),
                 ActiveView::Locks => self.locks.select_next(),
                 ActiveView::Runs => self.runs.select_next(),
                 ActiveView::RunGrid => self.run_grid.select_next(),
                 ActiveView::Chat => self.chat.select_next(),
                 _ => {}
             },
-            KeyCode::PageUp if self.active_view == ActiveView::Prompt => {
-                self.prompt.scroll_up();
-            }
-            KeyCode::PageDown if self.active_view == ActiveView::Prompt => {
-                self.prompt.scroll_down();
-            }
             KeyCode::Enter => match self.active_view {
                 ActiveView::Dashboard => match self.dashboard.focus {
                     super::dashboard::DashboardFocus::Workers => {
@@ -1106,16 +1028,12 @@ impl App {
                 },
                 ActiveView::Dag => self.dag.toggle_detail(),
                 ActiveView::Logs => self.logs.toggle_detail(),
-                ActiveView::MemGraph => self.memgraph.toggle_detail(),
                 ActiveView::Tasks => self.tasks.toggle_detail(),
                 _ => {}
             },
             KeyCode::Esc => match self.active_view {
                 ActiveView::Dag if self.dag.detail_open => self.dag.detail_open = false,
                 ActiveView::Tasks if self.tasks.detail_open => self.tasks.detail_open = false,
-                ActiveView::MemGraph if self.memgraph.detail_open => {
-                    self.memgraph.detail_open = false
-                }
                 _ => {}
             },
             _ => {}
@@ -1132,12 +1050,8 @@ impl App {
         let next = match self.active_view {
             ActiveView::Dashboard => ActiveView::Dag,
             ActiveView::Dag => ActiveView::Tasks,
-            ActiveView::Tasks => ActiveView::Trace,
-            ActiveView::Trace => ActiveView::Logs,
-            ActiveView::Logs => ActiveView::MemGraph,
-            ActiveView::MemGraph => ActiveView::Eval,
-            ActiveView::Eval => ActiveView::Prompt,
-            ActiveView::Prompt => ActiveView::Locks,
+            ActiveView::Tasks => ActiveView::Logs,
+            ActiveView::Logs => ActiveView::Locks,
             ActiveView::Locks => ActiveView::Runs,
             ActiveView::Runs => ActiveView::RunGrid,
             ActiveView::RunGrid => ActiveView::Nerdy,
@@ -1151,12 +1065,8 @@ impl App {
             ActiveView::Dashboard => ActiveView::Chat,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
-            ActiveView::Trace => ActiveView::Tasks,
-            ActiveView::Logs => ActiveView::Trace,
-            ActiveView::MemGraph => ActiveView::Logs,
-            ActiveView::Eval => ActiveView::MemGraph,
-            ActiveView::Prompt => ActiveView::Eval,
-            ActiveView::Locks => ActiveView::Prompt,
+            ActiveView::Logs => ActiveView::Tasks,
+            ActiveView::Locks => ActiveView::Logs,
             ActiveView::Runs => ActiveView::Locks,
             ActiveView::RunGrid => ActiveView::Runs,
             ActiveView::Nerdy => ActiveView::RunGrid,
@@ -1229,11 +1139,7 @@ impl App {
                 ("1", ActiveView::Dashboard),
                 ("2", ActiveView::Dag),
                 ("3", ActiveView::Tasks),
-                ("4", ActiveView::Trace),
                 ("5", ActiveView::Logs),
-                ("6", ActiveView::MemGraph),
-                ("7", ActiveView::Eval),
-                ("8", ActiveView::Prompt),
                 ("9", ActiveView::Locks),
                 ("0", ActiveView::Runs),
                 ("G", ActiveView::RunGrid),
@@ -1247,11 +1153,7 @@ impl App {
                 tab("[1] Dashboard", self.active_view == ActiveView::Dashboard),
                 tab("[2] DAG", self.active_view == ActiveView::Dag),
                 tab("[3] Tasks", self.active_view == ActiveView::Tasks),
-                tab("[4] Trace", self.active_view == ActiveView::Trace),
                 tab("[5] Logs", self.active_view == ActiveView::Logs),
-                tab("[6] Memgraph", self.active_view == ActiveView::MemGraph),
-                tab("[7] Eval", self.active_view == ActiveView::Eval),
-                tab("[8] Prompt", self.active_view == ActiveView::Prompt),
                 tab("[9] Locks", self.active_view == ActiveView::Locks),
                 tab("[0] Runs", self.active_view == ActiveView::Runs),
                 tab("[G] Grid", self.active_view == ActiveView::RunGrid),
@@ -1281,17 +1183,13 @@ impl App {
             ActiveView::Tasks => {
                 "↑↓ select  ·  Enter=detail  ·  d=overlay  ·  e=rename  ·  r=run  ·  ⌫=delete"
             }
-            ActiveView::Trace => "↑↓ select",
             ActiveView::Logs => "f=filter  Enter=detail",
-            ActiveView::MemGraph => "↑↓ scroll  Enter=detail  /=search  Esc=close",
-            ActiveView::Eval => "w=cycle window (1h/6h/24h/7d)",
-            ActiveView::Prompt => "↑↓ pins · PgUp/PgDn scroll MEMORY.md",
             ActiveView::Locks => "↑↓ select  ·  r=release",
             ActiveView::Runs => "↑↓ select  ·  f=cycle filter (all/live/terminal)",
             ActiveView::RunGrid => {
                 "↑↓ select  ·  rows=tasks  ·  cols=recent attempts (newest left)"
             }
-            ActiveView::Nerdy => "pool / tables / pgvector / hooks (read-only deep-dive)",
+            ActiveView::Nerdy => "pool / tables / hooks (read-only deep-dive)",
             ActiveView::Chat => "c=compose  ↑↓=scroll  Enter=detail/claim  /=filter",
         };
         // yggdrasil-134: scope chip on the right of the help row makes
@@ -1318,11 +1216,7 @@ impl App {
             ActiveView::Dashboard => self.dashboard.render(frame, chunks[2]),
             ActiveView::Dag => self.dag.render(frame, chunks[2]),
             ActiveView::Tasks => self.tasks.render(frame, chunks[2]),
-            ActiveView::Trace => self.trace.render(frame, chunks[2]),
             ActiveView::Logs => self.logs.render(frame, chunks[2]),
-            ActiveView::MemGraph => self.memgraph.render(frame, chunks[2]),
-            ActiveView::Eval => self.eval.render(frame, chunks[2]),
-            ActiveView::Prompt => self.prompt.render(frame, chunks[2]),
             ActiveView::Locks => self.locks.render(frame, chunks[2]),
             ActiveView::Runs => self.runs.render(frame, chunks[2]),
             ActiveView::RunGrid => self.run_grid.render(frame, chunks[2]),
@@ -1371,11 +1265,6 @@ impl App {
         frame.render_widget(events_panel, strip[0]);
 
         let s = &self.ops_stats;
-        let ollama_style = if s.ollama_ok {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::Red)
-        };
         // yggdrasil-152: REVERSED for two paint passes when the cell value
         // moved between refreshes. Helper closure so each cell adds the
         // modifier conditionally without scattering the same style match.
@@ -1405,35 +1294,20 @@ impl App {
                 ),
             ])
         } else {
-            Line::from(vec![
-                Span::styled("  ⚡ ollama ", Style::default().fg(Color::DarkGray)),
-                Span::styled(if s.ollama_ok { "up" } else { "down" }, ollama_style),
-                Span::styled(
-                    format!("  db {}ms", s.db_ms),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ])
+            Line::from(vec![Span::styled(
+                format!("  db {}ms", s.db_ms),
+                Style::default().fg(Color::DarkGray),
+            )])
         };
 
-        // yggdrasil-177: pool saturation + event throughput + pgvector
-        // health on a fourth line so "is anything broken right now"
-        // resolves without leaving the dashboard. Color-flips when
-        // pool gets hot (≥75% saturated) or pgvector is missing.
+        // yggdrasil-177: pool saturation + event throughput on a fourth
+        // line so "is anything broken right now" resolves without leaving
+        // the dashboard. Color-flips when pool gets hot (≥75% saturated).
         let pool_saturated = s.pool_max > 0 && (s.pool_used as f64 / s.pool_max as f64) >= 0.75;
         let pool_color = if pool_saturated {
             Color::Yellow
         } else {
             Color::DarkGray
-        };
-        let pgvec_color = if s.pgvector_ok {
-            Color::Green
-        } else {
-            Color::Red
-        };
-        let pgvec_label = if s.pgvector_ok {
-            "▼ pgvec"
-        } else {
-            "✗ pgvec"
         };
         let db_line = Line::from(vec![
             Span::styled(
@@ -1441,10 +1315,9 @@ impl App {
                 Style::default().fg(pool_color),
             ),
             Span::styled(
-                format!("· {}/m ", s.events_per_min),
+                format!("· {}/m", s.events_per_min),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(format!("· {pgvec_label}"), Style::default().fg(pgvec_color)),
         ]);
         // yggdrasil-150: 10-glyph sparkline of recent alive-count history,
         // appended to the "● live" row so liveness trend is one glance.
@@ -1533,11 +1406,7 @@ impl App {
             ActiveView::Dashboard => "Dashboard",
             ActiveView::Dag => "Dag",
             ActiveView::Tasks => "Tasks",
-            ActiveView::Trace => "Trace",
             ActiveView::Logs => "Logs",
-            ActiveView::MemGraph => "MemGraph",
-            ActiveView::Eval => "Eval",
-            ActiveView::Prompt => "Prompt",
             ActiveView::Locks => "Locks",
             ActiveView::Runs => "Runs",
             ActiveView::RunGrid => "RunGrid",
@@ -1690,15 +1559,6 @@ pub async fn reconcile_workers(pool: &PgPool) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn reqwest_ping() -> bool {
-    let base = std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-    let url = format!("{}/api/tags", base.trim_end_matches('/'));
-    reqwest::get(url)
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
-}
-
 /// Stable hash for "this run_terminal event came from this task at this
 /// time." The cascade-ripple queue dedupes by this key so a second tick
 /// that pulls the same row doesn't re-trigger the ripple.
@@ -1774,7 +1634,7 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
     let mut app = App::new(agent_name);
 
     // Decouple refresh from input. Previously every keypress triggered
-    // a full DB+Ollama refresh cascade (~hundreds of ms) before the
+    // a full DB refresh cascade (~hundreds of ms) before the
     // next draw — arrow keys felt laggy. Now we refresh on a timer
     // (every 2s) while key polling at a short interval stays snappy.
     // Targeted per-action refreshes (e.g. after 'r' runs) still fire
@@ -1806,20 +1666,8 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                 ActiveView::Tasks => {
                     app.tasks.refresh(pool).await?;
                 }
-                ActiveView::Trace => {
-                    app.trace.refresh(pool).await?;
-                }
                 ActiveView::Logs => {
                     app.logs.refresh(pool).await?;
-                }
-                ActiveView::MemGraph => {
-                    app.memgraph.refresh(pool).await?;
-                }
-                ActiveView::Eval => {
-                    app.eval.refresh(pool).await?;
-                }
-                ActiveView::Prompt => {
-                    app.prompt.refresh(pool).await?;
                 }
                 ActiveView::Locks => {
                     app.locks.refresh(pool, config.lock_ttl_secs).await?;

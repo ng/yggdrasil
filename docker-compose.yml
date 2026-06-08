@@ -15,13 +15,5 @@ services:
       timeout: 3s
       retries: 5
 
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ygg_ollama:/root/.ollama
-
 volumes:
   ygg_pgdata:
-  ygg_ollama:

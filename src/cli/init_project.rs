@@ -8,11 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
-// VERSION 3 (2026-04-27): added active-vector-memory patterns
-// (ygg task dupes, ygg memory search, ygg remember, ygg learn) +
-// anti-patterns. Existing managed blocks pick this up on next
-// `ygg integrate`.
-const VERSION: u32 = 3;
+// VERSION 4 (2026-06-07, ADR 0015): retired the embedding / similarity
+// retrieval layer. Dropped ygg memory / ygg remember / ygg trace and
+// the [ygg memory | ...] injection narrative; Yggdrasil is now a pure
+// orchestration layer (tasks, locks, spawn, learnings). Existing
+// managed blocks pick this up on next `ygg integrate`.
+const VERSION: u32 = 4;
 const BEGIN: &str = "<!-- BEGIN YGG INTEGRATION";
 const END: &str = "<!-- END YGG INTEGRATION -->";
 
@@ -20,12 +21,12 @@ const END: &str = "<!-- END YGG INTEGRATION -->";
 /// the guidance surfaced by `ygg prime`.
 const CLAUDE_BLOCK: &str = r#"## Yggdrasil Agent Coordination
 
-This project uses **Yggdrasil** (`ygg`) for cross-session memory, resource
-coordination, and issue tracking. The SessionStart, UserPromptSubmit, Stop,
-PreCompact, and PreToolUse hooks are active — they auto-prime context, inject
-similar past nodes, digest transcripts, and track state in Postgres. You will
-see their output at the top of each session (`<!-- ygg:prime -->`) and above
-each user prompt (`[ygg memory | <agent> | <age> | sim=<n>%]`).
+This project uses **Yggdrasil** (`ygg`) for resource coordination and issue
+tracking across parallel Claude Code agents. The SessionStart, UserPromptSubmit,
+Stop, PreCompact, and PreToolUse hooks are active — they prime agent context,
+deliver agent-to-agent messages, record token stats, and track state in
+Postgres. You will see prime output at the top of each session
+(`<!-- ygg:prime -->`).
 
 ### Quick Reference
 
@@ -37,7 +38,7 @@ ygg task claim <ref>                        # Take a task (assign + in_progress)
 ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
 ygg task close <ref> [--reason "..."]       # Complete a task
 ygg task dep <task> <blocker>               # Record dependency
-ygg remember "..."                          # Durable note; similarity retriever can surface later
+ygg task dupes [--all] [--limit N]          # Probable duplicate pairs (string similarity)
 ```
 
 ### Task field values (important — no guessing)
@@ -84,9 +85,9 @@ Refs: yggdrasil-141, adversarial-review note 2026-04-23
 ### Terse for AI-tracking fields
 
 When writing content that only agents consume — `ygg task create`
-titles/descriptions/acceptance/design/notes, `ygg remember`,
-`ygg memory create` — be terse. Drop filler (really/just/basically/
-actually/very). Drop articles (`a`/`an`/`the`) when meaning survives.
+titles/descriptions/acceptance/design/notes, `ygg learn` rules — be
+terse. Drop filler (really/just/basically/actually/very). Drop articles
+(`a`/`an`/`the`) when meaning survives.
 Prefer one sentence per field where content allows. **Preserve
 verbatim**: identifiers (snake_case, CamelCase), paths, commands,
 numbers, URLs, and modal keywords (always/never/must/should/cannot/
@@ -111,51 +112,23 @@ ygg logs --follow                           # Live event stream
 ### Rules
 
 - **Before editing a resource another agent might touch** (shared file, branch, migration, config), acquire a lock: `ygg lock acquire <path-or-key>`. Release when done. This is Yggdrasil's core contract — bypassing it defeats the coordination layer.
-- **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock/memory coordination.
-- **Read `[ygg memory | ...]` injections** at the top of each user turn. They are real context from prior conversations (same or other agents) surfaced by similarity. Treat as relevant unless the content clearly refutes that.
+- **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock coordination.
 - **Before assuming you're alone**, check `ygg status`. Other agents may hold locks or be mid-task on related work.
 - **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in a native TodoList; cross-session work lives in `ygg task`.
-- **Durable notes** — `ygg remember "..."` writes a directive node the similarity retriever will surface in future sessions (scoped to the current repo when detectable). Prefer this over scratch `.md` files.
-- **Do NOT** use `bd` / beads. This project uses `ygg task` / `ygg remember` instead.
+- **Do NOT** use `bd` / beads. This project uses `ygg task` instead.
 
-### Vector memory: how to actually use it
+### Dedup + learnings
 
-Yggdrasil stores embeddings on tasks, memories, learnings, and recent
-conversation nodes. The retriever auto-surfaces relevant ones as
-`[ygg memory | ...]` lines above each user prompt — that's the
-**passive** path. There are four **active** patterns you should reach
-for explicitly:
+- **Before `ygg task create`** → run `ygg task dupes --limit 5` (or
+  `--all` for cross-repo). Dupe detection is token-set string similarity
+  on title+description (no embeddings). If a pair surfaces near the top,
+  prefer claiming/extending the existing task over filing a new one.
 
-1. **Before `ygg task create`** → run `ygg task dupes --limit 5` (or
-   `--all` for cross-repo). If any pair surfaces above sim ≈ 0.85,
-   prefer claiming/extending the existing task over filing a new one.
-   Keeps the corpus from accreting near-duplicates.
-
-2. **Before tackling a hard problem** → `ygg memory search "<topic>"`
-   returns top hits ranked by cosine similarity across global / repo /
-   session memories. If a directive landed last week that applies, the
-   retriever finds it; you avoid re-solving.
-
-3. **When you discover a non-obvious rule** → `ygg remember "<rule>"`.
-   One-sentence directive. Preserve identifiers, paths, modal verbs
-   verbatim. Examples that earn their keep:
-   - `ygg remember "always rebuild after src/db.rs edits — sqlx caches the schema"`
-   - `ygg remember "scheduler retries fire AFTER finalize, not before — see PR #112"`
-
-4. **For engineering corrections** → `ygg learn add` with a file glob.
-   Unlike `remember`, learnings re-fire deterministically when an agent
-   touches a matching file. Use for "every time someone edits X, also
-   check Y" rules.
-
-**Anti-patterns** (don't write these — they pollute the retriever):
-- Narration of what you just did ("I refactored foo.rs"). The PR/commit
-  carries that.
-- Per-task scratch ("trying option A first"). Use a TodoList.
-- Speculation ("might want to revisit this"). Wait until it matters.
-
-`ygg trace` shows what the retriever actually surfaced for the last
-turn — useful when an injection looks off; tells you whether the
-problem is in the corpus, the embedder, or the scoring.
+- **For recurring engineering corrections** → `ygg learn add` with a file
+  glob. Learnings re-fire deterministically when an agent touches a
+  matching file — use for "every time someone edits X, also check Y"
+  rules. Retrieval is SQL predicates on (repo, file_glob, rule_id), not
+  similarity.
 
 ## Session Completion
 
@@ -187,10 +160,9 @@ cp -f src dst     mv -f src dst     rm -f file     rm -rf dir     cp -rf src dst
 /// intended for non-Claude CLI agents that read AGENTS.md instead of CLAUDE.md.
 const AGENTS_BLOCK: &str = r#"## Yggdrasil Coordination
 
-This project uses **Yggdrasil** (`ygg`) for cross-session memory and
-coordination. Hooks fire at Claude Code lifecycle events; you do not invoke
-them manually. Above each user prompt you will see `[ygg memory | ... ]` lines —
-those are real prior context surfaced by similarity.
+This project uses **Yggdrasil** (`ygg`) for resource coordination and issue
+tracking across parallel agents. Hooks fire at Claude Code lifecycle events;
+you do not invoke them manually.
 
 ### Quick Reference
 
@@ -201,7 +173,7 @@ ygg task create "title"                     # New task
 ygg task claim <ref>                        # Take a task
 ygg task close <ref>                        # Complete a task
 ygg task dep <task> <blocker>               # Record dependency
-ygg remember "..."                          # Durable note; retriever can surface later
+ygg task dupes [--all]                      # Probable duplicate pairs (string similarity)
 
 ygg status                                  # Agents + outstanding locks
 ygg lock acquire <key> / release <key> / list
@@ -214,21 +186,11 @@ ygg logs --follow                           # Live event stream
 
 - Acquire a lock before editing a resource another agent might touch. Release when done.
 - Prefer `ygg spawn` over a native Task/Agent tool for parallel work.
-- Read `[ygg memory | ...]` hints — real prior context.
 - Check `ygg status` before assuming you're working alone.
-- Use `ygg task` for cross-session work tracking; `ygg remember` for durable notes.
+- Use `ygg task` for cross-session work tracking.
+- Before `ygg task create`, run `ygg task dupes` to surface near-dups.
+- For recurring engineering corrections, `ygg learn add` with a file glob.
 - Do NOT use `bd` / beads.
-
-### Vector memory
-
-Active retrieval, not just passive injections:
-- Before `ygg task create` → `ygg task dupes` to surface near-dups.
-- Before a hard problem → `ygg memory search "<topic>"`.
-- On a non-obvious rule → `ygg remember "<one-sentence>"`.
-- On a recurring engineering correction → `ygg learn add` with a glob.
-
-Anti-patterns: don't write narration, scratch, or speculation.
-`ygg trace` shows what the retriever surfaced last turn.
 
 ### Ticket body structure
 
@@ -240,7 +202,7 @@ SHAs, paths, commands, numeric thresholds), **Refs:** (optional —
 related ticket, ADR, URL).
 
 Be terse in `ygg task create` titles/descriptions/acceptance/notes and
-`ygg remember`. Drop filler and articles when meaning survives.
+`ygg learn` rules. Drop filler and articles when meaning survives.
 Preserve identifiers, paths, commands, numbers, URLs, and modal
 keywords (always/never/must/should/cannot/don't) verbatim. Does NOT
 apply to commit messages, PR descriptions, or chat — those stay
@@ -307,7 +269,17 @@ fn classify(content: &str, current_hash: &str) -> FoundBlock {
 /// Install or update the block in `content`. Returns the new content.
 fn install_block(content: &str, body: &str) -> String {
     let hash = block_hash(body);
-    let managed = format!("{}\n{}\n{}", begin_marker(&hash), body.trim_end(), END);
+    // The managed block intentionally restates sections (Quick Reference,
+    // Rules, Session Completion, …) that hand-authored content above it may
+    // also use, so it stays self-contained. Wrap it in a scoped MD024 disable
+    // so markdownlint doesn't flag those by-design duplicate headings; the
+    // hand-authored region above the block is still linted.
+    let managed = format!(
+        "{}\n<!-- markdownlint-disable MD024 -->\n{}\n<!-- markdownlint-enable MD024 -->\n{}",
+        begin_marker(&hash),
+        body.trim_end(),
+        END
+    );
 
     if let Some((s, e)) = find_block(content) {
         // Replace existing block in place.

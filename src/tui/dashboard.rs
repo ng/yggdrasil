@@ -63,9 +63,7 @@ pub struct DashboardView {
     pub live_sessions_by_agent: HashMap<Uuid, i64>,
 
     /// Corpus totals for the system-pulse DB line. Refreshed every tick —
-    /// cheap COUNTs on indexed tables. Memories omitted intentionally: the
-    /// pivot (ADR 0015 Phase 2) migrates them to CLAUDE.md files anyway.
-    pub db_nodes: i64,
+    /// cheap COUNTs on indexed tables.
     pub db_tasks_open: i64,
     pub db_tasks_total: i64,
     pub db_learnings: i64,
@@ -102,28 +100,6 @@ pub struct DashboardView {
     /// When true, only show agents belonging to the current user_id.
     /// Default false (show all users). Persisted in ~/.config/ygg/dashboard.json.
     pub filter_my_agents: bool,
-
-    // Vector & retrieval stats (refreshed every tick)
-    embed_calls_1h: i64,
-    embed_cache_hits_1h: i64,
-    similarity_hits_1h: i64,
-    similarity_avg_score: f64,
-    scoring_drops_1h: i64,
-    corrections_24h: i64,
-    nodes_with_embedding: i64,
-    nodes_total_count: i64,
-
-    // Recent similarity hits for the vector tile (task 3)
-    recent_hits: Vec<RecentHit>,
-}
-
-#[derive(Debug, Clone)]
-struct RecentHit {
-    score: f64,
-    snippet: String,
-    source_agent: String,
-    referenced: bool,
-    age: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -229,7 +205,6 @@ impl DashboardView {
             session_scoped: false,
             current_session_id: None,
             live_sessions_by_agent: HashMap::new(),
-            db_nodes: 0,
             db_tasks_open: 0,
             db_tasks_total: 0,
             db_learnings: 0,
@@ -248,15 +223,6 @@ impl DashboardView {
             runs_top_loop: 0,
             runs_window: RunsWindow::Hour1,
             filter_my_agents: load_filter_my_agents(),
-            embed_calls_1h: 0,
-            embed_cache_hits_1h: 0,
-            similarity_hits_1h: 0,
-            similarity_avg_score: 0.0,
-            scoring_drops_1h: 0,
-            corrections_24h: 0,
-            nodes_with_embedding: 0,
-            nodes_total_count: 0,
-            recent_hits: Vec::new(),
         }
     }
 
@@ -602,10 +568,9 @@ impl DashboardView {
         // cheap at current scale (all target tables indexed). locks_active
         // excludes expired rows since a held lock is ttl-bound, not just a
         // row existence.
-        let (nodes, tasks_open, tasks_total, learnings, locks_active): (i64, i64, i64, i64, i64) =
+        let (tasks_open, tasks_total, learnings, locks_active): (i64, i64, i64, i64) =
             sqlx::query_as(
                 r#"SELECT
-                 (SELECT COUNT(*) FROM nodes),
                  (SELECT COUNT(*) FROM tasks WHERE status <> 'closed'),
                  (SELECT COUNT(*) FROM tasks),
                  (SELECT COUNT(*) FROM learnings),
@@ -613,77 +578,11 @@ impl DashboardView {
             )
             .fetch_one(pool)
             .await
-            .unwrap_or((0, 0, 0, 0, 0));
-        self.db_nodes = nodes;
+            .unwrap_or((0, 0, 0, 0));
         self.db_tasks_open = tasks_open;
         self.db_tasks_total = tasks_total;
         self.db_learnings = learnings;
         self.db_locks_active = locks_active;
-
-        // Vector & retrieval stats — embedding activity and similarity search.
-        let (ec, ech, sh, sa, sd, cd): (i64, i64, i64, f64, i64, i64) = sqlx::query_as(
-            r#"SELECT
-                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'similarity_hit'),
-                 COALESCE(AVG((payload->>'similarity')::float)
-                     FILTER (WHERE event_kind::text = 'similarity_hit'), 0),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'scoring_decision'),
-                 COUNT(*) FILTER (WHERE event_kind::text = 'correction_detected')
-               FROM events WHERE created_at >= $1"#,
-        )
-        .bind(since_24h)
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0, 0, 0, 0.0, 0, 0));
-        self.embed_calls_1h = ec;
-        self.embed_cache_hits_1h = ech;
-        self.similarity_hits_1h = sh;
-        self.similarity_avg_score = sa;
-        self.scoring_drops_1h = sd;
-        self.corrections_24h = cd;
-
-        let (nt, ne): (i64, i64) = sqlx::query_as("SELECT COUNT(*), COUNT(embedding) FROM nodes")
-            .fetch_one(pool)
-            .await
-            .unwrap_or((0, 0));
-        self.nodes_total_count = nt;
-        self.nodes_with_embedding = ne;
-
-        // Recent individual similarity hits for the vector tile.
-        let hit_rows: Vec<(serde_json::Value, chrono::DateTime<chrono::Utc>, bool)> =
-            sqlx::query_as(
-                r#"SELECT e.payload, e.created_at,
-                       EXISTS(SELECT 1 FROM events r
-                              WHERE r.event_kind::text = 'hit_referenced'
-                                AND r.payload->>'source_node_id' = e.payload->>'source_node_id'
-                                AND r.created_at > e.created_at
-                                AND r.created_at < e.created_at + interval '10 minutes') AS referenced
-                   FROM events e
-                   WHERE e.event_kind::text = 'similarity_hit'
-                   ORDER BY e.created_at DESC LIMIT 3"#,
-            )
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
-        self.recent_hits = hit_rows
-            .into_iter()
-            .map(|(payload, created_at, referenced)| {
-                let score = payload["total_score"]
-                    .as_f64()
-                    .or_else(|| payload["similarity"].as_f64())
-                    .unwrap_or(0.0);
-                let snippet = payload["snippet"].as_str().unwrap_or("").to_string();
-                let source_agent = payload["source_agent"].as_str().unwrap_or("?").to_string();
-                RecentHit {
-                    score,
-                    snippet,
-                    source_agent,
-                    referenced,
-                    age: created_at,
-                }
-            })
-            .collect();
 
         // Prompts per hour sparkline, 24h — global across agents.
         // Uses hook_fired/UserPromptSubmit which fires on every user turn.
@@ -959,14 +858,13 @@ impl DashboardView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        // Layout: alerts · pulse · runs · vector · agents (stretch) · workers · locks
+        // Layout: alerts · pulse · runs · agents (stretch) · workers · locks
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // alerts
                 Constraint::Length(6), // system pulse + latest transition
                 Constraint::Length(5), // runs tile
-                Constraint::Length(5), // vector & retrieval tile
                 Constraint::Min(8),    // agents
                 Constraint::Length(6), // workers
                 Constraint::Length(4), // locks summary
@@ -976,16 +874,15 @@ impl DashboardView {
         self.render_alerts(frame, chunks[0]);
         self.render_pulse(frame, chunks[1]);
         self.render_runs_tile(frame, chunks[2]);
-        self.render_vector_tile(frame, chunks[3]);
-        self.render_agents_table(frame, chunks[4]);
-        self.render_workers(frame, chunks[5]);
-        self.render_locks_table(frame, chunks[6]);
+        self.render_agents_table(frame, chunks[3]);
+        self.render_workers(frame, chunks[4]);
+        self.render_locks_table(frame, chunks[5]);
 
         if self.rename.is_some() {
-            render_rename_overlay(frame, chunks[4], self);
+            render_rename_overlay(frame, chunks[3], self);
         }
         if self.msg.is_some() {
-            render_msg_overlay(frame, chunks[4], self);
+            render_msg_overlay(frame, chunks[3], self);
         }
     }
 
@@ -1125,134 +1022,6 @@ impl DashboardView {
         let para = Paragraph::new(vec![line1, line2, line3])
             .block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(para, cols[1]);
-    }
-
-    fn render_vector_tile(&self, frame: &mut Frame, area: Rect) {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
-
-        let embed_total = self.embed_calls_1h + self.embed_cache_hits_1h;
-        let hit_rate = if embed_total > 0 {
-            (self.embed_cache_hits_1h as f64 / embed_total as f64 * 100.0) as i64
-        } else {
-            0
-        };
-
-        let stats_lines: Vec<Line> = vec![
-            Line::from(vec![
-                Span::styled("embedder  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} calls", self.embed_calls_1h),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" · {}% cache", hit_rate),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("retrieval ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} hits", self.similarity_hits_1h),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" · avg {:.2}", self.similarity_avg_score),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" · {} drops", self.scoring_drops_1h),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("corpus    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} tasks ", self.db_tasks_total),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("({} open) ", self.db_tasks_open),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("· {} learnings ", self.db_learnings),
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ];
-        let stats_para = Paragraph::new(stats_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Vector & Retrieval "),
-        );
-        frame.render_widget(stats_para, cols[0]);
-
-        // Right column: recent individual similarity matches.
-        let now = Utc::now();
-        let mut hit_lines: Vec<Line> = Vec::new();
-        for hit in self.recent_hits.iter().take(3) {
-            let (glyph, glyph_color) = if hit.referenced {
-                ("\u{2713}", Color::Green)
-            } else {
-                ("\u{00b7}", Color::DarkGray)
-            };
-            let score_color = if hit.score >= 0.6 {
-                Color::Green
-            } else if hit.score >= 0.3 {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            };
-            let age_s = (now - hit.age).num_seconds().max(0);
-            let age = if age_s < 60 {
-                format!("{age_s}s")
-            } else if age_s < 3600 {
-                format!("{}m", age_s / 60)
-            } else {
-                format!("{}h", age_s / 3600)
-            };
-            let snip: String = hit
-                .snippet
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(30)
-                .collect();
-            hit_lines.push(Line::from(vec![
-                Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
-                Span::styled(
-                    format!("{:.2} ", hit.score),
-                    Style::default()
-                        .fg(score_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("\"{snip}\" "), Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} {age}", hit.source_agent),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
-        }
-        if hit_lines.is_empty() {
-            hit_lines.push(Line::from(Span::styled(
-                "no recent matches",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        let hits_para = Paragraph::new(hit_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Recent matches "),
-        );
-        frame.render_widget(hits_para, cols[1]);
     }
 
     fn render_workers(&self, frame: &mut Frame, area: Rect) {
@@ -1607,7 +1376,7 @@ impl DashboardView {
                 ),
             ]),
             // Most-recent agent state transition — replaces standalone
-            // transitions panel; corpus totals moved to vector tile.
+            // transitions panel.
             if let Some((ts, name, from, to, tool)) = self.recent_transitions.first() {
                 let t = ts
                     .with_timezone(&chrono::Local)
@@ -1824,7 +1593,13 @@ impl DashboardView {
                 let (name_color, state_fg, ctx_fg, tok_fg, spark_fg) = if is_dormant {
                     (dormant_fg, dormant_fg, dormant_fg, dormant_fg, dormant_fg)
                 } else {
-                    (Color::Reset, state_color, pressure_color, Color::White, Color::Cyan)
+                    (
+                        Color::Reset,
+                        state_color,
+                        pressure_color,
+                        Color::White,
+                        Color::Cyan,
+                    )
                 };
 
                 Row::new(vec![
@@ -1917,7 +1692,7 @@ impl DashboardView {
                 ),
                 Span::styled(" stale (>30m)  ·  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    "[0] Locks for detail",
+                    "[9] Locks for detail",
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::ITALIC),
