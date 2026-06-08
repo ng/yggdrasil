@@ -633,9 +633,19 @@ impl<'a> TaskRepo<'a> {
                 by_token.entry(tok.as_str()).or_default().push(i);
             }
         }
+        // A token appearing in more than `df_cap` tasks is non-discriminative
+        // (a near stop-word for this corpus) and its bucket would reintroduce
+        // the O(n²) sweep. Skip it as a blocking key: a pair sharing only such
+        // ubiquitous tokens has a low Jaccard and never clears the threshold,
+        // while a pair sharing any rarer token is still compared via that
+        // token's bucket. Floored so small corpora are unaffected.
+        let df_cap = (tasks.len() / 10).max(64);
         let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
         let mut pairs: Vec<(Task, Task, f64)> = Vec::new();
         for idxs in by_token.values() {
+            if idxs.len() > df_cap {
+                continue;
+            }
             for a in 0..idxs.len() {
                 for b in (a + 1)..idxs.len() {
                     // tasks are ordered by created_at, so the smaller index
