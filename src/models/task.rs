@@ -621,19 +621,38 @@ impl<'a> TaskRepo<'a> {
         .fetch_all(self.pool)
         .await?;
 
-        // Precompute a token set per task so the O(n²) sweep stays cheap.
+        // Precompute a token set per task.
         let token_sets: Vec<std::collections::HashSet<String>> = tasks
             .iter()
             .map(|t| tokenize(&format!("{} {}", t.title, t.description)))
             .collect();
 
+        // Inverted index: token -> task indices. Two tasks with no shared
+        // token have Jaccard 0, so only pairs that co-occur on some token
+        // can clear the threshold. Comparing just those candidate pairs
+        // avoids the all-pairs O(n²) sweep on disjoint tasks.
+        let mut by_token: std::collections::HashMap<&str, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, set) in token_sets.iter().enumerate() {
+            for tok in set {
+                by_token.entry(tok.as_str()).or_default().push(i);
+            }
+        }
+        let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
         let mut pairs: Vec<(Task, Task, f64)> = Vec::new();
-        for i in 0..tasks.len() {
-            for j in (i + 1)..tasks.len() {
-                let sim = jaccard(&token_sets[i], &token_sets[j]);
-                if sim >= min_similarity {
-                    // tasks are ordered by created_at, so i is the older one.
-                    pairs.push((tasks[i].clone(), tasks[j].clone(), sim));
+        for idxs in by_token.values() {
+            for a in 0..idxs.len() {
+                for b in (a + 1)..idxs.len() {
+                    // tasks are ordered by created_at, so the smaller index
+                    // is the older task; normalize so each pair is unique.
+                    let (i, j) = (idxs[a].min(idxs[b]), idxs[a].max(idxs[b]));
+                    if !seen.insert((i, j)) {
+                        continue;
+                    }
+                    let sim = jaccard(&token_sets[i], &token_sets[j]);
+                    if sim >= min_similarity {
+                        pairs.push((tasks[i].clone(), tasks[j].clone(), sim));
+                    }
                 }
             }
         }

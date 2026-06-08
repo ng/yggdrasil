@@ -18,7 +18,9 @@ pub fn find_latest_transcript() -> Option<String> {
         if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok())?;
+        let Some(mtime) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
+            continue;
+        };
         match &newest {
             None => newest = Some((mtime, p)),
             Some((t, _)) if mtime > *t => newest = Some((mtime, p)),

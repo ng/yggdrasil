@@ -50,11 +50,7 @@ pub async fn take_over(
 }
 
 /// Hand back control to the agent: transition back to Idle.
-pub async fn hand_back(
-    pool: &sqlx::PgPool,
-    agent_name: &str,
-    _summary: &str,
-) -> Result<(), anyhow::Error> {
+pub async fn hand_back(pool: &sqlx::PgPool, agent_name: &str) -> Result<(), anyhow::Error> {
     let agent_repo = AgentRepo::new(pool, crate::db::user_id());
 
     let agent = agent_repo

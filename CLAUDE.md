@@ -2,7 +2,7 @@
 
 This project **is** Yggdrasil — a multi-agent coordination layer. We dogfood it: the `ygg` CLI and hooks installed in this repo coordinate the agents working on it. Refer to the project as **Yggdrasil** in prose; `ygg` is the command binary.
 
-## Yggdrasil Agent Coordination
+## Working in This Repo (Dogfooded Coordination)
 
 The SessionStart, UserPromptSubmit, Stop, PreCompact, and PreToolUse hooks are active. They prime agent context, deliver agent-to-agent messages, record token stats, enforce locks, and track state in Postgres. You will see prime output at the top of each session (`<!-- ygg:prime -->`). (ADR 0015: the similarity-retrieval / embedding layer was removed — there is no longer a `[ygg memory | ...]` injection.)
 

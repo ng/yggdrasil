@@ -8,9 +8,20 @@
 --
 -- nodes is referenced by agents.head_node_id / agents.digest_id and
 -- sessions.head_node_id. DROP ... CASCADE removes those foreign-key
--- constraints automatically; the columns themselves remain as plain
--- nullable UUIDs (now always NULL) so the agent/session models are
--- untouched.
+-- constraints automatically, but it does NOT rewrite the columns — they
+-- would keep dangling UUIDs pointing at rows that no longer exist. Null
+-- them first so the agent/session models see clean NULLs and the columns
+-- survive as plain nullable UUIDs.
+
+UPDATE agents
+SET head_node_id = NULL,
+    digest_id = NULL
+WHERE head_node_id IS NOT NULL
+   OR digest_id IS NOT NULL;
+
+UPDATE sessions
+SET head_node_id = NULL
+WHERE head_node_id IS NOT NULL;
 
 DROP TABLE IF EXISTS nodes CASCADE;
 DROP TABLE IF EXISTS memories CASCADE;

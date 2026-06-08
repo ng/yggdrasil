@@ -901,12 +901,10 @@ enum InterruptAction {
         /// Agent name
         agent: String,
     },
-    /// Hand back control with a summary
+    /// Hand back control to the agent
     HandBack {
         /// Agent name
         agent: String,
-        /// Summary of what you did
-        summary: String,
     },
 }
 
@@ -1077,9 +1075,8 @@ async fn main() -> anyhow::Result<()> {
                 InterruptAction::TakeOver { agent } => {
                     ygg::cli::interrupt_cmd::execute_take_over(&pool, &config, &agent).await?;
                 }
-                InterruptAction::HandBack { agent, summary } => {
-                    ygg::cli::interrupt_cmd::execute_hand_back(&pool, &config, &agent, &summary)
-                        .await?;
+                InterruptAction::HandBack { agent } => {
+                    ygg::cli::interrupt_cmd::execute_hand_back(&pool, &config, &agent).await?;
                 }
             }
         }
