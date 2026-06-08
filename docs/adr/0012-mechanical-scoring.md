@@ -1,6 +1,6 @@
 # 0012 — Mechanical scoring for `ygg inject` candidates
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR 0015](0015-retrieval-scope-reduction.md) — `ygg inject` and the scoring layer were removed 2026-06-07.
 - **Date**: 2026-04-18
 - **Relates to**: [ADR 0011](0011-relevance-classifier.md), [Retrieval and injection](../retrieval.md), [Open questions](../open-questions.md)
 

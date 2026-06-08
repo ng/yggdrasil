@@ -8,7 +8,6 @@ fn ops(alive: i64, stuck: i64, tasks: i64, sessions: i64) -> OpsStats {
         agents_stuck: stuck,
         tasks_running: tasks,
         live_sessions: sessions,
-        ollama_ok: true,
         db_ms: 0,
         // Burn-rate fields (yggdrasil-148): not exercised by these
         // tests; default to zero so the struct literal stays complete.
@@ -20,7 +19,6 @@ fn ops(alive: i64, stuck: i64, tasks: i64, sessions: i64) -> OpsStats {
         pool_used: 0,
         pool_max: 0,
         events_per_min: 0,
-        pgvector_ok: false,
     }
 }
 

@@ -1,8 +1,5 @@
 use std::process::Stdio;
 use tokio::process::Command;
-use uuid::Uuid;
-
-use crate::models::node::{NodeKind, NodeRepo};
 
 /// Result of an RTK-proxied command execution.
 #[derive(Debug)]
@@ -56,52 +53,6 @@ impl Executor {
             exit_code: output.status.code().unwrap_or(-1),
             token_count,
         })
-    }
-
-    /// Run a command and record both the invocation and result as DAG nodes.
-    pub async fn run_and_record(
-        &self,
-        command: &str,
-        args: &[&str],
-        agent_id: Uuid,
-        parent_node_id: Uuid,
-        node_repo: &NodeRepo<'_>,
-    ) -> Result<(ExecutionResult, Uuid), crate::YggError> {
-        // Record the tool call node
-        let call_content = serde_json::json!({
-            "command": command,
-            "args": args,
-        });
-        let call_node = node_repo
-            .insert(
-                Some(parent_node_id),
-                agent_id,
-                NodeKind::ToolCall,
-                call_content,
-                0,
-            )
-            .await?;
-
-        // Execute
-        let result = self.run(command, args).await?;
-
-        // Record the tool result node
-        let result_content = serde_json::json!({
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "exit_code": result.exit_code,
-        });
-        let result_node = node_repo
-            .insert(
-                Some(call_node.id),
-                agent_id,
-                NodeKind::ToolResult,
-                result_content,
-                result.token_count as i32,
-            )
-            .await?;
-
-        Ok((result, result_node.id))
     }
 }
 

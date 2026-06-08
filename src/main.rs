@@ -50,12 +50,12 @@ enum Commands {
     /// Start ygg — open tmux session with dashboard (default when no command given)
     Up,
 
-    /// Bootstrap dependencies (Postgres, Ollama, migrations, status bar)
+    /// Bootstrap dependencies (Postgres, migrations, status bar)
     Init {
         /// Show command output for debugging
         #[arg(short, long)]
         verbose: bool,
-        /// Skip specific deps (pg, ollama, models, statusbar, pgvector, hooks)
+        /// Skip specific deps (pg, models, statusbar, hooks)
         #[arg(long, value_delimiter = ',')]
         skip: Vec<String>,
         /// Clear saved skip decisions and re-prompt everything
@@ -87,23 +87,6 @@ enum Commands {
         /// Agent name (auto-generated if omitted)
         #[arg(short, long)]
         name: Option<String>,
-    },
-
-    /// Observe a Claude Code session and ingest into the DAG
-    Observe {
-        /// Agent name to observe
-        #[arg(short, long)]
-        agent: String,
-    },
-
-    /// Inject directives near the attention cursor (called by hooks)
-    Inject {
-        /// Agent name
-        #[arg(short, long)]
-        agent: String,
-        /// Current prompt text to embed and use as the similarity query
-        #[arg(long)]
-        prompt: Option<String>,
     },
 
     /// Launch the TUI dashboard
@@ -160,26 +143,6 @@ enum Commands {
         session: Option<String>,
     },
 
-    /// Digest a session transcript — extract corrections, write Digest node.
-    /// Called by the Stop and PreCompact hooks automatically; can be run
-    /// manually as `ygg digest --now` to proactively checkpoint a
-    /// long-running session before auto-compaction hits.
-    Digest {
-        /// Agent name
-        #[arg(short, long)]
-        agent: Option<String>,
-        /// Path to the Claude Code transcript JSONL file
-        #[arg(long)]
-        transcript: Option<String>,
-        /// Find and digest the most recent transcript for this agent
-        #[arg(long)]
-        now: bool,
-        /// Called from the Stop hook — after digesting, mark the session
-        /// ended so the dashboard stops showing a ghost ×N badge.
-        #[arg(long)]
-        stop: bool,
-    },
-
     /// Stop-hook enforcement: block spawned-worker session end when work
     /// is unfinished (claimed task still open, uncommitted changes, or
     /// unpushed commits). Emits Claude Code decision:block JSON on stdout
@@ -221,14 +184,12 @@ enum Commands {
         body: Vec<String>,
     },
 
-    /// Purge stale rows from locks / sessions / memories / agents. Safe to cron.
+    /// Purge stale rows from locks / sessions / agents. Safe to cron.
     Reap {
         #[arg(long)]
         locks: bool,
         #[arg(long)]
         sessions: bool,
-        #[arg(long)]
-        memories: bool,
         /// Archive (not delete) agents with no activity in the window.
         /// Archived agents keep their history but disappear from live views.
         #[arg(long)]
@@ -285,13 +246,6 @@ enum Commands {
         also_agents: bool,
     },
 
-    /// Aggregate events into an effectiveness report over a time window
-    Eval {
-        /// Time window in hours (default 24)
-        #[arg(long, default_value = "24")]
-        hours: i64,
-    },
-
     /// Orchestrator eval suite — run scripted scenarios against three baselines
     /// (vanilla-single, vanilla-tmux, ygg) and produce comparable numbers.
     /// Specified in docs/eval-benchmarks.md. Drivers land per yggdrasil-103.
@@ -305,34 +259,6 @@ enum Commands {
     Scheduler {
         #[command(subcommand)]
         action: SchedulerAction,
-    },
-
-    /// Pressure-test recovery paths: compaction, skip-it, crash. Reports
-    /// PASS/FAIL for each scenario with forensic detail. Run periodically
-    /// to catch regressions in the memory-survival story.
-    RecoveryTest {
-        /// compact | skip-it | crash | all (default all)
-        #[arg(long, default_value = "all")]
-        scenario: String,
-        /// Agent to test against (defaults to env / pwd basename)
-        #[arg(short, long)]
-        agent: Option<String>,
-    },
-
-    /// Show the full pipeline trace for recent user turns — embed →
-    /// retrieve → score → emit → (reference, after digest). Lets you
-    /// see what Yggdrasil actually did vs. what you think it did.
-    Trace {
-        /// Number of recent turns to render (default 5)
-        #[arg(long, default_value = "5")]
-        last: i64,
-        /// Filter to a specific agent
-        #[arg(short, long)]
-        agent: Option<String>,
-        /// Dump the full untruncated hit snippets so you can read exactly
-        /// what Yggdrasil prepended to each turn's context.
-        #[arg(long)]
-        full: bool,
     },
 
     /// Emit the single-line status for Claude Code's statusLine — reads the
@@ -352,21 +278,6 @@ enum Commands {
         action: PlanAction,
     },
 
-    /// Retroactively scrub content from already-stored nodes. Use when a
-    /// secret slipped past the write-time redactor. See ADR yggdrasil-18.
-    Forget {
-        /// Delete a specific node by UUID (and its embedding cache entry).
-        #[arg(long)]
-        node: Option<String>,
-        /// Replace a literal substring with `[redacted:manual]` across every node.
-        #[arg(long)]
-        pattern: Option<String>,
-        /// Re-run the secret redactor over every existing node's content.
-        /// Useful after adding new patterns.
-        #[arg(long)]
-        redact_all: bool,
-    },
-
     /// Per-repo activity rollup over a recent window (default: last 7 days).
     Rollup {
         /// Number of days to look back.
@@ -378,12 +289,6 @@ enum Commands {
         /// Output format: text, markdown, or json.
         #[arg(short, long, default_value = "markdown")]
         format: String,
-    },
-
-    /// Manage scoped, embedded memories (global / repo / session)
-    Memory {
-        #[command(subcommand)]
-        action: MemoryAction,
     },
 
     /// Scoped learnings — CodeRabbit-style rule capture + deterministic match.
@@ -401,21 +306,6 @@ enum Commands {
         /// Agent name (defaults to env / pwd basename)
         #[arg(short, long)]
         agent: Option<String>,
-    },
-
-    /// Persist a durable directive the similarity retriever can surface later
-    Remember {
-        /// The memory text
-        text: Option<String>,
-        /// Agent name (defaults to env / pwd basename)
-        #[arg(short, long)]
-        agent: Option<String>,
-        /// If set, list recent remembered directives instead of writing one
-        #[arg(long)]
-        list: bool,
-        /// Maximum number of entries to list
-        #[arg(long, default_value = "20")]
-        limit: i64,
     },
 
     /// Handle Claude Code lifecycle hooks natively (replaces shell scripts)
@@ -563,15 +453,6 @@ enum SchedulerAction {
 
 #[derive(Subcommand)]
 enum RunAction {
-    /// Start an agent run loop (preserved from the legacy top-level `ygg run`).
-    Start {
-        /// Agent name (creates or resumes)
-        #[arg(short, long)]
-        name: String,
-        /// Initial task description
-        #[arg(short, long)]
-        task: Option<String>,
-    },
     /// Open a run for the given task reference. Used by spawned agents whose
     /// SessionStart hook claims their bound task.
     Claim {
@@ -667,39 +548,6 @@ enum AgentAction {
         #[arg(long, default_value = "14")]
         older_than_days: i64,
     },
-}
-
-#[derive(Subcommand)]
-enum MemoryAction {
-    /// Create a memory at the given scope (global / repo / session)
-    Create {
-        text: String,
-        #[arg(short, long, default_value = "global")]
-        scope: String,
-        #[arg(short, long)]
-        agent: Option<String>,
-    },
-    /// List memories, optionally filtered by scope
-    List {
-        #[arg(short, long)]
-        scope: Option<String>,
-        #[arg(long, default_value = "20")]
-        limit: i64,
-    },
-    /// Semantic search across memories visible in the current scope
-    Search {
-        query: String,
-        #[arg(long, default_value = "10")]
-        limit: i64,
-    },
-    /// Pin a memory so it surfaces first in listings and retrieval
-    Pin { id: String },
-    /// Unpin a previously-pinned memory
-    Unpin { id: String },
-    /// Expire a memory after N seconds (useful for temporary scratch)
-    Expire { id: String, seconds: i64 },
-    /// Delete a memory permanently
-    Delete { id: String },
 }
 
 #[derive(Subcommand)]
@@ -849,15 +697,17 @@ enum TaskAction {
         #[arg(long)]
         json: bool,
     },
-    /// Surface probable duplicate task pairs via pgvector cosine on the
-    /// title+description embedding stored at create time.
+    /// Surface probable duplicate task pairs via token-set (Jaccard)
+    /// string similarity on title+description.
     Dupes {
         /// Scan every repo (default: current repo only)
         #[arg(long)]
         all: bool,
-        /// Minimum cosine similarity (0.0–1.0). Default 0.85 — high enough
-        /// to keep false positives down, low enough to catch reworded dupes.
-        #[arg(long, default_value_t = 0.85)]
+        /// Minimum token-set (Jaccard) similarity on title+description
+        /// (0.0–1.0). Default 0.5 — Jaccard is stricter than the old
+        /// embedding cosine, so 0.5 catches reworded dupes while keeping
+        /// false positives down.
+        #[arg(long, default_value_t = 0.5)]
         min_similarity: f64,
         /// Max pairs to return
         #[arg(long, default_value_t = 20)]
@@ -1147,11 +997,6 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             match action {
-                RunAction::Start { name, task } => {
-                    let session_id = ygg::status::new_session_id();
-                    ygg::cli::run::execute(&pool, &config, &name, task.as_deref(), &session_id)
-                        .await?;
-                }
                 RunAction::Claim { task_ref, agent } => {
                     let agent = resolve_agent_arg(agent);
                     ygg::cli::run_cmd::claim_cli(&pool, &task_ref, &agent).await?;
@@ -1194,16 +1039,6 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::spawn::execute(&pool, &config, &task, name.as_deref()).await?;
-        }
-        Commands::Observe { agent } => {
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::observe::execute(&pool, &config, &agent).await?;
-        }
-        Commands::Inject { agent, prompt } => {
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::inject::execute(&pool, &config, &agent, prompt.as_deref()).await?;
         }
         Commands::Dashboard => {
             let config = ygg::config::AppConfig::from_env()?;
@@ -1279,60 +1114,6 @@ async fn main() -> anyhow::Result<()> {
                 session.as_deref(),
             )
             .await?;
-        }
-        Commands::Digest {
-            agent,
-            transcript,
-            now,
-            stop,
-        } => {
-            let agent_name = agent
-                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
-                .unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .unwrap_or_else(|| "ygg".to_string())
-                });
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-
-            let path = match (transcript, now) {
-                (Some(p), _) => p,
-                (None, true) => match ygg::cli::digest::find_latest_transcript() {
-                    Some(p) => p,
-                    None => {
-                        eprintln!("no Claude Code transcript found — run with --transcript <path>");
-                        return Ok(());
-                    }
-                },
-                (None, false) => {
-                    eprintln!("pass --transcript <path> or --now");
-                    return Ok(());
-                }
-            };
-            ygg::cli::digest::execute(&pool, &config, &agent_name, &path).await?;
-            // Mark the session ended when the Stop hook flow called us —
-            // PreCompact continues the same session, so only Stop should end.
-            if stop {
-                if let Ok(Some(a)) = ygg::models::agent::AgentRepo::new(&pool, &user_id)
-                    .get_by_name(&agent_name)
-                    .await
-                {
-                    if let Some(sid) =
-                        ygg::models::session::resolve_current_session(&pool, a.agent_id, None).await
-                    {
-                        let _ = ygg::models::session::SessionRepo::new(&pool).end(sid).await;
-                    }
-                    // Release every lock this agent still holds — they were
-                    // leases on shared resources, not persistent claims, and
-                    // a dead session shouldn't keep others waiting for TTL
-                    // expiry. Silent on error (DB contention is fine to skip).
-                    let lock_mgr =
-                        ygg::lock::LockManager::new(&pool, config.lock_ttl_secs, &user_id);
-                    let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
-                }
-            }
         }
         Commands::Chat {
             to,
@@ -1424,7 +1205,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Reap {
             locks,
             sessions,
-            memories,
             agents,
             older_than_days,
             dry_run,
@@ -1432,7 +1212,7 @@ async fn main() -> anyhow::Result<()> {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             // Default to everything when no specific flag is set.
-            let all = !(locks || sessions || memories || agents);
+            let all = !(locks || sessions || agents);
             let mut total: i64 = 0;
 
             if all || locks {
@@ -1475,28 +1255,6 @@ async fn main() -> anyhow::Result<()> {
                     n_closed
                 );
                 total += n_closed;
-            }
-            if all || memories {
-                let n =
-                    if dry_run {
-                        sqlx::query_scalar::<_, i64>(
-                            "SELECT COUNT(*)::bigint FROM memories
-                          WHERE expires_at IS NOT NULL AND expires_at < now()",
-                        )
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap_or(0)
-                    } else {
-                        sqlx::query(
-                        "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < now()"
-                    ).execute(&pool).await?.rows_affected() as i64
-                    };
-                println!(
-                    "memories: {} {} expired",
-                    if dry_run { "would delete" } else { "deleted" },
-                    n
-                );
-                total += n;
             }
             if all || agents {
                 // Archive-not-delete: keep history intact, just hide from
@@ -1954,11 +1712,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Eval { hours } => {
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::eval_cmd::execute(&pool, hours).await?;
-        }
         Commands::Bench { action } => match action {
             BenchAction::List => {
                 ygg::cli::bench_cmd::list();
@@ -2027,27 +1780,6 @@ async fn main() -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&stats)?);
                 }
             }
-        }
-        Commands::Trace { last, agent, full } => {
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::trace_cmd::execute(&pool, last, agent.as_deref(), full).await?;
-        }
-        Commands::RecoveryTest { scenario, agent } => {
-            let agent_name = agent
-                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
-                .unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .unwrap_or_else(|| "ygg".to_string())
-                });
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            let scenario = ygg::cli::recovery_cmd::Scenario::parse(&scenario).ok_or_else(|| {
-                anyhow::anyhow!("unknown scenario — use compact|skip-it|crash|all")
-            })?;
-            ygg::cli::recovery_cmd::test(&pool, scenario, &agent_name).await?;
         }
         Commands::Bar => {
             let config = ygg::config::AppConfig::from_env()?;
@@ -2207,30 +1939,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Forget {
-            node,
-            pattern,
-            redact_all,
-        } => {
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            match (node, pattern, redact_all) {
-                (Some(id), _, _) => {
-                    let uuid: uuid::Uuid =
-                        id.parse().map_err(|_| anyhow::anyhow!("invalid UUID"))?;
-                    ygg::cli::forget_cmd::forget_node(&pool, uuid).await?;
-                }
-                (None, Some(pat), _) => {
-                    ygg::cli::forget_cmd::forget_pattern(&pool, &pat).await?;
-                }
-                (None, None, true) => {
-                    ygg::cli::forget_cmd::redact_all(&pool).await?;
-                }
-                _ => {
-                    eprintln!("pass --node <uuid>, --pattern <substring>, or --redact-all");
-                }
-            }
-        }
         Commands::Rollup { days, repo, format } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
@@ -2240,70 +1948,6 @@ async fn main() -> anyhow::Result<()> {
                 _ => ygg::cli::rollup_cmd::Format::Markdown,
             };
             ygg::cli::rollup_cmd::execute(&pool, days, repo.as_deref(), fmt).await?;
-        }
-        Commands::Memory { action } => {
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            let agent_name_default = || {
-                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .unwrap_or_else(|| "ygg".to_string())
-                })
-            };
-            // Allow an 8-char prefix or full UUID — memory IDs printed by `list` use the prefix.
-            async fn parse_id(pool: &sqlx::PgPool, s: &str) -> Result<uuid::Uuid, anyhow::Error> {
-                if let Ok(u) = uuid::Uuid::parse_str(s) {
-                    return Ok(u);
-                }
-                let matches: Vec<uuid::Uuid> = sqlx::query_scalar(
-                    "SELECT memory_id FROM memories WHERE memory_id::text LIKE $1",
-                )
-                .bind(format!("{s}%"))
-                .fetch_all(pool)
-                .await?;
-                match matches.len() {
-                    0 => Err(anyhow::anyhow!("no memory matches id prefix '{s}'")),
-                    1 => Ok(matches[0]),
-                    n => Err(anyhow::anyhow!("ambiguous id prefix '{s}' ({n} matches)")),
-                }
-            }
-            match action {
-                MemoryAction::Create { text, scope, agent } => {
-                    let scope =
-                        ygg::models::memory::MemoryScope::parse(&scope).ok_or_else(|| {
-                            anyhow::anyhow!("scope must be one of: global, repo, session")
-                        })?;
-                    let agent_name = agent.unwrap_or_else(agent_name_default);
-                    ygg::cli::memory_cmd::create(&pool, &agent_name, scope, &text).await?;
-                }
-                MemoryAction::List { scope, limit } => {
-                    let scope = scope
-                        .as_deref()
-                        .and_then(ygg::models::memory::MemoryScope::parse);
-                    ygg::cli::memory_cmd::list(&pool, scope, limit).await?;
-                }
-                MemoryAction::Search { query, limit } => {
-                    ygg::cli::memory_cmd::search(&pool, &query, limit).await?;
-                }
-                MemoryAction::Pin { id } => {
-                    let uuid = parse_id(&pool, &id).await?;
-                    ygg::cli::memory_cmd::pin(&pool, uuid, true).await?;
-                }
-                MemoryAction::Unpin { id } => {
-                    let uuid = parse_id(&pool, &id).await?;
-                    ygg::cli::memory_cmd::pin(&pool, uuid, false).await?;
-                }
-                MemoryAction::Expire { id, seconds } => {
-                    let uuid = parse_id(&pool, &id).await?;
-                    ygg::cli::memory_cmd::expire(&pool, uuid, seconds).await?;
-                }
-                MemoryAction::Delete { id } => {
-                    let uuid = parse_id(&pool, &id).await?;
-                    ygg::cli::memory_cmd::delete(&pool, uuid).await?;
-                }
-            }
         }
         Commands::Learn { action } => {
             let config = ygg::config::AppConfig::from_env()?;
@@ -2380,31 +2024,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Hook { action } => {
             ygg::cli::hook_cmd::handle(action).await?;
-        }
-        Commands::Remember {
-            text,
-            agent,
-            list,
-            limit,
-        } => {
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
-            let agent_name = agent
-                .clone()
-                .or_else(|| std::env::var("YGG_AGENT_NAME").ok())
-                .unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .unwrap_or_else(|| "ygg".to_string())
-                });
-            if list {
-                ygg::cli::remember::list(&pool, agent.as_deref(), limit).await?;
-            } else {
-                let text = text
-                    .ok_or_else(|| anyhow::anyhow!("provide text to remember, or pass --list"))?;
-                ygg::cli::remember::remember(&pool, &agent_name, &text).await?;
-            }
         }
     }
 

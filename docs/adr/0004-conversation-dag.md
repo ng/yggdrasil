@@ -1,6 +1,6 @@
 # 0004 — Conversation as a typed DAG, not a flat transcript
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR 0015](0015-retrieval-scope-reduction.md) — the `nodes` DAG ledger was removed 2026-06-07.
 - **Date**: 2026-04-15
 
 ## Context

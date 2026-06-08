@@ -1,6 +1,33 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// Find the newest Claude Code JSONL transcript for the current working
+/// directory, matching how Claude Code slugifies project paths under
+/// `~/.claude/projects/<slug>/`.
+pub fn find_latest_transcript() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let slug = cwd.to_string_lossy().replace('/', "-");
+    let home = std::env::var("HOME").ok()?;
+    let project_dir = PathBuf::from(&home).join(".claude/projects").join(&slug);
+    if !project_dir.exists() {
+        return None;
+    }
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&project_dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok())?;
+        match &newest {
+            None => newest = Some((mtime, p)),
+            Some((t, _)) if mtime > *t => newest = Some((mtime, p)),
+            _ => {}
+        }
+    }
+    newest.map(|(_, p)| p.to_string_lossy().to_string())
+}
+
 /// Token usage from a single Claude Code assistant message.
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {

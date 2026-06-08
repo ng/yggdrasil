@@ -135,10 +135,6 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
                 effect: "delete (armed; y to confirm)",
             },
         ],
-        "Trace" => &[KeyHint {
-            keys: "↑↓",
-            effect: "select node",
-        }],
         "Logs" => &[
             KeyHint {
                 keys: "f",
@@ -147,34 +143,6 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             KeyHint {
                 keys: "Enter",
                 effect: "show event detail",
-            },
-        ],
-        "MemGraph" => &[
-            KeyHint {
-                keys: "↑↓",
-                effect: "scroll",
-            },
-            KeyHint {
-                keys: "Enter",
-                effect: "show node detail",
-            },
-            KeyHint {
-                keys: "/",
-                effect: "semantic search (Enter=run, Esc=cancel)",
-            },
-        ],
-        "Eval" => &[KeyHint {
-            keys: "w",
-            effect: "cycle window (1h / 6h / 24h / 7d)",
-        }],
-        "Prompt" => &[
-            KeyHint {
-                keys: "↑↓",
-                effect: "select pin",
-            },
-            KeyHint {
-                keys: "PgUp/PgDn",
-                effect: "scroll MEMORY.md",
             },
         ],
         "Locks" => &[
@@ -213,7 +181,7 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
         ],
         "Nerdy" => &[KeyHint {
             keys: "(read-only)",
-            effect: "pool / tables / pgvector / hooks deep-dive",
+            effect: "pool / tables / hooks deep-dive",
         }],
         "Chat" => &[
             KeyHint {

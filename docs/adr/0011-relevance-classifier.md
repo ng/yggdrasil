@@ -1,6 +1,6 @@
 # 0011 — Relevance classifier for `ygg inject` top-k
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR 0015](0015-retrieval-scope-reduction.md) — `ygg inject` and the classifier were removed 2026-06-07.
 - **Date**: 2026-04-18
 - **Relates to**: [Retrieval and injection](../retrieval.md), [Open questions](../open-questions.md), [LLM usage](../llm-usage.md)
 

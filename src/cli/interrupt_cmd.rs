@@ -11,13 +11,6 @@ pub async fn execute_take_over(
         "Took over agent '{}' (was: {})",
         agent, snapshot.prior_state
     );
-    println!(
-        "  Head: {}",
-        snapshot
-            .head_node_id
-            .map(|id| id.to_string())
-            .unwrap_or("none".into())
-    );
     println!("  Pressure: {} tokens", snapshot.context_tokens);
     println!("\nType in the agent's tmux pane. When done:");
     println!("  ygg interrupt hand-back {} \"what you did\"", agent);

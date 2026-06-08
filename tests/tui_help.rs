@@ -39,15 +39,12 @@ fn each_active_pane_has_a_keymap_section() {
         "Dashboard",
         "Dag",
         "Tasks",
-        "Trace",
-        "Query",
         "Logs",
-        "MemGraph",
-        "Eval",
-        "Prompt",
         "Locks",
         "Runs",
         "RunGrid",
+        "Nerdy",
+        "Chat",
     ] {
         let keys = pane_keys(v);
         // RunGrid has its own narrow "rows = tasks" pseudo-bindings; every

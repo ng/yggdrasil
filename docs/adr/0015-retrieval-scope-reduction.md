@@ -1,7 +1,13 @@
 # ADR 0015 — Retrieval scope reduction (pivot toward orchestrator-only)
 
-**Status:** accepted (Phase 1 landed via yggdrasil-76; Phases 2–4 gated on observation)
-**Date:** 2026-04-18
+**Status:** implemented. Phase 1 landed via yggdrasil-76; Phases 2–4
+landed 2026-06-07 (yggdrasil-77/78/79) — the `nodes`, `memories`, and
+`embedding_cache` tables, the `tasks.embedding` column, pgvector, and the
+Ollama dependency are all gone. `ygg remember` / `ygg memory` / `ygg
+trace` / `ygg eval` / `ygg digest` / `ygg observe` / `ygg recovery-test`
+and the legacy `ygg run` loop were removed. Task dupe-detection now uses
+token-set (Jaccard) string similarity instead of embeddings.
+**Date:** 2026-04-18 (decision); 2026-06-07 (implementation)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 0001 — Postgres + pgvector as the single source of truth
 
-- **Status**: Accepted
+- **Status**: Partially superseded by [ADR 0015](0015-retrieval-scope-reduction.md) — Postgres remains the single store, but pgvector and the embedding columns were removed 2026-06-07.
 - **Date**: 2026-04-15
 
 ## Context

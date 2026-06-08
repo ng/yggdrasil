@@ -10,7 +10,6 @@ fn db_side_fields_default_to_zero() {
     assert_eq!(s.pool_used, 0);
     assert_eq!(s.pool_max, 0);
     assert_eq!(s.events_per_min, 0);
-    assert!(!s.pgvector_ok);
 }
 
 #[test]
@@ -21,6 +20,6 @@ fn ops_stats_partial_eq_includes_new_fields() {
     a.pool_used = 4;
     assert_ne!(a, b, "moving pool_used should bust equality");
     a.pool_used = 0;
-    a.pgvector_ok = true;
-    assert_ne!(a, b, "moving pgvector_ok should bust equality");
+    a.events_per_min = 9;
+    assert_ne!(a, b, "moving events_per_min should bust equality");
 }

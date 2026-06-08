@@ -130,48 +130,17 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
     let repo = resolve_cwd_repo(pool).await?;
     let created_by = resolve_agent_id(pool, opts.agent_name).await?;
 
-    // Auto-classify (yggdrasil-6) — only calls the LLM for the fields the
-    // user didn't explicitly pass. Explicit flags always win. Zero cost if
-    // Ollama is down (returns None, we fall back to defaults).
-    let missing_kind = opts.kind.is_none();
-    let missing_priority = opts.priority.is_none();
-    let missing_labels = opts.labels.is_empty();
-    let suggestion = if missing_kind || missing_priority || missing_labels {
-        crate::task_classify::suggest(opts.title, opts.description).await
-    } else {
-        None
-    };
-
     let kind = match opts.kind {
         Some(k) => TaskKind::from_str(k).map_err(|e| anyhow::anyhow!(e))?,
-        None => suggestion
-            .as_ref()
-            .and_then(|s| s.kind.as_deref())
-            .and_then(|k| TaskKind::from_str(k).ok())
-            .unwrap_or_default(),
+        None => TaskKind::default(),
     };
 
-    let priority = opts
-        .priority
-        .or(suggestion.as_ref().and_then(|s| s.priority))
-        .unwrap_or(2);
+    let priority = opts.priority.unwrap_or(2);
     if !(0..=4).contains(&priority) {
         anyhow::bail!("priority must be between 0 (critical) and 4 (backlog)");
     }
 
-    let suggested_labels: Vec<String> = if opts.labels.is_empty() {
-        suggestion
-            .as_ref()
-            .map(|s| s.labels.clone())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let labels: &[String] = if opts.labels.is_empty() {
-        &suggested_labels
-    } else {
-        opts.labels
-    };
+    let labels: &[String] = opts.labels;
 
     let task = TaskRepo::new(pool)
         .create(
@@ -191,17 +160,6 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
             },
         )
         .await?;
-
-    // Best-effort embedding for dupe-detection. Title + description carries
-    // most of the task's semantic identity; acceptance/design/notes are
-    // noisy and skew the vector toward implementation detail.
-    embed_task_best_effort(
-        pool,
-        task.task_id,
-        opts.title,
-        opts.description.unwrap_or(""),
-    )
-    .await;
 
     let task_ref = format!("{}-{}", repo.task_prefix, task.seq);
     let _ = EventRepo::new(pool)
@@ -1069,8 +1027,7 @@ pub async fn create_from_markdown(
             _ => TaskKind::Task,
         };
         // Priority defaults to 2 (medium) for bulk imports — users override
-        // per-task later. A blanket auto-classifier call per task would add
-        // Ollama latency × N.
+        // per-task later.
         let task = task_repo
             .create(
                 repo.repo_id,
@@ -1084,7 +1041,6 @@ pub async fn create_from_markdown(
                 },
             )
             .await?;
-        embed_task_best_effort(pool, task.task_id, &p.title, &p.body).await;
 
         // Link to parent: parent-task depends on child-task so the parent
         // stays blocked until all children close (rollup semantics).
@@ -1198,40 +1154,6 @@ fn parse_markdown_tasks(source: &str) -> Vec<ParsedHeader<'_>> {
     out
 }
 
-/// Embed a task's title+description via Ollama and persist the vector.
-/// Best-effort: Ollama unreachable or an embed error is silently swallowed.
-/// Skipped entirely when title+description fits in fewer than ~5 chars —
-/// no point embedding "test" or "" and bloating the HNSW index.
-async fn embed_task_best_effort(
-    pool: &sqlx::PgPool,
-    task_id: Uuid,
-    title: &str,
-    description: &str,
-) {
-    let source = if description.is_empty() {
-        title.to_string()
-    } else {
-        format!("{title}\n{description}")
-    };
-    if source.trim().chars().count() < 5 {
-        return;
-    }
-    // Truncate to ~1500 chars — keeps embedding input manageable.
-    let source = if source.len() > 1500 {
-        &source[..1500]
-    } else {
-        &source
-    };
-
-    let embedder = crate::embed::Embedder::default_ollama();
-    if !embedder.health_check().await {
-        return;
-    }
-    if let Ok(v) = embedder.embed(source).await {
-        let _ = TaskRepo::new(pool).set_embedding(task_id, &v).await;
-    }
-}
-
 pub async fn dupes(
     pool: &sqlx::PgPool,
     all_repos: bool,
@@ -1244,9 +1166,8 @@ pub async fn dupes(
     } else {
         Some(resolve_cwd_repo(pool).await?.repo_id)
     };
-    let max_distance = (1.0 - min_similarity).clamp(0.0, 1.0);
     let pairs = TaskRepo::new(pool)
-        .find_dupes(repo_id, max_distance, limit)
+        .find_dupes(repo_id, min_similarity, limit)
         .await?;
 
     if json {
@@ -1289,9 +1210,6 @@ pub async fn dupes(
         println!(
             "No probable duplicates above {:.0}% similarity.",
             min_similarity * 100.0
-        );
-        println!(
-            "(If tasks were created before this migration, re-run with `ygg task admin reembed` — TODO.)"
         );
         return Ok(());
     }

@@ -185,17 +185,6 @@ async fn has(name: &str) -> bool {
     find_bin(name).is_some()
 }
 
-async fn run(cmd: &str, args: &[&str]) -> bool {
-    let bin = find_bin(cmd).unwrap_or_else(|| cmd.to_string());
-    Command::new(&bin)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|s| s.success())
-}
-
 async fn run_show(cmd: &str, args: &[&str]) -> bool {
     let bin = find_bin(cmd).unwrap_or_else(|| cmd.to_string());
     Command::new(&bin)
@@ -349,43 +338,6 @@ async fn pg_createdb(user: &str, host: &str, port: u16, pass: Option<&str>) -> b
     cmd.status().await.is_ok_and(|s| s.success())
 }
 
-/// Run `psql -c "CREATE EXTENSION IF NOT EXISTS <ext>"` against the configured instance.
-async fn pg_enable_extension(
-    user: &str,
-    host: &str,
-    port: u16,
-    pass: Option<&str>,
-    ext: &str,
-) -> bool {
-    let port_s = port.to_string();
-    let sql = format!("CREATE EXTENSION IF NOT EXISTS {ext}");
-    let bin = find_bin("psql").unwrap_or_else(|| "psql".to_string());
-    let mut cmd = Command::new(&bin);
-    cmd.args([
-        "-U", user, "-h", host, "-p", &port_s, "-d", "ygg", "-c", &sql, "-q",
-    ])
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped());
-    if let Some(p) = pass {
-        cmd.env("PGPASSWORD", p);
-    }
-    match cmd.output().await {
-        Ok(output) if output.status.success() => true,
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr = stderr.trim();
-            if !stderr.is_empty() {
-                hint(&format!("psql: {stderr}"));
-            }
-            false
-        }
-        Err(e) => {
-            hint(&format!("psql invocation failed: {e}"));
-            false
-        }
-    }
-}
-
 /// Detect which postgresql@XX version is running via brew services or pg_config.
 async fn detect_pg_version() -> String {
     // Try pg_config first
@@ -469,21 +421,6 @@ async fn load_saved_skips(config_dir: &Path) -> Vec<String> {
     } else {
         vec![]
     }
-}
-
-/// Save a skip decision
-async fn save_skip(config_dir: &Path, name: &str) {
-    let path = config_dir.join("skips.json");
-    let mut skips = load_saved_skips(config_dir).await;
-    let name = name.to_lowercase();
-    if !skips.contains(&name) {
-        skips.push(name);
-    }
-    let _ = tokio::fs::write(
-        &path,
-        serde_json::to_string_pretty(&skips).unwrap_or_default(),
-    )
-    .await;
 }
 
 async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
@@ -579,7 +516,6 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         // Write config immediately so it's saved
         let env_content = format!(
             "DATABASE_URL={url}\n\
-             EMBEDDING_DIMENSIONS=768\n\
              CONTEXT_LIMIT_TOKENS=250000\n\
              CONTEXT_HARD_CAP_TOKENS=300000\n\
              LOCK_TTL_SECS=300\n\
@@ -603,8 +539,6 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
     let (pg_user, pg_host, pg_port, pg_pass) = parse_pg_url_parts(&db_url, &sys_user);
     let pg_is_local = pg_host == "localhost" || pg_host == "127.0.0.1";
 
-    let embed_dim = std::env::var("EMBEDDING_DIMENSIONS").unwrap_or_else(|_| "768".into());
-
     let db_show = db_url
         .find('@')
         .and_then(|at| {
@@ -616,7 +550,6 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
 
     println!("  {D}pkg{X}     {pkg}");
     println!("  {D}pg{X}      {db_show}");
-    println!("  {D}embed{X}   embeddinggemma {D}({embed_dim}d, ollama){X}");
     println!();
     println!("  {BR}╭─────────────────────────────────────────────╮{X}");
 
@@ -761,110 +694,6 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         } else {
             ok("database 'ygg'", "exists");
         }
-
-        // Now check pgvector in the ygg database
-        let pgvector_ok =
-            pg_enable_extension(&pg_user, &pg_host, pg_port, pg_pass.as_deref(), "vector").await;
-
-        if pgvector_ok {
-            ok("pgvector", "enabled");
-        } else {
-            bad("pgvector", "not available");
-            let pg_version = detect_pg_version().await;
-            let major = pg_version.trim_start_matches("postgresql@");
-            if has_brew {
-                hint("run: brew install pgvector");
-            } else if has_apt {
-                hint(&format!(
-                    "run: sudo apt-get install -y postgresql-{major}-pgvector"
-                ));
-            } else {
-                hint("install: https://github.com/pgvector/pgvector");
-            }
-            hint("then: psql -d ygg -c 'CREATE EXTENSION vector'");
-            if !prompt_skip("pgvector") {
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // ── ollama (for embeddings) ──
-    head("ollama");
-
-    if skipping(&all_skips, "ollama") {
-        ok("ollama", "skipped");
-    } else if port_open(11434).await {
-        ok("ollama", "running");
-
-        // Pull embed model
-        let embedder = crate::embed::Embedder::default_ollama();
-        let pb = spin("pulling embedding model...");
-        match embedder.pull_model().await {
-            Ok(()) => {
-                pb.finish_and_clear();
-                ok("embed model", "pulled");
-            }
-            Err(e) => {
-                pb.finish_and_clear();
-                bad("embed model", &format!("{e}"));
-            }
-        }
-
-        // Smoke test
-        let pb = spin("testing embedding...");
-        match embedder.embed("hello world").await {
-            Ok(_) => {
-                pb.finish_and_clear();
-                ok("embedding", &format!("ok ({embed_dim}d)"));
-            }
-            Err(e) => {
-                pb.finish_and_clear();
-                bad("embedding", &format!("{e}"));
-            }
-        }
-    } else if has("ollama").await {
-        ok("ollama", "installed");
-        hint("starting ollama...");
-        Command::new("ollama")
-            .arg("serve")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok();
-        if wait_port(11434, 10).await {
-            ok("ollama", "started");
-        } else {
-            bad("ollama", "didn't start");
-            if !prompt_skip("ollama") {
-                std::process::exit(1);
-            }
-        }
-    } else {
-        bad("ollama", "not found");
-        if has_brew {
-            if prompt_yes("install ollama via brew?") {
-                let pb = spin("brew install ollama...");
-                let installed = run_show("brew", &["install", "ollama"]).await;
-                pb.finish_and_clear();
-                if installed {
-                    ok("ollama", "installed");
-                    Command::new("ollama")
-                        .arg("serve")
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .ok();
-                    wait_port(11434, 10).await;
-                } else {
-                    bad("ollama", "brew install failed");
-                }
-            }
-        } else {
-            offer_curl_install("ollama", "https://ollama.com/install.sh").await;
-        }
-        if !port_open(11434).await && !prompt_skip("ollama") {
-            std::process::exit(1);
-        }
     }
 
     // ── config ──
@@ -981,7 +810,6 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                             if !new_url.is_empty() {
                                 let new_content = format!(
                                     "DATABASE_URL={new_url}\n\
-                                 EMBEDDING_DIMENSIONS=768\n\
                                  CONTEXT_LIMIT_TOKENS=250000\n\
                                  CONTEXT_HARD_CAP_TOKENS=300000\n\
                                  LOCK_TTL_SECS=300\n\
@@ -1013,8 +841,6 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
             }
         } // if probe_ok
     }
-
-    // No Ollama model pulls needed — embedding is in-process via fastembed
 
     // ── hooks + status bar ──
     if !skipping(&all_skips, "hooks") {

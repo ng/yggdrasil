@@ -105,32 +105,14 @@ async fn handle_session_start(
 
 // ── UserPromptSubmit ────────────────────────────────────────────────────────
 
-/// Port of scripts/hooks/prompt-submit.sh:
-/// 1. Extract prompt (truncate to 2000 chars)
-/// 2. Call inject with agent + prompt (output to stdout)
-/// 3. Check inbox — if non-empty and not "inbox empty", output to stdout
-/// 4. Call mark-read (silent)
-async fn handle_prompt_submit(agent_name: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
-    let prompt_raw = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-    // Truncate to 2000 bytes (matching the shell script's `head -c 2000`).
-    // Use byte length with char-boundary snapping to avoid splitting multi-byte UTF-8.
-    let prompt = if prompt_raw.len() <= 2000 {
-        prompt_raw.to_string()
-    } else {
-        let mut end = 2000;
-        while !prompt_raw.is_char_boundary(end) {
-            end -= 1;
-        }
-        prompt_raw[..end].to_string()
-    };
-
-    let prompt_opt = if prompt.is_empty() {
-        None
-    } else {
-        Some(prompt.as_str())
-    };
-
-    // Inject: writes prompt node, similarity search, returns context lines.
+/// UserPromptSubmit hook:
+/// 1. Record incremental token stats from the live transcript
+/// 2. Check inbox — if non-empty and not "inbox empty", output to stdout
+/// 3. Call mark-read (silent)
+async fn handle_prompt_submit(
+    agent_name: &str,
+    _payload: &serde_json::Value,
+) -> anyhow::Result<()> {
     // Gracefully ignore errors (matches `|| true` in the shell script).
     let config = match AppConfig::from_env() {
         Ok(c) => c,
@@ -147,16 +129,11 @@ async fn handle_prompt_submit(agent_name: &str, payload: &serde_json::Value) -> 
         }
     };
 
-    if let Err(e) = crate::cli::inject::execute(&pool, &config, agent_name, prompt_opt).await {
-        warn!("hook prompt-submit: inject failed: {e}");
-    }
-
     // Record incremental token stats from the live transcript (ygg-2).
     // Uses replace semantics so repeated calls overwrite (no double-counting).
-    match crate::cli::digest::find_latest_transcript() {
+    match crate::stats::collector::find_latest_transcript() {
         Some(tp) => {
-            let turns =
-                crate::stats::collector::parse_session(std::path::Path::new(&tp));
+            let turns = crate::stats::collector::parse_session(std::path::Path::new(&tp));
             if turns.is_empty() {
                 warn!("hook prompt-submit: transcript has 0 parseable turns: {tp}");
             } else {
@@ -178,7 +155,9 @@ async fn handle_prompt_submit(agent_name: &str, payload: &serde_json::Value) -> 
                             warn!("hook prompt-submit: replace_stats failed: {e}");
                         }
                     }
-                    Ok(None) => warn!("hook prompt-submit: agent '{agent_name}' not found for stats"),
+                    Ok(None) => {
+                        warn!("hook prompt-submit: agent '{agent_name}' not found for stats")
+                    }
                     Err(e) => warn!("hook prompt-submit: agent lookup failed: {e}"),
                 }
             }
@@ -280,41 +259,8 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
 /// Port of scripts/hooks/pre-compact.sh:
 /// 1. If transcript exists, digest it (without --stop)
 /// 2. Re-inject agent context via prime (output to stdout)
-async fn handle_pre_compact(agent_name: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
-    let transcript_path = payload
-        .get("transcript_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    // Digest the conversation about to be compacted.
-    if !transcript_path.is_empty() && std::path::Path::new(&transcript_path).is_file() {
-        let config = match AppConfig::from_env() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("hook pre-compact: config error: {e}");
-                // Still try prime below.
-                crate::cli::prime::execute(agent_name, None).await?;
-                return Ok(());
-            }
-        };
-        let pool = match crate::db::create_pool(&config.database_url).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("hook pre-compact: db pool error: {e}");
-                crate::cli::prime::execute(agent_name, None).await?;
-                return Ok(());
-            }
-        };
-
-        if let Err(e) =
-            crate::cli::digest::execute(&pool, &config, agent_name, &transcript_path).await
-        {
-            warn!("hook pre-compact: digest failed: {e}");
-        }
-    }
-
-    // Re-inject agent context.
+async fn handle_pre_compact(agent_name: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+    // Re-inject agent context before Claude Code compacts the window.
     crate::cli::prime::execute(agent_name, None).await?;
 
     Ok(())
@@ -353,32 +299,21 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
     if let Some((ref pool, ref config)) = db {
         let user_id = crate::db::user_id().to_string();
 
-        // 1. Digest with --stop semantics.
+        // 1. On stop, record token stats + end session + release locks.
         if !transcript_path.is_empty() && std::path::Path::new(&transcript_path).is_file() {
-            if let Err(e) =
-                crate::cli::digest::execute(pool, config, agent_name, &transcript_path).await
-            {
-                warn!("hook stop: digest failed: {e}");
-            }
-
             // --stop: record token stats + end session + release locks.
             if let Ok(Some(a)) = AgentRepo::new(pool, &user_id).get_by_name(agent_name).await {
                 // Record token stats from the transcript to agent_stats (ygg-2).
-                let turns = crate::stats::collector::parse_session(
-                    std::path::Path::new(&transcript_path),
-                );
+                let turns =
+                    crate::stats::collector::parse_session(std::path::Path::new(&transcript_path));
                 if !turns.is_empty() {
                     let usage = crate::stats::collector::aggregate_usage(&turns);
                     let tool_names: Vec<String> =
                         turns.iter().flat_map(|t| t.tool_names.clone()).collect();
                     let category = crate::stats::classifier::classify(&tool_names);
-                    if let Err(e) = crate::stats::tracker::replace_stats(
-                        pool,
-                        a.agent_id,
-                        &usage,
-                        &category,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::stats::tracker::replace_stats(pool, a.agent_id, &usage, &category)
+                            .await
                     {
                         warn!("hook stop: replace_stats failed: {e}");
                     }
@@ -426,8 +361,6 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn prompt_truncation_ascii() {
         // ASCII: byte length == char length, should truncate to exactly 2000 bytes.

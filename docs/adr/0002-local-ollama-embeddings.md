@@ -1,6 +1,6 @@
 # 0002 — Local Ollama embeddings over API-hosted models
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR 0015](0015-retrieval-scope-reduction.md) — the embedding/retrieval layer and the Ollama dependency were removed 2026-06-07.
 - **Date**: 2026-04-15
 
 ## Context
