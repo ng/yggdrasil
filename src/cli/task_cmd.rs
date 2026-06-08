@@ -1161,6 +1161,9 @@ pub async fn dupes(
     limit: i64,
     json: bool,
 ) -> Result<(), anyhow::Error> {
+    if !(0.0..=1.0).contains(&min_similarity) {
+        anyhow::bail!("min_similarity must be between 0.0 and 1.0");
+    }
     let repo_id = if all_repos {
         None
     } else {

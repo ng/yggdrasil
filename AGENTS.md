@@ -11,11 +11,6 @@ ygg task create "title"                        # New task
 ygg task claim <ref>                           # Take a task
 ygg task close <ref>                           # Complete a task
 
-ygg memory create "..." --scope repo           # First-class scoped note (global|repo|session)
-ygg memory search "<query>"                    # Semantic search over memories
-ygg memory pin <id>                            # Surface a memory first in retrieval
-ygg remember "..."                             # Back-compat alias — writes a directive node
-
 ygg status                                     # See all agents' state, locks, recent activity
 ygg lock acquire <resource-key>                # Lease a shared resource before editing
 ygg lock release <resource-key>                # Release when done
@@ -23,17 +18,14 @@ ygg spawn --task "..."                         # Spawn a parallel agent in a new
 ygg logs --follow [--kind K] [--session SID]   # Live event stream (filterable)
 ygg rollup --days 7                            # Per-repo activity summary
 ygg reap --dry-run                             # Preview stale-row cleanup
-ygg eval                                       # Retrieval effectiveness (CLI; pane [8] in TUI)
 ```
 
 ### Rules
 
 - Acquire a lock before editing a resource another agent might touch. Release when done.
 - Prefer `ygg spawn` over a native Task/Agent tool for parallel work that warrants its own context.
-- Read `[ygg memory | ...]` hints injected above user prompts — they are real prior context.
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking. Intra-turn checklists can stay in a native TodoList.
-- `ygg memory create --scope repo|session|global` is the preferred way to persist notes; `ygg remember` still works.
 - Do NOT use `bd` / beads. This project has migrated to Yggdrasil.
 
 ## Agent naming

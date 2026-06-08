@@ -1692,7 +1692,7 @@ impl DashboardView {
                 ),
                 Span::styled(" stale (>30m)  ·  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    "[0] Locks for detail",
+                    "[9] Locks for detail",
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::ITALIC),

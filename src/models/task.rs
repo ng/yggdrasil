@@ -36,9 +36,10 @@ impl std::str::FromStr for TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, sqlx::Type, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, sqlx::Type, Serialize, Deserialize)]
 #[sqlx(type_name = "task_kind", rename_all = "snake_case")]
 pub enum TaskKind {
+    #[default]
     Task,
     Bug,
     Feature,
@@ -110,12 +111,6 @@ pub struct TaskCreate<'a> {
     pub assignee: Option<Uuid>,
     pub labels: &'a [String],
     pub external_ref: Option<&'a str>,
-}
-
-impl Default for TaskKind {
-    fn default() -> Self {
-        TaskKind::Task
-    }
 }
 
 #[derive(Debug, Default)]

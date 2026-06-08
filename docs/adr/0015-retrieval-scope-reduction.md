@@ -135,9 +135,11 @@ Schema churn:
   `src/tui/trace_view.rs`, `src/tui/query_view.rs`, `src/tui/eval_view.rs` — all delete-candidates
 - Ollama dependency removed from `ygg init` entirely
 
-Tasks retain the `embedding` column (just shipped for dupe detection);
-that's the only pgvector usage that survives Phase 4 since it powers a
-pure-orchestration feature.
+Task dupe detection no longer uses embeddings. `tasks.embedding` was
+dropped in Phase 4 (see
+`migrations/20260607000001_drop_embeddings_and_nodes.sql`); dupe
+detection now uses token-set (Jaccard) string similarity on
+title+description.
 
 ## Consequences
 

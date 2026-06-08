@@ -19,7 +19,7 @@ pub struct KeyHint {
 /// Built-in global keymap rendered above every pane-specific section.
 pub const GLOBAL_KEYS: &[KeyHint] = &[
     KeyHint {
-        keys: "1..0, G, N, C",
+        keys: "1,2,3,5,9,0,G,N,C",
         effect: "switch view",
     },
     KeyHint {

@@ -299,11 +299,11 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
     if let Some((ref pool, ref config)) = db {
         let user_id = crate::db::user_id().to_string();
 
-        // 1. On stop, record token stats + end session + release locks.
-        if !transcript_path.is_empty() && std::path::Path::new(&transcript_path).is_file() {
-            // --stop: record token stats + end session + release locks.
-            if let Ok(Some(a)) = AgentRepo::new(pool, &user_id).get_by_name(agent_name).await {
-                // Record token stats from the transcript to agent_stats (ygg-2).
+        // 1. On stop, always end session + release locks; token stats are
+        //    best-effort and depend on a readable transcript.
+        if let Ok(Some(a)) = AgentRepo::new(pool, &user_id).get_by_name(agent_name).await {
+            // Record token stats from the transcript to agent_stats (ygg-2).
+            if !transcript_path.is_empty() && std::path::Path::new(&transcript_path).is_file() {
                 let turns =
                     crate::stats::collector::parse_session(std::path::Path::new(&transcript_path));
                 if !turns.is_empty() {
@@ -318,17 +318,17 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
                         warn!("hook stop: replace_stats failed: {e}");
                     }
                 }
-
-                if let Some(sid) =
-                    crate::models::session::resolve_current_session(pool, a.agent_id, None).await
-                {
-                    let _ = crate::models::session::SessionRepo::new(pool)
-                        .end(sid)
-                        .await;
-                }
-                let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, &user_id);
-                let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
             }
+
+            if let Some(sid) =
+                crate::models::session::resolve_current_session(pool, a.agent_id, None).await
+            {
+                let _ = crate::models::session::SessionRepo::new(pool)
+                    .end(sid)
+                    .await;
+            }
+            let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, &user_id);
+            let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
         }
 
         // 2. Capture outcome (unless YGG_RUN_CAPTURE=0).
