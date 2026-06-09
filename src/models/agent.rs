@@ -38,8 +38,6 @@ pub struct AgentWorkflow {
     pub agent_id: Uuid,
     pub agent_name: String,
     pub current_state: AgentState,
-    pub head_node_id: Option<Uuid>,
-    pub digest_id: Option<Uuid>,
     pub context_tokens: i32,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
@@ -89,8 +87,8 @@ impl<'a> AgentRepo<'a> {
             VALUES ($1, $2, $3)
             ON CONFLICT (user_id, agent_name, COALESCE(persona, ''))
               DO UPDATE SET updated_at = now()
-            RETURNING agent_id, agent_name, current_state, head_node_id,
-                      digest_id, context_tokens, metadata, created_at, updated_at, persona
+            RETURNING agent_id, agent_name, current_state,
+                      context_tokens, metadata, created_at, updated_at, persona
             "#,
         )
         .bind(name)
@@ -112,8 +110,8 @@ impl<'a> AgentRepo<'a> {
             UPDATE agents
             SET current_state = $3::agent_state, updated_at = now()
             WHERE agent_id = $1 AND current_state = $2::agent_state
-            RETURNING agent_id, agent_name, current_state, head_node_id,
-                      digest_id, context_tokens, metadata, created_at, updated_at, persona
+            RETURNING agent_id, agent_name, current_state,
+                      context_tokens, metadata, created_at, updated_at, persona
             "#,
         )
         .bind(agent_id)
@@ -181,60 +179,12 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
-    /// Update the head node and context token count.
-    pub async fn update_head(
-        &self,
-        agent_id: Uuid,
-        head_node_id: Uuid,
-        context_tokens: i32,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE agents SET head_node_id = $2, context_tokens = $3, updated_at = now() WHERE agent_id = $1",
-        )
-        .bind(agent_id)
-        .bind(head_node_id)
-        .bind(context_tokens)
-        .execute(self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Atomically update head, digest, and token count in a single statement.
-    pub async fn flush_context(
-        &self,
-        agent_id: Uuid,
-        head_node_id: Uuid,
-        digest_id: Uuid,
-        context_tokens: i32,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE agents SET head_node_id = $2, digest_id = $3, context_tokens = $4, updated_at = now() WHERE agent_id = $1",
-        )
-        .bind(agent_id)
-        .bind(head_node_id)
-        .bind(digest_id)
-        .bind(context_tokens)
-        .execute(self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Update the digest reference after a context flush.
-    pub async fn set_digest(&self, agent_id: Uuid, digest_id: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE agents SET digest_id = $2, updated_at = now() WHERE agent_id = $1")
-            .bind(agent_id)
-            .bind(digest_id)
-            .execute(self.pool)
-            .await?;
-        Ok(())
-    }
-
     /// Get agent by ID.
     pub async fn get(&self, agent_id: Uuid) -> Result<Option<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
             FROM agents WHERE agent_id = $1
             "#,
         )
@@ -247,8 +197,8 @@ impl<'a> AgentRepo<'a> {
     pub async fn get_by_name(&self, name: &str) -> Result<Option<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
             FROM agents WHERE agent_name = $1 AND user_id = $2
             ORDER BY (persona IS NOT NULL), updated_at DESC
             LIMIT 1
@@ -267,8 +217,8 @@ impl<'a> AgentRepo<'a> {
     ) -> Result<Option<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
             FROM agents
             WHERE agent_name = $1 AND COALESCE(persona, '') = COALESCE($2, '') AND user_id = $3
             "#,
@@ -284,8 +234,8 @@ impl<'a> AgentRepo<'a> {
     pub async fn list(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
             FROM agents
             WHERE archived_at IS NULL AND user_id = $1
             ORDER BY created_at
@@ -300,8 +250,8 @@ impl<'a> AgentRepo<'a> {
     pub async fn list_all(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
             FROM agents WHERE user_id = $1 ORDER BY created_at
             "#,
         )
@@ -314,8 +264,8 @@ impl<'a> AgentRepo<'a> {
     pub async fn list_all_users(&self) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
             FROM agents
             WHERE archived_at IS NULL
             ORDER BY created_at
@@ -377,8 +327,8 @@ impl<'a> AgentRepo<'a> {
     pub async fn find_stale(&self, days: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT a.agent_id, a.agent_name, a.current_state, a.head_node_id,
-                   a.digest_id, a.context_tokens, a.metadata, a.created_at, a.updated_at
+            SELECT a.agent_id, a.agent_name, a.current_state,
+                   a.context_tokens, a.metadata, a.created_at, a.updated_at, a.persona
             FROM agents a
             WHERE a.archived_at IS NULL
               AND a.user_id = $2
@@ -410,8 +360,8 @@ impl<'a> AgentRepo<'a> {
     pub async fn find_orphaned(&self, stale_secs: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
             FROM agents
             WHERE current_state IN ('executing', 'waiting_tool', 'planning', 'context_flush')
               AND updated_at < now() - make_interval(secs => $1)

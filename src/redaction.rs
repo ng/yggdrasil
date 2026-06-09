@@ -9,7 +9,7 @@
 //!     rows (covers pre-migration data + handles pattern additions over
 //!     time).
 //!   - Kill switch via `YGG_REDACTION=off` for debugging.
-//!   - Every redaction emits a `RedactionApplied` event so we can audit.
+//!   - Redacted content is logged for audit.
 //!
 //! Patterns are deliberately high-precision — false positives on real prose
 //! would be worse than the occasional miss. Broader patterns (generic

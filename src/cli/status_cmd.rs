@@ -20,20 +20,6 @@ pub async fn execute(
         println!("  ID:       {}", agent.agent_id);
         println!("  State:    {}", agent.current_state);
         println!("  Pressure: {} tokens", agent.context_tokens);
-        println!(
-            "  Head:     {}",
-            agent
-                .head_node_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "none".into())
-        );
-        println!(
-            "  Digest:   {}",
-            agent
-                .digest_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "none".into())
-        );
         println!("  Updated:  {}", agent.updated_at);
 
         let lock_mgr = LockManager::new(pool, 300, crate::db::user_id());

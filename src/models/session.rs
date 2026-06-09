@@ -29,7 +29,6 @@ pub struct Session {
     pub repo_id: Option<Uuid>,
     pub cc_session_id: Option<String>,
     pub current_state: AgentState,
-    pub head_node_id: Option<Uuid>,
     pub context_tokens: i32,
     pub last_tool: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -61,7 +60,7 @@ impl<'a> SessionRepo<'a> {
             // Fast path: session already exists.
             if let Some(existing) = sqlx::query_as::<_, Session>(
                 r#"SELECT session_id, agent_id, repo_id, cc_session_id,
-                          current_state, head_node_id, context_tokens,
+                          current_state, context_tokens,
                           last_tool, started_at, ended_at, updated_at, metadata
                    FROM sessions WHERE cc_session_id = $1 LIMIT 1"#,
             )
@@ -78,7 +77,7 @@ impl<'a> SessionRepo<'a> {
                    VALUES ($1, $2, $3)
                    ON CONFLICT (cc_session_id) DO UPDATE SET updated_at = now()
                    RETURNING session_id, agent_id, repo_id, cc_session_id,
-                             current_state, head_node_id, context_tokens,
+                             current_state, context_tokens,
                              last_tool, started_at, ended_at, updated_at, metadata"#,
             )
             .bind(agent_id)
@@ -92,7 +91,7 @@ impl<'a> SessionRepo<'a> {
                 r#"INSERT INTO sessions (agent_id, repo_id)
                    VALUES ($1, $2)
                    RETURNING session_id, agent_id, repo_id, cc_session_id,
-                             current_state, head_node_id, context_tokens,
+                             current_state, context_tokens,
                              last_tool, started_at, ended_at, updated_at, metadata"#,
             )
             .bind(agent_id)
@@ -121,23 +120,6 @@ impl<'a> SessionRepo<'a> {
         .bind(session_id)
         .bind(&to)
         .bind(last_tool)
-        .execute(self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn update_head(
-        &self,
-        session_id: Uuid,
-        head_node_id: Uuid,
-        context_tokens: i32,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE sessions SET head_node_id = $2, context_tokens = $3, updated_at = now() WHERE session_id = $1",
-        )
-        .bind(session_id)
-        .bind(head_node_id)
-        .bind(context_tokens)
         .execute(self.pool)
         .await?;
         Ok(())

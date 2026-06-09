@@ -168,22 +168,11 @@ const SEP: &str = "\x1b[38;5;240m·\x1b[0m";
 
 fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
     match kind {
-        EventKind::NodeWritten => (GREEN, "●"),
         EventKind::LockAcquired => (YELLOW, "⚿"),
         EventKind::LockReleased => (DIM, "○"),
-        EventKind::DigestWritten => (CYAN, "◈"),
-        EventKind::SimilarityHit => (BLUE, "≈"),
-        EventKind::CorrectionDetected => (RED, "✗"),
         EventKind::HookFired => (ORANGE, "▸"),
-        EventKind::EmbeddingCall => (CYAN, "⚡"),
         EventKind::TaskCreated => (GREEN, "✚"),
         EventKind::TaskStatusChanged => (YELLOW, "◆"),
-        EventKind::Remembered => (BLUE, "♦"),
-        EventKind::EmbeddingCacheHit => (GREEN, "⚡"),
-        EventKind::ClassifierDecision => (CYAN, "⚖"),
-        EventKind::ScoringDecision => (GRAY, "·"),
-        EventKind::RedactionApplied => (RED, "✂"),
-        EventKind::HitReferenced => (GREEN, "✓"),
         EventKind::AgentStateChanged => (BLUE, "↪"),
         EventKind::Message => (CYAN, "✉"),
         EventKind::RunScheduled => (DIM, "□"),
@@ -198,76 +187,11 @@ fn kind_style(kind: &EventKind) -> (&'static str, &'static str) {
 
 fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
     match kind {
-        EventKind::NodeWritten => {
-            let kind = p["kind"].as_str().unwrap_or("node");
-            let tok = p["tokens"].as_i64().unwrap_or(0);
-            let snip = p["snippet"].as_str().unwrap_or("");
-            // Humanize kind; omit raw token count (it's an estimate, not load-bearing
-            // to the human reader). The snippet is what actually matters.
-            let kind_label = match kind {
-                "user_message" => "user",
-                "assistant_message" => "assistant",
-                "tool_call" => "tool call",
-                "tool_result" => "tool result",
-                "digest" => "digest",
-                "directive" => "directive",
-                "human_override" => "override",
-                "system" => "system",
-                _ => kind,
-            };
-            format!(
-                "{CYAN}{kind_label:<11}{RESET} {DIM}~{tok:>3}t{RESET}  {}",
-                truncate(snip, 50)
-            )
-        }
         EventKind::LockAcquired | EventKind::LockReleased => p["resource"]
             .as_str()
             .map(|r| truncate(r, 60).to_string())
             .unwrap_or_default(),
-        EventKind::DigestWritten => {
-            let turns = p["turns"].as_i64().unwrap_or(0);
-            let corr = p["corrections"].as_i64().unwrap_or(0);
-            let reinf = p["reinforcements"].as_i64().unwrap_or(0);
-            format!(
-                "{DIM}{turns:>4} turns{RESET}  {RED}{corr:>2} corrections{RESET}  {GREEN}{reinf:>2} reinforcements{RESET}"
-            )
-        }
-        EventKind::SimilarityHit => {
-            let score = p["total_score"]
-                .as_f64()
-                .unwrap_or_else(|| p["similarity"].as_f64().unwrap_or(0.0));
-            let src = p["source_agent"].as_str().unwrap_or("?");
-            let snip = p["snippet"].as_str().unwrap_or("");
-            let label = if score >= 0.6 {
-                format!("{GREEN}strong{RESET}")
-            } else if score >= 0.3 {
-                format!("{BLUE}recall{RESET}")
-            } else {
-                format!("{DIM}faint{RESET}")
-            };
-            format!(
-                "{label} {DIM}{score:.2} from {src}{RESET}  {}",
-                truncate(snip, 40)
-            )
-        }
-        EventKind::CorrectionDetected => {
-            let fb = p["feedback"].as_str().unwrap_or("");
-            let sent = p["sentiment"].as_str().unwrap_or("");
-            format!("{RED}{sent}{RESET}  {}", truncate(fb, 55))
-        }
         EventKind::HookFired => p["hook"].as_str().unwrap_or("").to_string(),
-        EventKind::EmbeddingCall => {
-            let model = p["model"].as_str().unwrap_or("?");
-            let ms = p["latency_ms"].as_u64().unwrap_or(0);
-            let chars = p["input_chars"].as_u64().unwrap_or(0);
-            let ok = p["success"].as_bool().unwrap_or(false);
-            let status = if ok {
-                format!("{GREEN}ok{RESET}")
-            } else {
-                format!("{RED}fail{RESET}")
-            };
-            format!("{CYAN}{model:<11}{RESET} {chars:>4} chars  {ms:>4}ms  {status}")
-        }
         EventKind::TaskCreated => {
             let rref = p["ref"].as_str().unwrap_or("?");
             let title = p["title"].as_str().unwrap_or("");
@@ -286,81 +210,6 @@ fn format_payload(kind: &EventKind, p: &serde_json::Value) -> String {
                 .map(|r| format!("  {DIM}{}{RESET}", truncate(r, 40)))
                 .unwrap_or_default();
             format!("{YELLOW}{rref}{RESET} → {to}{extra}")
-        }
-        EventKind::Remembered => {
-            let tok = p["tokens"].as_i64().unwrap_or(0);
-            let snip = p["snippet"].as_str().unwrap_or("");
-            format!(
-                "{CYAN}directive{RESET}   {DIM}~{tok}t{RESET}  {}",
-                truncate(snip, 50)
-            )
-        }
-        EventKind::EmbeddingCacheHit => {
-            let model = p["model"].as_str().unwrap_or("?");
-            let ms = p["latency_ms"].as_u64().unwrap_or(0);
-            let chars = p["input_chars"].as_u64().unwrap_or(0);
-            let purpose = p["purpose"].as_str().unwrap_or("");
-            format!(
-                "{GREEN}{model:<11}{RESET} {chars:>4} chars  {ms:>4}ms  {DIM}{purpose} (cached){RESET}"
-            )
-        }
-        EventKind::ClassifierDecision => {
-            let score = p["score"].as_f64().unwrap_or(0.0);
-            let kept = p["kept"].as_bool().unwrap_or(false);
-            let bypassed = p["bypassed"].as_bool().unwrap_or(false);
-            let src = p["source_agent"].as_str().unwrap_or("?");
-            let snip = p["snippet"].as_str().unwrap_or("");
-            let verdict = if bypassed {
-                format!("{DIM}bypass{RESET}")
-            } else if kept {
-                format!("{GREEN}keep{RESET}")
-            } else {
-                format!("{RED}drop{RESET}")
-            };
-            format!(
-                "{verdict} {CYAN}score={score:.2}{RESET} {DIM}from {src}{RESET}  {}",
-                truncate(snip, 40)
-            )
-        }
-        EventKind::ScoringDecision => {
-            let kept = p["kept"].as_bool().unwrap_or(false);
-            let reason = p["drop_reason"].as_str().unwrap_or("");
-            let total = p["components"]["total"].as_f64().unwrap_or(0.0);
-            let snip = p["snippet"].as_str().unwrap_or("");
-            let src = p["source_agent"].as_str().unwrap_or("?");
-            let verdict = if kept {
-                format!("{GREEN}keep{RESET}")
-            } else {
-                format!("{RED}drop{RESET}")
-            };
-            let extra = if !reason.is_empty() && !kept {
-                format!(" {DIM}({reason}){RESET}")
-            } else {
-                String::new()
-            };
-            format!(
-                "{verdict}{extra} {DIM}{total:.2} from {src}{RESET}  {}",
-                truncate(snip, 35)
-            )
-        }
-        EventKind::RedactionApplied => {
-            let total = p["total"].as_i64().unwrap_or(0);
-            let node_kind = p["node_kind"].as_str().unwrap_or("");
-            let kinds = p["kinds"]
-                .as_object()
-                .map(|o| {
-                    o.iter()
-                        .map(|(k, v)| format!("{k}:{v}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_default();
-            format!("{RED}{total} redacted{RESET} {DIM}in {node_kind} · {kinds}{RESET}")
-        }
-        EventKind::HitReferenced => {
-            let overlap = p["overlap"].as_f64().unwrap_or(0.0);
-            let method = p["method"].as_str().unwrap_or("");
-            format!("{GREEN}referenced{RESET} {DIM}overlap={overlap:.2} method={method}{RESET}")
         }
         EventKind::AgentStateChanged => {
             let from = p["from"].as_str().unwrap_or("?");

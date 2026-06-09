@@ -13,7 +13,6 @@
 //! Designed to be fast: one DB query, opened per invocation. Refreshes
 //! every 3s (Claude Code statusLine default), so keep it under ~100ms.
 
-use chrono::{Duration, Utc};
 use std::io::Read;
 
 const RESET: &str = "\x1b[0m";
@@ -23,7 +22,7 @@ const GREEN: &str = "\x1b[38;5;114m";
 const YELL: &str = "\x1b[38;5;221m";
 const BOLD: &str = "\x1b[1m";
 
-pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
+pub async fn execute(_pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     // Read Claude Code's JSON payload from stdin. Non-fatal if absent.
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -53,49 +52,6 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     // transcript-byte-size estimate (~4 chars per token). This way tokens
     // show up next to cost regardless of how CC labels the field.
     let tok_total: i64 = token_count(&j).unwrap_or(0);
-
-    // When CC provides session_id, scope numbers to THIS session (the true
-    // "what am I getting out of ygg right now" signal). Otherwise fall back
-    // to a 24h global window like before.
-    let session_id = j
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let now_minus_24 = Utc::now() - Duration::hours(24);
-    let now_minus_48 = Utc::now() - Duration::hours(48);
-    // Embedding cache numbers still flow from non-retrieval paths
-    // (task dupe detection, occasional manual searches), so the cache
-    // hit ratio remains a meaningful signal post-ADR-0015 Phase 1.
-    // The retrieval-only signals (similarity_hit, hit_referenced) are
-    // gone — see the segment-rendering section below.
-    let (cache_hits, embed_calls, cache_prev, calls_prev) = if let Some(sid) = session_id.as_deref()
-    {
-        // Session-scoped: current session vs last 24h global for trend comparison.
-        let row: (i64, i64, i64, i64) = sqlx::query_as(
-                r#"SELECT
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND cc_session_id = $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND cc_session_id = $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $2 AND cc_session_id IS DISTINCT FROM $1)
-                   FROM events"#,
-            )
-            .bind(sid)
-            .bind(now_minus_24)
-            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0));
-        row
-    } else {
-        let row: (i64, i64, i64, i64) = sqlx::query_as(
-                r#"SELECT
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at >= $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at >= $1),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_cache_hit' AND created_at < $1 AND created_at >= $2),
-                     COUNT(*) FILTER (WHERE event_kind::text = 'embedding_call'      AND created_at < $1 AND created_at >= $2)
-                   FROM events"#,
-            )
-            .bind(now_minus_24).bind(now_minus_48)
-            .fetch_one(pool).await.unwrap_or((0, 0, 0, 0));
-        row
-    };
 
     let mut segments: Vec<String> = Vec::new();
 
@@ -140,30 +96,6 @@ pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
         segments.push(format!("{DIM}spend{RESET} {BOLD}${:.2}{RESET}", cost_usd));
     }
 
-    // Yggdrasil metrics — label explicitly with the "ygg" prefix so it's
-    // obvious these are our numbers, not Claude Code's. 24h window on both
-    // because we don't yet plumb session_id through events — see
-    // yggdrasil-26 for the per-session upgrade.
-    let cache_total = cache_hits + embed_calls;
-    if cache_total > 0 {
-        let rate_now = cache_hits as f64 / cache_total as f64;
-        let prev_total = cache_prev + calls_prev;
-        let trend = if prev_total >= 10 {
-            let rate_prev = cache_prev as f64 / prev_total as f64;
-            trend_arrow(rate_now - rate_prev, 0.05)
-        } else {
-            ""
-        };
-        segments.push(format!(
-            "{DIM}ygg cache{RESET} {GREEN}{cache_hits}/{cache_total}{RESET}{trend}"
-        ));
-    }
-
-    // ADR 0015 Phase 1 dropped retrieval-as-memory; the `recalls/24h`
-    // and `recall N/M (X%)` segments measured a feature we no longer
-    // run, so they're gone. Cache-hit segment stays — embedding still
-    // fires from task dupe detection and manual searches.
-
     println!("{}", segments.join(" · "));
     Ok(())
 }
@@ -179,19 +111,6 @@ fn read_effort_level() -> Option<String> {
     v.get("effortLevel")
         .and_then(|x| x.as_str())
         .map(String::from)
-}
-
-/// Render a delta as a trend glyph. `delta` is the signed change (new - old
-/// for absolute metrics, or (new - old)/old for rates). `flat_band` defines
-/// the threshold below which we consider the movement noise.
-fn trend_arrow(delta: f64, flat_band: f64) -> &'static str {
-    if delta > flat_band {
-        "\x1b[38;5;114m ↑\x1b[0m" // green up
-    } else if delta < -flat_band {
-        "\x1b[38;5;203m ↓\x1b[0m" // red down
-    } else {
-        "\x1b[2m ─\x1b[0m" // dim flat
-    }
 }
 
 /// Pull a session token count from the Claude Code statusline JSON.
