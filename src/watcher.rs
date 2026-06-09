@@ -263,6 +263,16 @@ impl Watcher {
             return Ok(0);
         }
 
+        // Resolve the repo root so worktree paths are absolute regardless of
+        // the watcher's CWD.
+        let repo_root = match repo_toplevel() {
+            Some(r) => r,
+            None => {
+                tracing::warn!("cleanup_zombie_agents: not inside a git repo, skipping");
+                return Ok(0);
+            }
+        };
+
         // Snapshot live windows once per tick. Empty when tmux isn't
         // running or the `ygg` session doesn't exist — both mean every
         // candidate's window is gone.
@@ -276,9 +286,9 @@ impl Watcher {
 
         let mut n = 0u64;
         for a in candidates {
-            let worktree = format!(".ygg/worktrees/{}", a.agent_name);
+            let worktree = repo_root.join(".ygg/worktrees").join(&a.agent_name);
             // No worktree → not a `ygg spawn` agent → leave alone.
-            if !std::path::Path::new(&worktree).exists() {
+            if !worktree.exists() {
                 continue;
             }
             // Window still alive → harness is running, not a zombie.
@@ -295,7 +305,8 @@ impl Watcher {
             // covers the rare case where tmux still has a stub window with
             // a dead pane after a panic.
             TmuxManager::kill_window_sync("ygg", &a.agent_name);
-            remove_worktree(&worktree);
+            let worktree_str = worktree.to_string_lossy();
+            remove_worktree(&worktree_str);
             tracing::info!(
                 agent = %a.agent_name,
                 prior_state = %a.current_state,
@@ -532,6 +543,21 @@ fn extract_intent(pane: &str, state: WorkerState) -> Option<String> {
     }
 
     None
+}
+
+fn repo_toplevel() -> Option<std::path::PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if top.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(top))
 }
 
 fn remove_worktree(path: &str) {
