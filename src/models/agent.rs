@@ -385,4 +385,27 @@ impl<'a> AgentRepo<'a> {
         .await?;
         Ok(())
     }
+
+    /// Candidates for the watcher's zombie reap. Returns agents whose state
+    /// hasn't been touched in `min_idle_secs` and which aren't already in a
+    /// terminal state (Shutdown / HumanOverride / Error). Cross-user safe
+    /// because the watcher reaps on behalf of every spawn-owner.
+    pub async fn list_reap_candidates(
+        &self,
+        min_idle_secs: i64,
+    ) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
+        sqlx::query_as::<_, AgentWorkflow>(
+            r#"
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
+              FROM agents
+             WHERE archived_at IS NULL
+               AND current_state NOT IN ('shutdown', 'human_override', 'error')
+               AND updated_at < now() - make_interval(secs => $1)
+            "#,
+        )
+        .bind(min_idle_secs as f64)
+        .fetch_all(self.pool)
+        .await
+    }
 }

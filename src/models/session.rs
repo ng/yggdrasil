@@ -135,10 +135,24 @@ impl<'a> SessionRepo<'a> {
         Ok(())
     }
 
+    /// End every still-open session for an agent. Used by the watcher's
+    /// zombie reap when the Claude process is gone but its sessions row
+    /// never reached the Stop hook.
+    pub async fn end_all_for_agent(&self, agent_id: Uuid) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE sessions SET ended_at = now()
+              WHERE agent_id = $1 AND ended_at IS NULL",
+        )
+        .bind(agent_id)
+        .execute(self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn latest_for_agent(&self, agent_id: Uuid) -> Result<Option<Session>, sqlx::Error> {
         sqlx::query_as::<_, Session>(
             r#"SELECT session_id, agent_id, repo_id, cc_session_id,
-                      current_state, head_node_id, context_tokens,
+                      current_state, context_tokens,
                       last_tool, started_at, ended_at, updated_at, metadata
                FROM sessions
                WHERE agent_id = $1
