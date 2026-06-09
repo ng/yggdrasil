@@ -396,8 +396,8 @@ impl<'a> AgentRepo<'a> {
     ) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
             r#"
-            SELECT agent_id, agent_name, current_state, head_node_id,
-                   digest_id, context_tokens, metadata, created_at, updated_at, persona
+            SELECT agent_id, agent_name, current_state,
+                   context_tokens, metadata, created_at, updated_at, persona
               FROM agents
              WHERE archived_at IS NULL
                AND current_state NOT IN ('shutdown', 'human_override', 'error')

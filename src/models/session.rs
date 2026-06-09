@@ -152,7 +152,7 @@ impl<'a> SessionRepo<'a> {
     pub async fn latest_for_agent(&self, agent_id: Uuid) -> Result<Option<Session>, sqlx::Error> {
         sqlx::query_as::<_, Session>(
             r#"SELECT session_id, agent_id, repo_id, cc_session_id,
-                      current_state, head_node_id, context_tokens,
+                      current_state, context_tokens,
                       last_tool, started_at, ended_at, updated_at, metadata
                FROM sessions
                WHERE agent_id = $1
