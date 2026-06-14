@@ -53,12 +53,7 @@ pub async fn execute(
     TmuxManager::send_keys(&left_pane, &cd_cmd).await?;
     let perm_mode =
         std::env::var("YGG_SPAWN_PERMISSION_MODE").unwrap_or_else(|_| "bypassPermissions".into());
-    let claude_cmd = format!(
-        "claude --dangerously-skip-permissions --permission-mode {} --name '{}' '{}'",
-        shell_escape(&perm_mode),
-        shell_escape(&agent_name),
-        shell_escape(task),
-    );
+    let claude_cmd = build_claude_cmd(&perm_mode, &agent_name, task);
     TmuxManager::send_keys(&left_pane, &claude_cmd).await?;
 
     // Start the ygg observer in the sidebar (right) pane. It tails the
@@ -117,6 +112,34 @@ async fn create_worktree(agent_name: &str) -> Result<PathBuf, anyhow::Error> {
     Ok(std::fs::canonicalize(&worktree_dir)?)
 }
 
+/// Build the shell line that launches Claude Code in the agent's pane.
+///
+/// Two hardening measures for long-running tool calls (e.g. `cargo test`
+/// running past Claude Code's default 2-minute Bash timeout):
+///
+///   - `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` raise the Bash
+///     tool timeout (30 min default, 2 h ceiling) so slow commands don't
+///     get SIGTERM'd out from under the agent.
+///   - `setsid` puts `claude` in its own session so a SIGTERM aimed at a
+///     timed-out child's process group can't propagate up and kill the
+///     agent. macOS ships `setsid` only as a libc call (no CLI), so we
+///     resolve it at runtime via `command -v` and fall back to a bare
+///     invocation when it's absent (`${SETSID:+...}` expands to nothing).
+///     `-w` keeps `claude` in the foreground so the pane stays attached
+///     and the watcher's exit detection still works; `-c` hands it the
+///     pane's controlling terminal for the interactive TUI.
+fn build_claude_cmd(perm_mode: &str, agent_name: &str, task: &str) -> String {
+    format!(
+        "SETSID=\"$(command -v setsid)\"; \
+         BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=7200000 \
+         ${{SETSID:+\"$SETSID\" -w -c}} \
+         claude --dangerously-skip-permissions --permission-mode {} --name '{}' '{}'",
+        shell_escape(perm_mode),
+        shell_escape(agent_name),
+        shell_escape(task),
+    )
+}
+
 fn slugify(task: &str) -> String {
     task.to_lowercase()
         .chars()
@@ -131,4 +154,43 @@ fn slugify(task: &str) -> String {
 
 fn shell_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_cmd_sets_bash_timeout_env() {
+        let cmd = build_claude_cmd("bypassPermissions", "agent-x", "do the thing");
+        // Both timeout knobs are passed as an env-assignment prefix so
+        // claude (and the Bash tool it spawns) inherit them.
+        assert!(cmd.contains("BASH_DEFAULT_TIMEOUT_MS=1800000"));
+        assert!(cmd.contains("BASH_MAX_TIMEOUT_MS=7200000"));
+    }
+
+    #[test]
+    fn claude_cmd_wraps_in_setsid_when_available() {
+        let cmd = build_claude_cmd("bypassPermissions", "agent-x", "do the thing");
+        // Resolves setsid at runtime and applies it only when present,
+        // so the line still runs on macOS (no setsid CLI).
+        assert!(cmd.contains("command -v setsid"));
+        assert!(cmd.contains("${SETSID:+\"$SETSID\" -w -c}"));
+    }
+
+    #[test]
+    fn claude_cmd_passes_perm_mode_and_task() {
+        let cmd = build_claude_cmd("acceptEdits", "my-agent", "fix the bug");
+        assert!(cmd.contains("--permission-mode acceptEdits"));
+        assert!(cmd.contains("--name 'my-agent'"));
+        assert!(cmd.contains("'fix the bug'"));
+        assert!(cmd.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn claude_cmd_escapes_single_quotes_in_task() {
+        let cmd = build_claude_cmd("bypassPermissions", "agent-x", "it's broken");
+        // Single quote is escaped so the surrounding '...' stays balanced.
+        assert!(cmd.contains("'it'\\''s broken'"));
+    }
 }
