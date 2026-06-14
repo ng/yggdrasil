@@ -291,7 +291,7 @@ enum Commands {
         format: String,
     },
 
-    /// Scoped learnings — CodeRabbit-style rule capture + deterministic match.
+    /// Scoped learnings — durable rule capture with deterministic match.
     /// Retrieval is SQL predicates on (repo, file_glob, rule_id), not vector
     /// similarity. See ADR 0015.
     Learn {

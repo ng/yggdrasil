@@ -1,4 +1,4 @@
-//! Scoped learnings — CodeRabbit-style rule capture. Key property:
+//! Scoped learnings — durable rule capture. Key property:
 //! retrieval is deterministic (SQL predicates on repo_id + file_glob +
 //! rule_id) rather than vector-similarity. A learning scoped to
 //! `terraform/*.tf` with rule_id `CKV_AWS_337` surfaces exactly when a
@@ -21,6 +21,7 @@ pub struct Learning {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub applied_count: i32,
+    pub last_applied_at: Option<DateTime<Utc>>,
     pub scope_tags: serde_json::Value,
 }
 
@@ -47,7 +48,7 @@ impl<'a> LearningRepo<'a> {
             r#"INSERT INTO learnings (repo_id, file_glob, rule_id, text, context, created_by, scope_tags)
                VALUES ($1, $2, $3, $4, $5, $6, $7)
                RETURNING learning_id, repo_id, file_glob, rule_id, text, context,
-                         created_by, created_at, applied_count, scope_tags"#,
+                         created_by, created_at, applied_count, last_applied_at, scope_tags"#,
         )
         .bind(repo_id)
         .bind(file_glob)
@@ -79,7 +80,7 @@ impl<'a> LearningRepo<'a> {
         sqlx::query_as::<_, Learning>(
             r#"
             SELECT learning_id, repo_id, file_glob, rule_id, text, context,
-                   created_by, created_at, applied_count, scope_tags
+                   created_by, created_at, applied_count, last_applied_at, scope_tags
             FROM learnings
             WHERE ($1::UUID IS NULL OR repo_id IS NULL OR repo_id = $1)
               AND ($2::TEXT IS NULL
@@ -108,7 +109,7 @@ impl<'a> LearningRepo<'a> {
 
     pub async fn increment_applied(&self, learning_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "UPDATE learnings SET applied_count = applied_count + 1 WHERE learning_id = $1",
+            "UPDATE learnings SET applied_count = applied_count + 1, last_applied_at = now() WHERE learning_id = $1",
         )
         .bind(learning_id)
         .execute(self.pool)
