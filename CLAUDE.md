@@ -24,7 +24,7 @@ ygg task dupes [--all] [--limit N]          # Probable duplicate pairs (string s
 ygg remember "..."                          # Durable note (repo-scoped; --global for all repos)
 ygg remember --list [--all] [--limit N]     # Read stored notes (also surfaced in `ygg prime`)
 
-ygg handoff save "..."                       # Checkpoint this session before /clear (also: ... | ygg handoff save)
+ygg handoff save "..."                       # Checkpoint this session before /clear; also accepts stdin (`... | ygg handoff save` or `ygg handoff save -`)
 ygg handoff show                             # Print the current resume note
 ygg handoff clear                            # Drop it once resumed
 

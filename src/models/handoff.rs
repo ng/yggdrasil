@@ -28,36 +28,29 @@ impl<'a> HandoffRepo<'a> {
         Self { pool }
     }
 
-    /// Replace any prior handoff for (repo_id, agent_id) and store the new one.
-    /// `IS NOT DISTINCT FROM` so NULL repo/agent match each other rather than
-    /// accumulating duplicate rows.
+    /// Store the resume note, replacing any prior one for (repo_id, agent_id).
+    /// Atomic upsert against the `UNIQUE NULLS NOT DISTINCT (repo_id, agent_id)`
+    /// constraint — a single statement, so concurrent saves can't interleave a
+    /// DELETE+INSERT into duplicate rows the way a transaction under READ
+    /// COMMITTED could. NULL repo/agent collide via NULLS NOT DISTINCT.
     pub async fn save(
         &self,
         repo_id: Option<Uuid>,
         agent_id: Option<Uuid>,
         text: &str,
     ) -> Result<Handoff, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "DELETE FROM handoffs
-             WHERE repo_id IS NOT DISTINCT FROM $1 AND agent_id IS NOT DISTINCT FROM $2",
-        )
-        .bind(repo_id)
-        .bind(agent_id)
-        .execute(&mut *tx)
-        .await?;
-        let handoff = sqlx::query_as::<_, Handoff>(
+        sqlx::query_as::<_, Handoff>(
             r#"INSERT INTO handoffs (repo_id, agent_id, text)
                VALUES ($1, $2, $3)
+               ON CONFLICT (repo_id, agent_id)
+               DO UPDATE SET text = EXCLUDED.text, created_at = now()
                RETURNING handoff_id, repo_id, agent_id, text, created_at"#,
         )
         .bind(repo_id)
         .bind(agent_id)
         .bind(text)
-        .fetch_one(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(handoff)
+        .fetch_one(self.pool)
+        .await
     }
 
     /// The current handoff for (repo_id, agent_id), if any.
