@@ -1276,6 +1276,8 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             None,
             None,
             &default_scope,
+            "active",
+            "manual",
         )
         .await
         .unwrap();
@@ -1288,6 +1290,8 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             None,
             None,
             &default_scope,
+            "active",
+            "manual",
         )
         .await
         .unwrap();
@@ -1300,6 +1304,8 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             None,
             None,
             &default_scope,
+            "active",
+            "manual",
         )
         .await
         .unwrap();
@@ -1347,6 +1353,107 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
     assert_eq!(n_glob, 1);
     assert_eq!(n_repo, 1);
     assert_eq!(n_other, 0);
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_learnings_approval_gate_hides_pending_until_approved() {
+    // ADR 0017: only `active` learnings surface. A `pending` (proposed)
+    // learning must not fire via surface_for_files; approving it promotes it
+    // to `active` and it then surfaces.
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'learn-gate'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'learn-gate', 'learn-gate') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+
+    let lr = ygg::models::learning::LearningRepo::new(&pool);
+    let scope = serde_json::json!({});
+    // One immediately-active learning, one proposed (pending), same glob.
+    let active = lr
+        .create(
+            Some(repo.0),
+            Some("*.rs"),
+            None,
+            "active rule visible",
+            None,
+            None,
+            &scope,
+            "active",
+            "manual",
+        )
+        .await
+        .unwrap();
+    let proposed = lr
+        .create(
+            Some(repo.0),
+            Some("*.rs"),
+            None,
+            "proposed rule hidden",
+            None,
+            None,
+            &scope,
+            "pending",
+            "proposed",
+        )
+        .await
+        .unwrap();
+
+    // list_pending sees the proposal; list_matching (the read path) does not.
+    let pend = lr.list_pending(Some(repo.0)).await.unwrap();
+    assert!(
+        pend.iter().any(|l| l.learning_id == proposed.learning_id),
+        "pending queue must contain the proposal"
+    );
+
+    let files = vec!["src/main.rs".to_string()];
+    let lines = ygg::cli::learning_cmd::surface_for_files(&pool, Some(repo.0), &files, None, None)
+        .await
+        .unwrap();
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("active rule visible"),
+        "active must surface"
+    );
+    assert!(
+        !joined.contains("proposed rule hidden"),
+        "pending proposal must NOT surface until approved"
+    );
+
+    // Approve → it surfaces and carries approval metadata.
+    let promoted = lr
+        .approve(proposed.learning_id, None)
+        .await
+        .unwrap()
+        .expect("approve returns the promoted row");
+    assert_eq!(promoted.status, "active");
+    assert!(promoted.approved_at.is_some(), "approved_at stamped");
+
+    let lines2 = ygg::cli::learning_cmd::surface_for_files(&pool, Some(repo.0), &files, None, None)
+        .await
+        .unwrap();
+    assert!(
+        lines2.join("\n").contains("proposed rule hidden"),
+        "approved learning must surface"
+    );
+
+    // reject only touches pending rows: rejecting the now-active learning fails.
+    assert!(
+        !lr.reject(promoted.learning_id).await.unwrap(),
+        "reject must not delete an active learning"
+    );
+
+    let _ = active; // keep binding meaningful
 
     sqlx::query("DELETE FROM repos WHERE repo_id = $1")
         .bind(repo.0)
