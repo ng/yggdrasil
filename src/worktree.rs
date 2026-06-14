@@ -235,6 +235,52 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, anyhow::Error> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Pre-recovery checkpoint (yggdrasil-115). Snapshot every change in `worktree`
+/// (tracked + untracked, respecting .gitignore) into a commit on the
+/// `refs/ygg/recovery/<run_id>` ref WITHOUT touching the working branch, HEAD,
+/// or the real index — so a retry can recover the work-in-progress before the
+/// watcher tears the worktree down. Returns the checkpoint commit SHA.
+///
+/// Uses a throwaway `GIT_INDEX_FILE` so `git add -A` stages the full working
+/// tree without disturbing the agent's staged state; `commit-tree -p HEAD`
+/// parents it on the current commit and `update-ref` parks it on the recovery
+/// ref, which lives in the shared git dir and survives `git worktree remove`.
+pub fn checkpoint(worktree: &Path, run_id: Uuid) -> Option<String> {
+    let index = std::env::temp_dir().join(format!("ygg-recovery-{run_id}.index"));
+    let _ = std::fs::remove_file(&index);
+    let run = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .env("GIT_INDEX_FILE", &index)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+
+    run(&["add", "-A"])?;
+    let tree = run(&["write-tree"])?;
+    let msg = format!("ygg: pre-recovery checkpoint {run_id}");
+    let head = run(&["rev-parse", "HEAD"]).filter(|h| !h.is_empty());
+    let mut commit_args = vec!["commit-tree", tree.as_str()];
+    if let Some(h) = head.as_deref() {
+        commit_args.push("-p");
+        commit_args.push(h);
+    }
+    commit_args.push("-m");
+    commit_args.push(msg.as_str());
+    let commit = run(&commit_args)?;
+
+    let ref_name = format!("refs/ygg/recovery/{run_id}");
+    run(&["update-ref", &ref_name, &commit])?;
+    let _ = std::fs::remove_file(&index);
+    Some(commit)
+}
+
 pub fn parse_policy(s: &str) -> Result<TeardownPolicy, anyhow::Error> {
     match s {
         "keep" => Ok(TeardownPolicy::Keep),
@@ -265,5 +311,62 @@ mod tests {
             let r = worktree_root().unwrap();
             assert!(r.ends_with("ygg/worktrees"));
         }
+    }
+
+    // Run git in `dir`, asserting success, returning trimmed stdout.
+    fn g(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // Integration: simulate a reap mid-run. The agent left uncommitted
+    // (modified + untracked) work in its worktree; checkpoint() must snapshot
+    // it onto refs/ygg/recovery/<run_id> without disturbing HEAD or the index,
+    // so the retry can recover it (yggdrasil-115).
+    #[test]
+    fn checkpoint_captures_wip_without_polluting_branch() {
+        let dir = std::env::temp_dir().join(format!("ygg-ckpt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        g(&dir, &["init", "-q"]);
+        g(&dir, &["config", "user.email", "test@ygg.local"]);
+        g(&dir, &["config", "user.name", "ygg-test"]);
+        std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+        g(&dir, &["add", "-A"]);
+        g(&dir, &["commit", "-qm", "base"]);
+        let base_head = g(&dir, &["rev-parse", "HEAD"]);
+
+        // Mid-run state: a.txt modified, b.txt brand new and untracked.
+        std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "new\n").unwrap();
+
+        let run_id = Uuid::new_v4();
+        let sha = checkpoint(&dir, run_id).expect("checkpoint sha");
+
+        // Ref parks the checkpoint; commit captures the WIP tree.
+        assert_eq!(
+            g(&dir, &["rev-parse", &format!("refs/ygg/recovery/{run_id}")]),
+            sha
+        );
+        assert_eq!(g(&dir, &["show", &format!("{sha}:a.txt")]), "v2");
+        assert_eq!(g(&dir, &["show", &format!("{sha}:b.txt")]), "new");
+
+        // Working branch untouched: HEAD unchanged, nothing staged in the real
+        // index (we used a throwaway GIT_INDEX_FILE).
+        assert_eq!(g(&dir, &["rev-parse", "HEAD"]), base_head);
+        assert_eq!(g(&dir, &["diff", "--cached", "--name-only"]), "");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
