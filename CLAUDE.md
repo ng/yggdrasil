@@ -14,6 +14,9 @@ ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywh
 ygg task create "title" --kind <task|bug|feature|chore|epic> --priority <0-4>
                                             # Priority: 0=critical 1=high 2=med 3=low 4=backlog.
                                             # Accepts "P0".."P4" too. NOT "high"/"medium"/"low".
+                                            # --agent-slug <name>: thematic worker name the scheduler
+                                            #   spawns this task under (e.g. "oauth-refresh"). Pick one
+                                            #   tied to the work, not the worktree. Sanitized to [a-z0-9-].
 ygg task claim <ref>                        # Take a task (assign + in_progress)
 ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
 ygg task close <ref> [--reason "..."]       # Complete a task

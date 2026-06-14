@@ -759,6 +759,12 @@ enum TaskAction {
         /// Link to an external issue tracker (gh-123, jira-PROJ-42, URL, etc.)
         #[arg(long)]
         external_ref: Option<String>,
+        /// Thematic name for the worker that runs this task, e.g.
+        /// "oauth-refresh" (yggdrasil-183). The scheduler uses it as the
+        /// spawned agent's name instead of the generic `ygg-<prefix>-<seq>`.
+        /// Sanitized to [a-z0-9-].
+        #[arg(long)]
+        agent_slug: Option<String>,
         /// Emit the created task(s) as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
@@ -1524,6 +1530,7 @@ async fn main() -> anyhow::Result<()> {
                     label,
                     agent,
                     external_ref,
+                    agent_slug,
                     json,
                     file,
                     body_file,
@@ -1565,6 +1572,7 @@ async fn main() -> anyhow::Result<()> {
                                 labels: &label,
                                 agent_name: &agent_name,
                                 external_ref: external_ref.as_deref(),
+                                agent_slug: agent_slug.as_deref(),
                                 json,
                             },
                         )
