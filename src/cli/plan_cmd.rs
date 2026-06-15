@@ -47,6 +47,7 @@ pub async fn create(
                 assignee: agent_id,
                 labels: &[],
                 external_ref: None,
+                agent_slug: None,
             },
         )
         .await?;
@@ -98,6 +99,7 @@ pub async fn add(
                 assignee: None,
                 labels: &[],
                 external_ref: None,
+                agent_slug: None,
             },
         )
         .await?;

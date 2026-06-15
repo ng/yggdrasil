@@ -39,6 +39,7 @@ async fn setup_repo(pool: &sqlx::PgPool, suffix: &str) -> (Uuid, [Uuid; 3]) {
                     assignee: None,
                     labels: &labels,
                     external_ref: None,
+                    agent_slug: None,
                 },
             )
             .await

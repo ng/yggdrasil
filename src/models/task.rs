@@ -97,6 +97,10 @@ pub struct Task {
     pub relevance: i32,
     #[sqlx(default)]
     pub external_ref: Option<String>,
+    /// Thematic name for the worker that runs this task (yggdrasil-183).
+    /// NULL = scheduler falls back to the generic `ygg-<prefix>-<seq>` scheme.
+    #[sqlx(default)]
+    pub agent_slug: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -111,6 +115,7 @@ pub struct TaskCreate<'a> {
     pub assignee: Option<Uuid>,
     pub labels: &'a [String],
     pub external_ref: Option<&'a str>,
+    pub agent_slug: Option<&'a str>,
 }
 
 #[derive(Debug, Default)]
@@ -171,11 +176,12 @@ impl<'a> TaskRepo<'a> {
         let task: Task = sqlx::query_as::<_, Task>(
             r#"INSERT INTO tasks
                (repo_id, seq, title, description, acceptance, design, notes,
-                kind, priority, created_by, assignee, external_ref, runnable)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                kind, priority, created_by, assignee, external_ref, runnable, agent_slug)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                RETURNING task_id, repo_id, seq, title, description, acceptance, design, notes,
                          kind, status, priority, created_by, assignee, human_flag,
-                         created_at, updated_at, closed_at, close_reason, relevance, external_ref"#,
+                         created_at, updated_at, closed_at, close_reason, relevance, external_ref,
+                         agent_slug"#,
         )
         .bind(repo_id)
         .bind(seq)
@@ -190,6 +196,7 @@ impl<'a> TaskRepo<'a> {
         .bind(spec.assignee)
         .bind(spec.external_ref)
         .bind(runnable_default)
+        .bind(spec.agent_slug)
         .fetch_one(&mut *tx)
         .await?;
 

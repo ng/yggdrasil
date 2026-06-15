@@ -53,11 +53,17 @@ pub async fn execute(
     TmuxManager::send_keys(&left_pane, &cd_cmd).await?;
     let perm_mode =
         std::env::var("YGG_SPAWN_PERMISSION_MODE").unwrap_or_else(|_| "bypassPermissions".into());
+    // Export YGG_AGENT_NAME so the lifecycle hooks resolve this agent by its
+    // registered name (yggdrasil-183). Without it the hooks fall back to the
+    // cwd basename — the worktree directory — which re-mints stale identities
+    // (e.g. "kb-chunking-207") unrelated to the current task. YGG_SPAWNED marks
+    // this as a spawned worker for the Stop-check + learnings nudge. The env
+    // prefix applies to claude and every hook subprocess it launches.
     let claude_cmd = format!(
-        "claude --dangerously-skip-permissions --permission-mode {} --name '{}' '{}'",
+        "YGG_AGENT_NAME='{name}' YGG_SPAWNED=1 claude --dangerously-skip-permissions --permission-mode {} --name '{name}' '{}'",
         shell_escape(&perm_mode),
-        shell_escape(&agent_name),
         shell_escape(task),
+        name = shell_escape(&agent_name),
     );
     TmuxManager::send_keys(&left_pane, &claude_cmd).await?;
 

@@ -7,7 +7,13 @@ CREATE TABLE handoffs (
     repo_id     UUID REFERENCES repos(repo_id) ON DELETE CASCADE,  -- NULL = no detected repo
     agent_id    UUID REFERENCES agents(agent_id) ON DELETE CASCADE,
     text        TEXT NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    user_id     TEXT NOT NULL DEFAULT '',
+    -- Exactly one current handoff per (repo, agent). NULLS NOT DISTINCT (PG15+)
+    -- so a (NULL repo, agent) key still collides instead of accumulating rows —
+    -- a plain UNIQUE treats NULLs as distinct and would not dedupe. Lets `save`
+    -- use ON CONFLICT for an atomic upsert (no DELETE+INSERT race under READ
+    -- COMMITTED). The constraint's index also serves the (repo_id, agent_id)
+    -- lookup, so no separate index is needed.
+    UNIQUE NULLS NOT DISTINCT (repo_id, agent_id)
 );
-
-CREATE INDEX idx_handoffs_lookup ON handoffs (repo_id, agent_id, created_at DESC);
