@@ -1,9 +1,5 @@
 name: release-plz
 
-permissions:
-  pull-requests: write
-  contents: write
-
 on:
   push:
     branches: [main]
@@ -18,10 +14,13 @@ jobs:
   release-plz-release:
     name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
         uses: release-plz/action@v0
@@ -35,10 +34,14 @@ jobs:
   release-plz-pr:
     name: Release PR
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
         uses: release-plz/action@v0
