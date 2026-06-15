@@ -142,15 +142,23 @@ async fn create_worktree(agent_name: &str) -> Result<PathBuf, anyhow::Error> {
 ///     `-w` keeps `claude` in the foreground so the pane stays attached
 ///     and the watcher's exit detection still works; `-c` hands it the
 ///     pane's controlling terminal for the interactive TUI.
+///
+/// `YGG_AGENT_NAME` is exported so the lifecycle hooks resolve this agent by
+/// its registered name. Without it the hooks fall back to the cwd basename —
+/// the worktree directory — which re-mints stale identities unrelated to the
+/// current task. `YGG_SPAWNED` marks this as a spawned worker for the
+/// Stop-check + learnings nudge. The env prefix applies to claude and every
+/// hook subprocess it launches.
 fn build_claude_cmd(perm_mode: &str, agent_name: &str, task: &str) -> String {
     format!(
         "SETSID=\"$(command -v setsid)\"; \
+         YGG_AGENT_NAME='{name}' YGG_SPAWNED=1 \
          BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=7200000 \
          ${{SETSID:+\"$SETSID\" -w -c}} \
-         claude --dangerously-skip-permissions --permission-mode '{}' --name '{}' '{}'",
-        shell_escape(perm_mode),
-        shell_escape(agent_name),
-        shell_escape(task),
+         claude --dangerously-skip-permissions --permission-mode '{pm}' --name '{name}' '{tk}'",
+        name = shell_escape(agent_name),
+        pm = shell_escape(perm_mode),
+        tk = shell_escape(task),
     )
 }
 
@@ -214,6 +222,15 @@ mod tests {
         // safe fixed set — defence-in-depth against future changes.
         let cmd = build_claude_cmd("dontAsk", "agent-x", "do the thing");
         assert!(cmd.contains("--permission-mode 'dontAsk'"));
+    }
+
+    #[test]
+    fn claude_cmd_exports_agent_identity_env() {
+        // Hooks resolve agent identity from YGG_AGENT_NAME; YGG_SPAWNED marks
+        // the worker. Both must be in the env prefix applied to claude.
+        let cmd = build_claude_cmd("bypassPermissions", "agent-x", "do the thing");
+        assert!(cmd.contains("YGG_AGENT_NAME='agent-x'"));
+        assert!(cmd.contains("YGG_SPAWNED=1"));
     }
 
     #[test]

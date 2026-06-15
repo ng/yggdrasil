@@ -122,8 +122,33 @@ pub struct CreateOpts<'a> {
     pub labels: &'a [String],
     pub agent_name: &'a str,
     pub external_ref: Option<&'a str>,
+    /// Thematic name for the worker that will run this task (yggdrasil-183).
+    /// Sanitized to [a-z0-9-] before storage.
+    pub agent_slug: Option<&'a str>,
     /// Emit JSON to stdout instead of the human confirmation line.
     pub json: bool,
+}
+
+/// Normalize a user/agent-supplied slug to a tmux-window / git-branch /
+/// directory-safe token: lowercase, non-alphanumerics → '-', collapse and trim
+/// dashes, cap length. Returns None if nothing usable survives (caller treats
+/// that as an error). Kept here, the CLI boundary, since that's where the
+/// untrusted string enters (yggdrasil-183).
+pub fn sanitize_agent_slug(raw: &str) -> Option<String> {
+    let slug: String = raw
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .take(40)
+        .collect::<String>();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() { None } else { Some(slug) }
 }
 
 pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), anyhow::Error> {
@@ -142,6 +167,15 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
 
     let labels: &[String] = opts.labels;
 
+    // Sanitize the slug at the boundary; reject a slug that's all punctuation.
+    let agent_slug = match opts.agent_slug {
+        Some(raw) => Some(
+            sanitize_agent_slug(raw)
+                .ok_or_else(|| anyhow::anyhow!("--agent-slug '{raw}' has no usable characters"))?,
+        ),
+        None => None,
+    };
+
     let task = TaskRepo::new(pool)
         .create(
             repo.repo_id,
@@ -157,6 +191,7 @@ pub async fn create(pool: &sqlx::PgPool, opts: CreateOpts<'_>) -> Result<(), any
                 assignee: None,
                 labels,
                 external_ref: opts.external_ref,
+                agent_slug: agent_slug.as_deref(),
             },
         )
         .await?;
@@ -1349,4 +1384,42 @@ async fn print_task_table(pool: &sqlx::PgPool, tasks: &[Task]) -> Result<(), any
     }
     println!("\n{} task(s).", tasks.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_agent_slug;
+
+    #[test]
+    fn slug_lowercases_and_dashes_separators() {
+        assert_eq!(
+            sanitize_agent_slug("OAuth Refresh Flow").as_deref(),
+            Some("oauth-refresh-flow")
+        );
+        assert_eq!(
+            sanitize_agent_slug("fix/db_pool.rs").as_deref(),
+            Some("fix-db-pool-rs")
+        );
+    }
+
+    #[test]
+    fn slug_collapses_and_trims_dashes() {
+        assert_eq!(
+            sanitize_agent_slug("--a__b---c--").as_deref(),
+            Some("a-b-c")
+        );
+    }
+
+    #[test]
+    fn slug_rejects_all_punctuation() {
+        assert_eq!(sanitize_agent_slug("///"), None);
+        assert_eq!(sanitize_agent_slug(""), None);
+    }
+
+    #[test]
+    fn slug_caps_length() {
+        let long = "a".repeat(100);
+        let s = sanitize_agent_slug(&long).unwrap();
+        assert!(s.len() <= 40, "slug should be capped, got {}", s.len());
+    }
 }

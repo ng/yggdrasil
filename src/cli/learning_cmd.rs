@@ -40,6 +40,11 @@ pub fn parse_scope_tags(scopes: &[String]) -> Result<serde_json::Value, anyhow::
     Ok(serde_json::Value::Object(map))
 }
 
+/// `ygg learn create` / `propose`. `status`/`source` carry the ADR 0017
+/// lifecycle: `("active","manual")` is today's immediately-firing create,
+/// `("pending","manual")` is `create --pending`, `("pending","proposed")`
+/// is `propose`.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &sqlx::PgPool,
     text: &str,
@@ -49,6 +54,8 @@ pub async fn create(
     context: Option<&str>,
     agent_name: &str,
     scope_tags: &serde_json::Value,
+    status: &str,
+    source: &str,
     json: bool,
 ) -> Result<(), anyhow::Error> {
     let repo_id = if global {
@@ -66,7 +73,7 @@ pub async fn create(
 
     let learning = LearningRepo::new(pool)
         .create(
-            repo_id, file_glob, rule_id, text, context, created_by, scope_tags,
+            repo_id, file_glob, rule_id, text, context, created_by, scope_tags, status, source,
         )
         .await?;
 
@@ -75,7 +82,128 @@ pub async fn create(
         return Ok(());
     }
     let scope = format_scope_label(repo_id, file_glob, rule_id, scope_tags);
-    println!("Learned [{}] {}", scope, short(text, 100));
+    // `proposed` and `--pending` learnings land in the gate, not the live
+    // corpus — say so, and point at the triage verb.
+    if status == "pending" {
+        let verb = if source == "proposed" {
+            "Proposed"
+        } else {
+            "Pending"
+        };
+        println!(
+            "{} [{}] {}\n  id {} — approve with `ygg learn approve {}`",
+            verb,
+            scope,
+            short(text, 100),
+            learning.learning_id,
+            learning.learning_id,
+        );
+    } else {
+        println!("Learned [{}] {}", scope, short(text, 100));
+    }
+    Ok(())
+}
+
+/// `ygg learn pending` — the triage queue (status='pending'), newest first.
+pub async fn pending(
+    pool: &sqlx::PgPool,
+    all_repos: bool,
+    json: bool,
+) -> Result<(), anyhow::Error> {
+    let repo_id = if all_repos {
+        None
+    } else {
+        resolve_cwd_repo(pool).await.ok().map(|r| r.repo_id)
+    };
+    let rows = LearningRepo::new(pool).list_pending(repo_id).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "count": rows.len(),
+                "results": rows,
+            }))?
+        );
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No pending learnings.");
+        return Ok(());
+    }
+    for r in &rows {
+        let scope = format_scope_label(
+            r.repo_id,
+            r.file_glob.as_deref(),
+            r.rule_id.as_deref(),
+            &r.scope_tags,
+        );
+        println!(
+            "  · {} [{} · {}] {}",
+            r.learning_id,
+            scope,
+            r.source,
+            short(&r.text, 100)
+        );
+    }
+    println!("\napprove: `ygg learn approve <id>` · reject: `ygg learn reject <id>`");
+    Ok(())
+}
+
+/// `ygg learn approve <id>` — promote a pending learning to active.
+pub async fn approve(
+    pool: &sqlx::PgPool,
+    learning_id: Uuid,
+    agent_name: &str,
+) -> Result<(), anyhow::Error> {
+    let approver: Option<Uuid> =
+        sqlx::query_scalar("SELECT agent_id FROM agents WHERE agent_name = $1")
+            .bind(agent_name)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    match LearningRepo::new(pool)
+        .approve(learning_id, approver)
+        .await?
+    {
+        Some(l) => {
+            let scope = format_scope_label(
+                l.repo_id,
+                l.file_glob.as_deref(),
+                l.rule_id.as_deref(),
+                &l.scope_tags,
+            );
+            println!(
+                "approved {learning_id} → active [{scope}] {}",
+                short(&l.text, 80)
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "no pending learning with id {learning_id} (already active, rejected, or unknown)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `ygg learn reject <id>` — drop a pending proposal.
+pub async fn reject(
+    pool: &sqlx::PgPool,
+    learning_id: Uuid,
+    reason: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    if LearningRepo::new(pool).reject(learning_id).await? {
+        match reason {
+            Some(r) => println!("rejected {learning_id} — {r}"),
+            None => println!("rejected {learning_id}"),
+        }
+    } else {
+        anyhow::bail!(
+            "no pending learning with id {learning_id} (active rows are removed with `ygg learn delete`)"
+        );
+    }
     Ok(())
 }
 
