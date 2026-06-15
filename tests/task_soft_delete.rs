@@ -30,6 +30,7 @@ async fn make_task(pool: &sqlx::PgPool, suffix: &str, idx: usize) -> (Uuid, Uuid
                 assignee: None,
                 labels: &labels,
                 external_ref: None,
+                agent_slug: None,
             },
         )
         .await
@@ -122,6 +123,7 @@ async fn list_trashed_returns_only_deleted_rows() {
                 assignee: None,
                 labels: &labels,
                 external_ref: None,
+                agent_slug: None,
             },
         )
         .await
@@ -200,6 +202,7 @@ async fn ready_skips_deleted_blockers_so_dependents_unblock() {
                 assignee: None,
                 labels: &labels,
                 external_ref: None,
+                agent_slug: None,
             },
         )
         .await

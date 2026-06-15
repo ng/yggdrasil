@@ -40,6 +40,7 @@ async fn setup_run(pool: &sqlx::PgPool, suffix: &str) -> (Uuid, Uuid, Uuid) {
                 assignee: None,
                 labels: &labels,
                 external_ref: None,
+                agent_slug: None,
             },
         )
         .await
