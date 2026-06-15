@@ -734,10 +734,11 @@ pub async fn schedule_retries(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i6
         serde_json::Value,
         Option<chrono::DateTime<chrono::Utc>>,
         Option<i64>,
+        Option<String>,
     )> = sqlx::query_as(
         r#"SELECT r.run_id, r.task_id, r.attempt, r.max_attempts, r.reason, r.ended_at,
                   r.input, r.error, r.retry_strategy,
-                  r.deadline_at, t.timeout_ms
+                  r.deadline_at, t.timeout_ms, r.pre_recovery_commit
              FROM task_runs r
              JOIN tasks t ON t.task_id = r.task_id
             WHERE r.state IN ('failed', 'crashed')
@@ -767,6 +768,7 @@ pub async fn schedule_retries(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i6
         retry_strategy,
         _old_deadline,
         timeout_ms,
+        pre_recovery_commit,
     ) in candidates
     {
         let backoff_ms = compute_backoff_ms(&retry_strategy, attempt);
@@ -789,6 +791,7 @@ pub async fn schedule_retries(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i6
                     "run_id": run_id,
                     "attempt": attempt,
                     "error": error,
+                    "pre_recovery_commit": pre_recovery_commit,
                 }),
             );
         }
@@ -930,7 +933,7 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
 
     let app_cfg = AppConfig::from_env().map_err(|e| anyhow::anyhow!("config: {e}"))?;
     let mut dispatched = 0i64;
-    for (run_id, task_id, attempt, _input) in claimed {
+    for (run_id, task_id, attempt, input) in claimed {
         // Pull task title for the spawn prompt + ref for events. agent_slug
         // (yggdrasil-183) names the worker thematically when the creator set it.
         let row: Option<(String, String, i32, String, Option<String>)> = sqlx::query_as(
@@ -957,10 +960,11 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
         let task_ref = format!("{prefix}-{seq}");
         let agent_name = scheduler_agent_name(&prefix, seq, attempt, agent_slug.as_deref());
         let prompt = format!(
-            "[ygg-scheduler] Task {task_ref} (attempt {attempt}): {title}\n\n{desc}\n\n\
+            "{recovery}[ygg-scheduler] Task {task_ref} (attempt {attempt}): {title}\n\n{desc}\n\n\
              Run `ygg run claim {task_ref}` to bind your session, then implement and \
              commit. The scheduler is watching this run; close the task with \
-             `ygg task close {task_ref} --reason '...'` when done."
+             `ygg task close {task_ref} --reason '...'` when done.",
+            recovery = recovery_note(&input),
         );
 
         // Use crate::cli::spawn::execute. A failure to spawn marks the run
@@ -1168,6 +1172,28 @@ fn scheduler_agent_name(prefix: &str, seq: i32, attempt: i32, agent_slug: Option
     format!("{base}-a{attempt}-{suffix}")
 }
 
+/// System-message preamble injected into a retry's spawn prompt when the prior
+/// attempt was force-recovered (yggdrasil-115). The work-in-progress lives at
+/// the checkpoint SHA on refs/ygg/recovery/<prior_run_id>; tell the agent how to
+/// resume from it instead of restarting from the base commit. Empty for a first
+/// attempt or when no checkpoint was taken.
+fn recovery_note(input: &serde_json::Value) -> String {
+    let sha = input
+        .get("previous_attempt")
+        .and_then(|p| p.get("pre_recovery_commit"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    match sha {
+        Some(sha) => format!(
+            "[ygg-scheduler] Previous attempt was force-recovered: its uncommitted \
+             work-in-progress is checkpointed at commit {sha}. Continue from there \
+             — run `git cherry-pick -n {sha}` (or `git checkout {sha} -- .`) to \
+             restore it instead of starting over.\n\n"
+        ),
+        None => String::new(),
+    }
+}
+
 async fn task_ref_for(pool: &PgPool, task_id: Uuid) -> Option<String> {
     sqlx::query_as::<_, (String, i32)>(
         r#"SELECT r.task_prefix, t.seq FROM tasks t
@@ -1283,6 +1309,27 @@ mod tests {
         );
         assert_eq!(f1, f2);
         assert_eq!(f1.len(), 64);
+    }
+
+    #[test]
+    fn recovery_note_present_only_with_checkpoint() {
+        // First attempt: no previous_attempt → empty note.
+        assert!(recovery_note(&serde_json::json!({})).is_empty());
+
+        // Retry whose parent was force-recovered → note carries the SHA and a
+        // concrete resume command.
+        let input = serde_json::json!({
+            "previous_attempt": { "pre_recovery_commit": "deadbeefcafe" }
+        });
+        let note = recovery_note(&input);
+        assert!(note.contains("deadbeefcafe"));
+        assert!(note.contains("cherry-pick"));
+
+        // Retry with no checkpoint captured (null SHA) → still empty.
+        let input = serde_json::json!({
+            "previous_attempt": { "pre_recovery_commit": serde_json::Value::Null }
+        });
+        assert!(recovery_note(&input).is_empty());
     }
 
     #[test]
