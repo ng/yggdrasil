@@ -214,8 +214,21 @@ pub async fn surface_for_edit(
     }
 
     // Per-session dedup via a best-effort flat file under /tmp/ygg.
-    let seen_path = (!session_id.is_empty())
-        .then(|| std::path::PathBuf::from(format!("/tmp/ygg/learnings-{session_id}.seen")));
+    // Sanitize session_id before embedding in a path: only [a-zA-Z0-9_-] allowed,
+    // everything else becomes '_', preventing path-traversal via crafted session IDs.
+    let seen_path = (!session_id.is_empty()).then(|| {
+        let safe: String = session_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        std::path::PathBuf::from(format!("/tmp/ygg/learnings-{safe}.seen"))
+    });
     let mut seen: std::collections::HashSet<String> = seen_path
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
