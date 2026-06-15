@@ -1,4 +1,4 @@
-//! Scoped learnings — CodeRabbit-style rule capture. Key property:
+//! Scoped learnings — durable rule capture. Key property:
 //! retrieval is deterministic (SQL predicates on repo_id + file_glob +
 //! rule_id) rather than vector-similarity. A learning scoped to
 //! `terraform/*.tf` with rule_id `CKV_AWS_337` surfaces exactly when a
@@ -21,6 +21,7 @@ pub struct Learning {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub applied_count: i32,
+    pub last_applied_at: Option<DateTime<Utc>>,
     pub scope_tags: serde_json::Value,
     /// `pending` | `active`. Only `active` learnings are ever surfaced
     /// (ADR 0017). `pending` rows exist but fire on nothing until promoted.
@@ -61,7 +62,7 @@ impl<'a> LearningRepo<'a> {
             r#"INSERT INTO learnings (repo_id, file_glob, rule_id, text, context, created_by, scope_tags, status, source)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                RETURNING learning_id, repo_id, file_glob, rule_id, text, context,
-                         created_by, created_at, applied_count, scope_tags,
+                         created_by, created_at, applied_count, last_applied_at, scope_tags,
                          status, source, approved_at, approved_by"#,
         )
         .bind(repo_id)
@@ -96,7 +97,7 @@ impl<'a> LearningRepo<'a> {
         sqlx::query_as::<_, Learning>(
             r#"
             SELECT learning_id, repo_id, file_glob, rule_id, text, context,
-                   created_by, created_at, applied_count, scope_tags,
+                   created_by, created_at, applied_count, last_applied_at, scope_tags,
                    status, source, approved_at, approved_by
             FROM learnings
             WHERE status = 'active'
@@ -131,7 +132,7 @@ impl<'a> LearningRepo<'a> {
         sqlx::query_as::<_, Learning>(
             r#"
             SELECT learning_id, repo_id, file_glob, rule_id, text, context,
-                   created_by, created_at, applied_count, scope_tags,
+                   created_by, created_at, applied_count, last_applied_at, scope_tags,
                    status, source, approved_at, approved_by
             FROM learnings
             WHERE status = 'pending'
@@ -158,7 +159,7 @@ impl<'a> LearningRepo<'a> {
             SET status = 'active', approved_at = now(), approved_by = $2
             WHERE learning_id = $1 AND status = 'pending'
             RETURNING learning_id, repo_id, file_glob, rule_id, text, context,
-                      created_by, created_at, applied_count, scope_tags,
+                      created_by, created_at, applied_count, last_applied_at, scope_tags,
                       status, source, approved_at, approved_by
             "#,
         )
@@ -170,7 +171,7 @@ impl<'a> LearningRepo<'a> {
 
     pub async fn increment_applied(&self, learning_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "UPDATE learnings SET applied_count = applied_count + 1 WHERE learning_id = $1",
+            "UPDATE learnings SET applied_count = applied_count + 1, last_applied_at = now() WHERE learning_id = $1",
         )
         .bind(learning_id)
         .execute(self.pool)

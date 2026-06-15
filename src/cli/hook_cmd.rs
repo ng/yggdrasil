@@ -244,6 +244,30 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
                     }
                 }
             }
+
+            // yggdrasil-180: surface scoped learnings whose file_glob matches
+            // the file being edited, injected as a system reminder before the
+            // edit runs. Deduped per session so the same learning fires once.
+            let session_id = payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lines = crate::cli::learning_cmd::surface_for_edit(
+                &pool,
+                file_path,
+                Some(agent_name),
+                session_id,
+            )
+            .await;
+            if !lines.is_empty() {
+                let out = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": lines.join("\n"),
+                    }
+                });
+                println!("{out}");
+            }
         }
         _ => {}
     }

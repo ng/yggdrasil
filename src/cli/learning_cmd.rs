@@ -245,7 +245,11 @@ pub async fn list(
             &r.scope_tags,
         );
         let applied = if r.applied_count > 0 {
-            format!(" [×{}]", r.applied_count)
+            let last = r
+                .last_applied_at
+                .map(|t| format!(", last {}", t.format("%Y-%m-%d")))
+                .unwrap_or_default();
+            format!(" [×{}{}]", r.applied_count, last)
         } else {
             String::new()
         };
@@ -305,6 +309,95 @@ pub async fn surface_for_files(
     }
 
     Ok(out)
+}
+
+/// Surface learnings matching a single file path an agent is about to edit
+/// (yggdrasil-180). Resolves the repo from cwd, queries the deterministic
+/// `list_matching` predicate, and dedups per session so the same learning is
+/// not re-injected on every edit. Returns formatted lines for newly-surfaced
+/// learnings and bumps each one's `applied_count` / `last_applied_at`.
+///
+/// Only file-scoped learnings (`file_glob IS NOT NULL`) fire here — repo-wide
+/// and global no-glob learnings are general rules already surfaced at session
+/// start (prime) and task claim, so re-injecting them on every edit is noise.
+/// Best-effort — any DB or filesystem hiccup yields an empty Vec, never an
+/// error to the hook caller.
+pub async fn surface_for_edit(
+    pool: &sqlx::PgPool,
+    file_path: &str,
+    agent_name: Option<&str>,
+    session_id: &str,
+) -> Vec<String> {
+    let repo_id = resolve_cwd_repo(pool).await.ok().map(|r| r.repo_id);
+    let repo = LearningRepo::new(pool);
+    let rows = match repo
+        .list_matching(repo_id, Some(file_path), None, agent_name, None)
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    // Per-session dedup via a best-effort flat file under /tmp/ygg.
+    // Sanitize session_id before embedding in a path: only [a-zA-Z0-9_-] allowed,
+    // everything else becomes '_', preventing path-traversal via crafted session IDs.
+    let seen_path = (!session_id.is_empty()).then(|| {
+        let safe: String = session_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        std::path::PathBuf::from(format!("/tmp/ygg/learnings-{safe}.seen"))
+    });
+    let mut seen: std::collections::HashSet<String> = seen_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    let mut fresh = Vec::new();
+    for l in &rows {
+        // Edit-time injection is for file-scoped rules only.
+        if l.file_glob.is_none() {
+            continue;
+        }
+        let id = l.learning_id.to_string();
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(format_learning_line(l));
+        fresh.push(id);
+        let _ = repo.increment_applied(l.learning_id).await;
+    }
+
+    if let Some(p) = seen_path {
+        if !fresh.is_empty() {
+            if let Some(dir) = p.parent() {
+                std::fs::create_dir_all(dir).ok();
+            }
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p)
+            {
+                for id in &fresh {
+                    let _ = writeln!(f, "{id}");
+                }
+            }
+        }
+    }
+
+    out
 }
 
 /// Best-effort file-path extractor for free-text task fields.

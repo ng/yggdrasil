@@ -1362,6 +1362,86 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
 }
 
 #[tokio::test]
+async fn test_learnings_surface_for_edit_dedups_and_tracks_recency() {
+    // yggdrasil-180: surface_for_edit injects a matching learning once per
+    // session, bumps applied_count, and stamps last_applied_at.
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    // Clear strays from any prior panicked run so reruns stay idempotent.
+    sqlx::query("DELETE FROM learnings WHERE file_glob = '*.ygg180test'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Global (repo_id NULL) learning with a glob that cannot collide with real
+    // edits; matches any repo so the test doesn't depend on cwd resolution.
+    let lr = ygg::models::learning::LearningRepo::new(&pool);
+    let learning = lr
+        .create(
+            None,
+            Some("*.ygg180test"),
+            None,
+            "Edit-hook surfacing smoke test.",
+            None,
+            None,
+            &serde_json::json!({}),
+            "active",
+            "manual",
+        )
+        .await
+        .unwrap();
+
+    let sid = format!("ygg180-{}", learning.learning_id);
+    let seen_path = format!("/tmp/ygg/learnings-{sid}.seen");
+    let _ = std::fs::remove_file(&seen_path);
+
+    // First edit surfaces the learning once.
+    let first =
+        ygg::cli::learning_cmd::surface_for_edit(&pool, "src/foo.ygg180test", None, &sid).await;
+    assert_eq!(
+        first.len(),
+        1,
+        "matching learning should surface on first edit"
+    );
+    assert!(first[0].contains("smoke test"));
+
+    // Second edit in the same session is deduped.
+    let second =
+        ygg::cli::learning_cmd::surface_for_edit(&pool, "src/foo.ygg180test", None, &sid).await;
+    assert!(
+        second.is_empty(),
+        "same learning must not re-surface within one session"
+    );
+
+    let count: i32 =
+        sqlx::query_scalar("SELECT applied_count FROM learnings WHERE learning_id = $1")
+            .bind(learning.learning_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let last_set: bool = sqlx::query_scalar(
+        "SELECT last_applied_at IS NOT NULL FROM learnings WHERE learning_id = $1",
+    )
+    .bind(learning.learning_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 1,
+        "deduped surfacing bumps applied_count exactly once"
+    );
+    assert!(last_set, "last_applied_at stamped on application");
+
+    let _ = std::fs::remove_file(&seen_path);
+    sqlx::query("DELETE FROM learnings WHERE learning_id = $1")
+        .bind(learning.learning_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_learnings_approval_gate_hides_pending_until_approved() {
     // ADR 0017: only `active` learnings surface. A `pending` (proposed)
     // learning must not fire via surface_for_files; approving it promotes it
