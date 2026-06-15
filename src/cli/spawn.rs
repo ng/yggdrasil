@@ -53,6 +53,20 @@ pub async fn execute(
     TmuxManager::send_keys(&left_pane, &cd_cmd).await?;
     let perm_mode =
         std::env::var("YGG_SPAWN_PERMISSION_MODE").unwrap_or_else(|_| "bypassPermissions".into());
+    const ALLOWED_PERM_MODES: &[&str] = &[
+        "bypassPermissions",
+        "dontAsk",
+        "acceptEdits",
+        "default",
+        "plan",
+    ];
+    if !ALLOWED_PERM_MODES.contains(&perm_mode.as_str()) {
+        anyhow::bail!(
+            "invalid YGG_SPAWN_PERMISSION_MODE {:?} — allowed: {}",
+            perm_mode,
+            ALLOWED_PERM_MODES.join(", ")
+        );
+    }
     let claude_cmd = build_claude_cmd(&perm_mode, &agent_name, task);
     TmuxManager::send_keys(&left_pane, &claude_cmd).await?;
 
@@ -133,7 +147,7 @@ fn build_claude_cmd(perm_mode: &str, agent_name: &str, task: &str) -> String {
         "SETSID=\"$(command -v setsid)\"; \
          BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=7200000 \
          ${{SETSID:+\"$SETSID\" -w -c}} \
-         claude --dangerously-skip-permissions --permission-mode {} --name '{}' '{}'",
+         claude --dangerously-skip-permissions --permission-mode '{}' --name '{}' '{}'",
         shell_escape(perm_mode),
         shell_escape(agent_name),
         shell_escape(task),
@@ -181,7 +195,7 @@ mod tests {
     #[test]
     fn claude_cmd_passes_perm_mode_and_task() {
         let cmd = build_claude_cmd("acceptEdits", "my-agent", "fix the bug");
-        assert!(cmd.contains("--permission-mode acceptEdits"));
+        assert!(cmd.contains("--permission-mode 'acceptEdits'"));
         assert!(cmd.contains("--name 'my-agent'"));
         assert!(cmd.contains("'fix the bug'"));
         assert!(cmd.contains("--dangerously-skip-permissions"));
@@ -192,5 +206,20 @@ mod tests {
         let cmd = build_claude_cmd("bypassPermissions", "agent-x", "it's broken");
         // Single quote is escaped so the surrounding '...' stays balanced.
         assert!(cmd.contains("'it'\\''s broken'"));
+    }
+
+    #[test]
+    fn claude_cmd_quotes_perm_mode() {
+        // perm_mode must be single-quoted even though validation restricts it to a
+        // safe fixed set — defence-in-depth against future changes.
+        let cmd = build_claude_cmd("dontAsk", "agent-x", "do the thing");
+        assert!(cmd.contains("--permission-mode 'dontAsk'"));
+    }
+
+    #[test]
+    fn claude_cmd_escapes_single_quotes_in_agent_name() {
+        // agent_name containing a single quote must not break the shell command.
+        let cmd = build_claude_cmd("bypassPermissions", "agent's-name", "do the thing");
+        assert!(cmd.contains("--name 'agent'\\''s-name'"));
     }
 }
