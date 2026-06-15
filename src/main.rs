@@ -607,12 +607,37 @@ enum LearnAction {
         /// Scope tag: global, agent=<name>, kind=<task-kind>. Repeatable.
         #[arg(long, value_name = "SCOPE")]
         scope: Vec<String>,
+        /// Land in the approval gate (status='pending') instead of firing
+        /// immediately. Promote later with `ygg learn approve <id>`.
+        #[arg(long)]
+        pending: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Propose a learning into the approval gate (status='pending',
+    /// source='proposed'). The capture verb (ADR 0017): the agent that was
+    /// corrected writes the durable rule; a human approves it before it fires.
+    Propose {
+        /// The learning text
+        text: String,
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        file_glob: Option<String>,
+        #[arg(long)]
+        rule_id: Option<String>,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
+        #[arg(long, value_name = "SCOPE")]
+        scope: Vec<String>,
         #[arg(long)]
         json: bool,
     },
     /// List learnings whose scope matches the given filters. No filters = all
     /// learnings visible from the current repo. Deterministic SQL match, not
-    /// similarity search.
+    /// similarity search. Only `active` learnings are shown.
     List {
         /// A file path to test against each learning's file_glob
         #[arg(long)]
@@ -625,6 +650,26 @@ enum LearnAction {
         all: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// List pending learnings awaiting approval (the triage queue).
+    Pending {
+        /// Scan every repo (default: current repo + global)
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote a pending learning to active.
+    Approve {
+        id: String,
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+    /// Reject (drop) a pending learning proposal.
+    Reject {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Delete a learning by id (full UUID or short prefix not supported yet)
     Delete { id: String },
@@ -2046,6 +2091,35 @@ async fn main() -> anyhow::Result<()> {
                     context,
                     agent,
                     scope,
+                    pending,
+                    json,
+                } => {
+                    let agent_name = agent.unwrap_or_else(agent_name_default);
+                    let scope_tags = ygg::cli::learning_cmd::parse_scope_tags(&scope)?;
+                    let status = if pending { "pending" } else { "active" };
+                    ygg::cli::learning_cmd::create(
+                        &pool,
+                        &text,
+                        global,
+                        file_glob.as_deref(),
+                        rule_id.as_deref(),
+                        context.as_deref(),
+                        &agent_name,
+                        &scope_tags,
+                        status,
+                        "manual",
+                        json,
+                    )
+                    .await?;
+                }
+                LearnAction::Propose {
+                    text,
+                    global,
+                    file_glob,
+                    rule_id,
+                    context,
+                    agent,
+                    scope,
                     json,
                 } => {
                     let agent_name = agent.unwrap_or_else(agent_name_default);
@@ -2059,9 +2133,25 @@ async fn main() -> anyhow::Result<()> {
                         context.as_deref(),
                         &agent_name,
                         &scope_tags,
+                        "pending",
+                        "proposed",
                         json,
                     )
                     .await?;
+                }
+                LearnAction::Pending { all, json } => {
+                    ygg::cli::learning_cmd::pending(&pool, all, json).await?;
+                }
+                LearnAction::Approve { id, agent } => {
+                    let uuid = uuid::Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
+                    let agent_name = agent.unwrap_or_else(agent_name_default);
+                    ygg::cli::learning_cmd::approve(&pool, uuid, &agent_name).await?;
+                }
+                LearnAction::Reject { id, reason } => {
+                    let uuid = uuid::Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
+                    ygg::cli::learning_cmd::reject(&pool, uuid, reason.as_deref()).await?;
                 }
                 LearnAction::List {
                     file,
