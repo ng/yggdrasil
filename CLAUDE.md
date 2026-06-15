@@ -14,6 +14,9 @@ ygg task list [--all] [--status <...>]      # All tasks in this repo (or everywh
 ygg task create "title" --kind <task|bug|feature|chore|epic> --priority <0-4>
                                             # Priority: 0=critical 1=high 2=med 3=low 4=backlog.
                                             # Accepts "P0".."P4" too. NOT "high"/"medium"/"low".
+                                            # --agent-slug <name>: thematic worker name the scheduler
+                                            #   spawns this task under (e.g. "oauth-refresh"). Pick one
+                                            #   tied to the work, not the worktree. Sanitized to [a-z0-9-].
 ygg task claim <ref>                        # Take a task (assign + in_progress)
 ygg task show <ref>                         # Full detail for <prefix>-NNN or UUID
 ygg task close <ref> [--reason "..."]       # Complete a task
@@ -24,7 +27,7 @@ ygg task dupes [--all] [--limit N]          # Probable duplicate pairs (string s
 ygg remember "..."                          # Durable note (repo-scoped; --global for all repos)
 ygg remember --list [--all] [--limit N]     # Read stored notes (also surfaced in `ygg prime`)
 
-ygg handoff save "..."                       # Checkpoint this session before /clear (also: ... | ygg handoff save)
+ygg handoff save "..."                       # Checkpoint this session before /clear; also accepts stdin (`... | ygg handoff save` or `ygg handoff save -`)
 ygg handoff show                             # Print the current resume note
 ygg handoff clear                            # Drop it once resumed
 
@@ -45,6 +48,7 @@ ygg logs --follow                           # Live event stream
 - **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in native TaskCreate; cross-session work lives in `ygg task`.
 - **Durable rules** — write hard rules to `CLAUDE.md` (repo) or `~/.claude/CLAUDE.md` (global); for file-scoped engineering corrections use `ygg learn add` with a glob. For shorter cross-session notes use `ygg remember "..."` (repo-scoped, `--global` for everywhere) — a plain note store with no embeddings/similarity; recent notes surface in the prime block and via `ygg remember --list`.
 - **Before a context reset** (`/clear` or compaction), write a resume note with `ygg handoff save` — the work in flight, the next concrete step, open PRs/decisions. It is keyed to this repo + agent and leads the next `ygg prime` automatically, so the fresh session continues without re-explaining. `ygg handoff save` replaces the prior note; `ygg handoff clear` drops it once resumed.
+- **When you are corrected on a durable, file-scoped rule** (the kind that should fire every time someone touches a path), propose it before the session ends: `ygg learn propose "<rule>" --file-glob "<glob>"` (ADR 0017). Proposals land in an approval gate (`status='pending'`) and fire on nothing until a human runs `ygg learn approve <id>` — so capture is cheap and safe, never auto-promoted into the live corpus. Triage the queue with `ygg learn pending`. Use this for recurring engineering corrections; one-off notes still go to `ygg remember`.
 - **Do NOT** use `bd` / beads. This project uses `ygg task` instead.
 
 ## Terse for AI-tracking fields

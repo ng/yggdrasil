@@ -931,16 +931,17 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
     let app_cfg = AppConfig::from_env().map_err(|e| anyhow::anyhow!("config: {e}"))?;
     let mut dispatched = 0i64;
     for (run_id, task_id, attempt, _input) in claimed {
-        // Pull task title for the spawn prompt + ref for events.
-        let row: Option<(String, String, i32, String)> = sqlx::query_as(
-            r#"SELECT t.title, r.task_prefix, t.seq, COALESCE(t.description, '')
+        // Pull task title for the spawn prompt + ref for events. agent_slug
+        // (yggdrasil-183) names the worker thematically when the creator set it.
+        let row: Option<(String, String, i32, String, Option<String>)> = sqlx::query_as(
+            r#"SELECT t.title, r.task_prefix, t.seq, COALESCE(t.description, ''), t.agent_slug
                  FROM tasks t JOIN repos r USING (repo_id)
                 WHERE t.task_id = $1"#,
         )
         .bind(task_id)
         .fetch_optional(pool)
         .await?;
-        let Some((title, prefix, seq, desc)) = row else {
+        let Some((title, prefix, seq, desc, agent_slug)) = row else {
             // Task vanished underneath us; mark crashed so we don't retry.
             sqlx::query(
                 "UPDATE task_runs SET state = 'crashed', reason = 'dependency_failed',
@@ -954,7 +955,7 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
         };
 
         let task_ref = format!("{prefix}-{seq}");
-        let agent_name = scheduler_agent_name(&prefix, seq, attempt);
+        let agent_name = scheduler_agent_name(&prefix, seq, attempt, agent_slug.as_deref());
         let prompt = format!(
             "[ygg-scheduler] Task {task_ref} (attempt {attempt}): {title}\n\n{desc}\n\n\
              Run `ygg run claim {task_ref}` to bind your session, then implement and \
@@ -1149,13 +1150,22 @@ pub async fn backfill(pool: &PgPool) -> Result<BackfillStats, anyhow::Error> {
     Ok(stats)
 }
 
-fn scheduler_agent_name(prefix: &str, seq: i32, attempt: i32) -> String {
+/// Name the worker that will run a scheduled task. A thematic `agent_slug`
+/// (yggdrasil-183), when the task carries one, becomes the name *prefix*;
+/// otherwise we fall back to the task ref (`ygg-<prefix>-<seq>`). Either way
+/// we append `-a<attempt>-<suffix>` so retries and concurrent runs get
+/// distinct agent rows, tmux windows, and worktrees.
+fn scheduler_agent_name(prefix: &str, seq: i32, attempt: i32, agent_slug: Option<&str>) -> String {
     let suffix = uuid::Uuid::new_v4()
         .to_string()
         .chars()
         .take(6)
         .collect::<String>();
-    format!("ygg-{prefix}-{seq}-a{attempt}-{suffix}")
+    let base = match agent_slug {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => format!("ygg-{prefix}-{seq}"),
+    };
+    format!("{base}-a{attempt}-{suffix}")
 }
 
 async fn task_ref_for(pool: &PgPool, task_id: Uuid) -> Option<String> {
@@ -1207,11 +1217,29 @@ mod tests {
 
     #[test]
     fn agent_name_includes_attempt_and_unique_suffix() {
-        let n1 = scheduler_agent_name("ygg", 42, 1);
-        let n2 = scheduler_agent_name("ygg", 42, 1);
+        let n1 = scheduler_agent_name("ygg", 42, 1, None);
+        let n2 = scheduler_agent_name("ygg", 42, 1, None);
         assert!(n1.starts_with("ygg-ygg-42-a1-"));
         assert!(n2.starts_with("ygg-ygg-42-a1-"));
         assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn agent_name_uses_thematic_slug_when_present() {
+        // yggdrasil-183: a task's agent_slug becomes the name prefix, with the
+        // attempt + uniqueness suffix still appended.
+        let n = scheduler_agent_name("ygg", 42, 2, Some("oauth-refresh"));
+        assert!(
+            n.starts_with("oauth-refresh-a2-"),
+            "slug should prefix the name, got {n}"
+        );
+        assert!(
+            !n.contains("ygg-ygg-42"),
+            "task ref must not leak in, got {n}"
+        );
+        // Empty slug falls back to the task-ref scheme.
+        let f = scheduler_agent_name("ygg", 42, 1, Some(""));
+        assert!(f.starts_with("ygg-ygg-42-a1-"));
     }
 
     #[test]
