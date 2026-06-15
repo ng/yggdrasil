@@ -24,6 +24,7 @@ ADRs are append-only. Superseded decisions get a new ADR that references the old
 | 0014 | [First-class scoped memories](0014-scoped-memories.md) | Accepted |
 | 0015 | [Retrieval scope reduction — pivot toward orchestrator-only](0015-retrieval-scope-reduction.md) | Proposed |
 | 0016 | [Autonomous execution — scheduler + durable task runs](0016-autonomous-execution.md) | Proposed |
+| 0017 | [Learnings: approval gate + agent-proposed capture](0017-learning-capture-and-approval.md) | Proposed |
 
 ## Writing a new ADR
 

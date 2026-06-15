@@ -325,6 +325,14 @@ enum Commands {
         json: bool,
     },
 
+    /// Checkpoint the current session so a fresh one (after `/clear`) resumes
+    /// without re-explaining. The saved note auto-surfaces at the top of the
+    /// next `ygg prime`. Subcommands: save / show / clear.
+    Handoff {
+        #[command(subcommand)]
+        action: HandoffAction,
+    },
+
     /// Record that the agent is about to invoke a tool — PreToolUse hook.
     AgentTool {
         /// Tool name (Bash, Edit, Read, …)
@@ -599,12 +607,37 @@ enum LearnAction {
         /// Scope tag: global, agent=<name>, kind=<task-kind>. Repeatable.
         #[arg(long, value_name = "SCOPE")]
         scope: Vec<String>,
+        /// Land in the approval gate (status='pending') instead of firing
+        /// immediately. Promote later with `ygg learn approve <id>`.
+        #[arg(long)]
+        pending: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Propose a learning into the approval gate (status='pending',
+    /// source='proposed'). The capture verb (ADR 0017): the agent that was
+    /// corrected writes the durable rule; a human approves it before it fires.
+    Propose {
+        /// The learning text
+        text: String,
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        file_glob: Option<String>,
+        #[arg(long)]
+        rule_id: Option<String>,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(short, long)]
+        agent: Option<String>,
+        #[arg(long, value_name = "SCOPE")]
+        scope: Vec<String>,
         #[arg(long)]
         json: bool,
     },
     /// List learnings whose scope matches the given filters. No filters = all
     /// learnings visible from the current repo. Deterministic SQL match, not
-    /// similarity search.
+    /// similarity search. Only `active` learnings are shown.
     List {
         /// A file path to test against each learning's file_glob
         #[arg(long)]
@@ -617,6 +650,26 @@ enum LearnAction {
         all: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// List pending learnings awaiting approval (the triage queue).
+    Pending {
+        /// Scan every repo (default: current repo + global)
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote a pending learning to active.
+    Approve {
+        id: String,
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+    /// Reject (drop) a pending learning proposal.
+    Reject {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Delete a learning by id (full UUID or short prefix not supported yet)
     Delete { id: String },
@@ -652,6 +705,33 @@ enum LockAction {
 }
 
 #[derive(Subcommand)]
+enum HandoffAction {
+    /// Save a resume note for this repo+agent (replaces any prior one). Pass
+    /// the text as an argument, or omit it / pass `-` to read from stdin.
+    Save {
+        /// The handoff text. Omit or use `-` to read stdin.
+        #[arg(default_value = "", allow_hyphen_values = true)]
+        text: String,
+        #[arg(short, long)]
+        agent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the current handoff for this repo+agent.
+    Show {
+        #[arg(short, long)]
+        agent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete the current handoff for this repo+agent.
+    Clear {
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum TaskAction {
     /// Create a new task in the current repo
     Create {
@@ -679,6 +759,12 @@ enum TaskAction {
         /// Link to an external issue tracker (gh-123, jira-PROJ-42, URL, etc.)
         #[arg(long)]
         external_ref: Option<String>,
+        /// Thematic name for the worker that runs this task, e.g.
+        /// "oauth-refresh" (yggdrasil-183). The scheduler uses it as the
+        /// spawned agent's name instead of the generic `ygg-<prefix>-<seq>`.
+        /// Sanitized to [a-z0-9-].
+        #[arg(long)]
+        agent_slug: Option<String>,
         /// Emit the created task(s) as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
@@ -1444,6 +1530,7 @@ async fn main() -> anyhow::Result<()> {
                     label,
                     agent,
                     external_ref,
+                    agent_slug,
                     json,
                     file,
                     body_file,
@@ -1485,6 +1572,7 @@ async fn main() -> anyhow::Result<()> {
                                 labels: &label,
                                 agent_name: &agent_name,
                                 external_ref: external_ref.as_deref(),
+                                agent_slug: agent_slug.as_deref(),
                                 json,
                             },
                         )
@@ -2011,6 +2099,35 @@ async fn main() -> anyhow::Result<()> {
                     context,
                     agent,
                     scope,
+                    pending,
+                    json,
+                } => {
+                    let agent_name = agent.unwrap_or_else(agent_name_default);
+                    let scope_tags = ygg::cli::learning_cmd::parse_scope_tags(&scope)?;
+                    let status = if pending { "pending" } else { "active" };
+                    ygg::cli::learning_cmd::create(
+                        &pool,
+                        &text,
+                        global,
+                        file_glob.as_deref(),
+                        rule_id.as_deref(),
+                        context.as_deref(),
+                        &agent_name,
+                        &scope_tags,
+                        status,
+                        "manual",
+                        json,
+                    )
+                    .await?;
+                }
+                LearnAction::Propose {
+                    text,
+                    global,
+                    file_glob,
+                    rule_id,
+                    context,
+                    agent,
+                    scope,
                     json,
                 } => {
                     let agent_name = agent.unwrap_or_else(agent_name_default);
@@ -2024,9 +2141,25 @@ async fn main() -> anyhow::Result<()> {
                         context.as_deref(),
                         &agent_name,
                         &scope_tags,
+                        "pending",
+                        "proposed",
                         json,
                     )
                     .await?;
+                }
+                LearnAction::Pending { all, json } => {
+                    ygg::cli::learning_cmd::pending(&pool, all, json).await?;
+                }
+                LearnAction::Approve { id, agent } => {
+                    let uuid = uuid::Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
+                    let agent_name = agent.unwrap_or_else(agent_name_default);
+                    ygg::cli::learning_cmd::approve(&pool, uuid, &agent_name).await?;
+                }
+                LearnAction::Reject { id, reason } => {
+                    let uuid = uuid::Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
+                    ygg::cli::learning_cmd::reject(&pool, uuid, reason.as_deref()).await?;
                 }
                 LearnAction::List {
                     file,
@@ -2073,6 +2206,33 @@ async fn main() -> anyhow::Result<()> {
                     })
                 });
                 ygg::cli::remember_cmd::remember(&pool, &text, global, &agent_name, json).await?;
+            }
+        }
+        Commands::Handoff { action } => {
+            let config = ygg::config::AppConfig::from_env()?;
+            let pool = ygg::db::create_pool(&config.database_url).await?;
+            match action {
+                HandoffAction::Save { text, agent, json } => {
+                    let agent_name = resolve_agent_arg(agent);
+                    // Empty or `-` reads the note from stdin (pipe-friendly).
+                    let text = if text.is_empty() || text == "-" {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf)?;
+                        buf
+                    } else {
+                        text
+                    };
+                    ygg::cli::handoff_cmd::save(&pool, &text, &agent_name, json).await?;
+                }
+                HandoffAction::Show { agent, json } => {
+                    let agent_name = resolve_agent_arg(agent);
+                    ygg::cli::handoff_cmd::show(&pool, &agent_name, json).await?;
+                }
+                HandoffAction::Clear { agent } => {
+                    let agent_name = resolve_agent_arg(agent);
+                    ygg::cli::handoff_cmd::clear(&pool, &agent_name).await?;
+                }
             }
         }
         Commands::AgentTool { tool, agent } => {

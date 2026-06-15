@@ -1276,6 +1276,8 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             None,
             None,
             &default_scope,
+            "active",
+            "manual",
         )
         .await
         .unwrap();
@@ -1288,6 +1290,8 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             None,
             None,
             &default_scope,
+            "active",
+            "manual",
         )
         .await
         .unwrap();
@@ -1300,6 +1304,8 @@ async fn test_learnings_surface_for_files_matches_glob_and_increments() {
             None,
             None,
             &default_scope,
+            "active",
+            "manual",
         )
         .await
         .unwrap();
@@ -1380,6 +1386,8 @@ async fn test_learnings_surface_for_edit_dedups_and_tracks_recency() {
             None,
             None,
             &serde_json::json!({}),
+            "active",
+            "manual",
         )
         .await
         .unwrap();
@@ -1428,6 +1436,107 @@ async fn test_learnings_surface_for_edit_dedups_and_tracks_recency() {
     let _ = std::fs::remove_file(&seen_path);
     sqlx::query("DELETE FROM learnings WHERE learning_id = $1")
         .bind(learning.learning_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_learnings_approval_gate_hides_pending_until_approved() {
+    // ADR 0017: only `active` learnings surface. A `pending` (proposed)
+    // learning must not fire via surface_for_files; approving it promotes it
+    // to `active` and it then surfaces.
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'learn-gate'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'learn-gate', 'learn-gate') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+
+    let lr = ygg::models::learning::LearningRepo::new(&pool);
+    let scope = serde_json::json!({});
+    // One immediately-active learning, one proposed (pending), same glob.
+    let active = lr
+        .create(
+            Some(repo.0),
+            Some("*.rs"),
+            None,
+            "active rule visible",
+            None,
+            None,
+            &scope,
+            "active",
+            "manual",
+        )
+        .await
+        .unwrap();
+    let proposed = lr
+        .create(
+            Some(repo.0),
+            Some("*.rs"),
+            None,
+            "proposed rule hidden",
+            None,
+            None,
+            &scope,
+            "pending",
+            "proposed",
+        )
+        .await
+        .unwrap();
+
+    // list_pending sees the proposal; list_matching (the read path) does not.
+    let pend = lr.list_pending(Some(repo.0)).await.unwrap();
+    assert!(
+        pend.iter().any(|l| l.learning_id == proposed.learning_id),
+        "pending queue must contain the proposal"
+    );
+
+    let files = vec!["src/main.rs".to_string()];
+    let lines = ygg::cli::learning_cmd::surface_for_files(&pool, Some(repo.0), &files, None, None)
+        .await
+        .unwrap();
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("active rule visible"),
+        "active must surface"
+    );
+    assert!(
+        !joined.contains("proposed rule hidden"),
+        "pending proposal must NOT surface until approved"
+    );
+
+    // Approve → it surfaces and carries approval metadata.
+    let promoted = lr
+        .approve(proposed.learning_id, None)
+        .await
+        .unwrap()
+        .expect("approve returns the promoted row");
+    assert_eq!(promoted.status, "active");
+    assert!(promoted.approved_at.is_some(), "approved_at stamped");
+
+    let lines2 = ygg::cli::learning_cmd::surface_for_files(&pool, Some(repo.0), &files, None, None)
+        .await
+        .unwrap();
+    assert!(
+        lines2.join("\n").contains("proposed rule hidden"),
+        "approved learning must surface"
+    );
+
+    // reject only touches pending rows: rejecting the now-active learning fails.
+    assert!(
+        !lr.reject(promoted.learning_id).await.unwrap(),
+        "reject must not delete an active learning"
+    );
+
+    let _ = active; // keep binding meaningful
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
         .execute(&pool)
         .await
         .unwrap();
@@ -1650,6 +1759,53 @@ async fn test_agent_list_returns_current_user_agents() {
     sqlx::query("DELETE FROM agents WHERE agent_id IN ($1, $2)")
         .bind(mine.agent_id)
         .bind(theirs.agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_handoff_save_supersedes_and_clears() {
+    // `ygg handoff`: one note per (repo, agent); save replaces; clear removes.
+    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let pool = ygg::db::create_pool(&db_url).await.unwrap();
+
+    sqlx::query("DELETE FROM repos WHERE task_prefix = 'handoff-test'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO repos (canonical_url, name, task_prefix) VALUES (NULL, 'handoff-test', 'handoff-test') RETURNING repo_id"
+    ).fetch_one(&pool).await.unwrap();
+
+    let hr = ygg::models::handoff::HandoffRepo::new(&pool);
+
+    // First save, then read back.
+    hr.save(Some(repo.0), None, "first note").await.unwrap();
+    let got = hr.latest(Some(repo.0), None).await.unwrap().unwrap();
+    assert_eq!(got.text, "first note");
+
+    // A second save supersedes — latest is the new text, and only one row exists.
+    hr.save(Some(repo.0), None, "second note").await.unwrap();
+    let got = hr.latest(Some(repo.0), None).await.unwrap().unwrap();
+    assert_eq!(got.text, "second note", "save replaces the prior handoff");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM handoffs WHERE repo_id = $1")
+        .bind(repo.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "exactly one handoff per (repo, agent)");
+
+    // Clear removes it.
+    let cleared = hr.clear(Some(repo.0), None).await.unwrap();
+    assert!(cleared, "clear reports it removed a handoff");
+    assert!(
+        hr.latest(Some(repo.0), None).await.unwrap().is_none(),
+        "no handoff after clear"
+    );
+
+    sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        .bind(repo.0)
         .execute(&pool)
         .await
         .unwrap();

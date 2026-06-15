@@ -368,6 +368,25 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
         }
     }
 
+    // 2b. ADR 0017 M4 — learnings-capture nudge. Remind spawned workers, as a
+    // session ends, to record any durable correction they received with
+    // `ygg learn propose` (lands in the approval gate, fires on nothing until a
+    // human approves). Advisory only (stderr, never blocks). Opt out with
+    // YGG_LEARN_NUDGE=0. The load-bearing push is the CLAUDE.md directive the
+    // model actually reads; this line is for the operator tending the queue.
+    let spawned = std::env::var("YGG_SPAWNED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let nudge_off = std::env::var("YGG_LEARN_NUDGE")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+    if spawned && !nudge_off {
+        eprintln!(
+            "ygg: if you were corrected this session, capture the durable rule: \
+             `ygg learn propose \"<rule>\" --file-glob \"<glob>\"` (queues for approval)"
+        );
+    }
+
     // 3. Stop-check (output to stdout) — runs regardless of whether
     // digest/capture-outcome succeeded or DB was unavailable.
     match &db {

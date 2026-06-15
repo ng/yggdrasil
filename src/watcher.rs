@@ -305,6 +305,20 @@ impl Watcher {
             // covers the rare case where tmux still has a stub window with
             // a dead pane after a panic.
             TmuxManager::kill_window_sync("ygg", &a.agent_name);
+            // Checkpoint work-in-progress onto refs/ygg/recovery/<run_id> before
+            // we destroy the worktree, so the retry can continue from it rather
+            // than reset to the starting commit (yggdrasil-115).
+            if let Some(run_id) = latest_run_for_agent(&self.pool, a.agent_id).await {
+                if let Some(sha) = crate::worktree::checkpoint(&worktree, run_id) {
+                    record_pre_recovery_commit(&self.pool, run_id, &sha).await;
+                    tracing::info!(
+                        agent = %a.agent_name,
+                        run = %run_id,
+                        sha = %sha,
+                        "pre-recovery checkpoint"
+                    );
+                }
+            }
             let worktree_str = worktree.to_string_lossy();
             remove_worktree(&worktree_str);
             tracing::info!(
@@ -558,6 +572,30 @@ fn repo_toplevel() -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::PathBuf::from(top))
+}
+
+/// The most recent run bound to an agent — the one whose worktree we're about
+/// to reap. Returns None if the agent never bound to a run.
+async fn latest_run_for_agent(pool: &PgPool, agent_id: uuid::Uuid) -> Option<uuid::Uuid> {
+    sqlx::query_scalar(
+        "SELECT run_id FROM task_runs WHERE agent_id = $1
+          ORDER BY started_at DESC NULLS LAST, created_at DESC LIMIT 1",
+    )
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn record_pre_recovery_commit(pool: &PgPool, run_id: uuid::Uuid, sha: &str) {
+    let _ = sqlx::query(
+        "UPDATE task_runs SET pre_recovery_commit = $2, updated_at = now() WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .bind(sha)
+    .execute(pool)
+    .await;
 }
 
 fn remove_worktree(path: &str) {
