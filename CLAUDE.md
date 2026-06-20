@@ -166,34 +166,47 @@ ygg task dupes [--all] [--limit N]          # Probable duplicate pairs (string s
 
 ### Ticket body structure
 
-Tickets are read by other agents picking up the work. Bodies have **four
-sections in this order**, separated by blank lines. No PR-prose walls.
+Tickets are authored and consumed by autonomous agents. Use the **dedicated
+fields** — do NOT cram everything into `--description`. `ygg task show`
+renders `acceptance`/`design`/`notes` as their own sections; a blob in
+`--description` leaves those columns NULL. Run `ygg task create --template`
+for a fill-in scaffold.
 
-1. **Why** — one sentence. The trigger or observation that justifies the
-   work. Cite the source: `Adversarial review:`, `Codebase audit:`,
-   `Bench scenario X:`, `Research thread Y:`, `Incident on <date>:`.
-2. **What** — one sentence. The concrete change. Use imperative voice.
-3. **Acceptance:** — a bulleted list of testable conditions. Each bullet
-   is something an autonomous agent can verify when claiming the task as
-   done. Avoid vague verbs ("improve", "consider"); pin SHAs, file paths,
-   commands, numeric thresholds.
-4. **Refs:** *(optional)* — research thread tag, related ticket
-   (`yggdrasil-NN`), external URL, ADR number.
+- **`--description`** — two terse paragraphs: **Why** (one sentence, cite the
+  source: `Adversarial review:`, `Codebase audit:`, `Incident <date>:`) then
+  **What** (one sentence, imperative). No `## headers`.
+- **`--acceptance`** — the **Definition of Done**, as a `- [ ]` checkbox list.
+  One box per *independently verifiable* condition; pin paths, commands,
+  numeric thresholds. No vague verbs ("improve", "consider"). This is
+  per-task correctness — "did I build the right thing".
+- **`--design`** *(optional)* — approach / constraints when non-obvious.
+- **`--notes`** *(optional)* — `Refs:` (`yggdrasil-NN`, ADR number, URL) and
+  any DoD deviation.
+
+**Definition of Done is two layers.** The per-task `--acceptance` checklist
+above, **plus** the repo-wide gates that apply to every task and are NOT
+retyped per ticket: `cargo test` + `cargo check --all-targets` +
+`cargo fmt --check` pass, locks released, branch pushed, PR open (see Session
+Completion). Record only *deviations* from the repo gates in `--notes`.
+
+**Before `ygg task close`:** re-read `ygg task show`, run each acceptance
+box's check, and tick the ones you verified (`ygg task update <ref>
+--acceptance "..."`). `ygg task show` prints a live `(checked/total)` count.
+`ygg task close` warns when boxes are unticked, and **blocks** under
+`--require-acceptance` (or `YGG_CLOSE_REQUIRES_ACCEPTANCE=1`) unless `--force`.
 
 Example:
 
-```text
-Adversarial review: src/db.rs max_connections(10) starves a fleet of
-50+ active agents.
-
-Bump default to 32 and accept YGG_DB_POOL env override.
-
-Acceptance:
-- src/db.rs default = 32; YGG_DB_POOL parses to u32, falls back on error
-- CLAUDE.md documents the knob in the Build & Test section
-- cargo check --all-targets clean
-
-Refs: yggdrasil-141, adversarial-review note 2026-04-23
+```bash
+ygg task create "bump db pool default to 32" --kind chore --priority 1 \
+  --description "Adversarial review: src/db.rs max_connections(10) starves 50+ agent fleets.
+Raise default to 32; accept YGG_DB_POOL override." \
+  --acceptance "- [ ] src/db.rs default = 32
+- [ ] YGG_DB_POOL parses to u32, falls back to 32 on parse error
+- [ ] CLAUDE.md Build & Test documents YGG_DB_POOL
+- [ ] cargo test passes
+- [ ] cargo check --all-targets clean" \
+  --notes "Refs: yggdrasil-141, adversarial-review note 2026-04-23"
 ```
 
 ### Terse for AI-tracking fields

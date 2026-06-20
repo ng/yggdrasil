@@ -99,12 +99,21 @@ ygg logs --follow                           # Live event stream
 
 ### Ticket body structure
 
-Tickets are read by other agents picking up the work. Bodies have four
-sections in this order, separated by blank lines: **Why** (one sentence,
-trigger or observation), **What** (one sentence, imperative change),
-**Acceptance:** (bulleted testable conditions, no vague verbs — pin
-SHAs, paths, commands, numeric thresholds), **Refs:** (optional —
-related ticket, ADR, URL).
+Tickets are authored and consumed by autonomous agents. Use the dedicated
+fields, not one `--description` blob (`ygg task show` renders each
+separately; `ygg task create --template` scaffolds them):
+**`--description`** = **Why** (one sentence, cite source) + **What** (one
+sentence, imperative). **`--acceptance`** = Definition of Done as a `- [ ]`
+checkbox list, each box independently verifiable (pin paths, commands,
+numeric thresholds; no vague verbs). **`--design`** (optional) = approach.
+**`--notes`** (optional) = `Refs:` (`yggdrasil-NN`, ADR, URL).
+
+Definition of Done = the per-task `--acceptance` checklist **plus** the
+standing repo gates (tests/check/fmt pass, locks released, PR open) — those
+are NOT retyped per ticket; note only deviations in `--notes`. Before
+`ygg task close`, tick the boxes you verified; `ygg task show` shows a live
+`(checked/total)` count, and close warns (or blocks under
+`--require-acceptance` / `YGG_CLOSE_REQUIRES_ACCEPTANCE=1`, override `--force`).
 
 Be terse in `ygg task create` titles/descriptions/acceptance/notes and
 `ygg learn` rules. Drop filler and articles when meaning survives.
