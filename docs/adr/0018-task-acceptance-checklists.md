@@ -9,7 +9,7 @@
 
 The `tasks` table already has dedicated `acceptance`, `design`, and `notes` TEXT columns (ADR 0010), and `ygg task show` renders each as its own labeled block. But the documented convention (CLAUDE.md / AGENTS.md "Ticket body structure") told agents to write **four prose sections — Why / What / Acceptance: / Refs: — all inside `--description`**. The convention and the schema were out of sync: agents crammed acceptance into the description blob, so the first-class `acceptance` column stayed NULL and `ygg task show` had no distinct "done" section to render.
 
-This matters specifically because ygg tasks are authored *and* consumed by autonomous agents. The dominant failure mode is **premature close**: an agent reads a vague acceptance line ("docs updated", "pool is bigger"), does something plausible, and closes the task as succeeded. There was no structured, machine-checkable notion of "done" — `ygg task close` (`task_cmd.rs`) just flipped status and classified the free-text reason.
+This matters specifically because Yggdrasil tasks are authored *and* consumed by autonomous agents. The dominant failure mode is **premature close**: an agent reads a vague acceptance line ("docs updated", "pool is bigger"), does something plausible, and closes the task as succeeded. There was no structured, machine-checkable notion of "done" — `ygg task close` (`task_cmd.rs`) just flipped status and classified the free-text reason.
 
 The maintainer asked for a format that "better captures tasks and definitions of done." The fix is not a new format — the slots already exist — it is to align the convention with the schema and add a thin, machine-checkable Definition-of-Done layer on top.
 
@@ -48,7 +48,7 @@ No new columns — both reuse existing fields (`description`, `design`) and exis
 
 ## Why structural, not executed
 
-A box `- [x] cargo test passes` proves nothing unless something ran the command. The tempting next step is to have `ygg task close` auto-execute acceptance commands. We explicitly **do not**: arbitrary command execution at close time means a sandbox, environment assumptions, and flaky tests that wedge closes — high cost, new failure surface. Instead ygg's check stays structural (boxes ticked), and *semantic* truth is carried where it already lives: the agent's own run, and ADR 0016's `failed` (acceptance-unmet) vs `crashed` (infra) run states. Honesty of a tick is the agent's responsibility, the same way a human checkbox is.
+A box `- [x] cargo test passes` proves nothing unless something ran the command. The tempting next step is to have `ygg task close` auto-execute acceptance commands. We explicitly **do not**: arbitrary command execution at close time means a sandbox, environment assumptions, and flaky tests that wedge closes — high cost, new failure surface. Instead Yggdrasil's check stays structural (boxes ticked), and *semantic* truth is carried where it already lives: the agent's own run, and ADR 0016's `failed` (acceptance-unmet) vs `crashed` (infra) run states. Honesty of a tick is the agent's responsibility, the same way a human checkbox is.
 
 ## Alternatives rejected
 
@@ -63,7 +63,7 @@ A box `- [x] cargo test passes` proves nothing unless something ran the command.
 
 ## Consequences
 
-- No migration. The columns, CLI flags, and `ygg task show` rendering already existed; this is convention + presentation + an opt-in gate. Fully revertible.
+- No migration. The `acceptance`/`design`/`notes` columns and the base `ygg task show` rendering of them already existed; **new** in this change are the task-create/task-close flags (`--template`, `--require-acceptance`, `--force`) and the `(checked/total)` acceptance-count rendering — all of it convention + presentation + an opt-in gate. Fully revertible.
 - Old tasks with free-text `acceptance` parse to `(0, 0)` — rendered without a count, never gated. No backfill needed.
 - The gate is fail-safe: unset by default (warn only), so nothing that closes today stops closing. Teams that want teeth opt in per-call or via the env var.
 - Sets up a future `ygg task close` → `RunState::Failed` wiring on unmet acceptance (ADR 0016 D5) without committing to it now.
