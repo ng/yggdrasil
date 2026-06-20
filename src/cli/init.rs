@@ -719,7 +719,13 @@ async fn init(skips: &[String], yes: bool) -> Result<(), anyhow::Error> {
                 "then: psql -U postgres -h {pg_host} -p {pg_port} -d postgres -c \"GRANT ALL ON SCHEMA public TO {pg_user};\""
             ));
             hint("then re-run: ygg init");
-            std::process::exit(1);
+            // Same skip-or-exit contract as the other postgres failure paths
+            // above — without this, --yes (and a plain skip) couldn't get past
+            // an existing-but-unmanageable role (e.g. Postgres.app, where the
+            // superuser is the OS user, not `postgres`).
+            if !prompt_skip("postgresql") {
+                std::process::exit(1);
+            }
         }
 
         // Create database
