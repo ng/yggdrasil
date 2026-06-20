@@ -180,10 +180,14 @@ fn transcript_totals(path: &std::path::Path) -> Totals {
     t
 }
 
-/// Compact token formatting matching the liked shell statusline: `1234` →
-/// `1.2k`, `45230` → `45.2k`, `340` → `340` (one decimal, lowercase k).
+/// Compact token formatting: `340` → `340`, `45230` → `45.2k`, `1_500_000` →
+/// `1.5M` (one decimal). Cumulative totals — especially summed cache reads —
+/// routinely cross 1M over a long session, so step up to `M` rather than
+/// printing an unreadable `1500.0k`.
 fn fmt_k(n: i64) -> String {
-    if n >= 1000 {
+    if n >= 1_000_000 {
+        format!("{}.{}M", n / 1_000_000, (n % 1_000_000) / 100_000)
+    } else if n >= 1000 {
         format!("{}.{}k", n / 1000, (n % 1000) / 100)
     } else {
         format!("{n}")
