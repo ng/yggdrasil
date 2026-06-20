@@ -1,199 +1,194 @@
 //! `ygg bar` — status-bar line generator. Reads Claude Code's statusline
-//! JSON from stdin (`{session_id, cost: {total_cost_usd}, context_window:
-//! {used_percentage}, ...}`), joins it with Yggdrasil's per-agent state and
-//! today's cache/inference savings, and emits a single colored line.
+//! JSON from stdin (`{session_id, transcript_path, workspace: {current_dir},
+//! ...}`), parses the session transcript for token totals + context size, and
+//! appends this agent's Yggdrasil state (state, locks held, other active
+//! agents) joined from the DB.
 //!
-//! Goals (per user feedback):
-//!   - drop "idle" — the agent-workflow state isn't meaningful to humans
-//!   - round cost to 2 decimal places
-//!   - show token usage
-//!   - surface cache hits / inference calls saved (the "did this help me?"
-//!     signal that's otherwise invisible)
+//! Format (per user feedback — match the liked shell statusline, then add ygg):
+//!   ↑<in> ↓<out> cache:<X> │ ctx:<N> (pct%) │ ygg:<agent> <state> · N locks · M agents
 //!
-//! Designed to be fast: one DB query, opened per invocation. Refreshes
-//! every 3s (Claude Code statusLine default), so keep it under ~100ms.
+//! - ↑/↓/cache are summed across every assistant turn (session totals);
+//!   ctx is the last turn's window occupancy (input + cache), like CC's own bar.
+//! - The ygg segment is best-effort: if this session has no matching agent
+//!   row (e.g. a plain `claude` session that never ran a ygg hook), it's
+//!   omitted and the token line still renders.
+//!
+//! Designed to be fast: a single DB round of small queries, opened per
+//! invocation. Refreshes every 3s (Claude Code statusLine default).
 
-use std::io::Read;
+use crate::lock::LockManager;
+use crate::models::agent::{AgentRepo, AgentState};
+use chrono::{Duration, Utc};
+use std::io::{BufRead, Read};
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
-const GREEN: &str = "\x1b[38;5;114m";
-const YELL: &str = "\x1b[38;5;221m";
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
 const BOLD: &str = "\x1b[1m";
 
-pub async fn execute(_pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
+/// Context-window size used to compute the ctx percentage. The 1M window is
+/// the tier this user runs; the liked shell statusline hard-codes the same.
+const CTX_LIMIT: i64 = 1_000_000;
+
+/// An agent counts as "active" (toward the M-agents tally) when it is not
+/// shut down *and* was touched within this window — drops stale idle rows.
+const ACTIVE_WINDOW_MINS: i64 = 15;
+
+pub async fn execute(pool: &sqlx::PgPool) -> Result<(), anyhow::Error> {
     // Read Claude Code's JSON payload from stdin. Non-fatal if absent.
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
+    let j: serde_json::Value = serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
 
-    let j: serde_json::Value =
-        serde_json::from_str(&input).unwrap_or_else(|_| serde_json::Value::Null);
+    // ── Token segment (matches the liked shell statusline) ──────────────────
+    let transcript = j.get("transcript_path").and_then(|v| v.as_str());
+    let Totals { ti, to, tc, ctx } = transcript
+        .map(|p| transcript_totals(std::path::Path::new(p)))
+        .unwrap_or_default();
 
-    let cost_usd = j
-        .pointer("/cost/total_cost_usd")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let model_label = j
-        .pointer("/model/display_name")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| {
-            j.pointer("/model/id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        });
-    // Effort level lives in ~/.claude/settings.json (e.g. "xhigh"); CC's
-    // statusLine JSON doesn't reliably expose it. Read once per refresh —
-    // small file, infrequent invocation.
-    let effort = read_effort_level();
-    // Claude Code's statusLine JSON doesn't reliably expose token_usage
-    // under one path. Try several known spellings, then fall back to a
-    // transcript-byte-size estimate (~4 chars per token). This way tokens
-    // show up next to cost regardless of how CC labels the field.
-    let tok_total: i64 = token_count(&j).unwrap_or(0);
-
-    let mut segments: Vec<String> = Vec::new();
-
-    // Context + tokens are the same dimension (how full is the window), so
-    // merge them into one segment. Color climbs neutral → yellow → red as
-    // pressure rises. Use absolute knees, not percent-of-cap — the cap
-    // detection upstream isn't 100% reliable, and degradation research is
-    // independent of the model's hard limit. Matches dashboard ctx_color.
-    let red = "\x1b[38;5;203m";
-    let orange = "\x1b[38;5;208m";
-    let (bar_color, value_style) = if tok_total >= 500_000 {
-        (red, format!("{red}{BOLD}"))
-    } else if tok_total >= 300_000 {
-        (orange, format!("{orange}{BOLD}"))
-    } else if tok_total >= 200_000 {
-        (YELL, format!("{YELL}{BOLD}"))
+    let pct = if CTX_LIMIT > 0 {
+        (ctx * 100 / CTX_LIMIT).clamp(0, 100)
     } else {
-        (GREEN, format!("{BOLD}"))
+        0
     };
-    let ctx_value = if tok_total > 0 {
-        format_tokens(tok_total)
+    let ctx_color = if pct < 50 {
+        GREEN
+    } else if pct <= 80 {
+        YELLOW
     } else {
-        "—".to_string()
+        RED
     };
-    segments.push(format!(
-        "{bar_color}▊{RESET} {DIM}ctx{RESET} {value_style}{ctx_value}{RESET}"
-    ));
 
-    // Model + effort: low-noise context for "what am I running right now."
-    if let Some(m) = model_label {
-        let suffix = effort
-            .as_deref()
-            .map(|e| format!(" {DIM}{e}{RESET}"))
-            .unwrap_or_default();
-        segments.push(format!("{CYAN}{m}{RESET}{suffix}"));
-    } else if let Some(e) = effort.as_deref() {
-        segments.push(format!("{DIM}{e}{RESET}"));
+    let mut line = format!(
+        "{CYAN}↑{}{RESET} {GREEN}↓{}{RESET} {DIM}cache:{}{RESET} {DIM}│{RESET} \
+         {ctx_color}ctx:{} ({pct}%){RESET}",
+        fmt_k(ti),
+        fmt_k(to),
+        fmt_k(tc),
+        fmt_k(ctx),
+    );
+
+    // ── ygg state segment (best-effort) ─────────────────────────────────────
+    if let Some(seg) = ygg_segment(pool, &j).await {
+        line.push_str(&format!(" {DIM}│{RESET} {seg}"));
     }
 
-    // Session cost — 2dp. Label as "spend" so it reads as verb-action.
-    if cost_usd > 0.0 {
-        segments.push(format!("{DIM}spend{RESET} {BOLD}${:.2}{RESET}", cost_usd));
-    }
-
-    println!("{}", segments.join(" · "));
+    println!("{line}");
     Ok(())
 }
 
-/// Pull the user's `effortLevel` (e.g. "xhigh") from
-/// `~/.claude/settings.json`. Best-effort — returns None if the file
-/// is missing, malformed, or the field is absent.
-fn read_effort_level() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::PathBuf::from(home).join(".claude/settings.json");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("effortLevel")
-        .and_then(|x| x.as_str())
-        .map(String::from)
+/// This agent's Yggdrasil state: `ygg:<name> <state> · N locks · M agents`.
+/// Returns None when the current session has no matching agent row, so the
+/// token line renders alone rather than erroring.
+async fn ygg_segment(pool: &sqlx::PgPool, j: &serde_json::Value) -> Option<String> {
+    let name = current_agent_name(j);
+    let repo = AgentRepo::new(pool, crate::db::user_id());
+    let agent = repo.get_by_name(&name).await.ok()??;
+
+    let locks = LockManager::new(pool, 0, crate::db::user_id())
+        .list_agent_locks(agent.agent_id)
+        .await
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    let cutoff = Utc::now() - Duration::minutes(ACTIVE_WINDOW_MINS);
+    let others = repo
+        .list()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| {
+            a.agent_id != agent.agent_id
+                && a.current_state != AgentState::Shutdown
+                && a.updated_at >= cutoff
+        })
+        .count();
+
+    Some(format!(
+        "{DIM}ygg:{RESET}{BOLD}{name}{RESET} {DIM}{}{RESET} {DIM}· {locks} locks · {others} agents{RESET}",
+        agent.current_state
+    ))
 }
 
-/// Pull a session token count from the Claude Code statusline JSON.
-/// CC has shipped several shapes over releases; check each, fall back to a
-/// transcript-file-size estimate (~4 chars per token).
-fn token_count(j: &serde_json::Value) -> Option<i64> {
-    let direct = [
-        "/token_usage/total_tokens",
-        "/tokens/total",
-        "/usage/total_tokens",
-    ];
-    for path in direct {
-        if let Some(n) = j.pointer(path).and_then(|v| v.as_i64()) {
-            if n > 0 {
-                return Some(n);
-            }
-        }
+/// Resolve this session's agent name the same way the hooks do
+/// (`$YGG_AGENT_NAME`, else the working-directory basename). For the
+/// statusLine we prefer the cwd reported in the JSON payload, falling back to
+/// the process cwd.
+fn current_agent_name(j: &serde_json::Value) -> String {
+    if let Ok(name) = std::env::var("YGG_AGENT_NAME")
+        && !name.is_empty()
+    {
+        return name;
     }
-    // Input + output sum, multiple spellings.
-    for (in_p, out_p) in [
-        ("/token_usage/input_tokens", "/token_usage/output_tokens"),
-        ("/tokens/input", "/tokens/output"),
-        ("/usage/input_tokens", "/usage/output_tokens"),
-    ] {
-        let i = j.pointer(in_p).and_then(|v| v.as_i64()).unwrap_or(0);
-        let o = j.pointer(out_p).and_then(|v| v.as_i64()).unwrap_or(0);
-        if i + o > 0 {
-            return Some(i + o);
-        }
-    }
-    // Fallback: parse the last `usage` entry from the transcript JSONL —
-    // same signal CC's own status line uses (cache_read + cache_creation +
-    // input + output). Reads only the tail of the file.
-    let transcript = j.get("transcript_path").and_then(|v| v.as_str())?;
-    if let Some(n) = last_usage_tokens_from_transcript(std::path::Path::new(transcript)) {
-        return Some(n);
-    }
-    // Very last resort: bytes / 30 is much closer to reality for JSONL than
-    // the old /8 heuristic, which was ~4x high.
-    let bytes = std::fs::metadata(transcript).ok()?.len() as i64;
-    Some((bytes / 30).max(0))
+    let cwd = j
+        .pointer("/workspace/current_dir")
+        .and_then(|v| v.as_str())
+        .or_else(|| j.get("cwd").and_then(|v| v.as_str()))
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    cwd.as_deref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "ygg".to_string())
 }
 
-fn last_usage_tokens_from_transcript(path: &std::path::Path) -> Option<i64> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let tail_start = len.saturating_sub(200_000);
-    file.seek(SeekFrom::Start(tail_start)).ok()?;
-    let mut buf = String::new();
-    file.take(200_000).read_to_string(&mut buf).ok()?;
-    for line in buf.lines().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+#[derive(Default)]
+struct Totals {
+    /// Σ input_tokens across assistant turns.
+    ti: i64,
+    /// Σ output_tokens across assistant turns.
+    to: i64,
+    /// Σ (cache_creation + cache_read) across assistant turns.
+    tc: i64,
+    /// Last turn's window occupancy: input + cache_creation + cache_read.
+    ctx: i64,
+}
+
+/// Stream the transcript JSONL once, summing per-turn usage for the totals and
+/// keeping the last turn's occupancy for ctx. Mirrors the liked shell
+/// statusline's `jq` reducer. Reads line-by-line to bound memory on large
+/// transcripts.
+fn transcript_totals(path: &std::path::Path) -> Totals {
+    let mut t = Totals::default();
+    let Ok(file) = std::fs::File::open(path) else {
+        return t;
+    };
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        let usage = v.pointer("/message/usage").or_else(|| v.pointer("/usage"));
-        let Some(u) = usage else { continue };
-        let cr = u
-            .get("cache_read_input_tokens")
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0);
-        let cc = u
-            .get("cache_creation_input_tokens")
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0);
-        let inp = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-        let out = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-        let total = cr + cc + inp + out;
-        if total > 0 {
-            return Some(total);
+        if v.get("type").and_then(|x| x.as_str()) != Some("assistant") {
+            continue;
         }
+        let Some(u) = v.pointer("/message/usage").or_else(|| v.pointer("/usage")) else {
+            continue;
+        };
+        let field = |k: &str| u.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+        let inp = field("input_tokens");
+        let out = field("output_tokens");
+        let cache = field("cache_creation_input_tokens") + field("cache_read_input_tokens");
+        t.ti += inp;
+        t.to += out;
+        t.tc += cache;
+        // Last assistant turn wins for the live context occupancy.
+        t.ctx = inp + cache;
     }
-    None
+    t
 }
 
-fn format_tokens(n: i64) -> String {
-    // Always K up to 10M (900K ≠ 1M is a big deal); M only when the
-    // thousands digit stops carrying useful information. No decimal — we
-    // want to see the thousands place, not lose it to rounding.
-    if n >= 10_000_000 {
-        format!("{}M", n / 1_000_000)
-    } else if n >= 1_000 {
-        format!("{}K", n / 1_000)
+/// Compact token formatting: `340` → `340`, `45230` → `45.2k`, `1_500_000` →
+/// `1.5M` (one decimal). Cumulative totals — especially summed cache reads —
+/// routinely cross 1M over a long session, so step up to `M` rather than
+/// printing an unreadable `1500.0k`.
+fn fmt_k(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{}.{}M", n / 1_000_000, (n % 1_000_000) / 100_000)
+    } else if n >= 1000 {
+        format!("{}.{}k", n / 1000, (n % 1000) / 100)
     } else {
         format!("{n}")
     }
