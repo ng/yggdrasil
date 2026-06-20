@@ -1,10 +1,21 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
 
 use crate::db;
+
+// Non-interactive mode (`ygg init --yes`). When set, every prompt resolves to
+// its default branch (proceed on yes/no questions, continue on skip questions)
+// without reading stdin — so the install script, CI, and spawned agents can run
+// `ygg init` unattended without hanging on a TTY.
+static NON_INTERACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn non_interactive() -> bool {
+    NON_INTERACTIVE.load(Ordering::Relaxed)
+}
 
 // Colors
 const D: &str = "\x1b[90m";
@@ -85,6 +96,10 @@ fn prompt_yes(msg: &str) -> bool {
     use std::io::{self, BufRead, Write};
     println!("  {BR}│{X}");
     println!("  {BR}│{X}  {Y}{msg} [Y/n]{X}");
+    if non_interactive() {
+        println!("  {BR}│{X}  {D}> (--yes) yes{X}");
+        return true;
+    }
     print!("  {BR}│{X}  > ");
     io::stdout().flush().ok();
     let mut s = String::new();
@@ -112,6 +127,13 @@ fn prompt_skip(name: &str) -> bool {
     use std::io::{self, BufRead, Write};
     println!("  {BR}│{X}");
     println!("  {BR}│{X}  {Y}skip {name} and continue? [Y/n]{X}");
+    // In --yes mode, continue past the failed dep but DON'T persist the skip —
+    // an unattended run shouldn't silently teach future interactive runs to
+    // skip this dep forever.
+    if non_interactive() {
+        println!("  {BR}│{X}  {D}> (--yes) skip and continue{X}");
+        return true;
+    }
     println!("  {BR}│{X}  {D}(choice will be remembered for future runs){X}");
     print!("  {BR}│{X}  > ");
     io::stdout().flush().ok();
@@ -401,12 +423,16 @@ async fn detect_pg_version() -> String {
 
 // ─── init ────────────────────────────────────────────────
 
-pub async fn execute_with_options(_verbose: bool, skip: &[String]) -> Result<(), anyhow::Error> {
-    init(skip).await
+pub async fn execute_with_options(
+    _verbose: bool,
+    skip: &[String],
+    non_interactive: bool,
+) -> Result<(), anyhow::Error> {
+    init(skip, non_interactive).await
 }
 
 pub async fn execute() -> Result<(), anyhow::Error> {
-    init(&[]).await
+    init(&[], false).await
 }
 
 fn skipping(list: &[String], name: &str) -> bool {
@@ -423,7 +449,9 @@ async fn load_saved_skips(config_dir: &Path) -> Vec<String> {
     }
 }
 
-async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
+async fn init(skips: &[String], yes: bool) -> Result<(), anyhow::Error> {
+    NON_INTERACTIVE.store(yes, Ordering::Relaxed);
+
     // Config lives in ~/.config/ygg/
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let config_dir = Path::new(&home).join(".config").join("ygg");
@@ -489,11 +517,17 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
         println!("  {BR}│{X}  {D}default: {default_db_url}{X}");
         println!("  {BR}│{X}");
         println!("  {BR}│{X}  {Y}use default? [Y/n]{X}");
-        print!("  {BR}│{X}  > ");
-        io::stdout().flush().ok();
-        let mut answer = String::new();
-        io::stdin().lock().read_line(&mut answer).ok();
-        let a = answer.trim().to_lowercase();
+        // --yes: take the default URL without prompting.
+        let a = if non_interactive() {
+            println!("  {BR}│{X}  {D}> (--yes) default{X}");
+            String::new()
+        } else {
+            print!("  {BR}│{X}  > ");
+            io::stdout().flush().ok();
+            let mut answer = String::new();
+            io::stdin().lock().read_line(&mut answer).ok();
+            answer.trim().to_lowercase()
+        };
 
         let url = if a.is_empty() || a == "y" || a == "yes" {
             default_db_url.clone()
@@ -795,8 +829,10 @@ async fn init(skips: &[String]) -> Result<(), anyhow::Error> {
                         hint("the configured role doesn't exist on this postgres server");
                         hint(&format!("current URL: {db_show}"));
                         hint("");
-                        // Offer to reconfigure the URL in-place
-                        if prompt_yes("reconfigure the database URL now?") {
+                        // Offer to reconfigure the URL in-place. Skipped under
+                        // --yes — there's no new URL to read unattended, so just
+                        // print the manual-fix hints below.
+                        if !non_interactive() && prompt_yes("reconfigure the database URL now?") {
                             use std::io::{self, BufRead, Write};
                             hint(&format!("your system user is: {sys_user}"));
                             println!(
