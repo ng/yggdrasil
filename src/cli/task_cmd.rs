@@ -759,18 +759,27 @@ fn acceptance_checkbox_counts(acceptance: &str) -> (usize, usize) {
 pub fn print_task_template() {
     print!(
         r#"# ygg task scaffold — fill in the <...> slots, then run the command.
-# Definition of Done lives in --acceptance as a `- [ ]` checklist: each box
-# must be binary pass/fail verifiable (path, command, numeric threshold).
-# Repo-wide gates (cargo test/check/fmt, locks released, PR open) are the
-# standing DoD from CLAUDE.md — note only deviations in --notes, don't retype.
+# --description Context is the one field you do NOT compress: the agent picks
+#   this up cold and must not know less than the conversation that spawned it.
+# --acceptance is the Definition of Done: a `- [ ]` checklist, each box binary
+#   pass/fail verifiable (path, command, numeric threshold). Repo-wide gates
+#   (cargo test/check/fmt, locks, PR) are standing DoD — note only deviations.
+# --design bounds scope: hard constraints + non-goals (ask before expanding).
+# Long context? pipe it: --body-file spec.md  (or)  ... | ygg task create --stdin
 
 ygg task create "<imperative title, <=60 chars>" \
   --kind <task|bug|feature|chore|epic> --priority <0-4> \
   --description "Why: <one sentence, cite source: Adversarial review: / Incident <date>: / ...>.
-What: <one sentence, imperative>." \
+What: <one sentence, imperative>.
+
+Context: <full background from the conversation — situation, decisions already
+made, alternatives rejected and why, file/function pointers. Don't make the
+agent re-derive what chat already settled.>" \
   --acceptance "- [ ] <verifiable criterion: path / command / threshold>
 - [ ] cargo test passes
 - [ ] cargo check --all-targets clean" \
+  --design "Constraints (use exactly this unless hard blocker): <which files/approach>.
+Out of scope — ask before doing: <what NOT to expand into; deps/features needing approval>." \
   --notes "Refs: <yggdrasil-NN, ADR-NNNN, URL>"
 "#
     );

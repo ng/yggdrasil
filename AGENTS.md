@@ -103,10 +103,16 @@ Tickets are authored and consumed by autonomous agents. Use the dedicated
 fields, not one `--description` blob (`ygg task show` renders each
 separately; `ygg task create --template` scaffolds them):
 **`--description`** = **Why** (one sentence, cite source) + **What** (one
-sentence, imperative). **`--acceptance`** = Definition of Done as a `- [ ]`
-checkbox list, each box independently verifiable (pin paths, commands,
-numeric thresholds; no vague verbs). **`--design`** (optional) = approach.
-**`--notes`** (optional) = `Refs:` (`yggdrasil-NN`, ADR, URL).
+sentence, imperative) + **Context** (full-fidelity background — the agent
+claims this cold and must not know less than the conversation that spawned it:
+situation, decisions made, alternatives rejected and why, file/function
+pointers; pipe long context via `--body-file`/`--stdin`). **`--acceptance`** =
+Definition of Done as a `- [ ]` checkbox list, each box independently
+verifiable (pin paths, commands, numeric thresholds; no vague verbs).
+**`--design`** (optional) = **Constraints** (use exactly this unless a hard
+blocker; which files to touch) + **Non-goals** (what NOT to expand into; ask
+before adding a dep/feature/surface the ticket didn't name). **`--notes`**
+(optional) = `Refs:` (`yggdrasil-NN`, ADR, URL).
 
 Definition of Done = the per-task `--acceptance` checklist **plus** the
 standing repo gates (tests/check/fmt pass, locks released, PR open) — those
@@ -115,12 +121,14 @@ are NOT retyped per ticket; note only deviations in `--notes`. Before
 `(checked/total)` count, and close warns (or blocks under
 `--require-acceptance` / `YGG_CLOSE_REQUIRES_ACCEPTANCE=1`, override `--force`).
 
-Be terse in `ygg task create` titles/descriptions/acceptance/notes and
-`ygg learn` rules. Drop filler and articles when meaning survives.
-Preserve identifiers, paths, commands, numbers, URLs, and modal
-keywords (always/never/must/should/cannot/don't) verbatim. Does NOT
-apply to commit messages, PR descriptions, or chat — those stay
-human-prose.
+Be terse in `ygg task create` titles, the `--acceptance` checklist, and
+`ygg learn` rules. Drop filler and articles when meaning survives. Preserve
+identifiers, paths, commands, numbers, URLs, and modal keywords
+(always/never/must/should/cannot/don't) verbatim. **Exception:** the
+`--description` Context paragraph (and non-obvious `--design`) are full
+fidelity — terseness there is what creates the chat→ticket knowledge gap.
+Compress the criteria, not the context. Does NOT apply to commit messages,
+PR descriptions, or chat — those stay human-prose.
 
 ## Session Completion
 

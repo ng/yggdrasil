@@ -37,6 +37,15 @@ This split keeps human/agent authoring effort on the part that's actually task-s
 
 The check is **purely structural** — are the boxes ticked? Free-text or empty acceptance has `total == 0` and is never gated, so existing tasks and the default close path are unaffected.
 
+### Decision 4 — Context is full-fidelity; scope is bounded by non-goals
+
+Two authoring guardrails ship with the body rewrite, both addressing failures observed in practice (tasks carrying less knowledge than the conversation that produced them; agents expanding scope past what a ticket named):
+
+- **Context is the one field that is NOT terse.** ADR-era convention applied "terse for AI-tracking fields" to *everything*, including `--description`. That is exactly what opens a knowledge gap between a Claude conversation and the ticket an agent later claims cold. The rewrite carves out the `--description` **Context** paragraph (situation, decisions made, alternatives rejected and why, file/function pointers) as full-fidelity, and points long context at the existing `--body-file` / `--stdin` inputs. Terseness still governs titles, the `--acceptance` checklist, and `ygg learn` rules — compress the *criteria*, not the *context*.
+- **`--design` carries constraints + non-goals.** Previously documented only as vague "approach notes," `--design` becomes the scope guardrail: hard constraints ("use exactly this unless a hard blocker", which files to touch) and **non-goals** — what NOT to expand into, and what needs approval first ("ask before adding a dependency/feature/surface the ticket didn't name"). This bounds scope the way `--acceptance` bounds done-ness.
+
+No new columns — both reuse existing fields (`description`, `design`) and existing inputs (`--body-file`/`--stdin`). The change is convention + the `--template` scaffold.
+
 ## Why structural, not executed
 
 A box `- [x] cargo test passes` proves nothing unless something ran the command. The tempting next step is to have `ygg task close` auto-execute acceptance commands. We explicitly **do not**: arbitrary command execution at close time means a sandbox, environment assumptions, and flaky tests that wedge closes — high cost, new failure surface. Instead ygg's check stays structural (boxes ticked), and *semantic* truth is carried where it already lives: the agent's own run, and ADR 0016's `failed` (acceptance-unmet) vs `crashed` (infra) run states. Honesty of a tick is the agent's responsibility, the same way a human checkbox is.
@@ -49,6 +58,8 @@ A box `- [x] cargo test passes` proves nothing unless something ran the command.
 - **Hard-blocking close by default.** Would break the existing manual flow and the scheduler's crash/cancel closes. Warn-by-default, block-on-flag is the safe ordering. Rejected as a default; available via the flag/env.
 - **Auto-executing acceptance commands at close.** See "Why structural" — sandbox/flakiness/arbitrary-exec cost. Rejected.
 - **Per-task DoD authoring (repeating the repo gates in every ticket).** Noise that drifts. The gates are a repo constant. Rejected.
+- **Keep `--description` terse (status quo).** Cheapest, but it is the direct cause of the chat→ticket knowledge gap — an agent claiming a terse ticket re-derives or guesses what the conversation already settled. Rejected for the Context paragraph; terseness retained for criteria/titles.
+- **Dedicated `context` / `non_goals` columns.** More structure than needed and a migration; `description` and `design` already hold these. Rejected, consistent with the no-new-columns stance above.
 
 ## Consequences
 
