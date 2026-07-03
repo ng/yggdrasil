@@ -1,5 +1,305 @@
 # Changelog
 
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.1](https://github.com/ng/yggdrasil/compare/v0.1.0...v0.1.1) - 2026-07-03
+
+### Added
+
+- *(bar)* match liked token statusline + append ygg state ([#109](https://github.com/ng/yggdrasil/pull/109))
+- re-add ygg remember (non-embedding) and ygg task move ([#97](https://github.com/ng/yggdrasil/pull/97))
+- reap zombie agents and close tmux windows after completion ([#95](https://github.com/ng/yggdrasil/pull/95))
+- add TOKENS column to agents dashboard, fix Nerdy context bars ([#92](https://github.com/ng/yggdrasil/pull/92))
+- incremental token stats via PromptSubmit hook ([#90](https://github.com/ng/yggdrasil/pull/90))
+- wire token stats recording into Stop hook ([#89](https://github.com/ng/yggdrasil/pull/89))
+- native ygg hook subcommand replacing shell script hooks ([#88](https://github.com/ng/yggdrasil/pull/88))
+- v0.2 epic — chat UX, init robustness, unit tests, docs ([#87](https://github.com/ng/yggdrasil/pull/87))
+- ygg init auto-creates PG role via superuser fallback ([#86](https://github.com/ng/yggdrasil/pull/86))
+- TUI Chat panel with broadcast messaging ([#78](https://github.com/ng/yggdrasil/pull/78))
+- TUI UX polish — time window toggle, vector matches, clearer labels ([#77](https://github.com/ng/yggdrasil/pull/77))
+- replace empty scheduler tile with task runs activity panel ([#76](https://github.com/ng/yggdrasil/pull/76))
+- TUI shows all agents by default with user filter toggle ([#75](https://github.com/ng/yggdrasil/pull/75))
+- auto-detect pending migrations on install and session start ([#73](https://github.com/ng/yggdrasil/pull/73))
+- switch to EmbeddingGemma 768d + configurable similarity threshold ([#72](https://github.com/ng/yggdrasil/pull/72))
+- observer intent surface, plan-mode detection, auto-cleanup (ygg-5) ([#71](https://github.com/ng/yggdrasil/pull/71))
+- multi-user support — partition DB by whoami, enable cross-user comms ([#70](https://github.com/ng/yggdrasil/pull/70))
+- scoped learnings — filter by agent identity and task kind ([#68](https://github.com/ng/yggdrasil/pull/68))
+- TUI overhaul — 7 panes including retrieval inspector + query console + log viewer
+- ygg recovery-test — pressure-test compaction, skip-it, crash
+- calibrated classifier prompt with rubric + one-shot example
+- HyDE query expansion (yggdrasil-5)
+- epoch reflections — mid-session digests at token-growth thresholds
+- ygg trace — visual per-turn pipeline inspector
+- task auto-classify + log glyph flush
+- LLM-generated digests (yggdrasil-4)
+- hybrid retrieval (RRF) + query-centered snippets
+- warm classifier, token-based disclosure cooldown, paraphrase dedup
+- retrieval outcome measurement — HitReferenced events (yggdrasil-20)
+- write-time secret redaction + ygg forget (yggdrasil-18)
+- *(bar)* trend arrows for cache and recalls
+- ygg bar status line, delimited log format, P-style priorities,
+- readable log format + ygg digest --now + session_summaries schema
+- mechanical scoring + disclosure gate + ygg eval + classifier default off
+- relevance classifier for ygg inject (ADR 0011)
+- embedding cache — sha256(text)+model → vector memoization
+- ygg init-project — install/update/remove managed CLAUDE.md + AGENTS.md block
+- task-lifecycle events in logs; LLM-usage research doc
+- ygg task + ygg remember — beads replacement, repos as first-class
+- embedding_call events in live stream — model, latency, success
+- prime shows session recovery + transcript-based context pressure
+- live event stream — ygg logs --follow
+- Stop hook digest — capture corrections, sentiment, session summary
+- live vector memory — write + recall across sessions
+- gastown-style ygg prime integration for Claude Code
+- remember skip decisions across runs
+- invisible orchestration via Claude Code hooks
+- ygg with no args opens tmux session, green tree theme
+- embedded inference via fastembed, no Ollama needed
+- feedback loop, JSONL observer, prompted installs
+
+### Fixed
+
+- squash migrations to remove pgvector dependency on clean install
+- avoid panic when digest truncation lands inside a multi-byte char ([#93](https://github.com/ng/yggdrasil/pull/93))
+- parse nested message.usage from Claude Code transcripts ([#91](https://github.com/ng/yggdrasil/pull/91))
+- detect timezone errors, surface pgvector failures, add migration retry hint ([#80](https://github.com/ng/yggdrasil/pull/80))
+- replace auto-install with detect-and-suggest for PG and pgvector ([#79](https://github.com/ng/yggdrasil/pull/79))
+- backfill empty user_id from multi-user migration + add tests ([#74](https://github.com/ng/yggdrasil/pull/74))
+- make multi_user migration idempotent with IF NOT EXISTS guards
+- never collapse 900K→0.9M; dashboard pressure reads real transcript
+- *(logs)* truncate at char boundary, not byte boundary
+- *(bar)* session tokens show next to cost with transcript-size fallback
+- *(cli)* allow_hyphen_values on task text fields (yggdrasil-21)
+- *(bar)* label every number; replace cache % with cache N/M
+- correct $3→$2 param index in list_since SQL
+- use matcher+hooks array format for Claude Code hooks settings
+- use configured pg host/port, offer URL reconfiguration on auth failure
+- write config immediately on prompt, no duplicate writes
+- never load local .env — only ~/.config/ygg/.env
+- write DATABASE_URL directly, force env override before migrations
+- remove committed .env, add to .gitignore
+- createdb with correct user before migrations, handle role errors
+- use whoami for default pg user, include in connection URL
+- prompt for pg URL when no config exists, don't load stale .env
+- build pgvector from git source, not brew formula
+- build pgvector from source to match local pg version
+- use pg_config for paths, no hardcoded /opt/homebrew
+- auto-detect pg version, rebuild pgvector against correct one
+- use postgresql@16 everywhere (was @15)
+- clean up unused imports and variables
+- createdb before pgvector check, enable extension in ygg db
+- config lives in ~/.config/ygg/.env, not cwd
+- use system user for postgres, no password by default
+- all adversarial review findings resolved
+- TOCTOU lock race, atomic state updates, chunked digest
+- fix rtk install URL
+- fix PATH: ensure /opt/homebrew/bin is visible on macOS
+- fix brew postgres install: show output, bump timeout to 180s
+- fix install script repo URL
+
+### Other
+
+- Pin release-plz action version
+- Address codex status review feedback
+- Add Codex compact status docs
+- definition-of-done + richer context + scope guardrails ([#108](https://github.com/ng/yggdrasil/pull/108))
+- add --yes for unattended bootstrap ([#107](https://github.com/ng/yggdrasil/pull/107))
+- Add release-plz for automated releases and changelog ([#106](https://github.com/ng/yggdrasil/pull/106))
+- Surface file-scoped learnings on edit + track last_applied_at ([#98](https://github.com/ng/yggdrasil/pull/98))
+- Add ADR 0017: learnings approval gate + agent-proposed capture ([#99](https://github.com/ng/yggdrasil/pull/99))
+- Add pre-recovery git checkpoint before reaping agent worktrees ([#104](https://github.com/ng/yggdrasil/pull/104))
+- Harden spawned agents against Bash-tool timeout kills (yggdrasil-116) ([#103](https://github.com/ng/yggdrasil/pull/103))
+- Fix scheduler dry-run crash on SMALLINT priority decode ([#102](https://github.com/ng/yggdrasil/pull/102))
+- Thematic agent names: task-level slug, stop cwd-basename identity drift ([#105](https://github.com/ng/yggdrasil/pull/105))
+- Implement ADR 0017: learnings approval gate + agent-proposed capture ([#101](https://github.com/ng/yggdrasil/pull/101))
+- Add `ygg handoff` — session checkpoint that auto-resumes after /clear ([#100](https://github.com/ng/yggdrasil/pull/100))
+- Remove embedding/Ollama retrieval layer (ADR 0015 phases 2-4) ([#96](https://github.com/ng/yggdrasil/pull/96))
+- compact transitions, fix 0-data counters, add agent messaging ([#69](https://github.com/ng/yggdrasil/pull/69))
+- msg send: auto-spawn worker when recipient is inactive ([#67](https://github.com/ng/yggdrasil/pull/67))
+- widen delivery-badge column so unpushed doesn't collide with time ([#66](https://github.com/ng/yggdrasil/pull/66))
+- pane-id refs (fix base-index=1); observe: bounded poll ([#65](https://github.com/ng/yggdrasil/pull/65))
+- ygg bar: tokens not %, surface model + effort level ([#64](https://github.com/ng/yggdrasil/pull/64))
+- keep dormant rows readable under selection cursor ([#63](https://github.com/ng/yggdrasil/pull/63))
+- ygg chat: pick-and-send wrapper over msg send ([#62](https://github.com/ng/yggdrasil/pull/62))
+- ygg inject: emit hook_fired for every UserPromptSubmit ([#61](https://github.com/ng/yggdrasil/pull/61))
+- ADR 0015: drop retrieval-only counters from dashboard + ygg bar ([#60](https://github.com/ng/yggdrasil/pull/60))
+- dim dormant rows (idle or 30m+ untouched), drop CTX denominator ([#59](https://github.com/ng/yggdrasil/pull/59))
+- per-session ctx caps + soft-knee colors, dim idle rows, token stats ([#58](https://github.com/ng/yggdrasil/pull/58))
+- nerdy stats pane (pool / tables / pgvector / hooks) ([#57](https://github.com/ng/yggdrasil/pull/57))
+- status strip: live db pool + event-rate + pgvector indicator ([#56](https://github.com/ng/yggdrasil/pull/56))
+- auto-recover from macOS Gatekeeper SIGKILL on first verify ([#55](https://github.com/ng/yggdrasil/pull/55))
+- atomic cp + codesign + 5s verify so first run can't SIGKILL ([#54](https://github.com/ng/yggdrasil/pull/54))
+- managed block: document active vector-memory retrieval ([#53](https://github.com/ng/yggdrasil/pull/53))
+- standardise body structure in managed CLAUDE.md / AGENTS.md ([#52](https://github.com/ng/yggdrasil/pull/52))
+- ygg integrate --global: install at ~/.claude, skip AGENTS.md by default ([#51](https://github.com/ng/yggdrasil/pull/51))
+- legend bar under the run grid ([#50](https://github.com/ng/yggdrasil/pull/50))
+- extend tui_flash::ops fixture for burn-rate fields ([#49](https://github.com/ng/yggdrasil/pull/49))
+- agent constellation force-directed layout substrate ([#48](https://github.com/ng/yggdrasil/pull/48))
+- disclosure governor (agent-ways action-potential model) ([#47](https://github.com/ng/yggdrasil/pull/47))
+- spinner + per-key pending substrate ([#46](https://github.com/ng/yggdrasil/pull/46))
+- PiP transcript-popup state machine ([#45](https://github.com/ng/yggdrasil/pull/45))
+- state-aware box-drawing DAG glyph palette ([#44](https://github.com/ng/yggdrasil/pull/44))
+- memory similarity ridgeline substrate ([#43](https://github.com/ng/yggdrasil/pull/43))
+- repo treemap squarified layout substrate ([#42](https://github.com/ng/yggdrasil/pull/42))
+- retry-storm collapse + next-retry countdown ([#41](https://github.com/ng/yggdrasil/pull/41))
+- DAG arc-diagram layout substrate ([#40](https://github.com/ng/yggdrasil/pull/40))
+- run-river horizon-chart projection substrate ([#39](https://github.com/ng/yggdrasil/pull/39))
+- lock swimlane gantt projection substrate ([#38](https://github.com/ng/yggdrasil/pull/38))
+- command palette substrate (Ctrl-K) ([#37](https://github.com/ng/yggdrasil/pull/37))
+- multi-select substrate (Space toggle / A select-all / X bulk) ([#36](https://github.com/ng/yggdrasil/pull/36))
+- drill stack with breadcrumbs ([#35](https://github.com/ng/yggdrasil/pull/35))
+- attention-item substrate (waiting/review/nudged punch list) ([#34](https://github.com/ng/yggdrasil/pull/34))
+- desktop notification substrate (osascript / notify-send) ([#33](https://github.com/ng/yggdrasil/pull/33))
+- per-pane substring filter substrate ([#32](https://github.com/ng/yggdrasil/pull/32))
+- saved views — name a pane+scope combo and reload it ([#31](https://github.com/ng/yggdrasil/pull/31))
+- calendar heatmap of run terminals (failure-rate by hour) ([#30](https://github.com/ng/yggdrasil/pull/30))
+- cascade ripple on task close (signature event) ([#29](https://github.com/ng/yggdrasil/pull/29))
+- global repo/all scope toggle (S) ([#28](https://github.com/ng/yggdrasil/pull/28))
+- context-sensitive help overlay (?) ([#27](https://github.com/ng/yggdrasil/pull/27))
+- run-grid pane (Airflow grid for task_runs) ([#23](https://github.com/ng/yggdrasil/pull/23))
+- floating detail overlay (k9s :describe pattern) ([#20](https://github.com/ng/yggdrasil/pull/20))
+- burn-rate line in the orchestration panel ([#19](https://github.com/ng/yggdrasil/pull/19))
+- transient toast strip above the status bar ([#18](https://github.com/ng/yggdrasil/pull/18))
+- flash cells whose value changed since last refresh ([#17](https://github.com/ng/yggdrasil/pull/17))
+- smooth gauge widget (1/8-block partials + viridis) ([#25](https://github.com/ng/yggdrasil/pull/25))
+- motion vocabulary + breathing/sparkline-tail substrate ([#24](https://github.com/ng/yggdrasil/pull/24))
+- inline rename of selected task title (lazygit pattern) ([#22](https://github.com/ng/yggdrasil/pull/22))
+- sparkline glyph buffer + agents-alive trend in ops panel ([#21](https://github.com/ng/yggdrasil/pull/21))
+- narrow-terminal collapse below 100 cols ([#16](https://github.com/ng/yggdrasil/pull/16))
+- adopt foundational ratatui ecosystem crates ([#15](https://github.com/ng/yggdrasil/pull/15))
+- soft-delete + trash + purge ([#26](https://github.com/ng/yggdrasil/pull/26))
+- emit agent_stale_warning instead of force-recovering ([#13](https://github.com/ng/yggdrasil/pull/13))
+- unified 16 KiB gate for output / error JSONB writes ([#12](https://github.com/ng/yggdrasil/pull/12))
+- lint subcommand surfacing pre-existing dep cycles ([#11](https://github.com/ng/yggdrasil/pull/11))
+- regression test for grade.sh log capture ([#10](https://github.com/ng/yggdrasil/pull/10))
+- bump pool max_connections default + YGG_DB_POOL override ([#9](https://github.com/ng/yggdrasil/pull/9))
+- scheduler tile on [1] Dashboard pane ([#8](https://github.com/ng/yggdrasil/pull/8))
+- roadmap tier 0: scheduler retry, heartbeat NULL, hook drift, auto-approve, runnable CLI ([#7](https://github.com/ng/yggdrasil/pull/7))
+- make install: post-install verify + recovery target ([#6](https://github.com/ng/yggdrasil/pull/6))
+- ygg task claim: surface scoped learnings on file match (yggdrasil-82) ([#5](https://github.com/ng/yggdrasil/pull/5))
+- ygg inject: YGG_INJECT=off default (yggdrasil-76) ([#4](https://github.com/ng/yggdrasil/pull/4))
+- address PR review: cargo fmt, fix message migration, CodeRabbit nits
+- LICENSE, CI, contributing guide, mermaid diagrams
+- ygg task create: default runnable=TRUE for non-epic kinds (yggdrasil-105)
+- ygg bench: Scenario 4 contention + diff CI-overlap test (yggdrasil-104)
+- ygg bench: Scenario 1 end-to-end (yggdrasil-103)
+- Runs pane (yggdrasil-101)
+- ygg scheduler: stage 3 — fingerprints + poison + per-repo budget + approval (yggdrasil-100)
+- ygg scheduler: stage 2 — heartbeat reap + deadlines + retry (yggdrasil-99, 95)
+- ygg scheduler: stage 1 MVP (yggdrasil-98)
+- ygg run: task-run lifecycle + stop-hook outcome capture (yggdrasil-96, 97)
+- ygg bench: scaffold + scenario registry (yggdrasil-102)
+- task_runs + blob store: schema for autonomous execution (yggdrasil-91..94)
+- ADR 0016 + epic yggdrasil-90: propose autonomous execution
+- messaging bus: agent-to-agent inbox on the events table
+- dedicated TUI tab, auto-release on Stop, dashboard summary
+- auto-archive orphaned agents on refresh tick
+- r=rename, a=archive on agents panel
+- add `ygg agent rename` + integration test
+- stop-hook enforcement: block spawned workers from exiting with open work
+- tui prompt: Learnings pane sandwiched between pins and MEMORY.md
+- tui eval: learnings row in Activity panel
+- system pulse gets a db-corpus line
+- workers panel flags idle-stale as needs-attention
+- learnings block — captured / total / applications
+- schema + model + CLI (yggdrasil-81)
+- ADR 0015 + epic ygg-75: propose orchestrator-only pivot
+- tmux session-per-worker instead of window under `yggdrasil`
+- flip default to opt-in — YGG_LLM_DIGEST=on (yggdrasil-74)
+- task cli: embedding-based dupe detection (yggdrasil-61)
+- task cli: external_ref column + --external-ref on create/update (yggdrasil-60)
+- task cli: stale detection (yggdrasil-59)
+- workers panel reconciles on every refresh + age shows last-seen
+- task cli: full label crud + --label-any OR-filter + list-all (yggdrasil-58)
+- task cli: bulk create from markdown + --body-file + --stdin (yggdrasil-57)
+- task cli: --json output on show/list/ready/blocked/stats/create (yggdrasil-56)
+- AI-tracking fields only — CLAUDE.md clause + digest prompt
+- backspace-to-delete on DAG/Tasks + age column, with confirm
+- pinned rows inject unconditionally + Prompt Inspector TUI
+- decouple data refresh from key input — fixes arrow-key lag
+- auto-recover stale agents to Idle (yggdrasil-48)
+- delivery tracking — push / PR / merge status (yggdrasil-54)
+- Enter = detail, r = run on both DAG and Tasks panes
+- workers B+C+D: observer, attach-on-Enter, boot reconciliation
+- workers A: schema + model + populate on spawn (yggdrasil-50)
+- shared task widgets, Workers dashboard panel, --label filter
+- accurate run-state glyphs + unique tmux window names
+- pre-trust worktree in ~/.claude.json to skip Claude's trust dialog
+- orchestration stats panel on bottom strip
+- silent reporter (TUI no longer leaks stdout into frame) + stale dim
+- tmux window names include agent/persona, claude auto-accepts
+- Enter on Tasks pane runs the selected task
+- pause/resume/abort + failure handling (yggdrasil-46, yggdrasil-47)
+- supervisor — dep-driven iteration (yggdrasil-44)
+- dag pane gets r=run, n=add, run-state glyphs (yggdrasil-45)
+- ygg plan create/add/run — single-task execute path (yggdrasil-43)
+- ensure/teardown helper (click-to-do A · yggdrasil-42)
+- themed loading view for dag/tasks while first query blocks
+- bug glyph → 🐞 so it stops reading as "done"
+- Enter on an agent row filters DAG by that agent
+- first-class persona column (compound key)
+- switch from Jaccard to containment — fixes 1% recall bug
+- archive/unarchive + reap --agents + persona naming docs
+- Hit-quality section — worst-offender + best-performer source nodes
+- ygg recall segment — referenced/emitted ratio in statusline
+- per-hit referenced verdict + --full flag
+- short-UUID shorthand — ygg-<8hex> resolves + displayed (yggdrasil-40)
+- relevance bump + non-blocker links (yggdrasil-38)
+- surface savings — "what are you getting?" (yggdrasil-39)
+- README/AGENTS + ADRs 0013-0014 (yggdrasil-36)
+- include memories in Recent + neighbors (yggdrasil-37)
+- eval pane [8] — retrieval effectiveness live (yggdrasil-35)
+- agent filter falls back to created_by (yggdrasil-34)
+- ygg logs --kind/--session filters + multi-status task list (yggdrasil-33)
+- session lifecycle: end() on Stop + ygg reap (yggdrasil-32)
+- two-row top bar — tabs first, context-sensitive help second
+- query pane auto-focuses input on entry
+- live-follow + detail overlay, sessions carry state (yggdrasil-30)
+- per-repo activity summary over a time window (yggdrasil-7)
+- pulse session-scope toggle (yggdrasil-25)
+- agent assignee filter + subtree focus
+- group Tasks by kind + memgraph gets real table columns
+- memories in inject + footer events get icons
+- first-class scoped memories with CLI (yggdrasil-29)
+- session-scoping + tasks-pane cross-repo + memgraph UX polish
+- trigger-maintained content_tsv for older Postgres compat
+- memgraph pane [7] — similarity neighborhood explorer
+- accurate pressure, total tokens, state transition timeline
+- alert strip, per-agent sparkline, live-locks, DAG sort
+- drop Meter pane + DAG Enter opens task detail overlay
+- wire state transitions so dashboard reflects reality
+- DAG pane is cross-repo — shows all open tasks grouped by repo
+- color-coded pressure, humanized state, DAG diagnostics, sparkline left
+- drop LLM's placeholder corrections/reinforcements; keep summary + open_threads
+- bar labels+color, log icons+detail, dag conversation fallback
+- dashboard gets system pulse + readable locks
+- task-dep graph in [2], sparklines in meter, global event strip, ← → nav
+- *(bar)* tok next to ctx with matching label+value styling
+- upgrade template to match hand-written CLAUDE.md quality
+- re-sign ad-hoc after macOS install to avoid Gatekeeper SIGKILL
+- ygg init-project → ygg integrate
+- migrate to Yggdrasil-only directives, add README and ADRs
+- 7 integration tests, all passing
+- auto-start ollama without prompting
+- revert to Ollama for embeddings, fastembed optional
+- check pgvector before migrations, prompt to install if missing
+- prompt for postgres connection instead of assuming defaults
+- bd init: initialize beads issue tracking
+- never sudo: auto-install via brew, tell user what to run otherwise
+- simplify init: one file, direct path lookup, no PATH hacks
+- prompt on missing deps instead of silently failing
+- skip reinstalling deps that already exist
+- remove hardcoded timeouts, watch process exit instead
+- remove all sudo from install, fix unused var warning
+- install to ~/.local/bin, no sudo
+- Initial commit — Yggdrasil agent orchestrator
+# Changelog
+
 All notable changes to **Yggdrasil** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
