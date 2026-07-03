@@ -126,6 +126,9 @@ enum Commands {
         /// Show agents across all users
         #[arg(long)]
         all_users: bool,
+        /// Output format: table (default) or codex (compact one-line status)
+        #[arg(long, default_value = "table", value_parser = ["table", "codex"])]
+        format: String,
     },
 
     /// Live event stream — all hook activity, node writes, locks, digests, similarity hits
@@ -1219,10 +1222,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Status { agent, all_users } => {
+        Commands::Status {
+            agent,
+            all_users,
+            format,
+        } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::status_cmd::execute(&pool, agent.as_deref(), all_users).await?;
+            ygg::cli::status_cmd::execute(&pool, agent.as_deref(), all_users, &format).await?;
         }
         Commands::Logs {
             follow,
