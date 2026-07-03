@@ -32,7 +32,7 @@ ygg init
 # 2. Create a task
 ygg task create "my first task" --kind task --priority 2
 
-# 3. Spawn a Claude Code agent to work on it
+# 3. Spawn an agent to work on it
 ygg spawn --task "do something"
 
 # 4. Open the TUI dashboard to watch your fleet
@@ -40,19 +40,22 @@ ygg dashboard
 
 # 5. Check fleet state from the command line
 ygg status
+
+# Optional: one-line status for Codex prompts, hooks, or panes
+ygg status --format codex
 ```
 
 ## Architecture
 
 ```text
 +------------------+         +-------------------------------+
-|   Claude Code    |         |          PostgreSQL           |
-|                  |         |                               |
-|  SessionStart  --+--ygg-->|  agents   (state machine)     |
-|  UserPromptSubmit+--msg--->|  events   (live stream)       |
-|  Stop          --+--run--->|  locks    (semantic leases)   |
-|  PreCompact    --+-prime-->|  tasks    (tracking + deps)   |
-|  PreToolUse    --+--lock-->|  task_runs(scheduler runs)    |
+| Agent CLI        |         |          PostgreSQL           |
+| providers        |         |                               |
+|                  |         |  agents   (state machine)     |
+| Claude Code      |--hooks->|  events   (live stream)       |
+| Codex CLI        |--hooks->|  locks    (semantic leases)   |
+|                  |         |  tasks    (tracking + deps)   |
+|                  |--ygg--->|  task_runs(scheduler runs)    |
 +------------------+         +-------------------------------+
         |                                |
         v                                v
@@ -62,7 +65,9 @@ ygg status
                                 +------------------+
 ```
 
-Hooks (installed by `ygg init` as native `ygg hook <event>` handlers) fire at Claude Code lifecycle events:
+Hooks (installed by `ygg init` as native `ygg hook <event>` handlers) currently
+fire at Claude Code lifecycle events. Codex CLI integration is being added at
+the same hook boundary; see [docs/codex-integration.md](docs/codex-integration.md).
 
 - **SessionStart / PreCompact** -> `ygg prime` -- emits agent context as markdown
 - **UserPromptSubmit** -> delivers unread agent-to-agent messages, records token stats
@@ -91,7 +96,7 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `init`      | Bootstrap: Postgres check, migrations, hooks.                          |
 | `up`        | Launch the tmux dashboard (default when run bare).                     |
 | `dashboard` | Launch the TUI dashboard directly.                                      |
-| `status`    | Quick text output of agent + system state.                              |
+| `status`    | Quick text output of agent + system state; `--format codex` emits one line. |
 | `migrate`   | Run database migrations.                                                |
 | `spawn`     | Spawn a new agent in a tmux window, registered in the DB.               |
 | `task`      | Task tracking: `create / list / ready / claim / close / dep / show / dupes`. |
@@ -110,6 +115,10 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `bar`       | Claude Code statusline generator (context pressure, cache rate, spend). |
 | `agent-tool`| Hook: record the tool an agent is about to call.                        |
 | `hook`      | Native Claude Code lifecycle hook handlers.                             |
+
+Codex CLI notes, including a sample `[tui].status_line` and the compact
+`ygg status --format codex` output, live in
+[docs/codex-integration.md](docs/codex-integration.md).
 
 ## Project Layout
 
