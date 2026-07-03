@@ -70,16 +70,3 @@ hook responsibilities. The next implementation step is a provider adapter in
   `.codex/hooks.json`;
 - verify Codex hook stdout/blocking payload behavior with a local probe before
   enabling lock and stop-check enforcement by default.
-
-## Release Versioning
-
-Yggdrasil already uses release-plz for automated versioning and GitHub releases:
-
-- `.github/workflows/release-plz.yml` runs on pushes to `main`;
-- `release-plz.toml` enables changelog updates, git tags, and GitHub releases;
-- `publish = false` keeps the binary crate off crates.io for now;
-- `CHANGELOG.md` carries the release-plz insertion marker.
-
-Codex integration PRs should use normal commits and let release-plz maintain the
-Release PR instead of manually editing `Cargo.toml` versions or changelog
-entries.
