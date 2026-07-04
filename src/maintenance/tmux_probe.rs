@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
 use tokio::process::Command;
+use tokio::sync::OnceCell;
+
+static TMUX_AVAILABLE: OnceCell<()> = OnceCell::const_new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TmuxProbeResult {
@@ -17,15 +20,24 @@ pub enum TmuxProbeResult {
     },
 }
 
+async fn tmux_binary_available() -> bool {
+    if TMUX_AVAILABLE.get().is_some() {
+        return true;
+    }
+
+    let available = matches!(
+        Command::new("tmux").arg("-V").output().await,
+        Ok(out) if out.status.success()
+    );
+    if available {
+        let _ = TMUX_AVAILABLE.set(());
+    }
+    available
+}
+
 pub async fn probe_session(session: &str) -> TmuxProbeResult {
-    match Command::new("tmux").arg("-V").output().await {
-        Ok(out) if out.status.success() => {}
-        Ok(_) => return TmuxProbeResult::TmuxUnavailable,
-        Err(e) => {
-            return TmuxProbeResult::ProbeFailed {
-                error: format!("tmux -V failed: {e}"),
-            };
-        }
+    if !tmux_binary_available().await {
+        return TmuxProbeResult::TmuxUnavailable;
     }
 
     let has = match Command::new("tmux")
