@@ -1405,10 +1405,17 @@ async fn main() -> anyhow::Result<()> {
                 // live locks in the window.
                 let repo = ygg::models::agent::AgentRepo::new(&pool, &user_id);
                 let stale = repo.find_stale(older_than_days).await.unwrap_or_default();
-                let n = stale.len() as i64;
+                let mut n = stale.len() as i64;
                 if !dry_run {
+                    n = 0;
                     for a in &stale {
-                        let _ = repo.archive(a.agent_id).await;
+                        if repo
+                            .archive_if_stale(a.agent_id, a.updated_at, older_than_days)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            n += 1;
+                        }
                     }
                 }
                 println!(
