@@ -163,6 +163,36 @@ impl<'a> WorkerRepo<'a> {
         Ok(())
     }
 
+    pub async fn set_state_if_live(
+        &self,
+        worker_id: Uuid,
+        state: WorkerState,
+        exit_reason: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let terminal = matches!(
+            state,
+            WorkerState::Completed | WorkerState::Failed | WorkerState::Abandoned
+        );
+        let result = sqlx::query(
+            r#"
+            UPDATE workers
+               SET state = $2::worker_state,
+                   last_seen_at = now(),
+                   ended_at = CASE WHEN $3 AND ended_at IS NULL THEN now() ELSE ended_at END,
+                   exit_reason = COALESCE($4, exit_reason)
+             WHERE worker_id = $1
+               AND ended_at IS NULL
+            "#,
+        )
+        .bind(worker_id)
+        .bind(&state)
+        .bind(terminal)
+        .bind(exit_reason)
+        .execute(self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// All workers whose tmux window should still exist. Used by the
     /// observer and the dashboard Workers panel.
     /// Workers the dashboard should keep visible: alive OR recently ended

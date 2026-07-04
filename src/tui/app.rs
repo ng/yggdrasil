@@ -1510,47 +1510,49 @@ fn event_glyph(kind: &str) -> (&'static str, Color) {
 /// windows; abandon any row whose window is gone. Called once at TUI
 /// startup and also cheap to call from anywhere else (idempotent).
 pub async fn reconcile_workers(pool: &PgPool) -> Result<(), anyhow::Error> {
+    use crate::maintenance::tmux_probe::{TmuxProbeResult, probe_session};
+    use crate::maintenance::workers::{ReconcileAction, reconcile_from_probe};
     use crate::models::worker::{WorkerRepo, WorkerState};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let workers = WorkerRepo::new(pool).list_live().await.unwrap_or_default();
     if workers.is_empty() {
         return Ok(());
     }
 
-    let mut by_session: HashMap<String, HashSet<String>> = HashMap::new();
-    for w in &workers {
-        by_session.entry(w.tmux_session.clone()).or_default();
-    }
-    for session in by_session.keys().cloned().collect::<Vec<_>>() {
-        let out = std::process::Command::new("tmux")
-            .args(["list-windows", "-t", &session, "-F", "#{window_name}"])
-            .output();
-        let set = match out {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|s| s.trim().to_string())
-                .collect(),
-            _ => HashSet::new(), // session missing → treat all as gone
-        };
-        by_session.insert(session, set);
+    let mut by_session: HashMap<String, Vec<crate::models::worker::Worker>> = HashMap::new();
+    for w in workers {
+        by_session
+            .entry(w.tmux_session.clone())
+            .or_default()
+            .push(w);
     }
 
     let repo = WorkerRepo::new(pool);
     let mut n = 0;
-    for w in workers {
-        let live = by_session
-            .get(&w.tmux_session)
-            .map(|set| set.contains(&w.tmux_window))
-            .unwrap_or(false);
-        if !live {
-            let _ = repo
-                .set_state(
-                    w.worker_id,
-                    WorkerState::Abandoned,
-                    Some("reconciled at TUI start — window absent"),
-                )
-                .await;
-            n += 1;
+    for (session, ws) in by_session {
+        let probe = probe_session(&session).await;
+        match &probe {
+            TmuxProbeResult::ProbeFailed { error } => {
+                tracing::warn!(session = %session, error = %error, "worker reconciliation skipped");
+                continue;
+            }
+            TmuxProbeResult::TmuxUnavailable => {
+                tracing::warn!(session = %session, "worker reconciliation skipped: tmux unavailable");
+                continue;
+            }
+            TmuxProbeResult::SessionMissing { .. } | TmuxProbeResult::SessionPresent { .. } => {}
+        }
+        for action in reconcile_from_probe(&ws, &probe) {
+            let ReconcileAction::Abandon {
+                worker_id, reason, ..
+            } = action;
+            if repo
+                .set_state_if_live(worker_id, WorkerState::Abandoned, Some(reason))
+                .await
+                .unwrap_or(false)
+            {
+                n += 1;
+            }
         }
     }
     if n > 0 {

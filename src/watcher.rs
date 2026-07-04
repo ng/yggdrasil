@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use crate::config::AppConfig;
 use crate::lock::LockManager;
+use crate::maintenance::tmux_probe::{TmuxProbeResult, probe_session};
+use crate::maintenance::workers::{ReconcileAction, reconcile_from_probe};
 use crate::models::event::{EventKind, EventRepo};
 use crate::models::worker::{Worker, WorkerRepo, WorkerState};
 use crate::tmux::TmuxManager;
@@ -48,12 +50,48 @@ impl Watcher {
     }
 
     async fn tick(&self) -> Result<(), anyhow::Error> {
-        let reaped = self.reap_expired_locks().await?;
-        let stale = self.flag_stale_agents().await?;
-        let worker_updates = self.observe_workers().await.unwrap_or(0);
-        let delivery_updates = self.check_delivery().await.unwrap_or(0);
-        let cleaned = self.cleanup_delivered().await.unwrap_or(0);
-        let zombies = self.cleanup_zombie_agents().await.unwrap_or(0);
+        let reaped = match self.reap_expired_locks().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(scope = "reap_expired_locks", error = %e, "watcher scope failed");
+                0
+            }
+        };
+        let stale = match self.flag_stale_agents().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(scope = "flag_stale_agents", error = %e, "watcher scope failed");
+                0
+            }
+        };
+        let worker_updates = match self.observe_workers().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(scope = "observe_workers", error = %e, "watcher scope failed");
+                0
+            }
+        };
+        let delivery_updates = match self.check_delivery().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(scope = "check_delivery", error = %e, "watcher scope failed");
+                0
+            }
+        };
+        let cleaned = match self.cleanup_delivered().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(scope = "cleanup_delivered", error = %e, "watcher scope failed");
+                0
+            }
+        };
+        let zombies = match self.cleanup_zombie_agents().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(scope = "cleanup_zombie_agents", error = %e, "watcher scope failed");
+                0
+            }
+        };
 
         if reaped > 0
             || stale > 0
@@ -141,19 +179,44 @@ impl Watcher {
         let mut changes = 0u64;
 
         for (session, ws) in by_session {
-            let windows: HashSet<String> = list_tmux_windows(&session).into_iter().collect();
+            let probe = probe_session(&session).await;
+            let actions = reconcile_from_probe(&ws, &probe);
+            for action in actions {
+                let ReconcileAction::Abandon {
+                    worker_id,
+                    tmux_session,
+                    tmux_window,
+                    reason,
+                } = action;
+                if repo
+                    .set_state_if_live(worker_id, WorkerState::Abandoned, Some(reason))
+                    .await
+                    .unwrap_or(false)
+                {
+                    tracing::info!(
+                        worker = %worker_id,
+                        tmux_session = %tmux_session,
+                        tmux_window = %tmux_window,
+                        "worker abandoned during observer tick"
+                    );
+                    changes += 1;
+                }
+            }
+
+            let windows: HashSet<String> = match &probe {
+                TmuxProbeResult::SessionPresent { windows, .. } => windows.clone(),
+                TmuxProbeResult::ProbeFailed { error } => {
+                    tracing::warn!(session = %session, error = %error, "tmux probe failed; skipping worker observer mutations");
+                    continue;
+                }
+                TmuxProbeResult::TmuxUnavailable => {
+                    tracing::warn!(session = %session, "tmux unavailable; skipping worker observer mutations");
+                    continue;
+                }
+                TmuxProbeResult::SessionMissing { .. } => continue,
+            };
             for w in ws {
                 if !windows.contains(&w.tmux_window) {
-                    // Window vanished — machine restart, manual kill, or
-                    // claude exited and the shell closed.
-                    let _ = repo
-                        .set_state(
-                            w.worker_id,
-                            WorkerState::Abandoned,
-                            Some("tmux window absent on observer tick"),
-                        )
-                        .await;
-                    changes += 1;
                     continue;
                 }
 
@@ -273,12 +336,18 @@ impl Watcher {
             }
         };
 
-        // Snapshot live windows once per tick. Empty when tmux isn't
-        // running or the `ygg` session doesn't exist — both mean every
-        // candidate's window is gone.
-        let live_windows = list_tmux_windows("ygg");
-        let live: std::collections::HashSet<&str> =
-            live_windows.iter().map(String::as_str).collect();
+        let initial_probe = probe_session("ygg").await;
+        match &initial_probe {
+            TmuxProbeResult::ProbeFailed { error } => {
+                tracing::warn!(error = %error, "cleanup_zombie_agents: tmux probe failed, skipping");
+                return Ok(0);
+            }
+            TmuxProbeResult::TmuxUnavailable => {
+                tracing::warn!("cleanup_zombie_agents: tmux unavailable, skipping");
+                return Ok(0);
+            }
+            TmuxProbeResult::SessionMissing { .. } | TmuxProbeResult::SessionPresent { .. } => {}
+        }
 
         let lock_mgr =
             LockManager::new(&self.pool, self.config.lock_ttl_secs, crate::db::user_id());
@@ -292,15 +361,49 @@ impl Watcher {
                 continue;
             }
             // Window still alive → harness is running, not a zombie.
-            if live.contains(a.agent_name.as_str()) {
+            if probe_has_window(&initial_probe, &a.agent_name) {
+                continue;
+            }
+
+            let fresh_probe = probe_session("ygg").await;
+            match &fresh_probe {
+                TmuxProbeResult::ProbeFailed { error } => {
+                    tracing::warn!(agent = %a.agent_name, error = %error, "cleanup_zombie_agents: re-probe failed, skipping");
+                    continue;
+                }
+                TmuxProbeResult::TmuxUnavailable => {
+                    tracing::warn!(agent = %a.agent_name, "cleanup_zombie_agents: tmux unavailable on re-probe, skipping");
+                    continue;
+                }
+                TmuxProbeResult::SessionPresent { windows, .. }
+                    if windows.contains(&a.agent_name) =>
+                {
+                    continue;
+                }
+                TmuxProbeResult::SessionPresent { .. } | TmuxProbeResult::SessionMissing { .. } => {
+                }
+            }
+
+            let won = agent_repo
+                .force_state_if_observed(
+                    a.agent_id,
+                    a.current_state.clone(),
+                    a.updated_at,
+                    crate::models::agent::AgentState::Shutdown,
+                    None,
+                )
+                .await
+                .unwrap_or(false);
+            if !won {
+                tracing::info!(
+                    agent = %a.agent_name,
+                    "cleanup_zombie_agents: candidate changed before cleanup, skipping external teardown"
+                );
                 continue;
             }
 
             let _ = session_repo.end_all_for_agent(a.agent_id).await;
             let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
-            let _ = agent_repo
-                .force_state(a.agent_id, crate::models::agent::AgentState::Shutdown, None)
-                .await;
             // Killing the window is mostly a no-op (it's already gone) but
             // covers the rare case where tmux still has a stub window with
             // a dead pane after a panic.
@@ -340,6 +443,9 @@ impl Watcher {
             .unwrap_or_default();
         let mut n = 0u64;
         for w in workers {
+            if !std::path::Path::new(&w.worktree_path).exists() {
+                continue;
+            }
             TmuxManager::kill_window_sync(&w.tmux_session, &w.tmux_window);
             remove_worktree(&w.worktree_path);
             tracing::info!(
@@ -354,24 +460,13 @@ impl Watcher {
     }
 }
 
-/// `tmux list-windows -t <session> -F '#{window_name}'` → Vec<name>.
-/// Empty on any error (session missing, tmux absent) — the observer
-/// treats that as "all workers abandoned," which is correct.
-fn list_tmux_windows(session: &str) -> Vec<String> {
-    let out = Command::new("tmux")
-        .args(["list-windows", "-t", session, "-F", "#{window_name}"])
-        .output();
-    let Ok(out) = out else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
+fn probe_has_window(probe: &TmuxProbeResult, window: &str) -> bool {
+    match probe {
+        TmuxProbeResult::SessionPresent { windows, .. } => windows.contains(window),
+        TmuxProbeResult::ProbeFailed { .. }
+        | TmuxProbeResult::TmuxUnavailable
+        | TmuxProbeResult::SessionMissing { .. } => false,
     }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 fn capture_pane(session: &str, window: &str) -> Option<String> {

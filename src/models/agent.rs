@@ -179,6 +179,71 @@ impl<'a> AgentRepo<'a> {
         Ok(())
     }
 
+    pub async fn force_state_if_observed(
+        &self,
+        agent_id: Uuid,
+        observed_state: AgentState,
+        observed_updated_at: DateTime<Utc>,
+        to: AgentState,
+        last_tool: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let meta_patch = match last_tool {
+            Some(t) => serde_json::json!({"last_tool": t}),
+            None => serde_json::json!({"last_tool": null}),
+        };
+        let row: Option<(AgentState, String)> = sqlx::query_as(
+            r#"
+            WITH prior AS (
+                SELECT current_state AS old_state, agent_name
+                  FROM agents
+                 WHERE agent_id = $1
+                   AND current_state = $2::agent_state
+                   AND updated_at = $3
+            )
+            UPDATE agents
+               SET current_state = $4::agent_state,
+                   metadata = metadata || $5::jsonb,
+                   updated_at = now()
+             WHERE agent_id = $1
+               AND current_state = $2::agent_state
+               AND updated_at = $3
+             RETURNING (SELECT old_state FROM prior) AS old_state,
+                       (SELECT agent_name FROM prior) AS agent_name
+            "#,
+        )
+        .bind(agent_id)
+        .bind(&observed_state)
+        .bind(observed_updated_at)
+        .bind(&to)
+        .bind(meta_patch)
+        .fetch_optional(self.pool)
+        .await?;
+
+        if let Some((old, name)) = row {
+            if old != to {
+                let payload = serde_json::json!({
+                    "from": old.to_string(),
+                    "to": to.to_string(),
+                    "tool": last_tool,
+                });
+                let _ = sqlx::query(
+                    "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id, user_id)
+                     VALUES ('agent_state_changed', $1, $2, $3, $4, $5)",
+                )
+                .bind(agent_id)
+                .bind(&name)
+                .bind(payload)
+                .bind(crate::models::event::cc_session_id())
+                .bind(&self.user_id)
+                .execute(self.pool)
+                .await;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Get agent by ID.
     pub async fn get(&self, agent_id: Uuid) -> Result<Option<AgentWorkflow>, sqlx::Error> {
         sqlx::query_as::<_, AgentWorkflow>(
@@ -281,6 +346,47 @@ impl<'a> AgentRepo<'a> {
             .execute(self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn archive_if_stale(
+        &self,
+        agent_id: Uuid,
+        observed_updated_at: DateTime<Utc>,
+        days: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE agents a
+               SET archived_at = now()
+             WHERE a.agent_id = $1
+               AND a.archived_at IS NULL
+               AND a.user_id = $3
+               AND a.updated_at = $2
+               AND a.updated_at < now() - ($4 || ' days')::interval
+               AND NOT EXISTS (
+                    SELECT 1 FROM events e
+                     WHERE e.agent_id = a.agent_id
+                       AND e.created_at >= now() - ($4 || ' days')::interval
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM sessions s
+                     WHERE s.agent_id = a.agent_id
+                       AND COALESCE(s.ended_at, s.started_at)
+                            >= now() - ($4 || ' days')::interval
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM locks l
+                     WHERE l.agent_id = a.agent_id AND l.expires_at > now()
+               )
+            "#,
+        )
+        .bind(agent_id)
+        .bind(observed_updated_at)
+        .bind(&self.user_id)
+        .bind(days.to_string())
+        .execute(self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn rename(&self, agent_id: Uuid, new_name: &str) -> Result<(), sqlx::Error> {

@@ -171,6 +171,13 @@ impl TmuxManager {
             .await
             .map_err(|e| crate::YggError::Tmux(format!("list-windows failed: {e}")))?;
 
+        if !output.status.success() {
+            return Err(crate::YggError::Tmux(format!(
+                "list-windows failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
         let names = String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(|s| s.to_string())

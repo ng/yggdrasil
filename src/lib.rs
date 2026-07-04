@@ -7,6 +7,7 @@ pub mod db;
 pub mod executor;
 pub mod interrupt;
 pub mod lock;
+pub mod maintenance;
 pub mod models;
 pub mod notify;
 pub mod redaction;
