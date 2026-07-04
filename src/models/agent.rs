@@ -63,6 +63,25 @@ pub struct AgentRepo<'a> {
     user_id: String,
 }
 
+const STALE_AGENT_PREDICATE: &str = r#"
+              AND a.updated_at < now() - ($1 || ' days')::interval
+              AND NOT EXISTS (
+                    SELECT 1 FROM events e
+                     WHERE e.agent_id = a.agent_id
+                       AND e.created_at >= now() - ($1 || ' days')::interval
+              )
+              AND NOT EXISTS (
+                    SELECT 1 FROM sessions s
+                     WHERE s.agent_id = a.agent_id
+                       AND COALESCE(s.ended_at, s.started_at)
+                            >= now() - ($1 || ' days')::interval
+              )
+              AND NOT EXISTS (
+                    SELECT 1 FROM locks l
+                     WHERE l.agent_id = a.agent_id AND l.expires_at > now()
+              )
+"#;
+
 impl<'a> AgentRepo<'a> {
     pub fn new(pool: &'a PgPool, user_id: &str) -> Self {
         Self {
@@ -157,24 +176,8 @@ impl<'a> AgentRepo<'a> {
         .await?;
 
         if let Some((old, name)) = row {
-            if old != to {
-                let payload = serde_json::json!({
-                    "from": old.to_string(),
-                    "to": to.to_string(),
-                    "tool": last_tool,
-                });
-                let _ = sqlx::query(
-                    "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id, user_id)
-                     VALUES ('agent_state_changed', $1, $2, $3, $4, $5)",
-                )
-                .bind(agent_id)
-                .bind(&name)
-                .bind(payload)
-                .bind(crate::models::event::cc_session_id())
-                .bind(&self.user_id)
-                .execute(self.pool)
+            self.record_state_change_event(agent_id, &name, &old, &to, last_tool)
                 .await;
-            }
         }
         Ok(())
     }
@@ -220,28 +223,42 @@ impl<'a> AgentRepo<'a> {
         .await?;
 
         if let Some((old, name)) = row {
-            if old != to {
-                let payload = serde_json::json!({
-                    "from": old.to_string(),
-                    "to": to.to_string(),
-                    "tool": last_tool,
-                });
-                let _ = sqlx::query(
-                    "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id, user_id)
-                     VALUES ('agent_state_changed', $1, $2, $3, $4, $5)",
-                )
-                .bind(agent_id)
-                .bind(&name)
-                .bind(payload)
-                .bind(crate::models::event::cc_session_id())
-                .bind(&self.user_id)
-                .execute(self.pool)
+            self.record_state_change_event(agent_id, &name, &old, &to, last_tool)
                 .await;
-            }
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    async fn record_state_change_event(
+        &self,
+        agent_id: Uuid,
+        agent_name: &str,
+        old: &AgentState,
+        to: &AgentState,
+        last_tool: Option<&str>,
+    ) {
+        if old == to {
+            return;
+        }
+
+        let payload = serde_json::json!({
+            "from": old.to_string(),
+            "to": to.to_string(),
+            "tool": last_tool,
+        });
+        let _ = sqlx::query(
+            "INSERT INTO events (event_kind, agent_id, agent_name, payload, cc_session_id, user_id)
+             VALUES ('agent_state_changed', $1, $2, $3, $4, $5)",
+        )
+        .bind(agent_id)
+        .bind(agent_name)
+        .bind(payload)
+        .bind(crate::models::event::cc_session_id())
+        .bind(&self.user_id)
+        .execute(self.pool)
+        .await;
     }
 
     /// Get agent by ID.
@@ -354,38 +371,25 @@ impl<'a> AgentRepo<'a> {
         observed_updated_at: DateTime<Utc>,
         days: i64,
     ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
+        let query = format!(
             r#"
             UPDATE agents a
                SET archived_at = now()
-             WHERE a.agent_id = $1
+             WHERE a.agent_id = $2
                AND a.archived_at IS NULL
-               AND a.user_id = $3
-               AND a.updated_at = $2
-               AND a.updated_at < now() - ($4 || ' days')::interval
-               AND NOT EXISTS (
-                    SELECT 1 FROM events e
-                     WHERE e.agent_id = a.agent_id
-                       AND e.created_at >= now() - ($4 || ' days')::interval
-               )
-               AND NOT EXISTS (
-                    SELECT 1 FROM sessions s
-                     WHERE s.agent_id = a.agent_id
-                       AND COALESCE(s.ended_at, s.started_at)
-                            >= now() - ($4 || ' days')::interval
-               )
-               AND NOT EXISTS (
-                    SELECT 1 FROM locks l
-                     WHERE l.agent_id = a.agent_id AND l.expires_at > now()
-               )
+               AND a.user_id = $4
+               AND a.updated_at = $3
+{stale_predicate}
             "#,
-        )
-        .bind(agent_id)
-        .bind(observed_updated_at)
-        .bind(&self.user_id)
-        .bind(days.to_string())
-        .execute(self.pool)
-        .await?;
+            stale_predicate = STALE_AGENT_PREDICATE,
+        );
+        let result = sqlx::query(&query)
+            .bind(days.to_string())
+            .bind(agent_id)
+            .bind(observed_updated_at)
+            .bind(&self.user_id)
+            .execute(self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -431,36 +435,23 @@ impl<'a> AgentRepo<'a> {
     }
 
     pub async fn find_stale(&self, days: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {
-        sqlx::query_as::<_, AgentWorkflow>(
+        let query = format!(
             r#"
             SELECT a.agent_id, a.agent_name, a.current_state,
                    a.context_tokens, a.metadata, a.created_at, a.updated_at, a.persona
             FROM agents a
             WHERE a.archived_at IS NULL
               AND a.user_id = $2
-              AND a.updated_at < now() - ($1 || ' days')::interval
-              AND NOT EXISTS (
-                    SELECT 1 FROM events e
-                     WHERE e.agent_id = a.agent_id
-                       AND e.created_at >= now() - ($1 || ' days')::interval
-              )
-              AND NOT EXISTS (
-                    SELECT 1 FROM sessions s
-                     WHERE s.agent_id = a.agent_id
-                       AND COALESCE(s.ended_at, s.started_at)
-                            >= now() - ($1 || ' days')::interval
-              )
-              AND NOT EXISTS (
-                    SELECT 1 FROM locks l
-                     WHERE l.agent_id = a.agent_id AND l.expires_at > now()
-              )
+{stale_predicate}
             ORDER BY a.updated_at
             "#,
-        )
-        .bind(days.to_string())
-        .bind(&self.user_id)
-        .fetch_all(self.pool)
-        .await
+            stale_predicate = STALE_AGENT_PREDICATE,
+        );
+        sqlx::query_as::<_, AgentWorkflow>(&query)
+            .bind(days.to_string())
+            .bind(&self.user_id)
+            .fetch_all(self.pool)
+            .await
     }
 
     pub async fn find_orphaned(&self, stale_secs: i64) -> Result<Vec<AgentWorkflow>, sqlx::Error> {

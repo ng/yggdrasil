@@ -17,15 +17,6 @@ pub enum TmuxProbeResult {
     },
 }
 
-impl TmuxProbeResult {
-    pub fn permits_absence_evidence(&self) -> bool {
-        matches!(
-            self,
-            Self::SessionMissing { .. } | Self::SessionPresent { .. }
-        )
-    }
-}
-
 pub async fn probe_session(session: &str) -> TmuxProbeResult {
     match Command::new("tmux").arg("-V").output().await {
         Ok(out) if out.status.success() => {}
@@ -52,7 +43,11 @@ pub async fn probe_session(session: &str) -> TmuxProbeResult {
 
     if !has.status.success() {
         let stderr = String::from_utf8_lossy(&has.stderr).to_lowercase();
-        if stderr.contains("no server running") || stderr.contains("server exited") {
+        if stderr.contains("no server running")
+            || stderr.contains("server exited")
+            || stderr.contains("error connecting to")
+            || stderr.contains("no such file or directory")
+        {
             return TmuxProbeResult::TmuxUnavailable;
         }
         return TmuxProbeResult::SessionMissing {

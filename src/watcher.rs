@@ -443,10 +443,10 @@ impl Watcher {
             .unwrap_or_default();
         let mut n = 0u64;
         for w in workers {
+            TmuxManager::kill_window_sync(&w.tmux_session, &w.tmux_window);
             if !std::path::Path::new(&w.worktree_path).exists() {
                 continue;
             }
-            TmuxManager::kill_window_sync(&w.tmux_session, &w.tmux_window);
             remove_worktree(&w.worktree_path);
             tracing::info!(
                 worker = %w.worker_id,
