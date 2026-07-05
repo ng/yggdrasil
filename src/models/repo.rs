@@ -97,10 +97,16 @@ impl<'a> RepoRepo<'a> {
             .await;
             match res {
                 Ok(repo) => return Ok(repo),
+                // Retry only on the prefix uniqueness constraint — any other
+                // unique violation (e.g. a future canonical_url index) must
+                // surface, not get masked by 50 suffixed retries.
                 Err(e)
                     if attempt < 50
                         && e.as_database_error()
-                            .map(|d| d.is_unique_violation())
+                            .map(|d| {
+                                d.is_unique_violation()
+                                    && d.constraint() == Some("repos_user_prefix_uk")
+                            })
                             .unwrap_or(false) =>
                 {
                     attempt += 1;
