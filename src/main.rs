@@ -688,17 +688,19 @@ enum LockAction {
     Acquire {
         /// Resource key (e.g. "file:src/auth/")
         resource: String,
-        /// Agent name performing the lock
+        /// Agent name performing the lock (defaults to YGG_AGENT_NAME env var
+        /// or current directory name)
         #[arg(short, long)]
-        agent: String,
+        agent: Option<String>,
     },
     /// Release a resource lock
     Release {
         /// Resource key
         resource: String,
-        /// Agent name releasing the lock
+        /// Agent name releasing the lock (defaults to YGG_AGENT_NAME env var
+        /// or current directory name)
         #[arg(short, long)]
-        agent: String,
+        agent: Option<String>,
     },
     /// List all active locks. Pass --stale to restrict to locks held
     /// longer than `secs` (default 600 = 10 min) — useful for triaging
@@ -1200,9 +1202,11 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             match action {
                 LockAction::Acquire { resource, agent } => {
+                    let agent = resolve_agent_arg(agent);
                     ygg::cli::lock_cmd::acquire(&pool, &config, &resource, &agent).await?;
                 }
                 LockAction::Release { resource, agent } => {
+                    let agent = resolve_agent_arg(agent);
                     ygg::cli::lock_cmd::release(&pool, &config, &resource, &agent).await?;
                 }
                 LockAction::List { stale, stale_secs } => {
