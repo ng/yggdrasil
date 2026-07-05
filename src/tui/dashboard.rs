@@ -86,6 +86,12 @@ pub struct DashboardView {
     /// run (default 300s).
     orphan_last_check: Option<Instant>,
 
+    /// Throttles the tmux worker-reconciliation probe. It shells out one
+    /// `tmux list-windows` per session, so running it on every 2s refresh
+    /// spawns subprocesses in the input path — hitches the UI. Gated to at
+    /// most once every 10s; the external `ygg watch` observer covers the gap.
+    worker_reconcile_last: Option<Instant>,
+
     // Task runs activity tile
     runs_succeeded: i64,
     runs_failed: i64,
@@ -213,6 +219,7 @@ impl DashboardView {
             msg: None,
             flash: None,
             orphan_last_check: None,
+            worker_reconcile_last: None,
             runs_succeeded: 0,
             runs_failed: 0,
             runs_running: 0,
@@ -670,12 +677,19 @@ impl DashboardView {
             })
             .collect();
 
-        // Piggyback a tmux-window check on every refresh. The external
+        // Piggyback a tmux-window check, throttled to every 10s. The external
         // `ygg watch` observer does this too, but not everyone runs it —
         // without this call, workers whose tmux window was killed stay
-        // "running" in the panel forever. Cheap: one list-windows per
-        // unique tmux session, one UPDATE per absent worker.
-        let _ = super::app::reconcile_workers(pool).await;
+        // "running" in the panel forever. It shells out one list-windows per
+        // unique tmux session, so we keep it off the every-2s-tick hot path.
+        let reconcile_due = self
+            .worker_reconcile_last
+            .map(|t| t.elapsed().as_secs() >= 10)
+            .unwrap_or(true);
+        if reconcile_due {
+            let _ = super::app::reconcile_workers(pool).await;
+            self.worker_reconcile_last = Some(Instant::now());
+        }
 
         // Workers panel reads from the workers table. Observer
         // (yggdrasil-51) maintains state; we just show it.

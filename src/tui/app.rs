@@ -1659,9 +1659,17 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
             .unwrap_or(true);
 
         if need_refresh {
-            app.dashboard.refresh(pool).await?;
+            // The always-visible orchestration strip is fed by the cheap
+            // status-tail query (2 roundtrips, no subprocess), so it stays
+            // live on every view. The heavy dashboard refresh (~15 queries +
+            // a per-session tmux probe) only runs when its panel is on
+            // screen — off-dashboard views were paying that whole cascade,
+            // on the input thread, every tick.
             app.refresh_status_tail(pool).await;
             match app.active_view {
+                ActiveView::Dashboard => {
+                    app.dashboard.refresh(pool).await?;
+                }
                 ActiveView::Dag => {
                     app.dag.refresh(pool).await?;
                 }
