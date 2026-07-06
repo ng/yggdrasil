@@ -1087,16 +1087,22 @@ async fn main() -> anyhow::Result<()> {
     // straight over the TUI. Every other subcommand keeps stderr logging.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "ygg=info".parse().unwrap());
+    let is_dashboard = matches!(cli.command, Some(Commands::Dashboard));
     match dashboard_log_file(&cli.command) {
         Some(file) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
-                .with_writer(move || {
-                    file.try_clone()
-                        .map(|f| Box::new(f) as Box<dyn std::io::Write>)
-                        .unwrap_or_else(|_| Box::new(std::io::sink()))
-                })
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+        None if is_dashboard => {
+            // The log file couldn't be opened but the dashboard still owns the
+            // alt-screen. Falling back to stderr here would paint over the TUI —
+            // the exact corruption this routing exists to prevent — so drop logs.
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::sink)
                 .init();
         }
         None => {
