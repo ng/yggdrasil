@@ -1633,6 +1633,21 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
         tracing::warn!(error = %e, "worker reconciliation on TUI start failed");
     }
 
+    // Keep maintenance running while the dashboard is open. The watcher
+    // self-guards on the singleton advisory lock, so if a persistent
+    // `ygg watcher` daemon is already running this spawned copy grabs
+    // nothing and exits immediately. On dashboard exit the task is dropped
+    // and its lock-holding connection closes. This makes "dashboard open"
+    // imply "workers get observed and reaped" without a separate daemon.
+    {
+        let watcher = crate::watcher::Watcher::new(pool.clone(), config.clone());
+        tokio::spawn(async move {
+            if let Err(e) = watcher.run().await {
+                tracing::warn!(error = %e, "dashboard-spawned watcher exited with error");
+            }
+        });
+    }
+
     let mut app = App::new(agent_name);
 
     // Decouple refresh from input. Previously every keypress triggered
@@ -1659,9 +1674,17 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
             .unwrap_or(true);
 
         if need_refresh {
-            app.dashboard.refresh(pool).await?;
+            // The always-visible orchestration strip is fed by the cheap
+            // status-tail query (2 roundtrips, no subprocess), so it stays
+            // live on every view. The heavy dashboard refresh (~15 queries +
+            // a per-session tmux probe) only runs when its panel is on
+            // screen — off-dashboard views were paying that whole cascade,
+            // on the input thread, every tick.
             app.refresh_status_tail(pool).await;
             match app.active_view {
+                ActiveView::Dashboard => {
+                    app.dashboard.refresh(pool).await?;
+                }
                 ActiveView::Dag => {
                     app.dag.refresh(pool).await?;
                 }

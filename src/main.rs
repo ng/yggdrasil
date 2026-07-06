@@ -104,7 +104,12 @@ enum Commands {
     },
 
     /// Start the background watcher daemon
-    Watcher,
+    Watcher {
+        /// Run a single maintenance tick and exit, instead of looping. No-ops
+        /// if a persistent watcher already holds the singleton lock.
+        #[arg(long)]
+        once: bool,
+    },
 
     /// Resource lock management
     Lock {
@@ -688,17 +693,19 @@ enum LockAction {
     Acquire {
         /// Resource key (e.g. "file:src/auth/")
         resource: String,
-        /// Agent name performing the lock
+        /// Agent name performing the lock (defaults to YGG_AGENT_NAME env var
+        /// or current directory name)
         #[arg(short, long)]
-        agent: String,
+        agent: Option<String>,
     },
     /// Release a resource lock
     Release {
         /// Resource key
         resource: String,
-        /// Agent name releasing the lock
+        /// Agent name releasing the lock (defaults to YGG_AGENT_NAME env var
+        /// or current directory name)
         #[arg(short, long)]
-        agent: String,
+        agent: Option<String>,
     },
     /// List all active locks. Pass --stale to restrict to locks held
     /// longer than `secs` (default 600 = 10 min) — useful for triaging
@@ -1190,19 +1197,21 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::recover::execute(&pool, Some(stale_secs)).await?;
         }
-        Commands::Watcher => {
+        Commands::Watcher { once } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::watcher_cmd::execute(&pool, &config).await?;
+            ygg::cli::watcher_cmd::execute(&pool, &config, once).await?;
         }
         Commands::Lock { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
             match action {
                 LockAction::Acquire { resource, agent } => {
+                    let agent = resolve_agent_arg(agent);
                     ygg::cli::lock_cmd::acquire(&pool, &config, &resource, &agent).await?;
                 }
                 LockAction::Release { resource, agent } => {
+                    let agent = resolve_agent_arg(agent);
                     ygg::cli::lock_cmd::release(&pool, &config, &resource, &agent).await?;
                 }
                 LockAction::List { stale, stale_secs } => {

@@ -67,6 +67,8 @@ mod tests {
             pr_url: None,
             delivery_checked_at: None,
             intent: None,
+            window_reaped: false,
+            worktree_removed: false,
         }
     }
 
