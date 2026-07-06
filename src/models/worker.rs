@@ -57,6 +57,10 @@ pub struct Worker {
     pub delivery_checked_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
     pub intent: Option<String>,
+    /// Set once cleanup_delivered has reaped this worker's tmux window, so
+    /// list_cleanable stops re-selecting an already-cleaned row every tick.
+    #[sqlx(default)]
+    pub window_reaped: bool,
 }
 
 pub struct WorkerRepo<'a> {
@@ -131,6 +135,16 @@ impl<'a> WorkerRepo<'a> {
         .bind(pr_url)
         .execute(self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Mark a worker's tmux window reaped so list_cleanable stops re-selecting
+    /// it. One-shot: cleanup_delivered calls this after killing the window.
+    pub async fn mark_window_reaped(&self, worker_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE workers SET window_reaped = true WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -246,10 +260,11 @@ impl<'a> WorkerRepo<'a> {
                       worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
                       branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
                  FROM workers
-                WHERE (state IN ('completed', 'failed') AND branch_merged = true)
-                   OR (state = 'completed' AND branch_pushed = true
-                       AND ended_at < now() - interval '5 minutes')
-                   OR (state = 'abandoned' AND ended_at < now() - interval '1 hour')
+                WHERE window_reaped = false
+                  AND ((state IN ('completed', 'failed') AND branch_merged = true)
+                    OR (state = 'completed' AND branch_pushed = true
+                        AND ended_at < now() - interval '5 minutes')
+                    OR (state = 'abandoned' AND ended_at < now() - interval '1 hour'))
                 ORDER BY ended_at ASC
                 LIMIT 10"#,
         )

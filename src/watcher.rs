@@ -517,10 +517,8 @@ impl Watcher {
     /// Clean up workers that are terminal AND fully delivered (merged) or
     /// abandoned for >1h. Kills the tmux window and removes the worktree.
     async fn cleanup_delivered(&self) -> Result<u64, anyhow::Error> {
-        let workers = WorkerRepo::new(&self.pool)
-            .list_cleanable()
-            .await
-            .unwrap_or_default();
+        let repo = WorkerRepo::new(&self.pool);
+        let workers = repo.list_cleanable().await.unwrap_or_default();
         let mut n = 0u64;
         for w in workers {
             // Reap the idle tmux window in every cleanable case — that's what
@@ -536,6 +534,11 @@ impl Watcher {
             if fully_delivered && std::path::Path::new(&w.worktree_path).exists() {
                 remove_worktree(&w.worktree_path);
             }
+
+            // One-shot marker so this row drains out of list_cleanable —
+            // otherwise it re-matches every tick, re-killing a dead window and
+            // starving the LIMIT budget for genuinely-new cleanable workers.
+            let _ = repo.mark_window_reaped(w.worker_id).await;
             tracing::info!(
                 worker = %w.worker_id,
                 state = ?w.state,
