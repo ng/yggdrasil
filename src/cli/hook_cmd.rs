@@ -221,6 +221,25 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
     // ADR 0016 / yggdrasil-99: bump heartbeat on running task_run.
     let _ = crate::cli::run_cmd::heartbeat_cli(&pool, None, agent_name).await;
 
+    // Watcher-of-last-resort: bake an opportunistic maintenance tick into the
+    // hook that fires on every tool/ygg call, so a fleet self-heals even when
+    // nobody runs a dashboard or `ygg watcher` daemon. Heavily throttled — the
+    // atomic claim means at most one full tick per interval across all
+    // sessions, and when a supervisor is up this is a single UPDATE that
+    // matches nothing. Best-effort; opt out with YGG_HOOK_WATCHER_TICK=0,
+    // tune the floor with YGG_HOOK_WATCHER_TICK_SECS (default 60).
+    let tick_off = std::env::var("YGG_HOOK_WATCHER_TICK")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+    if !tick_off {
+        let secs = std::env::var("YGG_HOOK_WATCHER_TICK_SECS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(60.0);
+        let watcher = crate::watcher::Watcher::new(pool.clone(), config.clone());
+        let _ = watcher.run_once_throttled(secs).await;
+    }
+
     // Only lock on file-modifying tools.
     match tool_name {
         "Edit" | "Write" | "NotebookEdit" => {
