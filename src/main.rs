@@ -1056,17 +1056,56 @@ enum InterruptAction {
     },
 }
 
+/// When the invoked command is the dashboard TUI, return an append handle to
+/// its log file (`$XDG_STATE_HOME/ygg/dashboard.log`, falling back to
+/// `~/.local/state/ygg/`). Any other command returns `None` so logs stay on
+/// stderr. Failing to open the file also returns `None` — logging silently
+/// drops rather than corrupting the TUI.
+fn dashboard_log_file(command: &Option<Commands>) -> Option<std::fs::File> {
+    if !matches!(command, Some(Commands::Dashboard)) {
+        return None;
+    }
+    let dir = match std::env::var("XDG_STATE_HOME") {
+        Ok(x) if !x.is_empty() => std::path::PathBuf::from(x).join("ygg"),
+        _ => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".local/state/ygg"),
+    };
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("dashboard.log"))
+        .ok()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ygg=info".parse().unwrap()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+
+    // Route tracing to a log file — not stderr — while the dashboard owns the
+    // terminal. The dashboard runs in ratatui's alternate screen and spawns a
+    // background watcher; watcher `tracing::*` events written to stderr paint
+    // straight over the TUI. Every other subcommand keeps stderr logging.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "ygg=info".parse().unwrap());
+    match dashboard_log_file(&cli.command) {
+        Some(file) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(move || {
+                    file.try_clone()
+                        .map(|f| Box::new(f) as Box<dyn std::io::Write>)
+                        .unwrap_or_else(|_| Box::new(std::io::sink()))
+                })
+                .init();
+        }
+        None => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+    }
     let user_id = ygg::db::resolve_user();
 
     let command = cli.command.unwrap_or(Commands::Up);

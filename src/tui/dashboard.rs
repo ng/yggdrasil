@@ -687,7 +687,14 @@ impl DashboardView {
             .map(|t| t.elapsed().as_secs() >= 10)
             .unwrap_or(true);
         if reconcile_due {
-            let _ = super::app::reconcile_workers(pool).await;
+            // Fire-and-forget: reconcile shells out one `tmux list-windows`
+            // per session. Awaiting it here stalls the render loop on a
+            // subprocess; detaching keeps input smooth. Its writes land in the
+            // DB and surface on the next refresh tick.
+            let p = pool.clone();
+            tokio::spawn(async move {
+                let _ = super::app::reconcile_workers(&p).await;
+            });
             self.worker_reconcile_last = Some(Instant::now());
         }
 

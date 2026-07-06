@@ -34,11 +34,26 @@ async fn try_acquire_singleton(pool: &PgPool) -> Result<Option<sqlx::PgConnectio
 pub struct Watcher {
     pool: PgPool,
     config: AppConfig,
+    /// Suppress the stderr notice when another watcher already holds the
+    /// singleton lock. Set for the dashboard-spawned watcher, whose stderr
+    /// would paint over the ratatui alternate screen.
+    quiet: bool,
 }
 
 impl Watcher {
     pub fn new(pool: PgPool, config: AppConfig) -> Self {
-        Self { pool, config }
+        Self {
+            pool,
+            config,
+            quiet: false,
+        }
+    }
+
+    /// Silence the "another watcher is already running" stderr notice. Used by
+    /// the dashboard-spawned watcher so it can't corrupt the TUI display.
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
+        self
     }
 
     /// Run a single maintenance tick if no other watcher holds the singleton
@@ -67,7 +82,11 @@ impl Watcher {
                 tracing::info!(
                     "another ygg watcher already holds the singleton lock ({WATCHER_LOCK_ID:#x}); exiting"
                 );
-                eprintln!("another ygg watcher is already running on this database; nothing to do");
+                if !self.quiet {
+                    eprintln!(
+                        "another ygg watcher is already running on this database; nothing to do"
+                    );
+                }
                 return Ok(());
             }
         };
