@@ -4,6 +4,8 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -91,6 +93,11 @@ pub struct DashboardView {
     /// spawns subprocesses in the input path — hitches the UI. Gated to at
     /// most once every 10s; the external `ygg watch` observer covers the gap.
     worker_reconcile_last: Option<Instant>,
+
+    /// Set while a fire-and-forget reconcile is running. The 10s throttle
+    /// alone can't prevent overlap — a probe that outlives its window would
+    /// let a second spawn stack on top — so we also gate on this flag.
+    worker_reconcile_inflight: Arc<AtomicBool>,
 
     // Task runs activity tile
     runs_succeeded: i64,
@@ -220,6 +227,7 @@ impl DashboardView {
             flash: None,
             orphan_last_check: None,
             worker_reconcile_last: None,
+            worker_reconcile_inflight: Arc::new(AtomicBool::new(false)),
             runs_succeeded: 0,
             runs_failed: 0,
             runs_running: 0,
@@ -686,8 +694,20 @@ impl DashboardView {
             .worker_reconcile_last
             .map(|t| t.elapsed().as_secs() >= 10)
             .unwrap_or(true);
-        if reconcile_due {
-            let _ = super::app::reconcile_workers(pool).await;
+        // Skip if a prior reconcile is still running: a probe slower than the
+        // 10s window would otherwise let spawns stack up.
+        if reconcile_due && !self.worker_reconcile_inflight.load(Ordering::Relaxed) {
+            // Fire-and-forget: reconcile shells out one `tmux list-windows`
+            // per session. Awaiting it here stalls the render loop on a
+            // subprocess; detaching keeps input smooth. Its writes land in the
+            // DB and surface on the next refresh tick.
+            let p = pool.clone();
+            let inflight = self.worker_reconcile_inflight.clone();
+            inflight.store(true, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let _ = super::app::reconcile_workers(&p).await;
+                inflight.store(false, Ordering::Relaxed);
+            });
             self.worker_reconcile_last = Some(Instant::now());
         }
 

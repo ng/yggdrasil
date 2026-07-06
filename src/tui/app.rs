@@ -1640,7 +1640,7 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
     // and its lock-holding connection closes. This makes "dashboard open"
     // imply "workers get observed and reaped" without a separate daemon.
     {
-        let watcher = crate::watcher::Watcher::new(pool.clone(), config.clone());
+        let watcher = crate::watcher::Watcher::new(pool.clone(), config.clone()).quiet();
         tokio::spawn(async move {
             if let Err(e) = watcher.run().await {
                 tracing::warn!(error = %e, "dashboard-spawned watcher exited with error");
@@ -1660,6 +1660,10 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
     let refresh_interval = std::time::Duration::from_secs(2);
     let poll_interval = std::time::Duration::from_millis(50);
     let mut last_refresh: Option<Instant> = None;
+    // Only the active view refreshes each tick, so switching panes must
+    // trigger an immediate refresh — otherwise the newly-shown pane sits on
+    // stale/empty data for up to `refresh_interval` after a switch.
+    let mut last_view = app.active_view;
 
     loop {
         // Draw every tick so input stays snappy and each view's own
@@ -1669,9 +1673,12 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
         // Refresh on a coarser timer — every keypress refreshing the DB
         // made arrow keys laggy. Targeted per-action refreshes still fire
         // from handle_key directly.
-        let need_refresh = last_refresh
-            .map(|t| t.elapsed() >= refresh_interval)
-            .unwrap_or(true);
+        let view_changed = app.active_view != last_view;
+        last_view = app.active_view;
+        let need_refresh = view_changed
+            || last_refresh
+                .map(|t| t.elapsed() >= refresh_interval)
+                .unwrap_or(true);
 
         if need_refresh {
             // The always-visible orchestration strip is fed by the cheap
