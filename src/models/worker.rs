@@ -58,9 +58,15 @@ pub struct Worker {
     #[sqlx(default)]
     pub intent: Option<String>,
     /// Set once cleanup_delivered has reaped this worker's tmux window, so
-    /// list_cleanable stops re-selecting an already-cleaned row every tick.
+    /// list_cleanable stops re-selecting it for the (idempotent) window kill.
     #[sqlx(default)]
     pub window_reaped: bool,
+    /// Set once the local worktree has been torn down. Tracked separately from
+    /// window_reaped because a completed+pushed worker's window is reaped early
+    /// while its worktree is kept until the branch merges — the two steps
+    /// complete at different times.
+    #[sqlx(default)]
+    pub worktree_removed: bool,
 }
 
 pub struct WorkerRepo<'a> {
@@ -139,9 +145,21 @@ impl<'a> WorkerRepo<'a> {
     }
 
     /// Mark a worker's tmux window reaped so list_cleanable stops re-selecting
-    /// it. One-shot: cleanup_delivered calls this after killing the window.
+    /// it for the window kill. One-shot: cleanup_delivered calls this after
+    /// killing the window.
     pub async fn mark_window_reaped(&self, worker_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE workers SET window_reaped = true WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Mark a worker's local worktree torn down. One-shot: cleanup_delivered
+    /// calls this once the worktree is removed (or already absent), so the row
+    /// drains out of the worktree-teardown branch of list_cleanable.
+    pub async fn mark_worktree_removed(&self, worker_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE workers SET worktree_removed = true WHERE worker_id = $1")
             .bind(worker_id)
             .execute(self.pool)
             .await?;
@@ -260,11 +278,19 @@ impl<'a> WorkerRepo<'a> {
                       worktree_path, state, started_at, last_seen_at, ended_at, exit_reason,
                       branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
                  FROM workers
-                WHERE window_reaped = false
-                  AND ((state IN ('completed', 'failed') AND branch_merged = true)
-                    OR (state = 'completed' AND branch_pushed = true
-                        AND ended_at < now() - interval '5 minutes')
-                    OR (state = 'abandoned' AND ended_at < now() - interval '1 hour'))
+                 -- Eligible while either cleanup step is still pending. The
+                 -- window kill fires for any cleanable row; the worktree
+                 -- teardown only once fully delivered (merged) or abandoned —
+                 -- so a completed+pushed worker whose branch merges later
+                 -- re-enters here for teardown even after its window was reaped.
+                WHERE (window_reaped = false AND (
+                          (state IN ('completed', 'failed') AND branch_merged = true)
+                       OR (state = 'completed' AND branch_pushed = true
+                           AND ended_at < now() - interval '5 minutes')
+                       OR (state = 'abandoned' AND ended_at < now() - interval '1 hour')))
+                   OR (worktree_removed = false AND (
+                          (state IN ('completed', 'failed') AND branch_merged = true)
+                       OR (state = 'abandoned' AND ended_at < now() - interval '1 hour')))
                 ORDER BY ended_at ASC
                 LIMIT 10"#,
         )

@@ -521,32 +521,44 @@ impl Watcher {
         let workers = repo.list_cleanable().await.unwrap_or_default();
         let mut n = 0u64;
         for w in workers {
-            // Reap the idle tmux window in every cleanable case — that's what
-            // stops a done worker cluttering the fleet.
-            TmuxManager::kill_window_sync(&w.tmux_session, &w.tmux_window);
+            // Two independent, idempotent cleanup steps, each guarded by its
+            // own one-shot flag so a cleaned row drains out of list_cleanable
+            // instead of re-matching every tick.
+            let mut acted = false;
 
-            // Only tear down the local worktree once the work is fully
-            // delivered (branch merged) or the worker was abandoned. A
-            // completed-but-unmerged worker still has an open PR that may draw
-            // review comments, so keep its worktree for in-place iteration —
-            // the branch is already safe on origin regardless.
-            let fully_delivered = w.branch_merged || w.state == WorkerState::Abandoned;
-            if fully_delivered && std::path::Path::new(&w.worktree_path).exists() {
-                remove_worktree(&w.worktree_path);
+            // 1. Reap the idle tmux window — fires for any cleanable row.
+            if !w.window_reaped {
+                TmuxManager::kill_window_sync(&w.tmux_session, &w.tmux_window);
+                let _ = repo.mark_window_reaped(w.worker_id).await;
+                acted = true;
             }
 
-            // One-shot marker so this row drains out of list_cleanable —
-            // otherwise it re-matches every tick, re-killing a dead window and
-            // starving the LIMIT budget for genuinely-new cleanable workers.
-            let _ = repo.mark_window_reaped(w.worker_id).await;
-            tracing::info!(
-                worker = %w.worker_id,
-                state = ?w.state,
-                worktree = %w.worktree_path,
-                worktree_removed = fully_delivered,
-                "cleaned up delivered worker"
-            );
-            n += 1;
+            // 2. Tear down the local worktree — but only once the work is
+            // fully delivered (branch merged) or the worker was abandoned. A
+            // completed-but-unmerged worker keeps its worktree for in-place PR
+            // iteration; when its branch merges LATER, check_delivery flips
+            // branch_merged and the row re-enters here for this step even
+            // though its window was already reaped. The branch is safe on
+            // origin regardless.
+            let fully_delivered = w.branch_merged || w.state == WorkerState::Abandoned;
+            if fully_delivered && !w.worktree_removed {
+                if std::path::Path::new(&w.worktree_path).exists() {
+                    remove_worktree(&w.worktree_path);
+                }
+                let _ = repo.mark_worktree_removed(w.worker_id).await;
+                acted = true;
+            }
+
+            if acted {
+                tracing::info!(
+                    worker = %w.worker_id,
+                    state = ?w.state,
+                    worktree = %w.worktree_path,
+                    worktree_removed = fully_delivered,
+                    "cleaned up delivered worker"
+                );
+                n += 1;
+            }
         }
         Ok(n)
     }
