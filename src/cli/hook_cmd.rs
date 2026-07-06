@@ -232,12 +232,24 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
         .unwrap_or(false);
     if !tick_off {
+        // Clamp to the 60s floor: a configured 0 or negative value would flow
+        // into make_interval and defeat the throttle (a negative interval makes
+        // the atomic claim match on every call → stampede).
         let secs = std::env::var("YGG_HOOK_WATCHER_TICK_SECS")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(60.0);
+            .unwrap_or(60.0)
+            .max(60.0);
+        // Bound the tick so a slow git/gh/tmux probe inside a claimed tick can
+        // never stall the agent's tool path. The claim already bumped
+        // last_tick_at, so dropping the tick on timeout just defers the rest of
+        // the maintenance to the next window — never blocks the tool call.
         let watcher = crate::watcher::Watcher::new(pool.clone(), config.clone());
-        let _ = watcher.run_once_throttled(secs).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            watcher.run_once_throttled(secs),
+        )
+        .await;
     }
 
     // Only lock on file-modifying tools.
