@@ -366,6 +366,24 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
         if !skip_capture {
             let _ = crate::cli::run_cmd::capture_outcome_cli(pool, agent_name, None).await;
         }
+
+        // Headless self-heal: run one watcher tick as the session ends so a
+        // fleet with no persistent `ygg watcher` daemon (and no open
+        // dashboard) still gets its finished workers reaped. The tick
+        // self-guards on the singleton advisory lock — when a daemon or
+        // dashboard-spawned watcher already holds it, this returns instantly
+        // after a single lock probe, so the common case adds no latency. Only
+        // one Stop hook does real work at a time. Best-effort; opt out with
+        // YGG_STOP_WATCHER_TICK=0.
+        let tick_off = std::env::var("YGG_STOP_WATCHER_TICK")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+            .unwrap_or(false);
+        if !tick_off {
+            let watcher = crate::watcher::Watcher::new(pool.clone(), config.clone());
+            if let Err(e) = watcher.run_once().await {
+                warn!("hook stop: opportunistic watcher tick failed: {e}");
+            }
+        }
     }
 
     // 2b. ADR 0017 M4 — learnings-capture nudge. Remind spawned workers, as a

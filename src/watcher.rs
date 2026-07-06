@@ -10,6 +10,25 @@ use crate::models::event::{EventKind, EventRepo};
 use crate::models::worker::{Worker, WorkerRepo, WorkerState};
 use crate::tmux::TmuxManager;
 
+/// Watcher advisory-lock id — distinct from the scheduler's SCHEDULER_LOCK_ID.
+/// Whoever holds it is the sole worker/lock reaper on this database. A second
+/// `ygg watcher`, a dashboard-spawned observer, or a Stop-hook `--once` tick
+/// that can't grab it steps aside — that's what keeps the observer paths from
+/// racing each other on tmux probes and worker-state writes.
+const WATCHER_LOCK_ID: i64 = 0x4347_5743_4800; // "GGWC"
+
+/// Try to become the singleton watcher. Returns the held connection on
+/// success (drop it to release the lock), or None if another watcher already
+/// holds it. Non-blocking — never waits on the lock.
+async fn try_acquire_singleton(pool: &PgPool) -> Result<Option<sqlx::PgConnection>, anyhow::Error> {
+    let mut conn = pool.acquire().await?.detach();
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(WATCHER_LOCK_ID)
+        .fetch_one(&mut conn)
+        .await?;
+    if acquired { Ok(Some(conn)) } else { Ok(None) }
+}
+
 /// Background watcher daemon.
 /// Periodically: reap expired locks, flag stale agents, cleanup.
 pub struct Watcher {
@@ -22,8 +41,37 @@ impl Watcher {
         Self { pool, config }
     }
 
+    /// Run a single maintenance tick if no other watcher holds the singleton
+    /// lock, then release. Used by the dashboard's opportunistic reconcile and
+    /// the Stop hook's headless fallback: when a persistent `ygg watcher`
+    /// daemon is running it holds the lock and these ticks no-op; when nothing
+    /// supervises the fleet, one caller at a time keeps workers reaped.
+    pub async fn run_once(&self) -> Result<bool, anyhow::Error> {
+        match try_acquire_singleton(&self.pool).await? {
+            Some(_conn) => {
+                self.tick().await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Main loop — runs until SIGTERM/SIGINT.
     pub async fn run(&self) -> Result<(), anyhow::Error> {
+        // Singleton guard: a second watcher on the same database would race
+        // the first on tmux probes and worker-state writes. Hold the lock for
+        // the process lifetime; drop on return releases it.
+        let _guard = match try_acquire_singleton(&self.pool).await? {
+            Some(conn) => conn,
+            None => {
+                tracing::info!(
+                    "another ygg watcher already holds the singleton lock ({WATCHER_LOCK_ID:#x}); exiting"
+                );
+                eprintln!("another ygg watcher is already running on this database; nothing to do");
+                return Ok(());
+            }
+        };
+
         let interval = Duration::from_secs(self.config.watcher_interval_secs);
         tracing::info!(
             interval_secs = self.config.watcher_interval_secs,
@@ -215,13 +263,45 @@ impl Watcher {
                 }
                 TmuxProbeResult::SessionMissing { .. } => continue,
             };
+            let task_repo = crate::models::task::TaskRepo::new(&self.pool);
             for w in ws {
                 if !windows.contains(&w.tmux_window) {
                     continue;
                 }
 
-                // Touch last_seen_at; then inspect the pane for prompts.
+                // Touch last_seen_at first so a still-alive pane is never
+                // mistaken for abandoned.
                 let _ = repo.touch(w.worker_id).await;
+
+                // Completion is authoritative, not pane-text-derived: a done
+                // worker sits at an empty prompt that's indistinguishable from
+                // an idle one, so classify_pane can never reach Completed. If
+                // the bound task is closed, the agent finished — mark the
+                // worker Completed so it enters the delivery/cleanup pipeline
+                // instead of lingering "live" forever.
+                if let Ok(Some(task)) = task_repo.get(w.task_id).await {
+                    if task.status == crate::models::task::TaskStatus::Closed {
+                        if repo
+                            .set_state_if_live(
+                                w.worker_id,
+                                WorkerState::Completed,
+                                Some("bound task closed"),
+                            )
+                            .await
+                            .unwrap_or(false)
+                        {
+                            tracing::info!(
+                                worker = %w.worker_id,
+                                task = %w.task_id,
+                                "worker completed: bound task closed"
+                            );
+                            changes += 1;
+                        }
+                        continue;
+                    }
+                }
+
+                // Otherwise fall back to pane inspection for live status.
                 let pane = capture_pane(&session, &w.tmux_window).unwrap_or_default();
                 let next = classify_pane(&pane);
                 if next != w.state {
@@ -443,15 +523,24 @@ impl Watcher {
             .unwrap_or_default();
         let mut n = 0u64;
         for w in workers {
+            // Reap the idle tmux window in every cleanable case — that's what
+            // stops a done worker cluttering the fleet.
             TmuxManager::kill_window_sync(&w.tmux_session, &w.tmux_window);
-            if !std::path::Path::new(&w.worktree_path).exists() {
-                continue;
+
+            // Only tear down the local worktree once the work is fully
+            // delivered (branch merged) or the worker was abandoned. A
+            // completed-but-unmerged worker still has an open PR that may draw
+            // review comments, so keep its worktree for in-place iteration —
+            // the branch is already safe on origin regardless.
+            let fully_delivered = w.branch_merged || w.state == WorkerState::Abandoned;
+            if fully_delivered && std::path::Path::new(&w.worktree_path).exists() {
+                remove_worktree(&w.worktree_path);
             }
-            remove_worktree(&w.worktree_path);
             tracing::info!(
                 worker = %w.worker_id,
                 state = ?w.state,
                 worktree = %w.worktree_path,
+                worktree_removed = fully_delivered,
                 "cleaned up delivered worker"
             );
             n += 1;

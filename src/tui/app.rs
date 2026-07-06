@@ -1633,6 +1633,21 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
         tracing::warn!(error = %e, "worker reconciliation on TUI start failed");
     }
 
+    // Keep maintenance running while the dashboard is open. The watcher
+    // self-guards on the singleton advisory lock, so if a persistent
+    // `ygg watcher` daemon is already running this spawned copy grabs
+    // nothing and exits immediately. On dashboard exit the task is dropped
+    // and its lock-holding connection closes. This makes "dashboard open"
+    // imply "workers get observed and reaped" without a separate daemon.
+    {
+        let watcher = crate::watcher::Watcher::new(pool.clone(), config.clone());
+        tokio::spawn(async move {
+            if let Err(e) = watcher.run().await {
+                tracing::warn!(error = %e, "dashboard-spawned watcher exited with error");
+            }
+        });
+    }
+
     let mut app = App::new(agent_name);
 
     // Decouple refresh from input. Previously every keypress triggered

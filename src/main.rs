@@ -104,7 +104,12 @@ enum Commands {
     },
 
     /// Start the background watcher daemon
-    Watcher,
+    Watcher {
+        /// Run a single maintenance tick and exit, instead of looping. No-ops
+        /// if a persistent watcher already holds the singleton lock.
+        #[arg(long)]
+        once: bool,
+    },
 
     /// Resource lock management
     Lock {
@@ -1192,10 +1197,10 @@ async fn main() -> anyhow::Result<()> {
             let pool = ygg::db::create_pool(&config.database_url).await?;
             ygg::cli::recover::execute(&pool, Some(stale_secs)).await?;
         }
-        Commands::Watcher => {
+        Commands::Watcher { once } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
-            ygg::cli::watcher_cmd::execute(&pool, &config).await?;
+            ygg::cli::watcher_cmd::execute(&pool, &config, once).await?;
         }
         Commands::Lock { action } => {
             let config = ygg::config::AppConfig::from_env()?;

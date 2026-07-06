@@ -247,6 +247,8 @@ impl<'a> WorkerRepo<'a> {
                       branch_pushed, branch_merged, pr_url, delivery_checked_at, intent
                  FROM workers
                 WHERE (state IN ('completed', 'failed') AND branch_merged = true)
+                   OR (state = 'completed' AND branch_pushed = true
+                       AND ended_at < now() - interval '5 minutes')
                    OR (state = 'abandoned' AND ended_at < now() - interval '1 hour')
                 ORDER BY ended_at ASC
                 LIMIT 10"#,
