@@ -71,6 +71,32 @@ impl Watcher {
         }
     }
 
+    /// The watcher-of-last-resort baked into ygg's hooks: fire a tick only if
+    /// no tick has run in the last `min_interval_secs`, throttled across ALL
+    /// sessions by an atomic claim on the heartbeat row — so a fleet calling
+    /// ygg constantly doesn't stampede full ticks. Cheap on the hot path: the
+    /// common case is a single UPDATE that matches zero rows (a dashboard or
+    /// daemon keeps the heartbeat fresh) and returns immediately. Returns true
+    /// only when this call actually ran the tick.
+    pub async fn run_once_throttled(&self, min_interval_secs: f64) -> Result<bool, anyhow::Error> {
+        // Atomic claim: exactly one caller per interval wins the slot. Bumping
+        // last_tick_at up front means losers (incl. a concurrent supervisor's
+        // ticks) skip until the window elapses.
+        let claimed: Option<bool> = sqlx::query_scalar(
+            "UPDATE watcher_heartbeat SET last_tick_at = now()
+               WHERE id AND last_tick_at < now() - make_interval(secs => $1)
+             RETURNING true",
+        )
+        .bind(min_interval_secs)
+        .fetch_optional(&self.pool)
+        .await?;
+        if claimed.is_none() {
+            return Ok(false);
+        }
+        // Won the slot — run the tick unless a live watcher holds the lock.
+        self.run_once().await
+    }
+
     /// Main loop — runs until SIGTERM/SIGINT.
     pub async fn run(&self) -> Result<(), anyhow::Error> {
         // Singleton guard: a second watcher on the same database would race
@@ -177,6 +203,12 @@ impl Watcher {
                 "watcher tick"
             );
         }
+
+        // Refresh the liveness heartbeat so the hook-driven opportunistic tick
+        // (run_once_throttled) knows a watcher ran recently and stays quiet.
+        let _ = sqlx::query("UPDATE watcher_heartbeat SET last_tick_at = now() WHERE id")
+            .execute(&self.pool)
+            .await;
 
         Ok(())
     }
