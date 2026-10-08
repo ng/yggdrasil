@@ -11,17 +11,20 @@ use std::{
 
 use anyhow::{Result, bail, ensure};
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+
+mod moves;
 use uuid::Uuid;
 
 use super::document::{Document, MAX_DOCUMENT_BYTES, Scope, digest};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     Note,
     Learning,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
     pub repo: Option<Uuid>,
     pub kind: Kind,
@@ -256,6 +259,10 @@ impl KnowledgeStore {
     }
 
     fn read_at(parent: &File, name: &str) -> Result<Option<String>> {
+        Self::read_limited(parent, name, MAX_DOCUMENT_BYTES)
+    }
+
+    fn read_limited(parent: &File, name: &str, limit: usize) -> Result<Option<String>> {
         let file = match child(parent, name, libc::O_RDONLY, 0) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -266,16 +273,17 @@ impl KnowledgeStore {
             "knowledge document is not a regular file"
         );
         let mut text = String::new();
-        file.take((MAX_DOCUMENT_BYTES + 1) as u64)
-            .read_to_string(&mut text)?;
-        ensure!(
-            text.len() <= MAX_DOCUMENT_BYTES,
-            "knowledge document exceeds byte limit"
-        );
+        file.take((limit + 1) as u64).read_to_string(&mut text)?;
+        ensure!(text.len() <= limit, "knowledge document exceeds byte limit");
         Ok(Some(text))
     }
 
     pub fn get(&self, key: Key) -> Result<Option<RevisionedDocument>> {
+        self.recover_move()?;
+        self.get_unchecked(key)
+    }
+
+    fn get_unchecked(&self, key: Key) -> Result<Option<RevisionedDocument>> {
         let parent = match self.parent(key, false) {
             Ok(parent) => parent,
             Err(error)
@@ -328,6 +336,7 @@ impl KnowledgeStore {
         // Validate the serialized form with the same bounded parser used by reads.
         Document::parse(&text)?;
         let _lock = self.lock()?;
+        self.recover_move_locked()?;
         self.check_unique(key)?;
         let parent = self.parent(key, true)?;
         let name = format!("{}.md", key.id);
@@ -387,6 +396,7 @@ impl KnowledgeStore {
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
     ) -> Result<T> {
         let _lock = self.lock()?;
+        self.recover_move_locked()?;
         let current = self.read_control(name)?;
         let (text, result) = update(current.as_deref())?;
         ensure!(
@@ -401,6 +411,7 @@ impl KnowledgeStore {
 
     pub fn delete(&self, key: Key, expected: &str) -> Result<()> {
         let _lock = self.lock()?;
+        self.recover_move_locked()?;
         self.check_unique(key)?;
         let parent = self.parent(key, false)?;
         let name = format!("{}.md", key.id);
@@ -495,6 +506,12 @@ impl KnowledgeStore {
         result
     }
     pub fn snapshot(&self) -> Snapshot {
+        if let Err(e) = self.recover_move() {
+            return Snapshot {
+                documents: Vec::new(),
+                diagnostics: vec![format!("scope move recovery: {e}")],
+            };
+        }
         let inventory = self.inventory();
         let mut result = Snapshot {
             documents: Vec::new(),
@@ -512,7 +529,7 @@ impl KnowledgeStore {
                 ));
                 continue;
             }
-            match self.get(key) {
+            match self.get_unchecked(key) {
                 Ok(Some(doc)) => result.documents.push(doc),
                 Ok(None) => {}
                 Err(e) => result
@@ -524,6 +541,7 @@ impl KnowledgeStore {
     }
 
     pub fn find(&self, id: Uuid) -> Result<Option<RevisionedDocument>> {
+        self.recover_move()?;
         let inventory = self.inventory();
         ensure!(
             !inventory.incomplete,
@@ -532,7 +550,7 @@ impl KnowledgeStore {
         let candidates: Vec<_> = inventory.keys.into_iter().filter(|k| k.id == id).collect();
         ensure!(candidates.len() <= 1, "ambiguous document UUID");
         match candidates.first() {
-            Some(key) => self.get(*key),
+            Some(key) => self.get_unchecked(*key),
             None => Ok(None),
         }
     }

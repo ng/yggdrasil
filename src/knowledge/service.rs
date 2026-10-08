@@ -278,6 +278,33 @@ impl KnowledgeService {
         self.store.put(&edited, ExpectedRevision::Digest(revision))
     }
 
+    /// Moving a rule always requires review in its new matching scope. Original
+    /// creator/time and legacy provenance remain intact; UUID never changes.
+    pub fn move_scope(
+        &self,
+        id: Uuid,
+        revision: &str,
+        repo: Option<Uuid>,
+    ) -> Result<RevisionedDocument> {
+        Self::scope(&self.policy()?, repo)?;
+        let old = self.expected(id, revision)?;
+        ensure!(old.key.repo != repo, "document already has requested scope");
+        let mut document = old.document;
+        let mut profile = self.owned(&document)?;
+        profile.repo = repo;
+        profile.scope = if repo.is_some() {
+            Scope::Repo
+        } else {
+            Scope::Global
+        };
+        if old.key.kind == Kind::Learning {
+            profile.state = State::Pending;
+            profile.approval = None;
+        }
+        document.set_profile(&profile)?;
+        self.store.move_document(old.key, &document, revision)
+    }
+
     fn browse(&self) -> Result<Snapshot> {
         let policy = self.policy()?;
         let mut snapshot = self.store.snapshot();

@@ -100,10 +100,40 @@ filename or corrupt document does not erase unaffected knowledge. Incomplete
 filesystem enumeration fails UUID mutations/lookups rather than guessing identity.
 The inventory currently scans filenames and is not the final performance index.
 
+## Scope moves and interrupted operations
+
+`service::move_scope` preserves a document's UUID, kind, text and original
+provenance. A moved rule becomes pending and loses its old approval; note scope
+moves retain the explicit manual note state. Unknown target repo bindings and
+stale revisions are errors.
+
+The local store persists one `.move.json` intent under its writer lock. This is
+operational recovery state, containing a bounded JSON header followed by exact
+new document bytes. It records both keys and before/after digests. The target is
+written to a synced staging inode, linked exclusively into its destination, and
+synced before the source is removed. Source removal and intent removal each sync
+their directory. A destination appearing independently is never overwritten.
+
+Reads and mutations resume a pending intent under the same OS lock. Recovery
+checks UUID uniqueness and the recorded source/destination revisions before doing
+anything destructive. If either location changed independently, recovery reports
+an error and preserves both data and intent for manual resolution. A failure or
+process exit can be an ambiguous move outcome: reload before retrying. Recovery
+finishes forward; it does not infer that an interrupted request was cancelled.
+A failed recovery suppresses automatic bundle reads with a diagnostic until the
+conflict is resolved.
+
+Tests exit a subprocess abruptly after durable intent publication, destination
+publication, source removal and intent removal. Reopening recovers exactly one
+complete document with the same UUID. Additional tests cover concurrent moves,
+revision/destination conflicts, activation invalidation and independent edits
+made after interruption. This is a single-document move protocol, not a general
+multi-document transaction or the migration cutover protocol.
+
 ## Remaining engine work
 
-Scope moves, disposable indexing, generic OKF bundle browsing, legacy JSON
-adapters and latency measurements remain unfinished. Current snapshots
+Disposable indexing, generic OKF bundle browsing, legacy JSON adapters and latency
+measurements remain unfinished. Current snapshots
 scan the Yggdrasil layout directly. Approval must still be revalidated immediately
 before injection; never treat a previously read document as current authority.
 Shared Git transport, legacy adapters, migration and CLI integration build on this
