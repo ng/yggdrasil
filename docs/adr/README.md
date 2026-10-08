@@ -26,6 +26,7 @@ ADRs are append-only. Superseded decisions get a new ADR that references the old
 | 0016 | [Autonomous execution — scheduler + durable task runs](0016-autonomous-execution.md) | Proposed |
 | 0017 | [Learnings: approval gate + agent-proposed capture](0017-learning-capture-and-approval.md) | Proposed |
 | 0018 | [Task acceptance as a Definition-of-Done checklist](0018-task-acceptance-checklists.md) | Proposed |
+| 0019 | [Managed Postgres and OKF knowledge storage](0019-managed-postgres-and-okf-knowledge.md) | Proposed |
 
 ## Writing a new ADR
 
