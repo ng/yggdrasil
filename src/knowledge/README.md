@@ -132,11 +132,11 @@ multi-document transaction or the migration cutover protocol.
 
 ## Remaining engine work
 
-Generic OKF bundle browsing, legacy JSON adapters and the SQL-relative hook
-latency gate remain unfinished. Explicit browsing snapshots scan the Yggdrasil
+Generic OKF bundle browsing, command integration of the legacy adapters and the
+SQL-relative hook latency gate remain unfinished. Explicit browsing snapshots scan the Yggdrasil
 layout directly; rule/prime candidate lookup uses the disposable index below. Approval must still be revalidated immediately
 before injection; never treat a previously read document as current authority.
-Shared Git transport, legacy adapters, migration and CLI integration build on this
+Shared Git transport, migration and CLI integration build on this
 layer and remain separate release gates.
 
 ## Reproducible local read measurement
@@ -244,3 +244,35 @@ full-scan run. Directory inventory, metadata checks and index decoding still sca
 with corpus size. The SQL-relative 50 ms additional hook-latency gate is not yet
 measured or satisfied by this engine benchmark; retain the exact fixture while
 optimizing these remaining costs and integrating actual commands.
+
+## Legacy model adapters
+
+`legacy` converts existing `Memory` / `Learning` models to OKF and back without a
+database connection. Import requires explicit database/corpus IDs plus source
+repo-to-portable-repo and source-user-to-current-user mappings. An empty legacy
+user needs its own explicit mapping; unmapped scope or ownership never becomes
+global/current-user data. UUIDs, exact text, timestamps, nullable context/creator,
+source and approval evidence survive the fixture round trips.
+
+Only guarded migration of the selected database may call the activation-preserving
+learning importer. Active source rows get explicit `Legacy` evidence bound to the
+new document digest and corpus, preserving missing actor/time. Pending historical
+approval fields remain provenance, not activation. Arbitrary non-object JSONB
+scope tags retain their original representation in provenance and have no matching
+keys; conflicting later object-tag edits require resolving that representation.
+Unknown status/source values and documents exceeding parser bounds are errors.
+
+API adapters emit the existing JSON model fields. They choose legacy repo IDs from
+the document's current portable scope: original IDs survive same-database duplicate
+mappings, while moves and deployment rebinding require an unambiguous current
+mapping. `legacy_user_id` provides the separate SQL owner field omitted from those
+JSON models. Multiple possible inverse mappings are errors, never arbitrary picks.
+A digest-invalid rule is reported pending and cannot retain active approval fields.
+
+Usage is returned separately with `(corpus_id, document_id)`, application count and
+last-applied time. The API adapter requires an explicitly supplied matching usage
+record and does not fabricate zero counts when telemetry is unavailable. Durable
+telemetry storage/fallback and command-level outage behavior still require wiring.
+These are model adapters, not the fenced cutover/reverse-import implementation:
+rollback must additionally audit OKF-only fields for representability, inventory
+all owners/scopes, and coordinate database generation/fences before writing SQL.

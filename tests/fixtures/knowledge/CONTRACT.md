@@ -1,7 +1,7 @@
 # Managed database and knowledge compatibility contracts
 
 These fixtures capture baseline `0203e7a` for ADR 0019. They are inputs to both
-legacy SQL tests and the forthcoming OKF adapters, not a declaration that the
+legacy SQL tests and the OKF model adapters, not a declaration that the
 cutover or managed runtime is complete.
 
 `configuration.json` defines target resolution. `src/config/database.rs` resolves
@@ -49,7 +49,12 @@ the broader note regression suite.
   Export must read it explicitly and require mapping for empty IDs; it cannot
   infer ownership from these API fixtures or the operator's username.
 
-Legacy JSON learning and memory fields remain adapter contracts. Learn list uses
+Legacy JSON learning and memory fields remain adapter contracts.
+`tests/okf_legacy.rs` verifies fixture round trips through `knowledge::legacy`,
+including separate explicit owner mappings and usage records. It also covers
+duplicate legacy scopes, current-scope moves/rebinding, non-object JSONB tags,
+pending historical approval and invalidated activation. The converters do not
+perform SQL writes, guarded cutover or command dispatch. Learn list uses
 `count`/`results`, pending also uses `count`/`results`; remember list uses
 `count`/`results`. Creation returns the model object. These wrappers still require
 end-to-end CLI coverage during M5, as do hook per-session deduplication and offline
@@ -75,7 +80,9 @@ and exact body/context bytes; `approval-digest.txt` pins its SHA-256. The digest
 covers identity, type, scope and matching fields, while excluding display metadata
 and telemetry. `tests/okf_documents.rs` tests round trips, bounded alias expansion,
 expiry, import deactivation, and digest invalidation without Postgres. Durable
-filesystem writes, identity bindings, indexing and adapters remain M4/M5 work.
+filesystem writes, identity bindings, indexing and model adapters have standalone
+test coverage. Command integration, shared transport and migration remain M4/M5/M6
+work; the complete release gates below are not waived by those tests.
 
 ## Platform release matrix
 

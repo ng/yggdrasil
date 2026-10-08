@@ -3,6 +3,7 @@
 pub mod document;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod identity;
+pub mod legacy;
 pub mod matching;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod service;
