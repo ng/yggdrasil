@@ -48,28 +48,39 @@ fn query(service: &KnowledgeService, repo: Uuid) -> (f64, f64, usize) {
     let rules = service.rules(&filters, now).unwrap();
     assert!(rules.diagnostics.is_empty(), "{:?}", rules.diagnostics);
     assert_eq!(rules.documents.len(), 20);
-    let mut bytes = 0;
-    for rule in rules.documents {
-        bytes += service
-            .revalidate_rule(&rule, &filters, now)
-            .unwrap()
-            .unwrap()
-            .body
-            .len();
-    }
+    let verified = service
+        .revalidate_rules(&rules.documents, &filters, now)
+        .unwrap();
+    assert!(
+        verified.diagnostics.is_empty(),
+        "{:?}",
+        verified.diagnostics
+    );
+    assert_eq!(verified.documents.len(), 20);
+    let mut bytes: usize = verified
+        .documents
+        .iter()
+        .map(|doc| doc.document.body.len())
+        .sum();
     let rule_ms = start.elapsed().as_secs_f64() * 1000.;
     let start = Instant::now();
     let notes = service.prime_notes(Some(repo), now).unwrap();
     assert!(notes.diagnostics.is_empty(), "{:?}", notes.diagnostics);
     assert_eq!(notes.documents.len(), 5);
-    for note in notes.documents {
-        bytes += service
-            .revalidate_note(&note, Some(repo), now)
-            .unwrap()
-            .unwrap()
-            .body
-            .len();
-    }
+    let verified = service
+        .revalidate_notes(&notes.documents, Some(repo), now)
+        .unwrap();
+    assert!(
+        verified.diagnostics.is_empty(),
+        "{:?}",
+        verified.diagnostics
+    );
+    assert_eq!(verified.documents.len(), 5);
+    bytes += verified
+        .documents
+        .iter()
+        .map(|doc| doc.document.body.len())
+        .sum::<usize>();
     (rule_ms, start.elapsed().as_secs_f64() * 1000., bytes)
 }
 

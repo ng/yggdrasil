@@ -336,12 +336,9 @@ impl KnowledgeService {
         snapshot
             .documents
             .retain(|d| d.key.kind == Kind::Note && matching::note_scope(d.key.repo, repo, all));
-        snapshot.documents.sort_by(|a, b| {
-            let a = a.document.profile().unwrap().unwrap();
-            let b = b.document.profile().unwrap().unwrap();
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| a.id.cmp(&b.id))
+        snapshot.documents.sort_by_cached_key(|doc| {
+            let profile = doc.document.profile().unwrap().unwrap();
+            (std::cmp::Reverse(profile.created_at), profile.id)
         });
         snapshot.documents.truncate(limit);
         Ok(snapshot)
@@ -407,12 +404,9 @@ impl KnowledgeService {
                     .activation_valid(policy.corpus_id)
                     .unwrap_or(false)
         });
-        snapshot.documents.sort_by(|a, b| {
-            let a = a.document.profile().unwrap().unwrap();
-            let b = b.document.profile().unwrap().unwrap();
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| a.id.cmp(&b.id))
+        snapshot.documents.sort_by_cached_key(|doc| {
+            let profile = doc.document.profile().unwrap().unwrap();
+            (std::cmp::Reverse(profile.created_at), profile.id)
         });
         Ok(snapshot)
     }
@@ -441,6 +435,64 @@ impl KnowledgeService {
                 &a.document.profile().unwrap().unwrap(),
                 &b.document.profile().unwrap().unwrap(),
             )
+        });
+        Ok(snapshot)
+    }
+
+    /// Use one current corpus inventory for an injection batch; every retained
+    /// document still has fresh bytes, policy, ownership and eligibility checks.
+    pub fn revalidate_rules(
+        &self,
+        selected: &[RevisionedDocument],
+        filters: &Filters<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<Snapshot> {
+        let policy = self.policy()?;
+        Self::scope(&policy, filters.repo)?;
+        let mut snapshot = self.store.revalidate_selected(selected);
+        snapshot.documents.retain(|doc| {
+            let result = (|| -> Result<bool> {
+                Ok(doc.key.kind == Kind::Learning
+                    && doc
+                        .document
+                        .eligible(policy.trusted.then_some(policy.corpus_id), now)?
+                    && matching::matches(&self.owned(&doc.document)?, filters)?)
+            })();
+            match result {
+                Ok(eligible) => eligible,
+                Err(e) => {
+                    snapshot.diagnostics.push(format!("{}: {e}", doc.key.id));
+                    false
+                }
+            }
+        });
+        Ok(snapshot)
+    }
+
+    pub fn revalidate_notes(
+        &self,
+        selected: &[RevisionedDocument],
+        repo: Option<Uuid>,
+        now: DateTime<Utc>,
+    ) -> Result<Snapshot> {
+        let policy = self.policy()?;
+        Self::scope(&policy, repo)?;
+        let mut snapshot = self.store.revalidate_selected(selected);
+        snapshot.documents.retain(|doc| {
+            let result = (|| -> Result<bool> {
+                Ok(policy.trusted
+                    && doc.key.kind == Kind::Note
+                    && matching::note_scope(doc.key.repo, repo, false)
+                    && doc.document.current(now)?
+                    && self.owned(&doc.document)?.state == State::Active)
+            })();
+            match result {
+                Ok(eligible) => eligible,
+                Err(e) => {
+                    snapshot.diagnostics.push(format!("{}: {e}", doc.key.id));
+                    false
+                }
+            }
         });
         Ok(snapshot)
     }

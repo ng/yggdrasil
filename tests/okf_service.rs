@@ -484,3 +484,89 @@ fn external_content_edits_need_review_but_expiry_does_not_invent_a_proposal() {
             .is_err()
     );
 }
+
+#[test]
+fn batch_revalidation_preserves_matching_freshness_and_trust() {
+    let (temp, service, repo) = setup();
+    let rule = service
+        .create_rule(input(repo), Creation::ManualActive, now())
+        .unwrap();
+    let note = service
+        .create_note(Some(repo), "note".into(), None, now())
+        .unwrap();
+    let filters = Filters {
+        repo: Some(repo),
+        file: Some("src/main.rs"),
+        ..Filters::default()
+    };
+    let selected = vec![rule.clone(), note.clone(), rule.clone()];
+    assert_eq!(
+        service
+            .revalidate_rules(&selected, &filters, now())
+            .unwrap()
+            .documents
+            .len(),
+        1
+    );
+    assert_eq!(
+        service
+            .revalidate_notes(&selected, Some(repo), now())
+            .unwrap()
+            .documents
+            .len(),
+        1
+    );
+    assert!(
+        service
+            .revalidate_rules(
+                &selected,
+                &Filters {
+                    file: Some("docs/README.md"),
+                    ..filters
+                },
+                now()
+            )
+            .unwrap()
+            .documents
+            .is_empty()
+    );
+    let registry = IdentityRegistry::open(&temp.path().join("policy"), false).unwrap();
+    let (mut policy, revision) = registry.read().unwrap();
+    policy.trusted = false;
+    registry.replace(&revision, &policy).unwrap();
+    assert!(
+        service
+            .revalidate_rules(&selected, &filters, now())
+            .unwrap()
+            .documents
+            .is_empty()
+    );
+    assert!(
+        service
+            .revalidate_notes(&selected, Some(repo), now())
+            .unwrap()
+            .documents
+            .is_empty()
+    );
+    let (_, revision) = registry.read().unwrap();
+    policy.trusted = true;
+    registry.replace(&revision, &policy).unwrap();
+    let mut edited = rule.document.clone();
+    edited.body.push_str("changed");
+    service.edit(rule.key.id, &rule.revision, edited).unwrap();
+    service.delete(note.key.id, &note.revision).unwrap();
+    assert!(
+        service
+            .revalidate_rules(&selected, &filters, now())
+            .unwrap()
+            .documents
+            .is_empty()
+    );
+    assert!(
+        service
+            .revalidate_notes(&selected, Some(repo), now())
+            .unwrap()
+            .documents
+            .is_empty()
+    );
+}

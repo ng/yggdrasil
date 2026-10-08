@@ -540,6 +540,51 @@ impl KnowledgeStore {
         result
     }
 
+    /// Revalidate one injection batch against a single fresh UUID inventory.
+    /// Individual file bytes are still read and hashed immediately; this is not
+    /// a transaction snapshot across files or a cached membership assertion.
+    pub fn revalidate_selected(&self, selected: &[RevisionedDocument]) -> Snapshot {
+        if let Err(e) = self.recover_move() {
+            return Snapshot {
+                documents: Vec::new(),
+                diagnostics: vec![format!("scope move recovery: {e}")],
+            };
+        }
+        let inventory = self.inventory();
+        let mut result = Snapshot {
+            documents: Vec::new(),
+            diagnostics: inventory.diagnostics,
+        };
+        if inventory.incomplete {
+            return result;
+        }
+        let mut counts = std::collections::HashMap::new();
+        for key in inventory.keys {
+            *counts.entry(key.id).or_insert(0) += 1;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for previous in selected {
+            if !seen.insert(previous.key.id) {
+                continue;
+            }
+            if counts.get(&previous.key.id).copied().unwrap_or(0) != 1 {
+                result.diagnostics.push(format!(
+                    "{}: selected UUID missing or ambiguous",
+                    previous.key.id
+                ));
+                continue;
+            }
+            match self.get_unchecked(previous.key) {
+                Ok(Some(current)) if current.revision == previous.revision => {
+                    result.documents.push(current)
+                }
+                Ok(_) => {}
+                Err(e) => result.diagnostics.push(format!("{}: {e}", previous.key.id)),
+            }
+        }
+        result
+    }
+
     pub fn find(&self, id: Uuid) -> Result<Option<RevisionedDocument>> {
         self.recover_move()?;
         let inventory = self.inventory();

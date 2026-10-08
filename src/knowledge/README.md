@@ -178,3 +178,26 @@ revalidation inventories all filenames again. Disposable indexing must reduce
 both costs while preserving duplicate-UUID detection and fresh selected-file
 approval, scope, deletion, expiry and policy checks. Retain this fixture when
 comparing the indexed implementation.
+
+### Batched selection revalidation
+
+Use `revalidate_rules` / `revalidate_notes` for an injection batch. They inventory
+UUIDs once for the batch, then read, hash and parse each selected file and check
+current policy, ownership, matching, freshness and approval. Missing, ambiguous,
+changed or ineligible selections are excluded; malformed selections produce
+diagnostics while unrelated documents remain available. Repeated input IDs are
+deduplicated. This is not a cross-document transaction snapshot, and filenames
+are never taken from an earlier cached inventory.
+
+The process benchmark now calls these batch APIs. Note and proposal sorting also
+computes profile sort keys once per row. Persistent indexing remains unfinished:
+selection still reads the corpus. An experimental in-process parsed-document
+cache did not improve this workload and is not retained.
+
+With batched revalidation and cached sort keys, the same fixture on the same host
+measured rule p50/p95 of 6,295.4/6,744.2 ms and prime-note p50/p95 of
+6,022.2/6,439.9 ms (60 samples; 51.46 seconds total). Output remained 6,400 body
+bytes per sample. Compared with the initial scan-only run, p95 improved about
+18% for each operation. These are single-run observations, not a statistically
+controlled regression threshold. Whole-corpus reads and parsing remain to be addressed
+by the persistent index; the SQL-relative 50 ms target remains unverified.
