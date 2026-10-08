@@ -49,7 +49,7 @@ async fn try_with_db(
     transcript_path: Option<&str>,
 ) -> Result<PrimeContext, anyhow::Error> {
     let config = AppConfig::from_env()?;
-    let pool = db::create_pool(&config.database_url).await?;
+    let pool = db::connect(&config.database).await?;
     let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
     // Register (or touch) this agent so it exists in the DB. Persona from
     // $YGG_AGENT_PERSONA forms a compound key with agent_name — same cwd,

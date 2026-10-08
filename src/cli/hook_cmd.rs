@@ -118,7 +118,7 @@ async fn handle_prompt_submit(
             return Ok(());
         }
     };
-    let pool = match crate::db::create_pool(&config.database_url).await {
+    let pool = match crate::db::connect(&config.database).await {
         Ok(p) => p,
         Err(e) => {
             warn!("hook prompt-submit: db pool error: {e}");
@@ -208,7 +208,7 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
-    let pool = match crate::db::create_pool(&config.database_url).await {
+    let pool = match crate::db::connect(&config.database).await {
         Ok(p) => p,
         Err(_) => return Ok(()),
     };
@@ -304,7 +304,7 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
     // at the end — a transient DB failure must not silently skip the blocker
     // check that prevents premature session exits.
     let db = match AppConfig::from_env() {
-        Ok(config) => match crate::db::create_pool(&config.database_url).await {
+        Ok(config) => match crate::db::connect(&config.database).await {
             Ok(pool) => Some((pool, config)),
             Err(e) => {
                 warn!("hook stop: db pool error: {e}");

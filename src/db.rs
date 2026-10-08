@@ -57,6 +57,84 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
 }
 
+/// Central application connection path. Managed startup only opens an existing
+/// cluster: it never downloads binaries, initializes data or applies migrations.
+pub async fn connect(target: &crate::config::database::DatabaseTarget) -> anyhow::Result<PgPool> {
+    use crate::config::database::DatabaseTarget;
+    match target {
+        DatabaseTarget::External { url } => {
+            use anyhow::Context;
+            create_pool(url)
+                .await
+                .context("external database connection failed")
+        }
+        DatabaseTarget::ManagedLocal { data_dir } => {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            {
+                use anyhow::Context;
+                let cluster = runtime::ManagedCluster::open(&data_dir.join("postgres"))
+                    .context("managed database is not initialized; run ygg init")?;
+                supervisor::start(
+                    &cluster,
+                    &std::env::current_exe()?,
+                    std::time::Duration::from_secs(30),
+                )
+                .await?;
+                let max_connections = std::env::var("YGG_DB_POOL")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(DEFAULT_MAX_CONNECTIONS);
+                Ok(PgPoolOptions::new()
+                    .max_connections(max_connections)
+                    .connect_with(provision::runtime_options(&cluster))
+                    .await
+                    .context("managed runtime database unavailable; run ygg migrate explicitly")?)
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                let _ = data_dir;
+                anyhow::bail!(
+                    "managed database unsupported on this platform; configure an external database"
+                )
+            }
+        }
+    }
+}
+
+/// Operator-only migration path. Ordinary pools always retain runtime identity.
+pub async fn migrate_target(
+    target: &crate::config::database::DatabaseTarget,
+) -> anyhow::Result<()> {
+    use crate::config::database::DatabaseTarget;
+    match target {
+        DatabaseTarget::External { url } => {
+            let pool = create_pool(url).await?;
+            let result = run_migrations(&pool).await;
+            pool.close().await;
+            result?;
+        }
+        DatabaseTarget::ManagedLocal { data_dir } => {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            {
+                let cluster = runtime::ManagedCluster::open(&data_dir.join("postgres"))?;
+                supervisor::start(
+                    &cluster,
+                    &std::env::current_exe()?,
+                    std::time::Duration::from_secs(30),
+                )
+                .await?;
+                provision::migrate(&cluster).await?;
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                let _ = data_dir;
+                anyhow::bail!("managed database unsupported on this platform");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
 }

@@ -15,7 +15,7 @@ pub async fn dry_run(mapping_file: Option<&Path>, json: bool) -> Result<()> {
         })
         .transpose()?;
     let config = crate::config::AppConfig::from_env()?;
-    let pool = crate::db::create_pool(&config.database_url).await?;
+    let pool = crate::db::connect(&config.database).await?;
     let report = crate::knowledge::inventory::assess(&pool, mappings.as_ref()).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

@@ -86,25 +86,22 @@ pub fn config_dir(env: &Environment) -> Result<PathBuf, YggError> {
 impl DeploymentConfig {
     /// Read only user-owned configuration. The legacy .env supplies defaults;
     /// the inherited environment wins, including deliberately empty values.
-    pub fn load(mut env: Environment) -> Result<Self, YggError> {
+    pub fn load(env: Environment) -> Result<Self, YggError> {
         let dir = config_dir(&env)?;
-        match dotenvy::from_path_iter(dir.join(".env")) {
-            Ok(entries) => {
-                for entry in entries {
-                    let (key, value) = entry.map_err(|_| error("invalid user .env"))?;
-                    env.entry(key).or_insert(value);
-                }
-            }
-            Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(error("cannot read user .env")),
-        }
+        Self::from_user_environment(&user_environment(env)?, &dir)
+    }
+
+    pub(super) fn from_user_environment(
+        env: &Environment,
+        dir: &std::path::Path,
+    ) -> Result<Self, YggError> {
         let settings = match std::fs::read_to_string(dir.join("config.toml")) {
             // Do not echo TOML parse errors: source excerpts can contain secrets.
             Ok(text) => toml::from_str(&text).map_err(|_| error("invalid user config.toml"))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => UserSettings::default(),
             Err(_) => return Err(error("cannot read user config.toml")),
         };
-        Self::resolve(&settings, &env)
+        Self::resolve(&settings, env)
     }
 
     pub fn resolve(settings: &UserSettings, env: &Environment) -> Result<Self, YggError> {
@@ -184,4 +181,20 @@ impl DeploymentConfig {
             knowledge_dir,
         })
     }
+}
+
+/// Merge only user-level defaults without changing the process environment.
+pub(super) fn user_environment(mut env: Environment) -> Result<Environment, YggError> {
+    let dir = config_dir(&env)?;
+    match dotenvy::from_path_iter(dir.join(".env")) {
+        Ok(entries) => {
+            for entry in entries {
+                let (key, value) = entry.map_err(|_| error("invalid user .env"))?;
+                env.entry(key).or_insert(value);
+            }
+        }
+        Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(error("cannot read user .env")),
+    }
+    Ok(env)
 }

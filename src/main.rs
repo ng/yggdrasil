@@ -1230,30 +1230,21 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Migrate { check } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
             if check {
+                let pool = ygg::db::connect(&config.database).await?;
                 let pending = ygg::db::pending_migrations(&pool).await?;
                 if pending.is_empty() {
                     println!("Schema is up to date.");
                 } else {
                     println!(
                         "{}",
-                        serde_json::json!({
-                            "pending_count": pending.len(),
-                            "pending": pending,
-                        })
+                        serde_json::json!({"pending_count": pending.len(), "pending": pending})
                     );
                     std::process::exit(1);
                 }
             } else {
-                let pending = ygg::db::pending_migrations(&pool).await?;
-                let count = pending.len();
-                ygg::db::run_migrations(&pool).await?;
-                if count > 0 {
-                    println!("Applied {count} migration(s).");
-                } else {
-                    println!("Schema already up to date.");
-                }
+                ygg::db::migrate_target(&config.database).await?;
+                println!("Schema is up to date.");
             }
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1268,7 +1259,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Run { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 RunAction::Claim { task_ref, agent } => {
                     let agent = resolve_agent_arg(agent);
@@ -1310,27 +1301,27 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Spawn { task, name } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::spawn::execute(&pool, &config, &task, name.as_deref()).await?;
         }
         Commands::Dashboard => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::dashboard_cmd::execute(&pool, &config).await?;
         }
         Commands::Recover { stale_secs } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::recover::execute(&pool, Some(stale_secs)).await?;
         }
         Commands::Watcher { once } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::watcher_cmd::execute(&pool, &config, once).await?;
         }
         Commands::Lock { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 LockAction::Acquire { resource, agent } => {
                     let agent = resolve_agent_arg(agent);
@@ -1347,7 +1338,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Interrupt { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 InterruptAction::TakeOver { agent } => {
                     ygg::cli::interrupt_cmd::execute_take_over(&pool, &config, &agent).await?;
@@ -1363,7 +1354,7 @@ async fn main() -> anyhow::Result<()> {
             format,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::status_cmd::execute(&pool, agent.as_deref(), all_users, &format).await?;
         }
         Commands::Logs {
@@ -1374,7 +1365,7 @@ async fn main() -> anyhow::Result<()> {
             session,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let kinds: Vec<String> = kind
                 .map(|k| {
                     k.split(',')
@@ -1401,7 +1392,7 @@ async fn main() -> anyhow::Result<()> {
             body,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let from_name = from.unwrap_or_else(|| {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -1416,7 +1407,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Msg { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let default_agent = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -1477,7 +1468,7 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| "ygg".to_string())
                 });
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::stop_check::execute(&pool, &agent_name).await?;
         }
         Commands::Reap {
@@ -1488,7 +1479,7 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             // Default to everything when no specific flag is set.
             let all = !(locks || sessions || agents);
             let mut total: i64 = 0;
@@ -1574,7 +1565,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Agent { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let repo = ygg::models::agent::AgentRepo::new(&pool, &user_id);
             match action {
                 AgentAction::List { all } => {
@@ -1674,7 +1665,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Task { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let default_agent = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -2031,7 +2022,7 @@ async fn main() -> anyhow::Result<()> {
                 seed,
             } => {
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 let baseline: ygg::bench::Baseline =
                     baseline.parse().map_err(|e: String| anyhow::anyhow!(e))?;
                 let parallelism = parallelism.unwrap_or_else(|| {
@@ -2046,7 +2037,7 @@ async fn main() -> anyhow::Result<()> {
                 let id = uuid::Uuid::parse_str(&run_id)
                     .map_err(|e| anyhow::anyhow!("invalid run-id: {e}"))?;
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 ygg::cli::bench_cmd::report(&pool, id).await?;
             }
             BenchAction::Diff { a, b } => {
@@ -2055,20 +2046,20 @@ async fn main() -> anyhow::Result<()> {
                 let b = uuid::Uuid::parse_str(&b)
                     .map_err(|e| anyhow::anyhow!("invalid run-id b: {e}"))?;
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 ygg::cli::bench_cmd::diff(&pool, a, b).await?;
             }
             BenchAction::Ci { tier } => {
                 let tier: ygg::bench::Tier =
                     tier.parse().map_err(|e: String| anyhow::anyhow!(e))?;
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 ygg::cli::bench_cmd::ci(&pool, tier).await?;
             }
         },
         Commands::Scheduler { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 SchedulerAction::Run => {
                     ygg::cli::scheduler_cmd::run(pool, &config).await?;
@@ -2090,12 +2081,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Bar => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::bar_cmd::execute(&pool).await?;
         }
         Commands::Plan { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let default_agent = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -2179,7 +2170,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Worktree { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             // Mirrors the task-cmd resolver so `ygg worktree ensure ygg-abcd`
             // or `yggdrasil-42` both work.
             async fn resolve_id(pool: &sqlx::PgPool, r: &str) -> Result<uuid::Uuid, anyhow::Error> {
@@ -2248,7 +2239,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Rollup { days, repo, format } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let fmt = match format.as_str() {
                 "text" | "txt" => ygg::cli::rollup_cmd::Format::Text,
                 "json" => ygg::cli::rollup_cmd::Format::Json,
@@ -2258,7 +2249,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Learn { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let agent_name_default = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -2370,7 +2361,7 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             if list {
                 ygg::cli::remember_cmd::list(&pool, all || global, limit, json).await?;
             } else {
@@ -2387,7 +2378,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Handoff { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 HandoffAction::Save { text, agent, json } => {
                     let agent_name = resolve_agent_arg(agent);
@@ -2414,7 +2405,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::AgentTool { tool, agent } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let agent_name = agent
                 .clone()
                 .or_else(|| std::env::var("YGG_AGENT_NAME").ok())

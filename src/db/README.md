@@ -1,8 +1,8 @@
 # Managed PostgreSQL process prototype
 
 `runtime::ManagedCluster` implements the process-ownership part of M1. It is
-deliberately not yet connected to `ygg init`, hooks or application pools. Existing
-external database selection remains unchanged. No managed platform is advertised
+connected to hooks and application pools through `db::connect`; `ygg init`
+integration remains unfinished. Existing URLs continue to select external mode. No managed platform is advertised
 as release-ready by this prototype.
 
 Explicit `initialize(root, bin, major)` creates a new private persistent cluster
@@ -11,8 +11,8 @@ major, initializes UTF-8 PostgreSQL, disables TCP, configures a private Unix soc
 and durably saves the PostgreSQL system identifier, independent cluster UUID,
 major version, binary path and version string. It refuses nonempty roots and never
 deletes an interrupted initialization. This is not an installer: release archive
-checksums, provenance, atomic binary extraction and interrupted-bootstrap recovery
-remain required before user-facing initialization is enabled.
+verification and atomic extraction live in `package`; interrupted-bootstrap
+recovery remains required before user-facing initialization is enabled.
 
 `open` and `status` do not initialize or start PostgreSQL. `try_owner` obtains a
 nonblocking OS lease in the canonical cluster root. The returned `Owner` retains
@@ -43,9 +43,10 @@ startup and smart shutdown in [pg_ctl](https://www.postgresql.org/docs/16/app-pg
 server and coordinates explicit stop requests. SIGINT/SIGTERM end supervision but
 leave PostgreSQL running for adoption. Only `ygg db stop` drains the database.
 
-The bootstrap role is only for initialization and identity verification. Limited
-runtime and migration-owner roles, migrations and application connection dispatch
-remain to be integrated. Supplied binaries are trusted inputs in this spike;
+The bootstrap role is only for provisioning and identity verification. Explicit
+`ygg migrate` provisions a separate non-superuser migration owner and runtime role.
+Ordinary commands use the runtime role, which can write application data but cannot
+change schema, triggers, roles or migration/knowledge markers. Supplied binaries are trusted inputs in this spike;
 exact version strings are not archive integrity checks. Socket paths exceeding
 the portable Unix socket budget are rejected instead of enabling TCP. Configuration
 and process ownership assume the owning OS user controls their private files.
@@ -62,15 +63,17 @@ They initialize only disposable clusters under `/tmp`, require `uuid-ossp`, race
 and adopt its surviving server, kill/recover PostgreSQL and verify acknowledged
 rows, and prove client-draining shutdown. Negative tests cover wrong major and an
 unrelated live PID without signaling it. Local validation uses Homebrew PostgreSQL
-18.3 on macOS arm64; pinned PostgreSQL 16 release artifacts and macOS x86_64/Linux
-x86_64 smoke tests remain release gates. These tests do not use `DATABASE_URL`.
+18.3 and pinned 16.15 on macOS arm64. The native installer/lifecycle CI matrix
+also passed on Intel macOS and GNU Linux x86_64; quarantine and offline release
+bundle assembly remain release gates. These tests do not use `DATABASE_URL`.
 
 ## Supervisor commands
 
-The `db` commands use `DeploymentConfig` directly, independently of the legacy
-mandatory `AppConfig.database_url`. For managed mode they select
+The `db` commands and `AppConfig` use the same deployment resolver. Ordinary
+commands start/adopt initialized managed clusters through `db::connect`; configuration
+loading and status do not start servers. For managed mode they select
 `<resolved-profile-data-dir>/postgres`; that root must already have been initialized
-by the native runtime. The pinned installer and its `ygg init` integration are
+by the native runtime. The pinned installer exists, but its `ygg init` integration is
 still pending, so these commands are not yet a clean-machine installation path.
 They never download binaries, initialize data, migrate schemas or upgrade binaries.
 

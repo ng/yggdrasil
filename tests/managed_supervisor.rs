@@ -19,10 +19,9 @@ use ygg::db::{
 
 const WAIT: Duration = Duration::from_secs(30);
 
-fn cli(data: &Path) -> Command {
+fn app(data: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ygg"));
-    cmd.arg("db")
-        .env("YGG_DB_MODE", "managed")
+    cmd.env("YGG_DB_MODE", "managed")
         .env("YGG_DATA_DIR", data)
         .env("YGG_CONFIG_DIR", data.join("config"))
         .env_remove("DATABASE_URL")
@@ -30,6 +29,22 @@ fn cli(data: &Path) -> Command {
         .stdin(Stdio::null())
         .kill_on_drop(true);
     cmd
+}
+
+fn cli(data: &Path) -> Command {
+    let mut cmd = app(data);
+    cmd.arg("db");
+    cmd
+}
+
+async fn success(cmd: &mut Command) -> String {
+    let output = timeout(WAIT, cmd.output()).await.unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
 }
 
 async fn json(cmd: &mut Command) -> Value {
@@ -59,6 +74,16 @@ async fn status_is_read_only_and_external_lifecycle_is_rejected_without_secrets(
     .await;
     assert_eq!(status["state"], "not_initialized");
     assert!(!data.exists());
+    assert!(
+        !app(&data)
+            .args(["migrate", "--check"])
+            .output()
+            .await
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(!data.exists());
     for action in ["start", "stop", "serve"] {
         assert!(
             !cli(&data)
@@ -72,6 +97,19 @@ async fn status_is_read_only_and_external_lifecycle_is_rejected_without_secrets(
         assert!(!data.exists());
     }
     let url = "postgres://private-user:do-not-print@127.0.0.1:1/not-a-server";
+    let failed_external = app(&data)
+        .env("YGG_DB_MODE", "external")
+        .env("DATABASE_URL", url)
+        .args(["migrate", "--check"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!failed_external.status.success());
+    assert!(!String::from_utf8_lossy(&failed_external.stderr).contains("do-not-print"));
+    assert!(
+        !data.exists(),
+        "failed external connections must not initialize managed state"
+    );
     let status = json(
         cli(&data)
             .env("YGG_DB_MODE", "external")
@@ -154,6 +192,13 @@ async fn real_cli_supervises_adopts_recovers_and_drains_without_restarting_after
         assert!(responses.iter().all(|r| r.supervisor_pid == first.supervisor_pid && r.postgres == first.postgres));
         let Status::Ready { pid } = first.postgres else { panic!("not ready") };
         assert_eq!(cluster.status().await.unwrap(), first.postgres);
+        // Real application commands use the resolver and limited runtime role;
+        // explicit migrate selects the owner even before runtime DB exists.
+        success(app(&data).arg("migrate")).await;
+        success(app(&data).args(["migrate", "--check"])).await;
+        success(app(&data).args(["remember", "runtime CLI note", "--global"])).await;
+        let notes = success(app(&data).args(["remember", "--list", "--global", "--json"])).await;
+        assert!(notes.contains("runtime CLI note"));
         let mut conn = connection(&root).await;
         sqlx::raw_sql("CREATE TABLE durable(value text); INSERT INTO durable VALUES('retained')").execute(&mut conn).await.unwrap();
         conn.close().await.unwrap();
@@ -190,6 +235,8 @@ async fn real_cli_supervises_adopts_recovers_and_drains_without_restarting_after
         conn.close().await.unwrap();
         let output = timeout(WAIT, stopping.wait_with_output()).await.unwrap().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        // A normal command also starts an initialized, stopped deployment.
+        success(app(&data).args(["migrate", "--check"])).await;
         // An immediate start must not get stranded behind the exiting owner.
         let restarted: supervisor::Reply = serde_json::from_value(json(cli(&data).args(["start", "--json"])).await).unwrap();
         supervisor_ids.push(restarted.supervisor_pid);

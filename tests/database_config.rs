@@ -119,3 +119,25 @@ fn diagnostics_do_not_disclose_connection_secrets() {
     )]));
     assert!(!result.err().unwrap().to_string().contains("supersecret"));
 }
+
+#[test]
+fn application_config_uses_user_defaults_and_redacts_database() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::write(config.join(".env"), "DATABASE_URL=postgres://user:secret@host/db\nLOCK_TTL_SECS=123\nRTK_BINARY_PATH=custom-rtk\n").unwrap();
+    let mut env = Environment::from([
+        ("HOME".into(), temp.path().to_str().unwrap().into()),
+        ("YGG_CONFIG_DIR".into(), config.to_str().unwrap().into()),
+        ("LOCK_TTL_SECS".into(), "456".into()),
+    ]);
+    let app = ygg::config::AppConfig::from_environment(env.clone()).unwrap();
+    assert_eq!(app.lock_ttl_secs, 456);
+    assert_eq!(app.rtk_binary_path, "custom-rtk");
+    assert!(matches!(app.database, DatabaseTarget::External { .. }));
+    assert!(!format!("{app:?}").contains("secret"));
+    env.insert("YGG_DB_MODE".into(), "managed".into());
+    assert!(ygg::config::AppConfig::from_environment(env).is_err());
+    assert!(!temp.path().join("Library").exists());
+    assert!(!temp.path().join(".local").exists());
+}
