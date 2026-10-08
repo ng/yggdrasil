@@ -40,7 +40,8 @@ pub struct ManagedCluster {
     manifest: Manifest,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Status {
     Stopped,
     Ready {
@@ -261,6 +262,10 @@ impl ManagedCluster {
         self.manifest.cluster_id
     }
 
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Administrative connection for lifecycle verification only. Application
     /// connections must use the separately provisioned limited runtime role.
     fn admin_options(&self) -> PgConnectOptions {
@@ -403,6 +408,20 @@ impl Owner {
         ensure!(
             version == self.cluster.manifest.binary_version,
             "managed binary changed; explicit upgrade required"
+        );
+        let control = output(
+            command(&self.cluster.manifest.bin.join("pg_controldata"))
+                .arg(self.cluster.root.join("data")),
+            Duration::from_secs(5),
+        )
+        .await?;
+        ensure!(
+            control
+                .lines()
+                .find_map(|line| line.strip_prefix("Database system identifier:"))
+                .map(str::trim)
+                == Some(self.cluster.manifest.system_id.as_str()),
+            "cluster data identity changed; refusing to start a different database"
         );
         let log = OpenOptions::new()
             .create(true)

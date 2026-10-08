@@ -18,6 +18,7 @@ remain required before user-facing initialization is enabled.
 nonblocking OS lease in the canonical cluster root. The returned `Owner` retains
 that lease for its lifetime; competing clients wait for bounded readiness.
 `start_or_adopt` starts a detached postmaster only if the cluster is stopped, or
+checks the on-disk PostgreSQL system identifier before launch, and
 adopts the existing server after checking:
 
 - PostgreSQL data directory, system identifier, major version and disabled TCP;
@@ -38,8 +39,9 @@ The native-process approach avoids putting a `postgresql_embedded` handle in
 short-lived clients: the candidate's current [Drop implementation](https://raw.githubusercontent.com/theseus-rs/postgresql-embedded/main/postgresql_embedded/src/postgresql.rs)
 stops a started server even with persistent data. PostgreSQL documents native
 startup and smart shutdown in [pg_ctl](https://www.postgresql.org/docs/16/app-pg-ctl.html).
-The future `ygg db serve` loop must retain `Owner`, monitor readiness, and coordinate
-explicit stop requests. This library does not yet implement that CLI/IPC loop.
+`ygg db serve` retains `Owner`, monitors readiness, restarts a verified crashed
+server and coordinates explicit stop requests. SIGINT/SIGTERM end supervision but
+leave PostgreSQL running for adoption. Only `ygg db stop` drains the database.
 
 The bootstrap role is only for initialization and identity verification. Limited
 runtime and migration-owner roles, migrations and application connection dispatch
@@ -62,3 +64,54 @@ rows, and prove client-draining shutdown. Negative tests cover wrong major and a
 unrelated live PID without signaling it. Local validation uses Homebrew PostgreSQL
 18.3 on macOS arm64; pinned PostgreSQL 16 release artifacts and macOS x86_64/Linux
 x86_64 smoke tests remain release gates. These tests do not use `DATABASE_URL`.
+
+## Supervisor commands
+
+The `db` commands use `DeploymentConfig` directly, independently of the legacy
+mandatory `AppConfig.database_url`. For managed mode they select
+`<resolved-profile-data-dir>/postgres`; that root must already have been initialized
+by the native runtime. The pinned installer and its `ygg init` integration are
+still pending, so these commands are not yet a clean-machine installation path.
+They never download binaries, initialize data, migrate schemas or upgrade binaries.
+
+- `ygg db status [--json]` reads configuration, checks a managed server's identity
+  and optionally queries its supervisor. Missing managed roots report
+  `not_initialized` without creating directories. External status reports only
+  configured/unmanaged selection; it does not claim connection health or expose
+  the URL or credentials.
+- `ygg db start [--timeout 30] [--json]` detaches `ygg db serve` and returns only when
+  its control response and independent PostgreSQL verification agree on a ready
+  PID. Each child receives the selected canonical root and cluster UUID, avoiding
+  a configuration/profile change redirecting the launch. Concurrent losing
+  supervisors exit; another spawn is permitted only after the previous child has
+  exited and the OS ownership lease is available.
+- `ygg db stop [--timeout 30] [--json]` asks the current owner for smart shutdown.
+  Without a supervisor it can take the lease and stop a verified orphan directly,
+  without first starting a server. After delivery, a missing reply is reported as
+  an unknown outcome and is never automatically resent. Inspect status before
+  retrying. A stop timeout ends monitoring so a later completed drain cannot be
+  mistaken for a crash and automatically restarted.
+- `ygg db serve` owns the initialized managed cluster in the foreground. The
+  supervisor uses a bounded JSON protocol on a mode-0600 Unix socket inside the
+  private runtime directory. Protocol version, cluster identity and peer OS user
+  are checked. Wrong identities and malformed/oversized frames cannot authorize
+  shutdown. Only the lifetime lock owner replaces a stale owned socket; unexpected
+  files or symlinks are retained as errors.
+
+Timeout arguments accept 1–300 seconds. External start/stop/serve are rejected,
+without connecting to that target or creating managed state. Application pools,
+hooks and schedulers still use their existing connection paths pending central
+runtime integration and role provisioning.
+
+The opt-in `managed_supervisor` test runs 20 actual `ygg db start` processes,
+checks one reported owner/postmaster, kills the supervisor and adopts the surviving
+postmaster, crashes PostgreSQL and verifies automatic recovery with a retained row,
+checks client-draining stop and immediate restart, and proves stop timeout does
+not cause automatic restart. The normal CLI test covers read-only status, ignored
+repository `.env`, missing initialization and redacted external-mode rejection.
+Run native coverage with the same binary/major environment as above:
+
+```sh
+YGG_TEST_PG_BIN=/absolute/postgresql/bin YGG_TEST_PG_MAJOR=18 \
+  cargo test --test managed_supervisor -- --include-ignored --test-threads=1
+```

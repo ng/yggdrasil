@@ -26,4 +26,6 @@ pub mod task_cmd;
 pub mod watcher_cmd;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod db_cmd;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod knowledge_cmd;

@@ -62,6 +62,37 @@ enum KnowledgeAction {
 }
 
 #[derive(Subcommand)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+enum DbAction {
+    /// Inspect the selected target without starting or initializing it
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start or adopt an initialized managed cluster (no download or upgrade)
+    Start {
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drain clients and stop the managed cluster; never stop external databases
+    Stop {
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run the persistent managed owner in the foreground
+    Serve {
+        #[arg(long, hide = true, requires = "cluster_id")]
+        cluster_root: Option<std::path::PathBuf>,
+        #[arg(long, hide = true, requires = "cluster_root")]
+        cluster_id: Option<uuid::Uuid>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Start ygg — open tmux session with dashboard (default when no command given)
     Up,
@@ -91,6 +122,13 @@ enum Commands {
         /// Exit 0 if up-to-date, exit 1 if pending migrations exist (no changes applied)
         #[arg(long)]
         check: bool,
+    },
+
+    /// Inspect or control an already initialized managed database
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
     },
 
     /// Inspect knowledge migration readiness (no cutover is performed)
@@ -1180,6 +1218,16 @@ async fn main() -> anyhow::Result<()> {
             }
             ygg::cli::init::execute_with_options(verbose, &skip, yes).await?;
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        Commands::Db { action } => match action {
+            DbAction::Status { json } => ygg::cli::db_cmd::status(json).await?,
+            DbAction::Start { timeout, json } => ygg::cli::db_cmd::start(timeout, json).await?,
+            DbAction::Stop { timeout, json } => ygg::cli::db_cmd::stop(timeout, json).await?,
+            DbAction::Serve {
+                cluster_root,
+                cluster_id,
+            } => ygg::cli::db_cmd::serve(cluster_root, cluster_id).await?,
+        },
         Commands::Migrate { check } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
