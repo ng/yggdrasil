@@ -31,12 +31,16 @@ jobs:
       - run: cargo check --all-targets
 
   test:
-    name: cargo test
+    name: cargo test (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_DB: ygg
           POSTGRES_USER: postgres
@@ -74,11 +78,14 @@ jobs:
           cargo build --release --bin ygg
           ./target/release/ygg migrate
 
+      - name: Install test runtime tools
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
       - name: Run library tests
         run: cargo test --lib --quiet
 
-      - name: Run integration tests
-        run: cargo test --test integration --quiet -- --test-threads=1
+      - name: Run coordination and knowledge suites against isolated Postgres
+        run: cargo test --test integration --test remember --test watcher_consolidation --test database_config --test knowledge_contracts --test okf_documents --quiet -- --test-threads=1
 
   clippy:
     name: clippy

@@ -1,3 +1,5 @@
+pub mod database;
+
 use std::env;
 
 /// Application configuration loaded from environment variables.

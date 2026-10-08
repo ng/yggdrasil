@@ -6,7 +6,7 @@ Thanks for your interest. Yggdrasil is in active development; the public API and
 
 1. **Branch from `main`.** Use a short, descriptive name (`scheduler-fanout`, `bench-scenario-3`, `fix-lock-race`).
 2. **Work in small, focused commits.** Match the style of recent log: imperative, lowercase, area-prefixed (`scheduler:`, `bench:`, `tui:`, `docs:`). One commit can span multiple files; bundling related work is fine.
-3. **Open a PR into `main`.** CI runs `cargo fmt --check`, `cargo check --all-targets`, `cargo test --lib`, and `cargo test --test integration` against a Postgres + pgvector service container. Clippy runs advisory while we burn down existing warnings.
+3. **Open a PR into `main`.** CI runs `cargo fmt --check`, `cargo check --all-targets`, library, coordination and knowledge tests against isolated PostgreSQL 16 and 18 service containers. Clippy runs advisory while we burn down existing warnings.
 4. **Reference any related tasks** (`yggdrasil-NNN`) in the PR description so the rollup updates.
 5. **Squash or rebase merges** are both fine; no merge commits into `main` please.
 
@@ -15,7 +15,7 @@ Direct pushes to `main` are reserved for trivial fixes (typos, generated artifac
 ## Setting up
 
 ```bash
-docker-compose up -d              # Postgres 16 + pgvector
+docker-compose up -d              # Postgres (legacy compose setup)
 make install                      # cargo build --release && copy to ~/.local/bin
 ygg init                          # install hooks, run migrations
 ygg up                            # tmux dashboard
@@ -24,7 +24,8 @@ ygg up                            # tmux dashboard
 ## Tests
 
 - **Library tests** are fast and don't need Postgres: `cargo test --lib`.
-- **Integration tests** require a running Postgres at `DATABASE_URL`. CI uses `postgres://postgres:postgres@localhost:5432/ygg` (the pgvector service container's defaults). Locally the docker-compose default `postgres://localhost:5432/ygg` works too. Run: `DATABASE_URL=postgres://postgres:postgres@localhost:5432/ygg cargo test --test integration -- --test-threads=1`.
+- **Integration tests** require a running Postgres at `DATABASE_URL`. CI uses `postgres://postgres:postgres@localhost:5432/ygg` (the isolated service container's defaults). Locally the docker-compose default `postgres://localhost:5432/ygg` works too. Run: `DATABASE_URL=postgres://postgres:postgres@localhost:5432/ygg cargo test --test integration -- --test-threads=1`.
+- **Deployment/OKF contracts**: `cargo test --test database_config --test okf_documents` needs no database. `cargo test --test knowledge_contracts` compares legacy retrieval and JSON fixtures against the migrated database. These fixtures live in `tests/fixtures/knowledge/`; do not run database tests against a user installation.
 - **Bench tests** use a fake `claude` binary at `benches/fixtures/fake-claude.sh` so they run in CI without API tokens. Real `ygg bench` runs invoke the real `claude` CLI; set `YGG_BENCH_CLAUDE_BIN` to override.
 
 ## ADRs
