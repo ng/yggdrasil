@@ -4,6 +4,9 @@ use std::sync::OnceLock;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod runtime;
+
 const DEFAULT_MAX_CONNECTIONS: u32 = 32;
 
 static USER_ID: OnceLock<String> = OnceLock::new();
