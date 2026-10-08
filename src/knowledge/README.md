@@ -276,3 +276,31 @@ telemetry storage/fallback and command-level outage behavior still require wirin
 These are model adapters, not the fenced cutover/reverse-import implementation:
 rollback must additionally audit OKF-only fields for representability, inventory
 all owners/scopes, and coordinate database generation/fences before writing SQL.
+
+## Operational usage storage
+
+Migration `20261008000001_knowledge_telemetry.sql` adds `knowledge_usage` and
+`knowledge_applications`, keyed by corpus and document UUIDs without references
+to the legacy knowledge-content tables. `telemetry::Telemetry` seeds the imported
+baseline separately from subsequently observed applications. Identical seed
+retries succeed; conflicting snapshots fail without changing counts. A seed can
+arrive after observed events without resetting or double-counting them.
+
+Application recording commits the unique application ID and counter update in
+one transaction. Retries must reuse that ID; they retain the first timestamp and
+return `false` instead of incrementing twice. Distinct events add once, and the
+last-applied time is the maximum imported/observed time. This ledger does not
+replace per-session injection deduplication and does not authorize an injection.
+Application IDs must not be pruned while an old operation can still be retried.
+
+Totals use signed 64-bit counters. Conversion to legacy `Learning` JSON rejects
+values outside its signed 32-bit contract rather than wrapping or clamping them.
+A missing usage row remains explicitly absent. No knowledge text, approval or
+matching metadata is stored in these tables.
+
+This repository returns database failures to its caller. Command/hook integration
+must isolate optional telemetry failures from acknowledged document writes and
+injection, and supply a defined last-known-statistics path during database outage.
+That integration and the cutover's fenced baseline manifest remain unfinished.
+The SQL tests use private schemas in the isolated test database and cover 20-client
+races, seed conflicts, corpus isolation, failed-update rollback and wide totals.
