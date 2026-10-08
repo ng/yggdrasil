@@ -10,11 +10,43 @@ use uuid::Uuid;
 
 /// Explicit source IDs -> portable identities. Empty legacy users require an
 /// explicit entry just like named users; there is no current-user fallback.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mappings {
     pub database_id: Uuid,
     pub corpus_id: Uuid,
+    #[serde(deserialize_with = "unique_map")]
     pub repos: BTreeMap<Uuid, Uuid>,
+    #[serde(deserialize_with = "unique_map")]
     pub users: BTreeMap<String, String>,
+}
+
+fn unique_map<'de, D, K, V>(deserializer: D) -> std::result::Result<BTreeMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: Deserialize<'de> + Ord,
+    V: Deserialize<'de>,
+{
+    struct Unique<K, V>(std::marker::PhantomData<(K, V)>);
+    impl<'de, K: Deserialize<'de> + Ord, V: Deserialize<'de>> serde::de::Visitor<'de> for Unique<K, V> {
+        type Value = BTreeMap<K, V>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("identity map with unique source keys")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut source: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut result = BTreeMap::new();
+            while let Some((key, value)) = source.next_entry()? {
+                if result.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate identity mapping"));
+                }
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_map(Unique(std::marker::PhantomData))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -340,3 +340,41 @@ them before cutover, as required by the plan. These triggers also do not constra
 an administrator who disables triggers or changes table/function ownership. The
 old-client tests cover ordinary SQL writes, including stale transaction snapshots;
 they do not prove fleet upgrade, filesystem publication or lossless rollback.
+
+## Migration dry run
+
+`ygg knowledge migrate --dry-run --json` inventories all SQL notes and learnings
+from one repeatable-read snapshot under the compatibility guard. It reports the
+source database identity/generation/phase, source owners and repositories, row
+fingerprints, proposed paths/document digests and unresolved issues. It reads all
+row fields but reports fingerprints rather than copying private text into the
+report. No bundle is created, counters seeded or storage marker changed.
+
+Supply `--mapping-file /absolute/path/mapping.json` to verify conversions. The
+JSON object has exactly these fields:
+
+```json
+{
+  "database_id": "SOURCE-DATABASE-UUID-FROM-REPORT",
+  "corpus_id": "EXPLICIT-TARGET-CORPUS-UUID",
+  "repos": {"LEGACY-REPO-UUID": "PORTABLE-REPO-UUID"},
+  "users": {"": "EXPLICIT-OWNER-FOR-EMPTY-LEGACY-IDS", "alice": "alice"}
+}
+```
+
+Replace the placeholder UUIDs with actual IDs. The mapping file is bounded to
+1 MiB; duplicate source keys and unknown fields are rejected. Database identity
+must match the selected source; an already fenced source must also match the
+target corpus. Unmapped owners/repositories, unsupported SQL fields, cross-table
+UUID collisions, parser limits or failed field-by-field round trips make the
+report unresolved. UUIDs, nullable fields, pending/approval state, arbitrary JSONB
+tags and usage totals are checked via the same legacy adapters.
+
+JSON output remains on stdout even when row verification fails; exit status is
+nonzero for unresolved reports. `--dry-run` is required because publication is
+not implemented yet. `rows_verified: true` only proves this snapshot's rows passed
+conversion; it does not establish fleet upgrade, frozen writes, backups, semantic
+scope-fixture parity, filesystem publication or rollback readiness. A later fenced
+export must reread and validate its own manifest rather than trusting this report.
+The CLI tests create/drop their own database in the disposable PostgreSQL cluster
+and verify that neither the knowledge directory nor storage mode is changed.

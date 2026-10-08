@@ -24,3 +24,6 @@ pub mod status_cmd;
 pub mod stop_check;
 pub mod task_cmd;
 pub mod watcher_cmd;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod knowledge_cmd;

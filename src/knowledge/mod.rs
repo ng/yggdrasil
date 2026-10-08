@@ -4,6 +4,8 @@ pub mod document;
 pub mod guard;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod identity;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod inventory;
 pub mod legacy;
 pub mod matching;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

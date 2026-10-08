@@ -45,6 +45,22 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Subcommand)]
+enum KnowledgeAction {
+    /// Inventory a consistent source snapshot and verify explicit mappings
+    Migrate {
+        /// Assess only; required because publication/cutover is not available
+        #[arg(long, required = true)]
+        dry_run: bool,
+        /// JSON database/corpus IDs, legacy repo mapping and explicit user mapping
+        #[arg(long)]
+        mapping_file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Start ygg — open tmux session with dashboard (default when no command given)
@@ -75,6 +91,13 @@ enum Commands {
         /// Exit 0 if up-to-date, exit 1 if pending migrations exist (no changes applied)
         #[arg(long)]
         check: bool,
+    },
+
+    /// Inspect knowledge migration readiness (no cutover is performed)
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Knowledge {
+        #[command(subcommand)]
+        action: KnowledgeAction,
     },
 
     /// Agent run loop + task-run lifecycle (claim, finalize, heartbeat, show)
@@ -1185,6 +1208,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        Commands::Knowledge { action } => match action {
+            KnowledgeAction::Migrate {
+                dry_run: _,
+                mapping_file,
+                json,
+            } => {
+                ygg::cli::knowledge_cmd::dry_run(mapping_file.as_deref(), json).await?;
+            }
+        },
         Commands::Run { action } => {
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::create_pool(&config.database_url).await?;
