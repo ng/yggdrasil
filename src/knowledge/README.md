@@ -74,11 +74,36 @@ host, review/rebind local common-directory paths instead of treating paths copie
 from another machine as authoritative identity evidence. Client commands still
 need to wire these primitives into their scope and trust resolution.
 
+## Note and learning operations
+
+`service` joins the private bundle with the separate identity/trust registry and
+an explicit nonempty user mapping. It creates/lists/deletes notes, creates manual
+rules or pending proposals, approves/rejects with expected revisions, and edits
+without changing original provenance. It never needs a database connection.
+Manual active creation retains the existing CLI semantics; proposals cannot
+activate themselves. Approval accepts a human caller or an agent UUID explicitly
+listed in `approval_leads` in policy configuration. Caller classification belongs
+to the command/session adapter, not untrusted document metadata.
+
+Covered edits clear approval and become pending. External edits that invalidate
+an active rule's digest also appear in triage; unchanged expired rules do not
+become proposals. Display-only edits preserve evidence and cannot mint activation.
+User/repo bindings, corpus trust, expiry, matching and current byte revisions are
+checked before delivery. Rule/note revalidation methods reject stale selections.
+Prime's five-note limit is applied after expiry filtering, while explicit browsing
+can still show stale/deprecated content.
+
+The store inventories IDs across all scopes and both document kinds before a
+mutation. Duplicate UUIDs are rejected or excluded with diagnostics, including
+externally copied files; unrelated good documents remain available. An invalid
+filename or corrupt document does not erase unaffected knowledge. Incomplete
+filesystem enumeration fails UUID mutations/lookups rather than guessing identity.
+The inventory currently scans filenames and is not the final performance index.
+
 ## Remaining engine work
 
-High-level note and rule operations, uniqueness across scopes, scope moves,
-disposable indexing, generic
-OKF bundle browsing and latency measurements remain unfinished. Current snapshots
+Scope moves, disposable indexing, generic OKF bundle browsing, legacy JSON
+adapters and latency measurements remain unfinished. Current snapshots
 scan the Yggdrasil layout directly. Approval must still be revalidated immediately
 before injection; never treat a previously read document as current authority.
 Shared Git transport, legacy adapters, migration and CLI integration build on this

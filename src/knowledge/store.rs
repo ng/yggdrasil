@@ -76,6 +76,13 @@ pub struct Snapshot {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Default)]
+struct Inventory {
+    keys: Vec<Key>,
+    diagnostics: Vec<String>,
+    incomplete: bool,
+}
+
 pub enum ExpectedRevision<'a> {
     Absent,
     Digest(&'a str),
@@ -321,6 +328,7 @@ impl KnowledgeStore {
         // Validate the serialized form with the same bounded parser used by reads.
         Document::parse(&text)?;
         let _lock = self.lock()?;
+        self.check_unique(key)?;
         let parent = self.parent(key, true)?;
         let name = format!("{}.md", key.id);
         Self::check_revision(Self::read_at(&parent, &name)?.as_deref(), expected)?;
@@ -393,6 +401,7 @@ impl KnowledgeStore {
 
     pub fn delete(&self, key: Key, expected: &str) -> Result<()> {
         let _lock = self.lock()?;
+        self.check_unique(key)?;
         let parent = self.parent(key, false)?;
         let name = format!("{}.md", key.id);
         Self::check_revision(
@@ -407,8 +416,8 @@ impl KnowledgeStore {
     /// Scan fresh bytes. No cached approval or exclusive index content can make
     /// a deleted, edited or corrupted document eligible. One corrupt file does
     /// not suppress unrelated knowledge.
-    pub fn snapshot(&self) -> Snapshot {
-        let mut result = Snapshot::default();
+    fn inventory(&self) -> Inventory {
+        let mut result = Inventory::default();
         let mut scopes = vec![None];
         match directory(&self.root, "repos", false) {
             Ok(repos) => match names(&repos) {
@@ -422,10 +431,16 @@ impl KnowledgeStore {
                         }
                     }
                 }
-                Err(e) => result.diagnostics.push(format!("repos: {e}")),
+                Err(e) => {
+                    result.incomplete = true;
+                    result.diagnostics.push(format!("repos: {e}"));
+                }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => result.diagnostics.push(format!("repos: {e}")),
+            Err(e) => {
+                result.incomplete = true;
+                result.diagnostics.push(format!("repos: {e}"));
+            }
         }
         for repo in scopes {
             for kind in [Kind::Note, Kind::Learning] {
@@ -443,6 +458,7 @@ impl KnowledgeStore {
                         continue;
                     }
                     Err(e) => {
+                        result.incomplete = true;
                         result
                             .diagnostics
                             .push(format!("{:?}: {e}", key.relative_path().parent().unwrap()));
@@ -466,19 +482,71 @@ impl KnowledgeStore {
                                 continue;
                             };
                             let key = Key { id, ..key };
-                            match self.get(key) {
-                                Ok(Some(doc)) => result.documents.push(doc),
-                                Ok(None) => {} // Concurrent deletion.
-                                Err(e) => result
-                                    .diagnostics
-                                    .push(format!("{}: {e}", key.relative_path().display())),
-                            }
+                            result.keys.push(key);
                         }
                     }
-                    Err(e) => result.diagnostics.push(e.to_string()),
+                    Err(e) => {
+                        result.incomplete = true;
+                        result.diagnostics.push(e.to_string());
+                    }
                 }
             }
         }
         result
+    }
+    pub fn snapshot(&self) -> Snapshot {
+        let inventory = self.inventory();
+        let mut result = Snapshot {
+            documents: Vec::new(),
+            diagnostics: inventory.diagnostics,
+        };
+        let mut counts = std::collections::HashMap::new();
+        for key in &inventory.keys {
+            *counts.entry(key.id).or_insert(0) += 1;
+        }
+        for key in inventory.keys {
+            if counts[&key.id] != 1 {
+                result.diagnostics.push(format!(
+                    "{}: duplicate document UUID",
+                    key.relative_path().display()
+                ));
+                continue;
+            }
+            match self.get(key) {
+                Ok(Some(doc)) => result.documents.push(doc),
+                Ok(None) => {}
+                Err(e) => result
+                    .diagnostics
+                    .push(format!("{}: {e}", key.relative_path().display())),
+            }
+        }
+        result
+    }
+
+    pub fn find(&self, id: Uuid) -> Result<Option<RevisionedDocument>> {
+        let inventory = self.inventory();
+        ensure!(
+            !inventory.incomplete,
+            "cannot resolve UUID in an incomplete bundle inventory"
+        );
+        let candidates: Vec<_> = inventory.keys.into_iter().filter(|k| k.id == id).collect();
+        ensure!(candidates.len() <= 1, "ambiguous document UUID");
+        match candidates.first() {
+            Some(key) => self.get(*key),
+            None => Ok(None),
+        }
+    }
+
+    fn check_unique(&self, key: Key) -> Result<()> {
+        let inventory = self.inventory();
+        ensure!(
+            !inventory.incomplete,
+            "cannot mutate an incomplete bundle inventory"
+        );
+        ensure!(
+            inventory.keys.iter().all(|k| k.id != key.id || *k == key),
+            "document UUID already exists in another scope or type"
+        );
+        Ok(())
     }
 }

@@ -162,6 +162,8 @@ pub struct Identities {
     pub version: u32,
     pub corpus_id: Uuid,
     pub trusted: bool,
+    #[serde(default)]
+    pub approval_leads: BTreeSet<Uuid>,
     pub repos: Vec<RepoBinding>,
 }
 
@@ -248,6 +250,7 @@ impl IdentityRegistry {
                     version: 1,
                     corpus_id: Uuid::new_v4(),
                     trusted,
+                    approval_leads: BTreeSet::new(),
                     repos: Vec::new(),
                 },
             };

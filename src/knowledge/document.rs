@@ -239,19 +239,8 @@ impl Document {
         self.set_profile(&p)
     }
 
-    pub fn eligible(&self, trusted_corpus: Option<Uuid>, now: DateTime<Utc>) -> Result<bool> {
-        let Some(corpus_id) = trusted_corpus else {
-            return Ok(false);
-        };
-        if self.document_type()? != "Engineering Rule" {
-            return Ok(false);
-        }
-        let Some(profile) = self.profile()? else {
-            return Ok(false);
-        };
-        if profile.state != State::Active {
-            return Ok(false);
-        }
+    /// Descriptive lifecycle/freshness applies to notes as well as rules.
+    pub fn current(&self, now: DateTime<Utc>) -> Result<bool> {
         if let Some(status) = self.metadata.get("status") {
             match status.as_str() {
                 Some("stable" | "draft") => {}
@@ -266,6 +255,29 @@ impl Document {
             if now >= DateTime::parse_from_rfc3339(text)? {
                 return Ok(false);
             }
+        }
+        Ok(true)
+    }
+
+    pub fn eligible(&self, trusted_corpus: Option<Uuid>, now: DateTime<Utc>) -> Result<bool> {
+        let Some(corpus_id) = trusted_corpus else {
+            return Ok(false);
+        };
+        Ok(self.activation_valid(corpus_id)? && self.current(now)?)
+    }
+
+    /// Approval validity is separate from expiry and the configured trust flag.
+    /// This lets externally edited rules appear in triage without treating every
+    /// expired-but-unchanged rule as a new proposal.
+    pub fn activation_valid(&self, corpus_id: Uuid) -> Result<bool> {
+        if self.document_type()? != "Engineering Rule" {
+            return Ok(false);
+        }
+        let Some(profile) = self.profile()? else {
+            return Ok(false);
+        };
+        if profile.state != State::Active {
+            return Ok(false);
         }
         let Some(approval) = profile.approval else {
             return Ok(false);
