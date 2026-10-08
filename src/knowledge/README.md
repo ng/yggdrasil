@@ -132,9 +132,49 @@ multi-document transaction or the migration cutover protocol.
 
 ## Remaining engine work
 
-Disposable indexing, generic OKF bundle browsing, legacy JSON adapters and latency
-measurements remain unfinished. Current snapshots
-scan the Yggdrasil layout directly. Approval must still be revalidated immediately
+Disposable indexing, generic OKF bundle browsing, legacy JSON adapters and the
+SQL-relative hook latency gate remain unfinished. Current snapshots scan the
+Yggdrasil layout directly. Approval must still be revalidated immediately
 before injection; never treat a previously read document as current authority.
 Shared Git transport, legacy adapters, migration and CLI integration build on this
 layer and remain separate release gates.
+
+## Reproducible local read measurement
+
+Run the manual process benchmark on an otherwise idle host:
+
+```sh
+cargo test --release --test okf_performance -- --exact okf_process_benchmark --ignored --nocapture
+```
+
+It creates a disposable private corpus of 10,000 documents (8,000 notes and
+2,000 active rules), then starts 20 independent OS processes. Each process warms
+its own service instance, waits at a common barrier, and measures three rounds.
+Each round selects 20 matching rules and the five prime notes and revalidates
+every selected document immediately before counting its body bytes. Selection,
+file access, parsing, approval checks, sorting and revalidation are included;
+fixture creation and warmup are excluded. The report contains p50/p95 milliseconds
+for rules and notes separately over 60 samples and the selected body size.
+Workers are terminated on failure or timeout; the corpus is removed on exit.
+
+This is an engine measurement, not proof of the release's 50 ms *additional*
+warm-hook p95 target. The SQL hook baseline, actual CLI/hook overhead, rendering,
+telemetry, concurrent writes and shared-remote latency require separate runs.
+Do not compare debug-build timings or run this concurrently with other tests.
+
+Initial scan-only measurement (2026-10-08, engine at `cbed794`, release build,
+macOS arm64, 10 logical CPUs, 24 GiB RAM):
+
+| Operation | p50 | p95 |
+| --- | ---: | ---: |
+| Matching rules plus revalidation | 7,349.5 ms | 8,211.0 ms |
+| Prime notes plus revalidation | 6,862.8 ms | 7,815.9 ms |
+
+The 60 samples each selected 6,400 body bytes. The full run, including preparation
+and warmup, took 63.44 seconds. These results identify the full-corpus read path as
+a substantial scaling problem; they do not measure the SQL-relative release gate.
+Every selection currently parses the entire corpus, and every selected-document
+revalidation inventories all filenames again. Disposable indexing must reduce
+both costs while preserving duplicate-UUID detection and fresh selected-file
+approval, scope, deletion, expiry and policy checks. Retain this fixture when
+comparing the indexed implementation.
