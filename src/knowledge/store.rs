@@ -226,18 +226,57 @@ impl KnowledgeStore {
     }
 
     fn lock(&self) -> Result<File> {
-        let file = child(
-            &self.root,
-            ".writer.lock",
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?;
+        self.operation_lock(".writer.lock")
+    }
+
+    pub(super) fn operation_lock(&self, name: &str) -> Result<File> {
+        ensure!(
+            !name.contains('/') && !name.contains('\\') && name != "..",
+            "invalid lock filename"
+        );
+        let file = child(&self.root, name, libc::O_RDWR | libc::O_CREAT, 0o600)?;
         ensure!(
             file.metadata()?.is_file(),
             "knowledge lock is not a regular file"
         );
         file.lock_exclusive()?;
-        Ok(file) // Drop releases the OS lock, including after a process crash.
+        Ok(file)
+    }
+
+    /// Export artifacts are bounded independently of single OKF documents.
+    pub(super) fn read_artifact(&self, name: &str) -> Result<Option<String>> {
+        ensure!(
+            !name.contains('/') && !name.contains('\\') && name != "..",
+            "invalid artifact filename"
+        );
+        Self::read_limited(&self.root, name, 64 * 1024 * 1024)
+    }
+
+    pub(super) fn retain_artifact(&self, name: &str, text: &str, initializing: bool) -> Result<()> {
+        ensure!(
+            text.len() <= 64 * 1024 * 1024,
+            "export artifact exceeds 64 MiB limit"
+        );
+        let _lock = self.lock()?;
+        if let Some(current) = self.read_artifact(name)? {
+            ensure!(
+                current == text,
+                "export artifact conflict; preserve staging and choose a new destination"
+            );
+        } else {
+            if initializing {
+                ensure!(
+                    names(&self.root)?.iter().all(|n| n == ".writer.lock"
+                        || n == ".export.lock"
+                        || n.strip_prefix('.')
+                            .and_then(|s| s.strip_suffix(".tmp"))
+                            .is_some_and(|s| Uuid::parse_str(s).is_ok())),
+                    "staging directory is not empty and has no matching export intent"
+                );
+            }
+            Self::replace_at(&self.root, name, text)?;
+        }
+        Ok(())
     }
 
     fn parent(&self, key: Key, create: bool) -> Result<File> {

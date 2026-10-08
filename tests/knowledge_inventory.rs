@@ -52,7 +52,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn inventory_and_cli_verify_rows_without_publishing_or_switching() {
+async fn inventory_cli_and_staging_preserve_source_and_detect_conflicts() {
     let f = Fixture::new().await;
     let result = std::panic::AssertUnwindSafe(async {
     let note = Uuid::new_v4();
@@ -106,6 +106,9 @@ async fn inventory_and_cli_verify_rows_without_publishing_or_switching() {
     let mapping_path = temp.path().join("mapping.json");
     std::fs::write(&mapping_path, serde_json::to_vec(&mappings).unwrap()).unwrap();
     let knowledge = temp.path().join("must-not-exist");
+    let staging = temp.path().join("staging");
+    assert!(ygg::knowledge::export::stage(&f.pool, &mappings, &staging).await.is_err());
+    assert!(!staging.exists());
     let cli = |mapped: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ygg"));
         command
@@ -184,6 +187,7 @@ async fn inventory_and_cli_verify_rows_without_publishing_or_switching() {
             .count(),
         2
     );
+    sqlx::query("DELETE FROM learnings WHERE learning_id=$1").bind(note).execute(&f.pool).await.unwrap();
     sqlx::query("UPDATE knowledge_storage SET backend='fenced', generation=2, corpus_id=$1")
         .bind(mappings.corpus_id)
         .execute(&f.pool)
@@ -197,6 +201,38 @@ async fn inventory_and_cli_verify_rows_without_publishing_or_switching() {
             .backend,
         "fenced"
     );
+    let unrelated = temp.path().join("unrelated");
+    drop(ygg::knowledge::store::KnowledgeStore::open(&unrelated, true).unwrap());
+    std::fs::write(unrelated.join("keep.txt"), "keep").unwrap();
+    assert!(ygg::knowledge::export::stage(&f.pool, &mappings, &unrelated).await.is_err());
+    assert_eq!(std::fs::read_to_string(unrelated.join("keep.txt")).unwrap(), "keep");
+    let empty = temp.path().join("empty-stage");
+    drop(ygg::knowledge::store::KnowledgeStore::open(&empty, true).unwrap());
+    let empty_manifest = ygg::knowledge::export::stage(&f.pool, &mappings, &empty).await.unwrap();
+    let manifest = ygg::knowledge::export::stage(&f.pool, &mappings, &staging).await.unwrap();
+    assert_eq!(manifest.entries.len(), 2);
+    assert_eq!(ygg::knowledge::export::verify(&staging).unwrap(), manifest);
+    assert_eq!(ygg::knowledge::export::stage(&f.pool, &mappings, &staging).await.unwrap(), manifest);
+    let entry = manifest.entries.iter().find(|entry| entry.key.id == note).unwrap();
+    let note_path = staging.join(entry.key.relative_path());
+    // Recreate a durable partial state: intent + subset of documents, no
+    // completion receipt. Resumption must fill only the missing document.
+    std::fs::remove_file(staging.join(".export-complete.json")).unwrap();
+    std::fs::remove_file(&note_path).unwrap();
+    assert!(ygg::knowledge::export::verify(&staging).is_err());
+    assert_eq!(ygg::knowledge::export::stage(&f.pool, &mappings, &staging).await.unwrap(), manifest);
+    let edited = format!("{}independent edit", std::fs::read_to_string(&note_path).unwrap());
+    std::fs::write(&note_path, &edited).unwrap();
+    assert!(ygg::knowledge::export::verify(&staging).is_err());
+    assert!(ygg::knowledge::export::stage(&f.pool, &mappings, &staging).await.is_err());
+    assert_eq!(std::fs::read_to_string(&note_path).unwrap(), edited);
+    let marker: (String,i64) = sqlx::query_as("SELECT backend,generation FROM knowledge_storage").fetch_one(&f.pool).await.unwrap();
+    assert_eq!(marker, ("fenced".into(),2));
+    let saved_plan = std::fs::read(empty.join(".export-plan.json")).unwrap();
+    sqlx::query("UPDATE knowledge_storage SET generation=generation+1").execute(&f.pool).await.unwrap();
+    assert!(ygg::knowledge::export::stage(&f.pool, &mappings, &empty).await.is_err());
+    assert_eq!(std::fs::read(empty.join(".export-plan.json")).unwrap(), saved_plan);
+    assert_eq!(ygg::knowledge::export::verify(&empty).unwrap(), empty_manifest);
     }).catch_unwind().await;
     f.cleanup().await;
     if let Err(panic) = result {

@@ -378,3 +378,38 @@ scope-fixture parity, filesystem publication or rollback readiness. A later fenc
 export must reread and validate its own manifest rather than trusting this report.
 The CLI tests create/drop their own database in the disposable PostgreSQL cluster
 and verify that neither the knowledge directory nor storage mode is changed.
+
+## Fenced export staging
+
+`export::stage` prepares a separate private directory from an already fenced SQL
+source. It first verifies the complete inventory and every adapter round trip,
+then durably records `.export-plan.json` before writing documents. The immutable
+plan binds database identity, generation, target corpus, full explicit mappings,
+source/document digests, document keys and separate usage baselines. Artifacts are
+bounded to 64 MiB; exceeding that limit is an error before staging begins.
+
+A second guarded snapshot must match the planned generation, phase, row set and
+each source/document/usage record. Missing staged documents are written through
+the conditional durable store; matching files are retained and independently
+changed files are never overwritten. An OS export lock serializes cooperating
+exporters. A new or empty private directory can start an export; unrelated existing
+contents without a matching intent are rejected. Leftover store temporary files
+from an interrupted initial control-file write do not prevent resumption.
+
+After rereading the staged inventory and all document digests, the exporter writes
+`.export-complete.json` bound to the plan digest. `export::verify` checks the current
+files, unique UUIDs, keys, saved mapping identities and usage identities each time;
+receipt presence alone cannot validate an edited stage. A repeated identical
+export is idempotent. Different source generations or manifests cannot reuse a
+stage, even when the document bodies happen to match. Partial stages retain their
+intent and existing data for resumption or explicit operator inspection.
+
+The exporter does not publish, seed telemetry, change storage mode or configure
+trust. It is a library operation pending the validated cutover command; the public
+migration CLI still requires `--dry-run`. A future publisher must recheck the live
+source generation and copy only manifest-listed documents and required controls
+into its new authoritative destination; it must not blindly publish arbitrary
+unlisted files from a staging directory. Fleet upgrade, backups, scope-fixture
+parity, local generation/configuration publication and reverse import remain
+required. The tests exercise durable partial states and conflicts; they are not
+a substitute for the full killed-process migration and rollback release gates.

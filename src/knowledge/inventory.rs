@@ -48,7 +48,14 @@ pub struct Report {
     pub rows_verified: bool,
 }
 
-fn inspect(table: &str, raw: Value, mappings: Option<&Mappings>) -> Row {
+fn inspect(
+    table: &str,
+    raw: Value,
+    mappings: Option<&Mappings>,
+) -> (
+    Row,
+    Option<(super::document::Document, Option<legacy::Usage>)>,
+) {
     let id_field = if table == "memories" {
         "memory_id"
     } else {
@@ -64,6 +71,7 @@ fn inspect(table: &str, raw: Value, mappings: Option<&Mappings>) -> Row {
         document_digest: None,
         issues: Vec::new(),
     };
+    let mut extracted = None;
     let converted = (|| -> Result<()> {
         let mappings = mappings.ok_or_else(|| anyhow::anyhow!("explicit mapping file required"))?;
         let user = result
@@ -75,17 +83,17 @@ fn inspect(table: &str, raw: Value, mappings: Option<&Mappings>) -> Row {
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("source row is not an object"))?
             .remove("user_id");
-        let (document, expected, actual) = if table == "memories" {
+        let (document, expected, actual, usage) = if table == "memories" {
             let row: crate::models::memory::Memory = serde_json::from_value(model.clone())?;
             let document = legacy::import_note(&row, user, mappings)?;
             let actual = serde_json::to_value(legacy::note_json_model(&document, mappings)?)?;
-            (document, serde_json::to_value(row)?, actual)
+            (document, serde_json::to_value(row)?, actual, None)
         } else {
             let row: crate::models::learning::Learning = serde_json::from_value(model.clone())?;
             let (document, usage) = legacy::import_learning(&row, user, mappings)?;
             let actual =
                 serde_json::to_value(legacy::learning_json_model(&document, &usage, mappings)?)?;
-            (document, serde_json::to_value(row)?, actual)
+            (document, serde_json::to_value(row)?, actual, Some(usage))
         };
         let unknown: Vec<_> = model
             .as_object()
@@ -116,15 +124,29 @@ fn inspect(table: &str, raw: Value, mappings: Option<&Mappings>) -> Row {
                 .into_owned(),
         );
         result.document_digest = Some(digest(serialized.as_bytes()));
+        extracted = Some((document, usage));
         Ok(())
     })();
     if let Err(e) = converted {
         result.issues.push(e.to_string());
     }
-    result
+    (result, extracted)
 }
 
 pub async fn assess(pool: &PgPool, mappings: Option<&Mappings>) -> Result<Report> {
+    visit(pool, mappings, |_, _, _, _| Ok(())).await
+}
+
+pub(crate) async fn visit(
+    pool: &PgPool,
+    mappings: Option<&Mappings>,
+    mut visitor: impl FnMut(
+        &Source,
+        &Row,
+        &super::document::Document,
+        Option<&legacy::Usage>,
+    ) -> Result<()>,
+) -> Result<Report> {
     let mut tx = pool.begin().await?;
     // Guard row locks require a read/write-capable transaction, but this routine
     // issues no data mutations. RR pins one snapshot across both source tables.
@@ -176,7 +198,10 @@ pub async fn assess(pool: &PgPool, mappings: Option<&Mappings>) -> Result<Report
     ] {
         let mut stream = sqlx::query_scalar::<_, Value>(query).fetch(&mut *tx);
         while let Some(raw) = stream.try_next().await? {
-            let row = inspect(table, raw, mappings);
+            let (row, converted) = inspect(table, raw, mappings);
+            if let Some((document, usage)) = &converted {
+                visitor(&report.source, &row, document, usage.as_ref())?;
+            }
             if let Some(user) = &row.user_id {
                 *report.owners.entry(user.clone()).or_default() += 1;
             }
