@@ -86,6 +86,74 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
             .await
             .unwrap();
         assert!(version.starts_with("16.15"), "{version}");
+        // Concurrent explicit provisioning must converge on the same roles and
+        // schema. Re-running must preserve database/knowledge identities.
+        let (first, second) = tokio::join!(
+            ygg::db::provision::migrate(&cluster),
+            ygg::db::provision::migrate(&cluster)
+        );
+        first.unwrap();
+        second.unwrap();
+        let runtime = PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(ygg::db::provision::runtime_options(&cluster))
+            .await
+            .unwrap();
+        let user: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&runtime)
+            .await
+            .unwrap();
+        assert_eq!(user, "ygg_runtime");
+        assert!(
+            ygg::db::pending_migrations(&runtime)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut guarded = ygg::knowledge::guard::legacy_transaction(&runtime, true, None)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memories (text) VALUES ('limited-role note')")
+            .execute(&mut *guarded)
+            .await
+            .unwrap();
+        guarded.commit().await.unwrap();
+        for forbidden in [
+            "CREATE TABLE public.forbidden (id integer)",
+            "CREATE TEMP TABLE forbidden (id integer)",
+            "CREATE DATABASE forbidden",
+            "CREATE ROLE forbidden",
+            "SET ROLE ygg_owner",
+            "SET ROLE ygg_bootstrap",
+            "UPDATE knowledge_storage SET generation = generation + 1",
+            "DELETE FROM _sqlx_migrations",
+            "ALTER TABLE memories DISABLE TRIGGER ALL",
+            "TRUNCATE memories",
+        ] {
+            let error = sqlx::query(forbidden).execute(&runtime).await.unwrap_err();
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("42501"),
+                "{forbidden}: {error}"
+            );
+        }
+        // Drift is reported, not silently repaired or adopted.
+        sqlx::query("ALTER ROLE ygg_runtime SUPERUSER")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            ygg::db::provision::migrate(&cluster)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected privilege")
+        );
+        sqlx::query("ALTER ROLE ygg_runtime NOSUPERUSER")
+            .execute(&pool)
+            .await
+            .unwrap();
+        runtime.close().await;
         pool.close().await;
     })
     .catch_unwind()

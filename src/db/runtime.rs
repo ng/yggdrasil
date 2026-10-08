@@ -268,7 +268,7 @@ impl ManagedCluster {
 
     /// Administrative connection for lifecycle verification only. Application
     /// connections must use the separately provisioned limited runtime role.
-    fn admin_options(&self) -> PgConnectOptions {
+    pub(super) fn admin_options(&self) -> PgConnectOptions {
         PgConnectOptions::new()
             .host(self.root.join("runtime").to_str().unwrap())
             .port(5432)
