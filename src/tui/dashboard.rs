@@ -579,21 +579,32 @@ impl DashboardView {
         self.cache_total_24h = ch24 + cc24;
         self.redactions_24h = r24;
 
-        // DB corpus totals for the pulse footer line. Single roundtrip —
-        // cheap at current scale (all target tables indexed). locks_active
+        // Coordination totals stay independent of the guarded knowledge read.
+        // All target tables are indexed. locks_active
         // excludes expired rows since a held lock is ttl-bound, not just a
         // row existence.
-        let (tasks_open, tasks_total, learnings, locks_active): (i64, i64, i64, i64) =
-            sqlx::query_as(
-                r#"SELECT
+        let (tasks_open, tasks_total, locks_active): (i64, i64, i64) = sqlx::query_as(
+            r#"SELECT
                  (SELECT COUNT(*) FROM tasks WHERE status <> 'closed'),
                  (SELECT COUNT(*) FROM tasks),
-                 (SELECT COUNT(*) FROM learnings),
                  (SELECT COUNT(*) FROM locks WHERE expires_at > now())"#,
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap_or((0, 0, 0, 0));
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0, 0, 0));
+        // Keep coordination totals available when legacy knowledge is fenced or
+        // has moved to OKF. The compatibility read still holds its own lease.
+        let learnings = async {
+            let mut transaction =
+                crate::knowledge::guard::legacy_transaction(pool, false, None).await?;
+            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM learnings")
+                .fetch_one(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(count)
+        }
+        .await
+        .unwrap_or(0);
         self.db_tasks_open = tasks_open;
         self.db_tasks_total = tasks_total;
         self.db_learnings = learnings;

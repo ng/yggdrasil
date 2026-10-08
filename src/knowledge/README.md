@@ -304,3 +304,39 @@ injection, and supply a defined last-known-statistics path during database outag
 That integration and the cutover's fenced baseline manifest remain unfinished.
 The SQL tests use private schemas in the isolated test database and cover 20-client
 races, seed conflicts, corpus isolation, failed-update rollback and wide totals.
+
+## Compatibility guard and legacy write fence
+
+Migration `20261008000002_knowledge_storage_guard.sql` creates one database identity,
+monotonic storage generation, minimum client protocol and `sql`/`fenced`/`okf` phase.
+It starts in `sql` without changing the selected backend. Memory and learning
+repositories check protocol/phase inside a transaction and retain the shared
+advisory lease through the query and commit. The dashboard's direct learning count
+uses the same guard, separately from coordination counts.
+
+`fenced` permits compatible SQL reads but rejects knowledge writes; `okf` rejects
+legacy reads and writes through the compatibility guard. Statement triggers fence
+INSERT, UPDATE, DELETE and TRUNCATE on the old content tables, including ordinary
+older clients that do not call the guard. Phase changes acquire an exclusive lease
+before marker row locks and wait for existing operations. Row-locking marker reads
+reject stale repeatable-read snapshots after a committed transition. Marker changes
+require the next generation, stable database ID and nondecreasing protocol; direct
+SQL-to-OKF and OKF-to-SQL switches are rejected. Deletion/truncation of the marker
+is rejected. Guard functions use fixed qualified objects and a fixed search path;
+security-definer access permits read-only clients to lock/read the marker without
+granting them permission to update it.
+
+This is a compatibility foundation, not a ready-to-run cutover. Production commands
+still select SQL and will report a guard error if an administrator switches the
+marker to OKF. The guarded repository calls discover the current generation;
+`guard::legacy_transaction` also accepts an expected generation for future adapters
+that hold a configuration snapshot. OKF dispatch/local generation publication,
+manifest validation, minimum-client inventory, migration-only reverse-import bypass
+and restricted runtime/migration roles remain required before exposing cutover.
+Never manually switch the marker as a substitute for those steps.
+
+Unaware older binaries can still SELECT frozen legacy tables: upgrade or retire
+them before cutover, as required by the plan. These triggers also do not constrain
+an administrator who disables triggers or changes table/function ownership. The
+old-client tests cover ordinary SQL writes, including stale transaction snapshots;
+they do not prove fleet upgrade, filesystem publication or lossless rollback.

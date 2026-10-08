@@ -32,7 +32,9 @@ impl<'a> MemoryRepo<'a> {
         text: &str,
         created_by: Option<Uuid>,
     ) -> Result<Memory, sqlx::Error> {
-        sqlx::query_as::<_, Memory>(
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, true, None).await?;
+        let result = sqlx::query_as::<_, Memory>(
             r#"INSERT INTO memories (repo_id, text, created_by)
                VALUES ($1, $2, $3)
                RETURNING memory_id, repo_id, text, created_by, created_at"#,
@@ -40,8 +42,10 @@ impl<'a> MemoryRepo<'a> {
         .bind(repo_id)
         .bind(text)
         .bind(created_by)
-        .fetch_one(self.pool)
-        .await
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result)
     }
 
     /// List notes newest-first. `repo_id = Some` returns that repo's notes plus
@@ -53,7 +57,9 @@ impl<'a> MemoryRepo<'a> {
         all: bool,
         limit: i64,
     ) -> Result<Vec<Memory>, sqlx::Error> {
-        sqlx::query_as::<_, Memory>(
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, false, None).await?;
+        let result = sqlx::query_as::<_, Memory>(
             r#"SELECT memory_id, repo_id, text, created_by, created_at
                FROM memories
                WHERE ($2::bool IS TRUE)
@@ -65,16 +71,21 @@ impl<'a> MemoryRepo<'a> {
         .bind(repo_id)
         .bind(all)
         .bind(limit)
-        .fetch_all(self.pool)
-        .await
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result)
     }
 
     pub async fn delete(&self, memory_id: Uuid) -> Result<bool, sqlx::Error> {
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, true, None).await?;
         let n = sqlx::query("DELETE FROM memories WHERE memory_id = $1")
             .bind(memory_id)
-            .execute(self.pool)
+            .execute(&mut *transaction)
             .await?
             .rows_affected();
+        transaction.commit().await?;
         Ok(n > 0)
     }
 }
