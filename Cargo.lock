@@ -3250,6 +3250,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-input",
  "tui-popup",
+ "url",
  "uuid",
 ]
 

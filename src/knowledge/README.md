@@ -50,10 +50,34 @@ symlink escapes, corrupt documents, permission checks and a subprocess file-size
 limit that forces a partial write failure. The latter tests failed-write recovery,
 not a full disk or arbitrary filesystem failure model.
 
+## Identity and policy configuration
+
+`identity` stores `identity.json` in a separate private configuration directory,
+using the same locked atomic-write primitives. It persists the corpus UUID,
+explicit trust flag, portable repository UUIDs, canonical URL aliases, common Git
+directories, and source-database UUID to legacy-repo UUID bindings. Multiple legacy
+rows may explicitly map to one portable repository. This configuration must be
+backed up with the bundle; it is not disposable index state.
+
+Git discovery uses the canonical common directory, so linked worktrees share a
+scope and unrelated local repositories with equal names do not. Standard forge
+SSH/HTTPS aliases resolve together; custom server schemes, ports, SSH users and
+home-relative paths retain their identity distinctions. URLs with queries or
+fragments require explicit mapping; passwords are never persisted as aliases.
+A changed origin or conflicting URL/path does not silently reassign knowledge.
+
+Explicit alias, database-binding or trust edits require the current configuration
+revision. Reinitialization cannot replace a corpus ID, repair corrupt configuration
+by discarding it, or change its trust flag. Backup restoration and new database
+bindings preserve all existing corpus, repository and document IDs. On a different
+host, review/rebind local common-directory paths instead of treating paths copied
+from another machine as authoritative identity evidence. Client commands still
+need to wire these primitives into their scope and trust resolution.
+
 ## Remaining engine work
 
-Portable repo bindings, corpus identity/configuration, high-level note and rule
-operations, uniqueness across scopes, scope moves, disposable indexing, generic
+High-level note and rule operations, uniqueness across scopes, scope moves,
+disposable indexing, generic
 OKF bundle browsing and latency measurements remain unfinished. Current snapshots
 scan the Yggdrasil layout directly. Approval must still be revalidated immediately
 before injection; never treat a previously read document as current authority.

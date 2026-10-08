@@ -324,6 +324,15 @@ impl KnowledgeStore {
         let parent = self.parent(key, true)?;
         let name = format!("{}.md", key.id);
         Self::check_revision(Self::read_at(&parent, &name)?.as_deref(), expected)?;
+        Self::replace_at(&parent, &name, &text)?;
+        Ok(RevisionedDocument {
+            key,
+            revision: digest(text.as_bytes()),
+            document: document.clone(),
+        })
+    }
+
+    fn replace_at(parent: &File, name: &str, text: &str) -> Result<()> {
         let temporary = format!(".{}.tmp", Uuid::new_v4());
         let result = (|| -> Result<()> {
             let mut file = child(
@@ -335,7 +344,7 @@ impl KnowledgeStore {
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             let old = CString::new(temporary.as_str())?;
-            let new = CString::new(name.as_str())?;
+            let new = CString::new(name)?;
             if unsafe {
                 libc::renameat(
                     parent.as_raw_fd(),
@@ -353,12 +362,33 @@ impl KnowledgeStore {
         if result.is_err() {
             let _ = unlink(&parent, &temporary);
         }
-        result?;
-        Ok(RevisionedDocument {
-            key,
-            revision: digest(text.as_bytes()),
-            document: document.clone(),
-        })
+        result
+    }
+
+    pub(super) fn read_control(&self, name: &str) -> Result<Option<String>> {
+        ensure!(
+            !name.contains('/') && !name.contains('\\') && name != "..",
+            "invalid control filename"
+        );
+        Self::read_at(&self.root, name)
+    }
+
+    pub(super) fn update_control<T>(
+        &self,
+        name: &str,
+        update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
+    ) -> Result<T> {
+        let _lock = self.lock()?;
+        let current = self.read_control(name)?;
+        let (text, result) = update(current.as_deref())?;
+        ensure!(
+            text.len() <= MAX_DOCUMENT_BYTES,
+            "control document exceeds byte limit"
+        );
+        if current.as_deref() != Some(&text) {
+            Self::replace_at(&self.root, name, &text)?;
+        }
+        Ok(result)
     }
 
     pub fn delete(&self, key: Key, expected: &str) -> Result<()> {
