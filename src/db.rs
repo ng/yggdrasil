@@ -5,6 +5,8 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod package;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod runtime;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod supervisor;

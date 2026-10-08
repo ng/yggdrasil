@@ -115,3 +115,57 @@ Run native coverage with the same binary/major environment as above:
 YGG_TEST_PG_BIN=/absolute/postgresql/bin YGG_TEST_PG_MAJOR=18 \
   cargo test --test managed_supervisor -- --include-ignored --test-threads=1
 ```
+
+## Pinned distribution installer
+
+`packages.json` pins PostgreSQL 16.15 / theseus-rs distribution 16.15.0 for macOS
+arm64, macOS x86_64 and GNU Linux x86_64. Each record includes the exact release
+URL, archive size and SHA-256. The release records source commit
+`2954f800589f74265f136cdb490b87749e209e7c`. Downloaded archives for all three targets
+were checked against the release asset digests; they include `uuid-ossp`.
+
+`package::install_offline` accepts the native pinned archive, reads it through a
+bounded regular-file descriptor and verifies its exact bytes before creating any
+destination state. `install_download` explicitly downloads the same HTTPS artifact
+using curl (which is not required for offline installation). Neither is called
+from ordinary runtime, status, hooks or scheduler paths. User-facing `ygg init`
+and offline release-bundle assembly remain pending.
+
+Installation holds a private OS lock, extracts into a fresh private staging
+directory, syncs files and directories, then publishes using an exclusive atomic
+directory rename. It never replaces an existing destination, even an empty one.
+Existing installations are compared with the freshly verified archive's complete
+file inventory, digests, executable bits and symlink targets; independent edits
+and extra files cause an error. Receipts contain no exclusive copy of binaries.
+Failed or killed staging directories are never selected as installed packages;
+partial directories remain available for inspection and later explicit cleanup.
+
+Extraction accepts only regular files, directories and relative sibling symlinks
+to regular files. Links are created after file extraction. Absolute paths, parent
+traversal, hard links, devices, duplicate members and excessive compressed or
+expanded data are rejected. Package files/directories are private to the OS user;
+archive ownership, special permissions and xattrs are not applied. PostgreSQL and
+upstream license files are preserved. The installation adds `YGG-RELEASE.json`
+and `YGG-THIRD-PARTY-NOTICES.txt`, including the Apache 2.0 license for the bundled
+macOS OpenSSL 3.6.3 libraries. Linux uses system runtime libraries.
+
+The downloaded macOS arm64 16.15 archive passed the runtime and supervisor native
+suite, including 20 starts, crashes and adoption. An installed copy also starts,
+runs all migrations and loads `uuid-ossp`. These results do not establish the
+other platform gates. `.github/workflows/managed-postgres.yml` now runs release-mode
+installer/lifecycle smoke on macOS arm64, macOS Intel and Ubuntu 24.04. Its Linux
+job installs runtime libraries (not PostgreSQL) needed by the GNU artifact, and
+its macOS jobs verify the upstream ad-hoc signature. `scripts/prepare-postgres-smoke.py`
+is CI-only preparation, not the product installer. Platform results, clean-machine
+dependency handling, quarantine behavior and offline release packaging must be
+verified before advertising managed installation as release-ready.
+
+To test an offline archive locally:
+
+```sh
+YGG_TEST_PG_ARCHIVE=/absolute/postgresql-16.15.0-aarch64-apple-darwin.tar.gz \
+  cargo test --test managed_packages -- --include-ignored --test-threads=1
+```
+
+Set `YGG_TEST_PG_DOWNLOAD=1` too to exercise the explicit HTTPS downloader. The test
+creates only disposable private clusters and never reads `DATABASE_URL`.

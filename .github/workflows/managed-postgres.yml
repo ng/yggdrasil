@@ -1,0 +1,62 @@
+name: Managed PostgreSQL artifacts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/managed-postgres.yml'
+      - 'scripts/prepare-postgres-smoke.py'
+      - 'Cargo.*'
+      - 'src/db.rs'
+      - 'src/db/**'
+      - 'src/cli/db_cmd.rs'
+      - 'src/config/database.rs'
+      - 'src/main.rs'
+      - 'migrations/**'
+      - 'tests/managed_*.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native PostgreSQL 16.15 (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install GNU distribution runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libossp-uuid16 libxml2 liblz4-1 libzstd1
+      - name: Fetch and verify pinned release archive
+        run: python3 scripts/prepare-postgres-smoke.py --target '${{ matrix.target }}' --directory "$RUNNER_TEMP/pg-release"
+      - name: Check native binary dependencies and signatures
+        shell: bash
+        run: |
+          "$YGG_TEST_PG_BIN/postgres" --version
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --verify --strict "$YGG_TEST_PG_BIN/postgres"
+            otool -L "$YGG_TEST_PG_BIN/postgres"
+          else
+            ldd "$YGG_TEST_PG_BIN/postgres"
+            ldd "$YGG_TEST_PG_BIN/../lib/uuid-ossp.so"
+          fi
+      - name: Test release-mode installer, migrations and lifecycle
+        run: cargo test --release --test managed_packages --test managed_runtime --test managed_supervisor -- --include-ignored --test-threads=1

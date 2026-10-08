@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "postgres_version": "16.15",
+  "distribution_version": "16.15.0",
+  "source_commit": "2954f800589f74265f136cdb490b87749e209e7c",
+  "source_url": "https://github.com/theseus-rs/postgresql-binaries",
+  "release_url": "https://github.com/theseus-rs/postgresql-binaries/releases/tag/16.15.0",
+  "packages": [
+    {
+      "target": "aarch64-apple-darwin",
+      "url": "https://github.com/theseus-rs/postgresql-binaries/releases/download/16.15.0/postgresql-16.15.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "46f6382024d9b633d1f4b4903ffef8c2404e00ae83098d628c00591048cb0512",
+      "bytes": 12107763,
+      "root": "postgresql-16.15.0-aarch64-apple-darwin"
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "url": "https://github.com/theseus-rs/postgresql-binaries/releases/download/16.15.0/postgresql-16.15.0-x86_64-apple-darwin.tar.gz",
+      "sha256": "dfae21b2b931f1d8d1103afb6e8e108fdd94c6f407ce24d35b6cd0ad34f286d1",
+      "bytes": 12408962,
+      "root": "postgresql-16.15.0-x86_64-apple-darwin"
+    },
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "url": "https://github.com/theseus-rs/postgresql-binaries/releases/download/16.15.0/postgresql-16.15.0-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "77dd669eda3985ea8be26256f6af28d3c8414152ada713797555bb7423b4486a",
+      "bytes": 11087052,
+      "root": "postgresql-16.15.0-x86_64-unknown-linux-gnu"
+    }
+  ]
+}
