@@ -347,23 +347,41 @@ impl KnowledgeService {
     /// Prime keeps the established five-note cap, after freshness filtering.
     /// Explicit browsing remains able to display stale/deprecated documents.
     pub fn prime_notes(&self, repo: Option<Uuid>, now: DateTime<Utc>) -> Result<Snapshot> {
-        let mut snapshot = self.notes(repo, false, usize::MAX)?;
-        if !self.policy()?.trusted {
-            snapshot.documents.clear();
-            return Ok(snapshot);
+        let policy = self.policy()?;
+        Self::scope(&policy, repo)?;
+        if !policy.trusted {
+            return Ok(Snapshot::default());
         }
-        snapshot
-            .documents
-            .retain(|doc| match doc.document.current(now) {
-                Ok(current) => {
-                    current && doc.document.profile().unwrap().unwrap().state == State::Active
-                }
-                Err(e) => {
-                    snapshot.diagnostics.push(format!("{}: {e}", doc.key.id));
-                    false
-                }
-            });
-        snapshot.documents.truncate(5);
+        let mut candidates = self.store.candidates();
+        candidates.rows.retain(|row| {
+            row.key.kind == Kind::Note
+                && row.profile.user_id.as_deref() == Some(&self.user)
+                && matching::note_scope(row.key.repo, repo, false)
+        });
+        candidates
+            .rows
+            .sort_by_key(|row| (std::cmp::Reverse(row.profile.created_at), row.key.id));
+        let mut snapshot = Snapshot {
+            documents: Vec::new(),
+            diagnostics: candidates.diagnostics,
+        };
+        for row in candidates.rows {
+            let result = (|| -> Result<Option<RevisionedDocument>> {
+                let Some(doc) = self.store.load_candidate(&row)? else {
+                    return Ok(None);
+                };
+                let p = self.owned(&doc.document)?;
+                Ok((p.state == State::Active && doc.document.current(now)?).then_some(doc))
+            })();
+            match result {
+                Ok(Some(doc)) => snapshot.documents.push(doc),
+                Ok(None) => {}
+                Err(e) => snapshot.diagnostics.push(format!("{}: {e}", row.key.id)),
+            }
+            if snapshot.documents.len() == 5 {
+                break;
+            }
+        }
         Ok(snapshot)
     }
 
@@ -414,26 +432,43 @@ impl KnowledgeService {
     pub fn rules(&self, filters: &Filters<'_>, now: DateTime<Utc>) -> Result<Snapshot> {
         let policy = self.policy()?;
         Self::scope(&policy, filters.repo)?;
-        let mut snapshot = self.browse()?;
-        let trusted = policy.trusted.then_some(policy.corpus_id);
-        snapshot.documents.retain(|doc| {
-            let result = (|| -> Result<bool> {
-                Ok(doc.key.kind == Kind::Learning
-                    && doc.document.eligible(trusted, now)?
-                    && matching::matches(&doc.document.profile()?.unwrap(), filters)?)
+        let candidates = self.store.candidates();
+        let mut snapshot = Snapshot {
+            documents: Vec::new(),
+            diagnostics: candidates.diagnostics,
+        };
+        for row in candidates.rows {
+            let result = (|| -> Result<Option<RevisionedDocument>> {
+                if row.key.kind != Kind::Learning
+                    || row.profile.user_id.as_deref() != Some(&self.user)
+                    || !matching::matches(&row.profile, filters)?
+                {
+                    return Ok(None);
+                }
+                let Some(doc) = self.store.load_candidate(&row)? else {
+                    return Ok(None);
+                };
+                let profile = self.owned(&doc.document)?;
+                Ok((doc
+                    .document
+                    .eligible(policy.trusted.then_some(policy.corpus_id), now)?
+                    && matching::matches(&profile, filters)?)
+                .then_some(doc))
             })();
             match result {
-                Ok(eligible) => eligible,
-                Err(e) => {
-                    snapshot.diagnostics.push(format!("{}: {e}", doc.key.id));
-                    false
-                }
+                Ok(Some(doc)) => snapshot.documents.push(doc),
+                Ok(None) => {}
+                Err(e) => snapshot.diagnostics.push(format!("{}: {e}", row.key.id)),
             }
-        });
-        snapshot.documents.sort_by(|a, b| {
-            matching::compare(
-                &a.document.profile().unwrap().unwrap(),
-                &b.document.profile().unwrap().unwrap(),
+        }
+        snapshot.documents.sort_by_cached_key(|doc| {
+            let p = doc.document.profile().unwrap().unwrap();
+            (
+                std::cmp::Reverse(
+                    usize::from(p.file_glob.is_some()) + usize::from(p.rule_id.is_some()),
+                ),
+                std::cmp::Reverse(p.created_at),
+                p.id,
             )
         });
         Ok(snapshot)

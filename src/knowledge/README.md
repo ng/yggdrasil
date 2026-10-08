@@ -132,9 +132,9 @@ multi-document transaction or the migration cutover protocol.
 
 ## Remaining engine work
 
-Disposable indexing, generic OKF bundle browsing, legacy JSON adapters and the
-SQL-relative hook latency gate remain unfinished. Current snapshots scan the
-Yggdrasil layout directly. Approval must still be revalidated immediately
+Generic OKF bundle browsing, legacy JSON adapters and the SQL-relative hook
+latency gate remain unfinished. Explicit browsing snapshots scan the Yggdrasil
+layout directly; rule/prime candidate lookup uses the disposable index below. Approval must still be revalidated immediately
 before injection; never treat a previously read document as current authority.
 Shared Git transport, legacy adapters, migration and CLI integration build on this
 layer and remain separate release gates.
@@ -190,8 +190,8 @@ deduplicated. This is not a cross-document transaction snapshot, and filenames
 are never taken from an earlier cached inventory.
 
 The process benchmark now calls these batch APIs. Note and proposal sorting also
-computes profile sort keys once per row. Persistent indexing remains unfinished:
-selection still reads the corpus. An experimental in-process parsed-document
+computes profile sort keys once per row. Further lookup optimization remains necessary; the persistent metadata index
+below replaces whole-corpus parsing for rule and prime candidates. An experimental in-process parsed-document
 cache did not improve this workload and is not retained.
 
 With batched revalidation and cached sort keys, the same fixture on the same host
@@ -201,3 +201,46 @@ bytes per sample. Compared with the initial scan-only run, p95 improved about
 18% for each operation. These are single-run observations, not a statistically
 controlled regression threshold. Whole-corpus reads and parsing remain to be addressed
 by the persistent index; the SQL-relative 50 ms target remains unverified.
+
+### Persistent metadata lookup
+
+Rule matching and prime-note selection now use a disposable `.lookup.json` in the
+private bundle root. Its versioned header pins the parser version and contains a
+SHA-256 corpus revision over the sorted path, file-fingerprint, document-digest
+and matching-metadata rows. The file is bounded to 64 MiB and replaced atomically.
+It contains no Markdown bodies, activation evidence or unknown YAML metadata.
+Notes/proposals requested for explicit browsing still use authoritative snapshots.
+
+Each lookup inventories all live UUIDs to exclude ambiguous copies, then checks
+file metadata relative to held directory descriptors without following symlinks.
+It reuses one directory descriptor per contiguous scope/kind group, and opens
+only changed or selected files through the existing containment checks. Cached rows are
+reused only when device, inode, size, mtime and ctime (including nanoseconds) match.
+Changed/new files are parsed and their exact byte digests recorded; deleted files
+leave the index. Fingerprints are checked before and after reading changed files.
+This assumes the local filesystem reports changes through those metadata fields;
+it is not a shared/network-filesystem coherence protocol.
+
+The index only selects candidates. Selected files are read and parsed afresh,
+their exact digests must match the candidate rows, and current ownership, scope,
+matching, freshness and corpus-bound approval are checked. Prime selects up to
+five eligible notes after freshness checks. Injection adapters must still call
+batched revalidation immediately before rendering. A concurrently changed
+candidate is omitted until the next lookup rather than using older bytes.
+
+Missing, corrupt, checksum-mismatched or incompatible indexes rebuild from the
+bundle. Cache-write failure does not fail a valid read. Concurrent builders may
+publish older observations, but every reader checks current file fingerprints;
+cache publication never mutates authoritative documents. The lookup cache may be
+deleted at any time and should be excluded from authoritative exports and Git
+transport. OS timestamp checks and per-file reads do not create a transaction
+snapshot across independently edited files.
+
+On the same 10,000-document/20-process fixture, persistent metadata lookup with
+anchored `fstatat` checks measured rule p50/p95 of 299.9/419.0 ms and prime-note
+p50/p95 of 314.5/403.8 ms (60 samples, 6,400 selected body bytes per sample;
+6.56 seconds including setup/warmup). This is about 94% lower p95 than the batched
+full-scan run. Directory inventory, metadata checks and index decoding still scale
+with corpus size. The SQL-relative 50 ms additional hook-latency gate is not yet
+measured or satisfied by this engine benchmark; retain the exact fixture while
+optimizing these remaining costs and integrating actual commands.

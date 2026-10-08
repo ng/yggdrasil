@@ -13,6 +13,7 @@ use anyhow::{Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+mod index;
 mod moves;
 use uuid::Uuid;
 
