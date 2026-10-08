@@ -148,3 +148,43 @@ async fn legacy_note_scope_prime_limit_and_json_contract() {
     }
     pool.close().await;
 }
+
+#[tokio::test]
+async fn okf_scope_tag_text_matches_postgres_jsonb_representation() {
+    use ygg::knowledge::{
+        document::Document,
+        matching::{self, Filters},
+    };
+    let pool = pool().await;
+    let document = Document::parse(include_str!("fixtures/knowledge/rule.md")).unwrap();
+    let mut profile = document.profile().unwrap().unwrap();
+    for source in [
+        "null",
+        "true",
+        "42",
+        "1.5",
+        "1e-9",
+        "1e30",
+        "\"worker\"",
+        "[1, \"λ\", null]",
+        "{\"long\": 1, \"a\": {\"b\": true}}",
+    ] {
+        let value: serde_json::Value = serde_json::from_str(source).unwrap();
+        profile.scope_tags.insert("agent".into(), value.clone());
+        let actual: Option<String> =
+            sqlx::query_scalar("SELECT jsonb_build_object('agent', $1::jsonb)->>'agent'")
+                .bind(value)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let filters = Filters {
+            agent: actual.as_deref(),
+            ..Filters::default()
+        };
+        assert!(
+            matching::matches(&profile, &filters).unwrap(),
+            "{source} -> {actual:?}"
+        );
+    }
+    pool.close().await;
+}

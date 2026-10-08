@@ -79,7 +79,10 @@ jobs:
           ./target/release/ygg migrate
 
       - name: Install test runtime tools
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+          tmux new-session -d -s ygg-test-runtime
 
       - name: Run all tests against isolated Postgres
         run: cargo test --quiet -- --test-threads=1
