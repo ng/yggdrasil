@@ -40,7 +40,9 @@ jobs:
 
     services:
       postgres:
-        image: postgres:${{ matrix.postgres }}
+        # Docker official image mirror avoids shared-runner Docker Hub pull limits.
+        # https://gallery.ecr.aws/docker/library/postgres
+        image: public.ecr.aws/docker/library/postgres:${{ matrix.postgres }}
         env:
           POSTGRES_DB: ygg
           POSTGRES_USER: postgres
