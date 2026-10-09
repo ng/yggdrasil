@@ -16,6 +16,7 @@ pub mod service;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod store;
 pub mod telemetry;
+pub(crate) mod timing;
 mod yaml;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

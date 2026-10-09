@@ -102,18 +102,25 @@ impl KnowledgeStore {
 
     pub(crate) fn candidates(&self) -> Candidates {
         let mut result = Candidates::default();
+        let phase = crate::knowledge::timing::Phase::start("index_recovery");
         if let Err(e) = self.recover_move() {
             result.diagnostics.push(format!("scope move recovery: {e}"));
             return result;
         }
+        drop(phase);
+        let phase = crate::knowledge::timing::Phase::start("index_inventory");
         let inventory = self.inventory();
+        drop(phase);
         result.diagnostics.extend(inventory.diagnostics);
         if inventory.incomplete {
             return result;
         }
         // Missing, damaged, stale-version or unwritable caches are rebuildable.
         // Their failure cannot erase authoritative documents or fail a read.
+        let phase = crate::knowledge::timing::Phase::start("index_read");
         let loaded = self.read_index();
+        drop(phase);
+        let phase = crate::knowledge::timing::Phase::start("index_validate");
         let mut dirty = loaded.is_err();
         let mut old = loaded.unwrap_or_default();
         let old_len = old.len();
@@ -184,6 +191,7 @@ impl KnowledgeStore {
                 Err(e) => result.diagnostics.push(format!("{path}: {e}")),
             }
         }
+        drop(phase);
         dirty |= old_len != result.rows.len();
         if dirty {
             let save = (|| -> Result<()> {

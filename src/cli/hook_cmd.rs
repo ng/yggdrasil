@@ -209,6 +209,7 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
         .and_then(|v| v.get("file_path").or_else(|| v.get("path")))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let select_phase = crate::knowledge::timing::Phase::start("hook_selection");
     let mut legacy_knowledge = true;
     let mut observed = None;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -240,6 +241,8 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
             Ok(None) => {}
         }
     }
+    drop(select_phase);
+    let coordination_phase = crate::knowledge::timing::Phase::start("hook_coordination");
     // Knowledge is emitted independently. Coordination can still acquire shared
     // locks while healthy, but a failed query cannot indefinitely delay the hook.
     if let Ok(Ok(Some(pool))) = tokio::time::timeout(
@@ -248,6 +251,8 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
     )
     .await
     {
+        drop(coordination_phase);
+        let _usage_phase = crate::knowledge::timing::Phase::start("hook_usage");
         if let Some((context, applications)) =
             observed.filter(|(_, applications)| !applications.is_empty())
         {

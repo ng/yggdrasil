@@ -183,6 +183,31 @@ cleanup apply on failures. Run it without other local tests/builds; it does not
 qualify shared-remote latency, cold database startup, task-claim correctness,
 concurrent document mutation or every possible scope distribution.
 
+Set `YGG_HOOK_BENCH_PHASES=1` for diagnostic tracing in that benchmark. Ordinary
+commands can enable `RUST_LOG=ygg::knowledge::timing=debug`. Timings contain only
+static phase names and elapsed microseconds, never document text, paths, session
+IDs or credentials. The report retains per-request phases alongside total samples.
+Nested timings are inclusive; do not add their percentiles. Tracing adds overhead,
+so an instrumented run cannot replace uninstrumented release qualification.
+
+The [initial detailed profile](../../docs/performance/okf-hooks-2026-10-09-phase-profile.json)
+measured selection p95 483.63 ms: repository lookup 90.67 ms, rule selection
+276.05 ms, receipt handling 143.49 ms (including revalidation 38.31 ms). Within
+rule selection, index inventory was 55.41 ms, index reading 63.92 ms, and index
+validation 148.39 ms. SQL usage recording was 18.31 ms versus local usage-cache
+publication 166.89 ms. These are overlapping distributions, not additive totals.
+All ordered output and 2,400 observations passed; added hook p95 still failed.
+The [post-change diagnostic profile](../../docs/performance/okf-hooks-2026-10-09-disposable-cache-phases.json)
+retains the same phase samples after disposable cache publication; use the
+uninstrumented table below for the measured release gap.
+
+Session receipts and the optional usage snapshot now use locked atomic replacement
+without file/directory synchronization. During normal operation readers still see a complete
+old or new file. A system/power failure can lose these disposable caches: eligible
+rules may repeat and usage display falls back to migration baselines until refreshed.
+Committed SQL counters remain authoritative for telemetry. Knowledge documents,
+policy, migration baselines and recovery journals retain synced publication.
+
 Measured on 2026-10-09, release build, macOS arm64, 10 logical CPUs,
 PostgreSQL 18.3 (Homebrew), 100 samples per mode:
 
@@ -193,12 +218,14 @@ PostgreSQL 18.3 (Homebrew), 100 samples per mode:
 | Per-query file-pattern reuse | 262.44 ms | 637.42 ms | 374.98 ms | Failed |
 | Pattern reuse + moved warm index rows | 259.90 ms | 610.15 ms | 350.24 ms | Failed |
 | Above + batched usage recording | 207.08 ms | 569.17 ms | 362.09 ms | Failed |
+| Above + disposable cache publication | 210.95 ms | 467.02 ms | 256.07 ms | Failed |
 
 Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-before-session-locks.json),
 [with session locks](../../docs/performance/okf-hooks-2026-10-09-session-locks.json),
 [with pattern reuse](../../docs/performance/okf-hooks-2026-10-09-pattern-cache.json),
 [with warm row moves](../../docs/performance/okf-hooks-2026-10-09-pattern-cache-index-moves.json),
-and [with batched usage](../../docs/performance/okf-hooks-2026-10-09-batched-telemetry.json).
+[with batched usage](../../docs/performance/okf-hooks-2026-10-09-batched-telemetry.json),
+and [with disposable cache publication](../../docs/performance/okf-hooks-2026-10-09-disposable-cache.json).
 All runs verified identical rule output and all 2,400 usage observations per mode
 (including warmup). These are diagnostic runs on one host, not a cross-platform
 latency guarantee. Independent session leases remove one contention source, but

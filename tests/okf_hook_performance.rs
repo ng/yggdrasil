@@ -74,12 +74,26 @@ impl Drop for Running {
         }
     }
 }
-fn hook(root: &Path, url: &str, worker: usize, expected: &str) -> f64 {
+#[derive(serde::Serialize)]
+struct Sample {
+    total_ms: f64,
+    phases_us: BTreeMap<String, u64>,
+}
+fn hook(root: &Path, url: &str, worker: usize, expected: &str) -> Sample {
     let session = format!("ygg-bench-{}", Uuid::new_v4());
     let start = Instant::now();
     let mut child = Running(Some(
         okf::app(root, &root.join("repo"))
             .env("DATABASE_URL", url)
+            .env("NO_COLOR", "1")
+            .env(
+                "RUST_LOG",
+                if std::env::var_os("YGG_HOOK_BENCH_PHASES").is_some() {
+                    "ygg::knowledge::timing=debug"
+                } else {
+                    "ygg=info"
+                },
+            )
             .env("YGG_AGENT_NAME", format!("bench-{worker}"))
             .args(["hook", "pre-tool-use"])
             .stdin(Stdio::piped())
@@ -117,9 +131,31 @@ fn hook(root: &Path, url: &str, worker: usize, expected: &str) -> f64 {
         value["hookSpecificOutput"]["additionalContext"], expected,
         "missing, duplicate or reordered hook rules"
     );
-    elapsed
+    let mut phases_us = BTreeMap::new();
+    if std::env::var_os("YGG_HOOK_BENCH_PHASES").is_some() {
+        // Parse only our static timing fields, after the measured process exits.
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+        let plain = ansi.replace_all(&text, "");
+        let fields = regex::Regex::new(r#"phase="([a-z_]+)" elapsed_us=(\d+)"#).unwrap();
+        for capture in fields.captures_iter(&plain) {
+            assert!(
+                phases_us
+                    .insert(capture[1].to_owned(), capture[2].parse().unwrap())
+                    .is_none(),
+                "duplicate timing phase in one hook"
+            );
+        }
+        assert!(
+            phases_us.contains_key("hook_coordination"),
+            "missing timing fields: {plain}"
+        );
+    }
+    Sample {
+        total_ms: elapsed,
+        phases_us,
+    }
 }
-fn measure(root: &Path, url: &str, expected: &str) -> Vec<f64> {
+fn measure(root: &Path, url: &str, expected: &str) -> Vec<Sample> {
     let mut samples = Vec::new();
     // Every phase warms all twenty clients, then measures five synchronized
     // rounds. A fresh session forces real selection/output in each invocation.
@@ -146,8 +182,8 @@ fn measure(root: &Path, url: &str, expected: &str) -> Vec<f64> {
     }
     samples
 }
-fn percentile(samples: &[f64], percentile: usize) -> f64 {
-    let mut values = samples.to_vec();
+fn percentile(samples: &[Sample], percentile: usize) -> f64 {
+    let mut values: Vec<_> = samples.iter().map(|s| s.total_ms).collect();
     values.sort_by(f64::total_cmp);
     values[(values.len() * percentile).div_ceil(100) - 1]
 }
@@ -347,7 +383,12 @@ async fn qualify(f: &Fixture) {
         "okf_ms":{"p50":percentile(&okf,50),"p95":percentile(&okf,95)},
         "added_p95_ms":added,"limit_ms":50,"passed":added<=50. && observed==2400,
         "measurement":"warm actual pre-tool-use CLI, including startup, matching, revalidation, output, coordination and telemetry; SQL phase then OKF; new session per request; 20 identical rules required",
-        "sql_samples_ms":sql,"okf_samples_ms":okf});
+        "sql_samples_ms":sql.iter().map(|s| s.total_ms).collect::<Vec<_>>(),
+        "okf_samples_ms":okf.iter().map(|s| s.total_ms).collect::<Vec<_>>(),
+        "phase_diagnostics_enabled":std::env::var_os("YGG_HOOK_BENCH_PHASES").is_some(),
+        "phase_note":"Nested phase timings are inclusive and must not be summed; debug tracing adds overhead. Diagnostic runs do not replace uninstrumented qualification.",
+        "sql_phase_samples_us":sql.iter().map(|s| &s.phases_us).collect::<Vec<_>>(),
+        "okf_phase_samples_us":okf.iter().map(|s| &s.phases_us).collect::<Vec<_>>()});
     println!("{report}");
     if let Some(path) = std::env::var_os("YGG_HOOK_BENCH_REPORT") {
         fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();

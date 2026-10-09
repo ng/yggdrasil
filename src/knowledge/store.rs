@@ -491,6 +491,17 @@ impl KnowledgeStore {
     }
 
     fn replace_at(parent: &File, name: &str, text: &str) -> Result<()> {
+        Self::replace_with_sync(parent, name, text, true)
+    }
+
+    /// Disposable caches need complete cross-process publication, not power-loss
+    /// durability. Lost receipts may repeat eligible rules; SQL retains usage.
+    /// Never use this for documents, policy, baselines or migration journals.
+    fn replace_cache_at(parent: &File, name: &str, text: &str) -> Result<()> {
+        Self::replace_with_sync(parent, name, text, false)
+    }
+
+    fn replace_with_sync(parent: &File, name: &str, text: &str, sync: bool) -> Result<()> {
         let temporary = format!(".{}.tmp", Uuid::new_v4());
         let result = (|| -> Result<()> {
             let mut file = child(
@@ -500,7 +511,9 @@ impl KnowledgeStore {
                 0o600,
             )?;
             file.write_all(text.as_bytes())?;
-            file.sync_all()?;
+            if sync {
+                file.sync_all()?;
+            }
             let old = CString::new(temporary.as_str())?;
             let new = CString::new(name)?;
             if unsafe {
@@ -514,7 +527,9 @@ impl KnowledgeStore {
             {
                 return Err(std::io::Error::last_os_error().into());
             }
-            parent.sync_all()?;
+            if sync {
+                parent.sync_all()?;
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -536,7 +551,7 @@ impl KnowledgeStore {
         name: &str,
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
     ) -> Result<T> {
-        self.update_control_locked(name, update, self.lock()?)
+        self.update_control_locked(name, update, self.lock()?, Self::replace_at)
     }
 
     pub(crate) fn remove_control(&self, name: &str, expected: &str) -> Result<()> {
@@ -556,7 +571,12 @@ impl KnowledgeStore {
         name: &str,
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
     ) -> Result<T> {
-        self.update_control_locked(name, update, self.bounded_lock(".writer.lock")?)
+        self.update_control_locked(
+            name,
+            update,
+            self.bounded_lock(".writer.lock")?,
+            Self::replace_cache_at,
+        )
     }
 
     /// Independent session receipts do not serialize corpus revalidation. Keep
@@ -583,7 +603,7 @@ impl KnowledgeStore {
             "session receipt exceeds byte limit"
         );
         if current.as_deref() != Some(&text) {
-            Self::replace_at(&self.root, &name, &text)?;
+            Self::replace_cache_at(&self.root, &name, &text)?;
         }
         Ok(result)
     }
@@ -641,6 +661,7 @@ impl KnowledgeStore {
         name: &str,
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
         _lock: File,
+        publish: fn(&File, &str, &str) -> Result<()>,
     ) -> Result<T> {
         self.recover_move_locked()?;
         let current = self.read_control(name)?;
@@ -650,7 +671,7 @@ impl KnowledgeStore {
             "control document exceeds byte limit"
         );
         if current.as_deref() != Some(&text) {
-            Self::replace_at(&self.root, name, &text)?;
+            publish(&self.root, name, &text)?;
         }
         Ok(result)
     }

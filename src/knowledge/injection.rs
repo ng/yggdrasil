@@ -30,6 +30,7 @@ fn current(
     selected: &[RevisionedDocument],
     filters: &Filters<'_>,
 ) -> Result<Vec<RevisionedDocument>> {
+    let _phase = super::timing::Phase::start("edit_revalidation");
     let snapshot = context
         .service
         .revalidate_rules(selected, filters, chrono::Utc::now())?;
@@ -53,6 +54,7 @@ pub fn for_edit(
     agent: &str,
     session: &str,
 ) -> Result<Vec<RevisionedDocument>> {
+    let phase = super::timing::Phase::start("edit_repository");
     let repo = match context.repo(&std::env::current_dir()?) {
         Ok(repo) => Some(repo),
         Err(error) => {
@@ -60,12 +62,14 @@ pub fn for_edit(
             None
         }
     };
+    drop(phase);
     let filters = Filters {
         repo,
         file: Some(file),
         agent: Some(agent),
         ..Filters::default()
     };
+    let phase = super::timing::Phase::start("edit_rules");
     let mut selected = context.service.rules(&filters, chrono::Utc::now())?;
     diagnostics(&selected);
     selected.documents.retain(|doc| {
@@ -77,12 +81,14 @@ pub fn for_edit(
                 .flatten()
                 .is_some_and(|p| p.file_glob.is_some())
     });
+    drop(phase);
     if selected.documents.is_empty() {
         return Ok(Vec::new());
     }
     if session.is_empty() {
         return current(context, &selected.documents, &filters);
     }
+    let phase = super::timing::Phase::start("edit_receipt");
     let claimed = (|| -> Result<Vec<RevisionedDocument>> {
         ensure!(
             session.len() <= 4096 && context.user.len() <= 4096,
@@ -142,6 +148,7 @@ pub fn for_edit(
             Ok((serde_json::to_string(&seen)?, fresh))
         })
     })();
+    drop(phase);
     match claimed {
         Ok(documents) => Ok(documents),
         Err(_) => {

@@ -13,6 +13,7 @@ pub async fn after_emission(
     if applications.is_empty() {
         return;
     }
+    let phase = super::timing::Phase::start("usage_sql");
     let recorded = tokio::time::timeout(std::time::Duration::from_millis(500), async {
         let totals =
             telemetry::record_batch(&mut lease, context.mappings.corpus_id, applications).await?;
@@ -20,6 +21,8 @@ pub async fn after_emission(
         Ok::<_, anyhow::Error>(totals)
     })
     .await;
+    drop(phase);
+    let _phase = super::timing::Phase::start("usage_cache");
     match recorded {
         Ok(Ok(totals)) => {
             // The DB transaction has ended before taking the policy writer lock.
