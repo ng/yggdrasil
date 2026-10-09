@@ -215,3 +215,132 @@ pub fn verify(destination: &Path) -> Result<Manifest> {
     verify_documents(&store, &manifest)?;
     Ok(manifest)
 }
+
+/// Publish a complete, independently verifiable bundle while the SQL generation
+/// remains fenced. Does not select OKF, grant trust, seed telemetry or alter SQL.
+/// `archive` is retained recovery evidence, not a disposable temporary directory.
+/// Retries verify exact existing bytes; no independently edited target is replaced.
+pub async fn publish(
+    pool: &PgPool,
+    staging: &Path,
+    archive: &Path,
+    destination: &Path,
+) -> Result<Manifest> {
+    use super::store::{BackupEntry, KnowledgeBackup};
+    fn target_path(path: &Path) -> Result<std::path::PathBuf> {
+        ensure!(path.is_absolute(), "absolute publication paths required");
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("publication parent required"))?
+            .canonicalize()?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("publication filename required"))?;
+        Ok(parent.join(name))
+    }
+    let stage_path = staging.canonicalize()?;
+    let archive_path = target_path(archive)?;
+    let target = target_path(destination)?;
+    ensure!(
+        !target.starts_with(&stage_path)
+            && !stage_path.starts_with(&target)
+            && !target.starts_with(&archive_path)
+            && !archive_path.starts_with(&target),
+        "publication destination must be separate from staging and archive"
+    );
+    let manifest = verify(staging)?;
+    let mappings: Mappings = serde_json::from_value(manifest.mappings.clone())?;
+    let mut tx = pool.begin().await?;
+    let expected: BTreeMap<_, _> = manifest.entries.iter().map(|e| (e.key.id, e)).collect();
+    let mut observed = 0;
+    let report = inventory::visit_transaction(&mut tx, Some(&mappings), |_, row, doc, usage| {
+        let key = Key::from_document(doc)?;
+        let entry = expected
+            .get(&key.id)
+            .ok_or_else(|| anyhow::anyhow!("source inventory changed before publication"))?;
+        ensure!(
+            entry.key == key
+                && entry.source_digest == row.source_digest
+                && Some(&entry.document_digest) == row.document_digest.as_ref()
+                && entry.usage.as_ref() == usage,
+            "source row differs from publication manifest"
+        );
+        observed += 1;
+        Ok(())
+    })
+    .await?;
+    ensure!(
+        report.rows_verified
+            && observed == expected.len()
+            && report.source.backend == "fenced"
+            && report.source.database_id == manifest.database_id
+            && report.source.corpus_id == Some(manifest.corpus_id)
+            && report.source.generation == manifest.generation,
+        "publication requires unchanged, completely verified fenced source"
+    );
+    match std::fs::symlink_metadata(archive) {
+        Ok(_) => {
+            KnowledgeBackup::verify(archive)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            KnowledgeStore::open(staging, false)?.backup(archive)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    // Validate the immutable archive without opening corpus locks or a mutable
+    // snapshot reader inside it. Every file must be one of the verified export
+    // documents or the two exact manifest/receipt files.
+    let source = KnowledgeStore::open(staging, false)?;
+    ensure!(
+        verify(staging)? == manifest,
+        "staging export changed during capture"
+    );
+    let mut files: BTreeMap<String, String> = manifest
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.key.relative_path().to_string_lossy().into_owned(),
+                e.document_digest.clone(),
+            )
+        })
+        .collect();
+    for name in [PLAN, COMPLETE] {
+        let bytes = source
+            .read_artifact(name)?
+            .ok_or_else(|| anyhow::anyhow!("export evidence missing"))?;
+        files.insert(name.into(), digest(bytes.as_bytes()));
+    }
+    let archived = KnowledgeBackup::verify(archive)?;
+    let actual: BTreeMap<_, _> = archived
+        .entries
+        .iter()
+        .filter_map(|(name, entry)| match entry {
+            BackupEntry::File { sha256, .. } => Some((name.clone(), sha256.clone())),
+            BackupEntry::Directory => None,
+        })
+        .collect();
+    ensure!(
+        actual == files,
+        "publication archive differs from verified export"
+    );
+    KnowledgeBackup::verify_restored(archive, staging)?;
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => {
+            KnowledgeBackup::verify_restored(archive, destination)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            KnowledgeBackup::restore(archive, destination)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    ensure!(
+        verify(destination)? == manifest,
+        "published export differs from manifest"
+    );
+    // A lost database lease makes publication uncertain. Leave the unselected
+    // directory and archive for inspection; never acknowledge or erase it.
+    sqlx::query("SELECT 1").execute(&mut *tx).await?;
+    tx.rollback().await?;
+    Ok(manifest)
+}

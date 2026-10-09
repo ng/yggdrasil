@@ -213,6 +213,40 @@ async fn inventory_cli_and_staging_preserve_source_and_detect_conflicts() {
     assert_eq!(manifest.entries.len(), 2);
     assert_eq!(ygg::knowledge::export::verify(&staging).unwrap(), manifest);
     assert_eq!(ygg::knowledge::export::stage(&f.pool, &mappings, &staging).await.unwrap(), manifest);
+    // Publish on a one-connection pool: inventory and generation lease must use
+    // the same transaction, and retries may not overwrite independent edits.
+    let single = PgPoolOptions::new().max_connections(1).connect(&f.url).await.unwrap();
+    std::fs::write(empty.join("unlisted.txt"), b"must not publish").unwrap();
+    let unlisted_target = temp.path().join("unlisted-target");
+    assert!(ygg::knowledge::export::publish(&single, &empty,
+        &temp.path().join("unlisted-archive"), &unlisted_target).await.is_err());
+    assert!(!unlisted_target.exists());
+    std::fs::remove_file(empty.join("unlisted.txt")).unwrap();
+    let archive = temp.path().join("publication-archive");
+    let published = temp.path().join("published");
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10),
+        ygg::knowledge::export::publish(&single, &empty, &archive, &published))
+        .await.unwrap().unwrap(), manifest);
+    assert_eq!(ygg::knowledge::export::publish(&single, &empty, &archive, &published).await.unwrap(), manifest);
+    assert!(ygg::knowledge::export::publish(&single, &empty, &archive, &archive.join("corpus")).await.is_err());
+    assert!(ygg::knowledge::export::publish(&single, &empty, &archive, &empty.join("nested")).await.is_err());
+    assert!(!empty.join("nested").exists());
+    ygg::knowledge::store::KnowledgeBackup::verify(&archive).unwrap();
+    let published_note = published.join(manifest.entries.iter().find(|e| e.key.id == note).unwrap().key.relative_path());
+    let original = std::fs::read(&published_note).unwrap();
+    std::fs::write(&published_note, b"independent target edit").unwrap();
+    assert!(ygg::knowledge::export::publish(&single, &empty, &archive, &published).await.is_err());
+    assert_eq!(std::fs::read(&published_note).unwrap(), b"independent target edit");
+    std::fs::write(&published_note, original).unwrap();
+    // The complete immutable archive permits resuming after capture but before
+    // publication without duplicating or changing any document.
+    let resumed = temp.path().join("resumed-publication");
+    assert_eq!(ygg::knowledge::export::publish(&single, &empty, &archive, &resumed).await.unwrap(), manifest);
+    let partial_archive = temp.path().join("partial-archive");
+    std::fs::create_dir(&partial_archive).unwrap();
+    assert!(ygg::knowledge::export::publish(&single, &empty, &partial_archive, &temp.path().join("never-published")).await.is_err());
+    assert!(!temp.path().join("never-published").exists());
+    single.close().await;
     let entry = manifest.entries.iter().find(|entry| entry.key.id == note).unwrap();
     let note_path = staging.join(entry.key.relative_path());
     // Recreate a durable partial state: intent + subset of documents, no
@@ -233,6 +267,10 @@ async fn inventory_cli_and_staging_preserve_source_and_detect_conflicts() {
     assert!(ygg::knowledge::export::stage(&f.pool, &mappings, &empty).await.is_err());
     assert_eq!(std::fs::read(empty.join(".export-plan.json")).unwrap(), saved_plan);
     assert_eq!(ygg::knowledge::export::verify(&empty).unwrap(), empty_manifest);
+    let stale_target = temp.path().join("stale-publication");
+    assert!(ygg::knowledge::export::publish(&f.pool, &empty, &archive, &stale_target).await.is_err());
+    assert!(!stale_target.exists());
+
     }).catch_unwind().await;
     f.cleanup().await;
     if let Err(panic) = result {

@@ -140,6 +140,19 @@ pub async fn assess(pool: &PgPool, mappings: Option<&Mappings>) -> Result<Report
 pub(crate) async fn visit(
     pool: &PgPool,
     mappings: Option<&Mappings>,
+    visitor: impl FnMut(&Source, &Row, &super::document::Document, Option<&legacy::Usage>) -> Result<()>,
+) -> Result<Report> {
+    let mut tx = pool.begin().await?;
+    let report = visit_transaction(&mut tx, mappings, visitor).await?;
+    tx.rollback().await?;
+    Ok(report)
+}
+
+/// A fresh transaction supplied by the publisher retains its generation lease
+/// through filesystem publication. Uses the same connection even for size-one pools.
+pub(crate) async fn visit_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    mappings: Option<&Mappings>,
     mut visitor: impl FnMut(
         &Source,
         &Row,
@@ -147,21 +160,20 @@ pub(crate) async fn visit(
         Option<&legacy::Usage>,
     ) -> Result<()>,
 ) -> Result<Report> {
-    let mut tx = pool.begin().await?;
     // Guard row locks require a read/write-capable transaction, but this routine
     // issues no data mutations. RR pins one snapshot across both source tables.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("SET LOCAL TIME ZONE 'UTC'")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("SELECT public.ygg_knowledge_guard(false, $1, NULL)")
         .bind(CLIENT_PROTOCOL)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     let source = sqlx::query_as::<_, Source>("SELECT database_id, generation, backend, corpus_id, pg_current_snapshot()::text AS snapshot FROM public.knowledge_storage WHERE singleton")
-        .fetch_one(&mut *tx).await?;
+        .fetch_one(&mut **tx).await?;
     if let Some(mappings) = mappings {
         ensure!(
             mappings.database_id == source.database_id,
@@ -196,7 +208,7 @@ pub(crate) async fn visit(
             "SELECT to_jsonb(legacy_row.*) FROM public.learnings AS legacy_row ORDER BY learning_id",
         ),
     ] {
-        let mut stream = sqlx::query_scalar::<_, Value>(query).fetch(&mut *tx);
+        let mut stream = sqlx::query_scalar::<_, Value>(query).fetch(&mut **tx);
         while let Some(raw) = stream.try_next().await? {
             let (row, converted) = inspect(table, raw, mappings);
             if let Some((document, usage)) = &converted {
@@ -229,6 +241,5 @@ pub(crate) async fn visit(
         }
     }
     report.rows_verified = mappings.is_some() && report.rows.iter().all(|r| r.issues.is_empty());
-    tx.rollback().await?;
     Ok(report)
 }

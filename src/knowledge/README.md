@@ -404,15 +404,30 @@ export is idempotent. Different source generations or manifests cannot reuse a
 stage, even when the document bodies happen to match. Partial stages retain their
 intent and existing data for resumption or explicit operator inspection.
 
-The exporter does not publish, seed telemetry, change storage mode or configure
-trust. It is a library operation pending the validated cutover command; the public
-migration CLI still requires `--dry-run`. A future publisher must recheck the live
-source generation and copy only manifest-listed documents and required controls
-into its new authoritative destination; it must not blindly publish arbitrary
-unlisted files from a staging directory. Fleet upgrade, backups, scope-fixture
-parity, local generation/configuration publication and reverse import remain
-required. The tests exercise durable partial states and conflicts; they are not
-a substitute for the full killed-process migration and rollback release gates.
+`export::publish` revalidates every current SQL source row, document digest and
+usage baseline against the completed manifest in one repeatable-read transaction.
+It requires the same fenced database, generation and corpus, and retains that
+transaction's shared generation lease through publication. A one-connection pool
+works because inventory and publication use the same transaction.
+
+Publication captures a retained exact-byte recovery archive. Its complete file
+inventory must contain only manifest-listed documents and the exact plan/receipt;
+unlisted files are rejected. Validation never opens mutable document readers or
+creates lock files inside the immutable archive. The existing descriptor-anchored
+restore path then copies, syncs and exclusively publishes the complete bundle into
+an absent destination. Retries verify the retained archive and exact existing
+destination; independently edited bytes are never replaced. A final database query
+and transaction completion are required before acknowledgment. If that connection
+fails, the unselected published directory and archive remain for inspection.
+
+These are library operations pending the validated cutover command; the public
+migration CLI still requires `--dry-run`. Publication does not select OKF, seed
+telemetry, alter the SQL phase or configure trust. Fleet upgrade, source database
+backup, scope-fixture parity, local generation/configuration activation and reverse
+import remain required. Tests cover a one-connection pool, archive-only resumption,
+unlisted files, independent target edits, incomplete archives and changed source
+generations. They do not substitute for full killed-process migration, coordinated
+configuration publication or rollback release gates.
 
 ## Corpus backup component
 
