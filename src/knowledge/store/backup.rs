@@ -81,6 +81,121 @@ impl PairedBackup {
         self.verify_sources()
     }
 
+    /// Publish the cutover selection while retaining both writer leases. Consume
+    /// the guard because the policy intentionally ceases to match its old backup.
+    pub(crate) fn publish_selection(
+        self,
+        operation: Uuid,
+        expected: &str,
+        selected: &str,
+    ) -> Result<()> {
+        self.verify_sources()?;
+        let name = crate::knowledge::runtime::SELECTION_FILE;
+        ensure!(
+            KnowledgeStore::read_at(&self.policy_root, name)?.as_deref() == Some(expected),
+            "selection changed before activation"
+        );
+        ensure!(
+            selected.len() <= MAX_DOCUMENT_BYTES,
+            "selection exceeds byte limit"
+        );
+        let temporary = format!(".cutover-{operation}.tmp");
+        ensure!(
+            !self.policy.entries.contains_key(&temporary),
+            "cutover temporary name conflicts with retained policy"
+        );
+        // The durable journal names this file before it can be created. A kill
+        // during write therefore leaves identifiable, bounded recovery evidence.
+        let mut file = child(
+            &self.policy_root,
+            &temporary,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )?;
+        file.write_all(selected.as_bytes())?;
+        file.sync_all()?;
+        let old = CString::new(temporary)?;
+        let new = CString::new(name)?;
+        if unsafe {
+            libc::renameat(
+                self.policy_root.as_raw_fd(),
+                old.as_ptr(),
+                self.policy_root.as_raw_fd(),
+                new.as_ptr(),
+            )
+        } < 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        self.policy_root.sync_all()?;
+        for (root, mut expected_entries, policy) in [
+            (&self.corpus_root, self.corpus.entries.clone(), false),
+            (&self.policy_root, self.policy.entries.clone(), true),
+        ] {
+            if policy {
+                expected_entries.insert(
+                    name.into(),
+                    BackupEntry::File {
+                        bytes: selected.len() as u64,
+                        sha256: digest(selected.as_bytes()),
+                    },
+                );
+            }
+            let mut actual = BTreeMap::new();
+            inventory(root, None, "", 0, true, &mut actual, &mut 0)?;
+            ensure!(
+                actual == expected_entries,
+                "source changed during selection publication"
+            );
+        }
+        Ok(())
+    }
+
+    fn recover_selection_temporary(&self, operation: Uuid, selected: &str) -> Result<()> {
+        let name = format!(".cutover-{operation}.tmp");
+        ensure!(
+            !self.policy.entries.contains_key(&name),
+            "cutover temporary name conflicts with retained policy"
+        );
+        let file = match child(&self.policy_root, &name, libc::O_RDONLY, 0) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return self.verify_sources();
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file() && metadata.nlink() == 1 && metadata.len() <= selected.len() as u64,
+            "invalid interrupted selection temporary"
+        );
+        let mut partial = Vec::new();
+        file.take(selected.len() as u64 + 1)
+            .read_to_end(&mut partial)?;
+        ensure!(
+            selected.as_bytes().starts_with(&partial),
+            "interrupted selection temporary conflicts with intent"
+        );
+        // Verify all other bytes before removing even this named, matching prefix.
+        for (root, expected, policy) in [
+            (&self.corpus_root, &self.corpus.entries, false),
+            (&self.policy_root, &self.policy.entries, true),
+        ] {
+            let mut actual = BTreeMap::new();
+            inventory(root, None, "", 0, true, &mut actual, &mut 0)?;
+            if policy {
+                actual.remove(&name);
+            }
+            ensure!(
+                &actual == expected,
+                "source changed beside interrupted selection temporary"
+            );
+        }
+        unlink(&self.policy_root, &name)?;
+        self.policy_root.sync_all()?;
+        self.verify_sources()
+    }
+
     pub fn corpus(&self) -> &KnowledgeBackup {
         &self.corpus
     }
@@ -332,6 +447,28 @@ impl KnowledgeStore {
             _leases: leases,
         };
         saved.verify_sources()?;
+        Ok(saved)
+    }
+
+    /// Resume only the deterministic temporary named by an already durable
+    /// cutover intent. Never ignore arbitrary temporary or independently edited files.
+    pub(crate) fn resume_selection_pair(
+        &self,
+        other: &Self,
+        archive: &Path,
+        policy_archive: &Path,
+        operation: Uuid,
+        selected: &str,
+    ) -> Result<PairedBackup> {
+        let leases = self.pair_leases(other)?;
+        let saved = PairedBackup {
+            corpus: KnowledgeBackup::verify(archive)?,
+            policy: KnowledgeBackup::verify(policy_archive)?,
+            corpus_root: self.root.try_clone()?,
+            policy_root: other.root.try_clone()?,
+            _leases: leases,
+        };
+        saved.recover_selection_temporary(operation, selected)?;
         Ok(saved)
     }
 

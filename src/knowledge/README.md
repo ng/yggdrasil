@@ -488,6 +488,46 @@ barrier. Durable workflow resumption, offline-host quiescence, schema/constraint
 parity beyond column names, local binding/trust publication and complete forward/
 reverse rehearsals remain required before enabling the migration CLI.
 
+## Durable private-host forward completion
+
+`cutover::PrivateJournal` connects retained publication evidence, transactional SQL
+activation and atomic host-local binding publication. Preparation requires a
+published private export, paired corpus/policy archives and an explicitly prepared
+fenced `runtime.json` with validated corpus/repository identities. It retains the
+exact original/selected binding bytes, canonical paths, root identities, revisions,
+manifest and operation UUID in a synced journal before any database activation.
+Identical preparation reuses the UUID; preparation never waits for a busy journal
+while holding source leases. Journal relocation and conflicting evidence fail.
+
+Activation drains the local selection lease and reacquires the paired source
+leases before calling `forward::activate_on`. It rechecks evidence before commit.
+After commit it acquires a shared lease on the selected SQL generation before
+publishing the saved binding; a transition during that gap leaves local access
+fenced. Binding publication retains both filesystem writer leases and revalidates
+the complete inventories with only the intended selection change permitted.
+An uncertain SQL commit or interrupted local publication resumes the same journal.
+The journal operation UUID names the publication temporary before it is created.
+A partial temporary, including incomplete UTF-8, is recoverable only when it is a
+byte prefix of the exact intended binding and every other source file still
+matches its archive. A conflicting temporary or unrelated edit remains untouched;
+recovery never ignores arbitrary temporary files.
+
+If the exact selected binding already exists, recovery requires the matching SQL
+receipt and generation. It does not restore or compare current OKF documents to
+the frozen export: legitimate edits made after activation remain authoritative.
+Local selected bytes without a SQL receipt cannot authorize activation. The
+returned outcome describes the SQL step; `PreviouslyActivated` can also accompany
+successful completion of a previously interrupted local publication.
+
+This is one host's private-corpus completion path, not the fleet migration CLI.
+The caller still must capture/validate source-database backup evidence, fence SQL,
+verify full schema/scope parity, prepare identity/trust explicitly and coordinate
+all hosts and external editors. Shared transport is rejected by preparation;
+shared publication, remote admission/quiescence, reverse backend activation and
+complete process-kill rehearsals remain orchestration work. Tests reconstruct the
+committed-SQL/fenced-local crash boundary, resume through the receipt, make an
+actual offline `remember` write and verify later retries preserve its bytes.
+
 ## Reverse-import candidate validation
 
 `reverse::build` constructs SQL row candidates from the **current** complete corpus
