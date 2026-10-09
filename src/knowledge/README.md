@@ -186,21 +186,25 @@ concurrent document mutation or every possible scope distribution.
 Measured on 2026-10-09, release build, macOS arm64, 10 logical CPUs,
 PostgreSQL 18.3 (Homebrew), 100 samples per mode:
 
-| Receipt locking | SQL p95 | OKF p95 | Added p95 | 50 ms gate |
+| Optimization stage | SQL p95 | OKF p95 | Added p95 | 50 ms gate |
 | --- | ---: | ---: | ---: | --- |
 | Global writer lease | 251.04 ms | 1,781.85 ms | 1,530.81 ms | Failed |
 | Session lease + shared compatibility lease | 251.06 ms | 1,568.37 ms | 1,317.31 ms | Failed |
 | Per-query file-pattern reuse | 262.44 ms | 637.42 ms | 374.98 ms | Failed |
 | Pattern reuse + moved warm index rows | 259.90 ms | 610.15 ms | 350.24 ms | Failed |
+| Above + batched usage recording | 207.08 ms | 569.17 ms | 362.09 ms | Failed |
 
 Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-before-session-locks.json),
 [with session locks](../../docs/performance/okf-hooks-2026-10-09-session-locks.json),
 [with pattern reuse](../../docs/performance/okf-hooks-2026-10-09-pattern-cache.json),
-and [with warm row moves](../../docs/performance/okf-hooks-2026-10-09-pattern-cache-index-moves.json).
+[with warm row moves](../../docs/performance/okf-hooks-2026-10-09-pattern-cache-index-moves.json),
+and [with batched usage](../../docs/performance/okf-hooks-2026-10-09-batched-telemetry.json).
 All runs verified identical rule output and all 2,400 usage observations per mode
 (including warmup). These are diagnostic runs on one host, not a cross-platform
 latency guarantee. Independent session leases remove one contention source, but
-the release's SQL-relative latency requirement remains **unmet**.
+the release's SQL-relative latency requirement remains **unmet**. Batching reduces
+usage recording from about 80 calls for 20 fresh applications to two calls, but
+this run does not show improvement in the SQL-relative gap.
 
 File-pattern results are reused only within one immutable query, with at most 256
 keys and 64 KiB of pattern text retained. Every rule still undergoes its own scope,
@@ -339,6 +343,15 @@ return `false` instead of incrementing twice. Distinct events add once, and the
 last-applied time is the maximum imported/observed time. This ledger does not
 replace per-session injection deduplication and does not authorize an injection.
 Application IDs must not be pruned while an old operation can still be retried.
+
+Batches use two database calls: lock/upsert every usage row in sorted UUID order,
+then insert unique receipts and aggregate only newly inserted observations. The
+single-record path takes the same usage-before-receipt lock order. Existing and
+missing rows share one order; mixed batches cannot lock newly created rows ahead
+of earlier existing rows. Duplicate IDs retain their first timestamp, including
+within a batch, and returned per-application totals retain their intermediate
+values. Missing imported baselines remain excluded from published cache totals.
+Both receipt and counter changes roll back together on counter/total overflow.
 
 Totals use signed 64-bit counters. Conversion to legacy `Learning` JSON rejects
 values outside its signed 32-bit contract rather than wrapping or clamping them.

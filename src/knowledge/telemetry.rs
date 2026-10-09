@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgConnection, PgPool};
 use uuid::Uuid;
 
-#[derive(Debug, FromRow, PartialEq)]
+#[derive(Clone, Debug, FromRow, PartialEq)]
 pub struct Totals {
     pub corpus_id: Uuid,
     pub document_id: Uuid,
@@ -114,7 +114,8 @@ async fn record_on(
     application: Uuid,
     at: DateTime<Utc>,
 ) -> Result<bool> {
-    sqlx::query("INSERT INTO knowledge_usage (corpus_id, document_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+    // Match batch writers: acquire the usage row before touching its receipts.
+    sqlx::query("INSERT INTO knowledge_usage (corpus_id, document_id) VALUES ($1, $2) ON CONFLICT (corpus_id, document_id) DO UPDATE SET observed_count = knowledge_usage.observed_count")
             .bind(corpus).bind(document).execute(&mut *connection).await?;
     let inserted = sqlx::query(
         r#"
@@ -154,28 +155,90 @@ pub async fn record_batch(
     corpus: Uuid,
     applications: &[Application],
 ) -> Result<Vec<Totals>> {
-    let mut totals = Vec::new();
-    // Consistent row-lock ordering prevents overlapping batches from deadlocking
-    // when two claims mention the same rules in different file orders.
+    use std::collections::BTreeMap;
+    if applications.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Lock every existing AND missing usage row in the same order before any
+    // receipt insert. Single-record writers take this lock too. Locking only
+    // newly inserted rows first would deadlock mixed existing/missing batches.
     let mut ordered: Vec<_> = applications.iter().collect();
     ordered.sort_by_key(|a| (a.document, a.application));
+    let mut documents: Vec<_> = ordered.iter().map(|a| a.document).collect();
+    documents.dedup();
+    let initial = sqlx::query_as::<_, Totals>(
+        r#"INSERT INTO knowledge_usage (corpus_id, document_id)
+           SELECT $1, document FROM unnest($2::uuid[]) AS document ORDER BY document
+           ON CONFLICT (corpus_id, document_id) DO UPDATE
+               SET observed_count = knowledge_usage.observed_count
+           RETURNING corpus_id, document_id,
+               COALESCE(imported_count, 0)::bigint + observed_count AS applied_count,
+               GREATEST(imported_last_applied_at, observed_last_applied_at) AS last_applied_at,
+               imported_count IS NOT NULL AS baseline_imported"#,
+    )
+    .bind(corpus)
+    .bind(&documents)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut current: BTreeMap<_, _> = initial.into_iter().map(|t| (t.document_id, t)).collect();
+
+    // Stable sorting plus dedup retains the first timestamp for duplicate IDs,
+    // including duplicates within this batch. PostgreSQL returns its stored
+    // timestamp precision so intermediate totals match single-record writes.
+    let mut unique = ordered.clone();
+    unique.dedup_by_key(|a| (a.document, a.application));
+    let documents: Vec<_> = unique.iter().map(|a| a.document).collect();
+    let ids: Vec<_> = unique.iter().map(|a| a.application).collect();
+    let times: Vec<_> = unique.iter().map(|a| a.at).collect();
+    let inserted: Vec<(Uuid, Uuid, DateTime<Utc>, i64)> = sqlx::query_as(
+        r#"WITH inserted AS (
+               INSERT INTO knowledge_applications
+                   (corpus_id, document_id, application_id, applied_at)
+               SELECT $1, document, application, at
+               FROM unnest($2::uuid[], $3::uuid[], $4::timestamptz[])
+                   AS input(document, application, at)
+               ORDER BY document, application
+               ON CONFLICT DO NOTHING
+               RETURNING document_id, application_id, applied_at
+           ), delta AS (
+               SELECT document_id, count(*) AS amount, max(applied_at) AS latest
+               FROM inserted GROUP BY document_id
+           ), updated AS (
+               UPDATE knowledge_usage AS usage SET
+                   observed_count = usage.observed_count + delta.amount,
+                   observed_last_applied_at = GREATEST(usage.observed_last_applied_at, delta.latest)
+               FROM delta WHERE usage.corpus_id = $1 AND usage.document_id = delta.document_id
+               RETURNING usage.document_id,
+                   COALESCE(usage.imported_count, 0)::bigint + usage.observed_count AS total
+           )
+           SELECT inserted.document_id, inserted.application_id, inserted.applied_at, updated.total
+           FROM inserted JOIN updated USING (document_id)"#,
+    )
+    .bind(corpus)
+    .bind(documents)
+    .bind(ids)
+    .bind(times)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut inserted: BTreeMap<_, _> = inserted
+        .into_iter()
+        .map(|(doc, id, at, _)| ((doc, id), at))
+        .collect();
+    let mut totals = Vec::new();
     for application in ordered {
-        record_on(
-            connection,
-            corpus,
-            application.document,
-            application.application,
-            application.at,
-        )
-        .await?;
-        let total = sqlx::query_as::<_, Totals>(
-            "SELECT corpus_id, document_id, COALESCE(imported_count, 0)::bigint + observed_count AS applied_count, \
-             GREATEST(imported_last_applied_at, observed_last_applied_at) AS last_applied_at, \
-             imported_count IS NOT NULL AS baseline_imported FROM knowledge_usage WHERE corpus_id=$1 AND document_id=$2"
-        ).bind(corpus).bind(application.document).fetch_one(&mut *connection).await?;
+        let total = current
+            .get_mut(&application.document)
+            .expect("locked usage row");
+        if let Some(at) = inserted.remove(&(application.document, application.application)) {
+            total.applied_count = total
+                .applied_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("telemetry count overflow"))?;
+            total.last_applied_at = Some(total.last_applied_at.map_or(at, |old| old.max(at)));
+        }
         // A migration baseline cannot be inferred from post-cutover observations.
         if !application.imported || total.baseline_imported {
-            totals.push(total);
+            totals.push(total.clone());
         }
     }
     Ok(totals)

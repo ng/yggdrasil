@@ -433,3 +433,173 @@ async fn emitted_batches_are_idempotent_and_do_not_invent_imported_baselines() {
     );
     f.cleanup().await;
 }
+
+#[tokio::test]
+async fn batch_preserves_intermediate_totals_first_timestamps_and_atomic_overflow() {
+    use ygg::knowledge::telemetry::{Application, record_batch};
+    let f = Fixture::new().await;
+    let corpus = Uuid::new_v4();
+    let document = Uuid::new_v4();
+    let at = Utc.with_ymd_and_hms(2026, 10, 9, 0, 0, 0).unwrap();
+    let first = Application {
+        document,
+        application: Uuid::from_u128(1),
+        at,
+        imported: false,
+    };
+    let mut duplicate = first.clone();
+    duplicate.at = at + Duration::days(1);
+    let second = Application {
+        application: Uuid::from_u128(2),
+        at: at + Duration::seconds(1),
+        ..first.clone()
+    };
+    let batch = [second.clone(), first.clone(), duplicate];
+    let mut tx = f.pool.begin().await.unwrap();
+    assert!(record_batch(&mut tx, corpus, &[]).await.unwrap().is_empty());
+    let totals = record_batch(&mut tx, corpus, &batch).await.unwrap();
+    assert_eq!(
+        totals.iter().map(|t| t.applied_count).collect::<Vec<_>>(),
+        [1, 1, 2]
+    );
+    assert_eq!(totals[0].last_applied_at, Some(at));
+    assert_eq!(totals[1].last_applied_at, Some(at));
+    assert_eq!(totals[2].last_applied_at, Some(second.at));
+    tx.commit().await.unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    let totals = record_batch(&mut tx, corpus, &batch).await.unwrap();
+    assert!(
+        totals
+            .iter()
+            .all(|t| t.applied_count == 2 && t.last_applied_at == Some(second.at))
+    );
+    tx.commit().await.unwrap();
+    sqlx::query(
+        "UPDATE knowledge_usage SET observed_count=$1 WHERE corpus_id=$2 AND document_id=$3",
+    )
+    .bind(i64::MAX)
+    .bind(corpus)
+    .bind(document)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    let overflow = Application {
+        application: Uuid::new_v4(),
+        ..first
+    };
+    assert!(
+        record_batch(&mut tx, corpus, &[overflow.clone()])
+            .await
+            .is_err()
+    );
+    tx.rollback().await.unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_applications WHERE corpus_id=$1 AND application_id=$2",
+    )
+    .bind(corpus)
+    .bind(overflow.application)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    // The observed column can fit while imported + observed overflows. Force
+    // the SQL aggregate expression to be evaluated and abort that transaction.
+    sqlx::query("UPDATE knowledge_usage SET imported_count=1, observed_count=$1 WHERE corpus_id=$2 AND document_id=$3")
+        .bind(i64::MAX - 1).bind(corpus).bind(document).execute(&f.pool).await.unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    assert!(
+        record_batch(&mut tx, corpus, &[overflow.clone()])
+            .await
+            .is_err()
+    );
+    tx.rollback().await.unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_applications WHERE corpus_id=$1 AND application_id=$2",
+    )
+    .bind(corpus)
+    .bind(overflow.application)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        Telemetry::new(&f.pool)
+            .get(corpus, document)
+            .await
+            .unwrap()
+            .unwrap()
+            .applied_count,
+        i64::MAX
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn batches_and_single_writers_order_mixed_existing_and_missing_rows() {
+    use ygg::knowledge::telemetry::{Application, record_batch};
+    let f = Fixture::new().await;
+    let corpus = Uuid::new_v4();
+    let mut docs = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    docs.sort();
+    // Middle row exists; acquiring missing rows separately would invert locks.
+    Telemetry::new(&f.pool)
+        .seed(&Usage {
+            corpus_id: corpus,
+            document_id: docs[1],
+            applied_count: 7,
+            last_applied_at: None,
+        })
+        .await
+        .unwrap();
+    let at = Utc::now();
+    let apps: Vec<_> = docs
+        .iter()
+        .map(|&document| Application {
+            document,
+            application: Uuid::new_v4(),
+            at,
+            imported: false,
+        })
+        .collect();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(20));
+    let mut workers = Vec::new();
+    for index in 0..20 {
+        let pool = f.pool.clone();
+        let mut batch = apps.clone();
+        let barrier = barrier.clone();
+        if index % 2 == 0 {
+            batch.reverse();
+        }
+        workers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            if index % 3 == 0 {
+                let a = &batch[1];
+                Telemetry::new(&pool)
+                    .record(corpus, a.document, a.application, a.at)
+                    .await
+                    .unwrap();
+            } else {
+                let mut tx = pool.begin().await.unwrap();
+                record_batch(&mut tx, corpus, &batch).await.unwrap();
+                tx.commit().await.unwrap();
+            }
+        }));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for worker in workers {
+            worker.await.unwrap();
+        }
+    })
+    .await
+    .expect("mixed writers must not deadlock");
+    for (index, document) in docs.into_iter().enumerate() {
+        let total = Telemetry::new(&f.pool)
+            .get(corpus, document)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(total.applied_count, if index == 1 { 8 } else { 1 });
+    }
+    f.cleanup().await;
+}
