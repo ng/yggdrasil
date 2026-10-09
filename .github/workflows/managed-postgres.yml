@@ -19,6 +19,7 @@ on:
       - 'migrations/**'
       - 'tests/managed_*.rs'
       - 'tests/knowledge_migration.rs'
+      - 'tests/okf_disk_full.rs'
       - 'src/knowledge/**'
       - 'src/cli/knowledge_cmd.rs'
 
@@ -69,6 +70,8 @@ jobs:
         run: cargo test --release --test managed_packages --test managed_runtime --test managed_supervisor --test external_tls --test knowledge_migration -- --include-ignored --test-threads=1
       - name: Test killed bootstrap recovery
         run: cargo test --release --lib db::runtime::bootstrap_tests -- --include-ignored --test-threads=1
+      - name: Test knowledge writes on an actually full filesystem
+        run: cargo test --release --test okf_disk_full -- --include-ignored --nocapture --test-threads=1
       - name: Test killed deployment configuration publication
         run: cargo test --release --lib config::switch::tests -- --test-threads=1
       - name: Test short runtime endpoint identity and containment

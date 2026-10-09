@@ -48,7 +48,20 @@ while retaining unaffected documents. Hidden abandoned staging files are ignored
 Tests cover reopening, stale revisions, 20 concurrent writers, concurrent readers,
 symlink escapes, corrupt documents, permission checks and a subprocess file-size
 limit that forces a partial write failure. The latter tests failed-write recovery,
-not a full disk or arbitrary filesystem failure model.
+not a full disk. The opt-in `okf_disk_full` fixture fills a separate 128 MiB
+filesystem until real `ENOSPC`, then requires both an update and a new document
+write to fail with that error while the prior UUID, bytes and revision remain
+intact. It checks staging-file cleanup, frees space and verifies conditional retry
+and reopening. It refuses to fill a filesystem sharing the host directory's device
+or exceeding its capacity bound. macOS uses an owned APFS image; Linux uses an
+isolated tmpfs and requires noninteractive `sudo` for mount/unmount. Detach failure
+retains the fixture for inspection instead of recursively removing a mounted tree.
+
+Run `cargo test --test okf_disk_full -- --ignored --nocapture --test-threads=1`.
+The native platform workflow runs the same fixture in release mode. Local macOS
+arm64 APFS validation reached `ENOSPC` after 129,368,064 filler bytes and passed
+all preservation/retry assertions. This is disk-full write evidence, not arbitrary
+filesystem or power-loss qualification; Linux tmpfs is not a disk durability test.
 
 ## Identity and policy configuration
 
