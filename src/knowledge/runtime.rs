@@ -38,62 +38,31 @@ pub struct Binding {
     pub agents: BTreeMap<String, Uuid>,
 }
 
-pub struct Context {
-    pub service: KnowledgeService,
-    pub default_agent_name: String,
-    pub mappings: Mappings,
-    generation: i64,
-    registry: IdentityRegistry,
-    agents: BTreeMap<String, Uuid>,
-    policy: KnowledgeStore,
-    pub(super) user: String,
-    pub agent_context: bool,
-    _selection_lease: File,
+fn configured_user(env: &Environment) -> String {
+    env.get("YGG_USER")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::process::Command::new("whoami")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "default".into())
+        })
 }
-impl Context {
-    pub fn from_environment(env: Environment) -> Result<Option<Self>> {
-        Self::environment(env, true)
-    }
-    /// Subsequent edit hooks may reuse a remotely confirmed snapshot for 60 seconds.
-    pub fn for_edit_hook(env: Environment) -> Result<Option<Self>> {
-        Self::environment(env, false)
-    }
-    fn environment(env: Environment, refresh: bool) -> Result<Option<Self>> {
-        let (config, env) = KnowledgeConfig::load(env)?;
-        let user = env
-            .get("YGG_USER")
-            .filter(|value| !value.is_empty())
-            .cloned()
-            .unwrap_or_else(|| {
-                std::process::Command::new("whoami")
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "default".into())
-            });
-        let mut context = Self::open_with_refresh(&config, &user, refresh)?;
-        if let Some(context) = &mut context {
-            context.agent_context = env.contains_key("YGG_AGENT_NAME");
-            context.default_agent_name = env.get("YGG_AGENT_NAME").cloned().unwrap_or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .unwrap_or_else(|| "ygg".into())
-            });
-        }
-        Ok(context)
-    }
-    pub fn open(config: &KnowledgeConfig, legacy_user: &str) -> Result<Option<Self>> {
-        Self::open_with_refresh(config, legacy_user, true)
-    }
-    fn open_with_refresh(
-        config: &KnowledgeConfig,
-        legacy_user: &str,
-        refresh: bool,
-    ) -> Result<Option<Self>> {
+
+struct Selection {
+    policy: KnowledgeStore,
+    lease: File,
+    binding: Binding,
+    registry: IdentityRegistry,
+    user: String,
+}
+impl Selection {
+    fn load(config: &KnowledgeConfig, legacy_user: &str) -> Result<Option<Self>> {
         match std::fs::symlink_metadata(&config.knowledge_policy_dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -145,6 +114,93 @@ impl Context {
             .filter(|u| !u.trim().is_empty())
             .ok_or_else(|| anyhow!("explicit knowledge user mapping required"))?
             .clone();
+        Ok(Some(Self {
+            policy,
+            lease,
+            binding,
+            registry,
+            user,
+        }))
+    }
+}
+
+/// Recovery validates the same selection and ownership bindings as commands,
+/// without depending on a materialized or remotely refreshed read snapshot.
+pub struct SharedAccess {
+    pub transport: super::shared::SharedGit,
+    _selection_lease: File,
+}
+impl SharedAccess {
+    pub fn from_environment(env: Environment) -> Result<Self> {
+        let (config, env) = KnowledgeConfig::load(env)?;
+        let selected = Selection::load(&config, &configured_user(&env))?
+            .ok_or_else(|| anyhow!("no selected OKF corpus"))?;
+        let shared = selected
+            .policy
+            .read_control("shared.json")?
+            .ok_or_else(|| anyhow!("no shared Git corpus configured"))?;
+        let transport =
+            super::shared::SharedGit::open(&config.knowledge_dir, serde_json::from_str(&shared)?)?;
+        Ok(Self {
+            transport,
+            _selection_lease: selected.lease,
+        })
+    }
+}
+
+pub struct Context {
+    pub service: KnowledgeService,
+    pub default_agent_name: String,
+    pub mappings: Mappings,
+    generation: i64,
+    registry: IdentityRegistry,
+    agents: BTreeMap<String, Uuid>,
+    policy: KnowledgeStore,
+    pub(super) user: String,
+    pub agent_context: bool,
+    _selection_lease: File,
+}
+impl Context {
+    pub fn from_environment(env: Environment) -> Result<Option<Self>> {
+        Self::environment(env, true)
+    }
+    /// Subsequent edit hooks may reuse a remotely confirmed snapshot for 60 seconds.
+    pub fn for_edit_hook(env: Environment) -> Result<Option<Self>> {
+        Self::environment(env, false)
+    }
+    fn environment(env: Environment, refresh: bool) -> Result<Option<Self>> {
+        let (config, env) = KnowledgeConfig::load(env)?;
+        let user = configured_user(&env);
+        let mut context = Self::open_with_refresh(&config, &user, refresh)?;
+        if let Some(context) = &mut context {
+            context.agent_context = env.contains_key("YGG_AGENT_NAME");
+            context.default_agent_name = env.get("YGG_AGENT_NAME").cloned().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "ygg".into())
+            });
+        }
+        Ok(context)
+    }
+    pub fn open(config: &KnowledgeConfig, legacy_user: &str) -> Result<Option<Self>> {
+        Self::open_with_refresh(config, legacy_user, true)
+    }
+    fn open_with_refresh(
+        config: &KnowledgeConfig,
+        legacy_user: &str,
+        refresh: bool,
+    ) -> Result<Option<Self>> {
+        let Some(Selection {
+            policy,
+            lease,
+            binding,
+            registry,
+            user,
+        }) = Selection::load(config, legacy_user)?
+        else {
+            return Ok(None);
+        };
         let service = if let Some(shared) = policy.read_control("shared.json")? {
             let shared: super::shared::Config = serde_json::from_str(&shared)?;
             KnowledgeService::shared_with_refresh(

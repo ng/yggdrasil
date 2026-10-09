@@ -48,6 +48,21 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Inspect an uncertain local publication without fetching the remote
+    Pending {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retry or archive exactly the pending commit that was inspected
+    Recover {
+        commit: String,
+        #[arg(long, conflicts_with = "discard", required_unless_present = "discard")]
+        retry: bool,
+        #[arg(long)]
+        discard: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Refresh the configured shared corpus, optionally confirming an uncertain push
     Sync {
         #[arg(long)]
@@ -1349,6 +1364,13 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Knowledge { action } => match action {
+            KnowledgeAction::Pending { json } => ygg::cli::knowledge_cmd::pending(json)?,
+            KnowledgeAction::Recover {
+                commit,
+                retry,
+                discard: _,
+                json,
+            } => ygg::cli::knowledge_cmd::recover(&commit, retry, json)?,
             KnowledgeAction::Sync {
                 confirm_pending,
                 json,

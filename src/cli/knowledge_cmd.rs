@@ -58,9 +58,12 @@ pub async fn dry_run(mapping_file: Option<&Path>, json: bool) -> Result<()> {
 }
 
 pub fn sync(confirm_pending: bool, json: bool) -> Result<()> {
-    let context = crate::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
-        .ok_or_else(|| anyhow::anyhow!("no selected OKF corpus"))?;
-    let commit = context.service.sync_shared(confirm_pending)?;
+    let access =
+        crate::knowledge::runtime::SharedAccess::from_environment(std::env::vars().collect())?;
+    if confirm_pending {
+        access.transport.confirm_pending()?;
+    }
+    let commit = access.transport.refresh()?.commit;
     if json {
         println!(
             "{}",
@@ -68,6 +71,57 @@ pub fn sync(confirm_pending: bool, json: bool) -> Result<()> {
         );
     } else {
         println!("Shared knowledge confirmed at {commit}");
+    }
+    Ok(())
+}
+
+pub fn pending(json: bool) -> Result<()> {
+    let access =
+        crate::knowledge::runtime::SharedAccess::from_environment(std::env::vars().collect())?;
+    let pending = access.transport.pending_info()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pending)?);
+    } else if let Some(pending) = pending {
+        println!("Pending commit {} (base {})", pending.commit, pending.base);
+        for change in pending.changes {
+            println!(
+                "  {}: {} → {}",
+                change.path,
+                change.before.as_deref().unwrap_or("absent"),
+                change.after.as_deref().unwrap_or("deleted")
+            );
+        }
+    } else {
+        println!("No pending shared publication.");
+    }
+    Ok(())
+}
+pub fn recover(commit: &str, retry: bool, json: bool) -> Result<()> {
+    use crate::knowledge::shared::{RecoveryAction, RecoveryOutcome};
+    let access =
+        crate::knowledge::runtime::SharedAccess::from_environment(std::env::vars().collect())?;
+    let result = access.transport.recover(
+        commit,
+        if retry {
+            RecoveryAction::Retry
+        } else {
+            RecoveryAction::Discard
+        },
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        let action = match result.outcome {
+            RecoveryOutcome::Confirmed => "Confirmed remote publication",
+            RecoveryOutcome::Published => "Published recovered change",
+            RecoveryOutcome::ArchivedUnconfirmed => {
+                "Archived unconfirmed local draft; remote unchanged"
+            }
+        };
+        println!("{action}: {}", result.commit);
+        if let Some(reference) = result.archive_ref {
+            println!("Retained at {reference}");
+        }
     }
     Ok(())
 }

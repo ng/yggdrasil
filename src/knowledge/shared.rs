@@ -62,6 +62,36 @@ pub struct Change {
 pub struct Receipt {
     pub commit: String,
 }
+#[derive(Serialize)]
+pub struct PendingInfo {
+    pub commit: String,
+    pub base: String,
+    pub changes: Vec<PendingChange>,
+}
+#[derive(Serialize)]
+pub struct PendingChange {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+pub enum RecoveryAction {
+    Retry,
+    Discard,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryOutcome {
+    Confirmed,
+    Published,
+    ArchivedUnconfirmed,
+}
+#[derive(Serialize)]
+pub struct Recovery {
+    pub commit: String,
+    pub outcome: RecoveryOutcome,
+    pub archive_ref: Option<String>,
+}
+
 pub struct SharedGit {
     root: PathBuf,
     control: KnowledgeStore,
@@ -454,6 +484,107 @@ impl SharedGit {
             commit: pending.commit,
         }))
     }
+    fn pending_changes(&self, pending: &Pending) -> Result<Vec<Change>> {
+        let parents = self.checked(
+            &["rev-list", "--parents", "-n", "1", &pending.commit],
+            &[],
+            None,
+        )?;
+        let parents = std::str::from_utf8(&parents)?
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        ensure!(
+            parents == [pending.commit.as_str(), pending.base.as_str()],
+            "pending commit parent differs from journal"
+        );
+        let before = self.files(&pending.base)?;
+        let after = self.files(&pending.commit)?;
+        let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
+        let changes: Vec<_> = paths
+            .into_iter()
+            .filter(|p| before.get(*p) != after.get(*p))
+            .map(|p| Change {
+                path: p.clone(),
+                expected: before.get(p).map(|b| digest(b)),
+                replacement: after.get(p).cloned(),
+            })
+            .collect();
+        ensure!(changes.len() <= 32, "pending change batch exceeds limit");
+        Ok(changes)
+    }
+    /// Inspect local intent even when the remote or disposable read cache fails.
+    pub fn pending_info(&self) -> Result<Option<PendingInfo>> {
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        let Some(pending) = self.pending()? else {
+            return Ok(None);
+        };
+        let changes = self
+            .pending_changes(&pending)?
+            .into_iter()
+            .map(|c| PendingChange {
+                path: c.path,
+                before: c.expected,
+                after: c.replacement.as_ref().map(|b| digest(b)),
+            })
+            .collect();
+        Ok(Some(PendingInfo {
+            commit: pending.commit,
+            base: pending.base,
+            changes,
+        }))
+    }
+    /// Explicit recovery is pinned to the inspected commit, so a concurrent new
+    /// intent cannot be discarded or republished accidentally.
+    pub fn recover(&self, expected_commit: &str, action: RecoveryAction) -> Result<Recovery> {
+        ensure!(
+            oid(expected_commit.as_bytes())? == expected_commit,
+            "full pending commit ID required"
+        );
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        let pending = self
+            .pending()?
+            .ok_or_else(|| anyhow!("no pending shared publication"))?;
+        ensure!(
+            pending.commit == expected_commit,
+            "pending commit changed; inspect again"
+        );
+        let changes = self.pending_changes(&pending)?;
+        let remote = self.fetch()?;
+        let confirmed_at = Utc::now();
+        if self.reachable(&pending.commit, &remote)? {
+            self.publish_cache(remote, confirmed_at)?;
+            self.clear(&pending.commit)?;
+            return Ok(Recovery {
+                commit: pending.commit,
+                outcome: RecoveryOutcome::Confirmed,
+                archive_ref: None,
+            });
+        }
+        match action {
+            RecoveryAction::Retry => {
+                let receipt = self.change_locked(&changes, &mut |_| Ok(()))?;
+                Ok(Recovery {
+                    commit: receipt.commit,
+                    outcome: RecoveryOutcome::Published,
+                    archive_ref: None,
+                })
+            }
+            RecoveryAction::Discard => {
+                let archive_ref = format!("refs/ygg/drafts/{}", pending.commit);
+                // Pin before clearing the journal: interruption leaves recoverable
+                // bytes, and ordinary Git GC cannot collect the discarded draft.
+                self.checked(&["update-ref", &archive_ref, &pending.commit], &[], None)?;
+                self.publish_cache(remote, confirmed_at)?;
+                self.clear(&pending.commit)?;
+                Ok(Recovery {
+                    commit: pending.commit,
+                    outcome: RecoveryOutcome::ArchivedUnconfirmed,
+                    archive_ref: Some(archive_ref),
+                })
+            }
+        }
+    }
+
     pub fn change(&self, changes: &[Change]) -> Result<Receipt> {
         self.change_at(changes, &mut |_| Ok(()))
     }
@@ -483,6 +614,13 @@ impl SharedGit {
             self.pending()?.is_none(),
             "prior shared publication is uncertain; confirm it before another write"
         );
+        self.change_locked(changes, prepared)
+    }
+    fn change_locked(
+        &self,
+        changes: &[Change],
+        prepared: &mut impl FnMut(&str) -> Result<()>,
+    ) -> Result<Receipt> {
         for _ in 0..3 {
             let base = self.fetch()?;
             let files = self.files(&base)?;
@@ -590,7 +728,8 @@ impl SharedGit {
                 rejected,
                 "shared publication uncertain; retained pending commit"
             );
-            self.clear(&commit)?;
+            // Retain the last complete intent until confirmed or explicitly
+            // archived, including if the next retry finds a document conflict.
             // A definitive non-fast-forward rejection retries from a fresh remote
             // only after rechecking every affected expected digest above.
         }
@@ -775,5 +914,104 @@ mod tests {
         let mut changed = config;
         changed.branch = "different".into();
         assert!(SharedGit::open(&temp.path().join("cache"), changed).is_err());
+    }
+    #[test]
+    fn explicit_recovery_pins_intent_rechecks_digests_and_archives_conflicting_drafts() {
+        let (temp, config) = fixture();
+        let a = SharedGit::open(&temp.path().join("a"), config.clone()).unwrap();
+        let b = SharedGit::open(&temp.path().join("b"), config).unwrap();
+        a.refresh().unwrap();
+        assert!(
+            a.change_at(&[edit(b"draft\n", b"original\n")], &mut |_| bail!(
+                "stop before push"
+            ))
+            .is_err()
+        );
+        let pending = a.pending_info().unwrap().unwrap();
+        assert_eq!(pending.changes.len(), 1);
+        assert_eq!(pending.changes[0].before, Some(digest(b"original\n")));
+        assert_eq!(pending.changes[0].after, Some(digest(b"draft\n")));
+        assert!(a.recover(&"0".repeat(40), RecoveryAction::Discard).is_err());
+        assert_eq!(a.pending_info().unwrap().unwrap().commit, pending.commit);
+        b.change(&[Change {
+            path: "other.md".into(),
+            expected: None,
+            replacement: Some(b"other host\n".to_vec()),
+        }])
+        .unwrap();
+        let recovered = a.recover(&pending.commit, RecoveryAction::Retry).unwrap();
+        assert!(matches!(recovered.outcome, RecoveryOutcome::Published));
+        let snapshot = b.refresh().unwrap();
+        assert_eq!(snapshot.files["rule.md"], b"draft\n");
+        assert_eq!(snapshot.files["other.md"], b"other host\n");
+        assert!(a.pending_info().unwrap().is_none());
+        assert!(
+            a.change_at(&[edit(b"conflicting draft\n", b"draft\n")], &mut |_| bail!(
+                "stop before push"
+            ))
+            .is_err()
+        );
+        let pending = a.pending_info().unwrap().unwrap();
+        b.change(&[edit(b"new remote edit\n", b"draft\n")]).unwrap();
+        assert!(a.recover(&pending.commit, RecoveryAction::Retry).is_err());
+        assert_eq!(a.pending_info().unwrap().unwrap().commit, pending.commit);
+        let archived = a.recover(&pending.commit, RecoveryAction::Discard).unwrap();
+        assert!(matches!(
+            archived.outcome,
+            RecoveryOutcome::ArchivedUnconfirmed
+        ));
+        assert_eq!(
+            oid(&a
+                .checked(
+                    &["rev-parse", archived.archive_ref.as_deref().unwrap()],
+                    &[],
+                    None
+                )
+                .unwrap())
+            .unwrap(),
+            pending.commit
+        );
+        assert_eq!(
+            a.files(&pending.commit).unwrap()["rule.md"],
+            b"conflicting draft\n"
+        );
+        assert_eq!(b.refresh().unwrap().files["rule.md"], b"new remote edit\n");
+        assert!(a.pending_info().unwrap().is_none());
+        a.change(&[edit(b"after recovery\n", b"new remote edit\n")])
+            .unwrap();
+    }
+
+    #[test]
+    fn recovery_confirms_already_published_intent_instead_of_repeating_or_undoing_it() {
+        let (temp, config) = fixture();
+        let a = SharedGit::open(&temp.path().join("cache"), config.clone()).unwrap();
+        for action in [RecoveryAction::Retry, RecoveryAction::Discard] {
+            let current = a.refresh().unwrap();
+            assert!(
+                a.change_at(
+                    &[edit(b"once\n", &current.files["rule.md"])],
+                    &mut |commit| {
+                        a.checked(
+                            &[
+                                "push",
+                                &config.remote,
+                                &format!("{commit}:refs/heads/knowledge"),
+                            ],
+                            &[],
+                            None,
+                        )?;
+                        bail!("lost acknowledgment")
+                    }
+                )
+                .is_err()
+            );
+            let pending = a.pending_info().unwrap().unwrap();
+            let head = a.fetch().unwrap();
+            let result = a.recover(&pending.commit, action).unwrap();
+            assert!(matches!(result.outcome, RecoveryOutcome::Confirmed));
+            assert_eq!(result.commit, pending.commit);
+            assert_eq!(a.fetch().unwrap(), head);
+            assert!(a.pending_info().unwrap().is_none());
+        }
     }
 }

@@ -338,5 +338,109 @@ fn ordinary_commands_publish_shared_rules_and_remote_revocation_and_outage_gate_
             .iter()
             .any(|r| r["text"] == "MUST_NOT_PUBLISH")
     );
+    // A real CLI failure after preparing a commit must remain inspectable even
+    // without its optional read cache. The fixture Git wrapper fails only pushes.
+    let bin = parent.path().join("fault-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("git");
+    std::fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = push ]; then exit 70; fi\ndone\nexec /usr/bin/git \"$@\"\n").unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fault_path = format!("{}:/usr/bin:/bin", bin.display());
+    let failed = okf::command(a.path(), &a.path().join("repo"))
+        .env("PATH", &fault_path)
+        .args(["RECOVERED_NOTE", "--global", "--json"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    std::fs::remove_file(a.path().join("bundle/snapshot.json")).unwrap();
+    let pending = okf::json(
+        okf::app(a.path(), &a.path().join("repo"))
+            .args(["knowledge", "pending", "--json"])
+            .output()
+            .unwrap(),
+    );
+    let commit = pending["commit"].as_str().unwrap();
+    assert_eq!(pending["changes"].as_array().unwrap().len(), 1);
+    for flags in [vec!["--json"], vec!["--retry", "--discard", "--json"]] {
+        let invalid = okf::app(a.path(), &a.path().join("repo"))
+            .args(["knowledge", "recover", commit])
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(!invalid.status.success());
+    }
+    let recovered = okf::json(
+        okf::app(a.path(), &a.path().join("repo"))
+            .args(["knowledge", "recover", commit, "--retry", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(recovered["outcome"], "published");
+    let notes = okf::json(
+        okf::command(b.path(), &b.path().join("repo"))
+            .args(["--list", "--all", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        notes["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["text"] == "RECOVERED_NOTE")
+            .count(),
+        1
+    );
+    let failed = okf::command(a.path(), &a.path().join("repo"))
+        .env("PATH", &fault_path)
+        .args(["ARCHIVED_NOTE", "--global", "--json"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let pending = okf::json(
+        okf::app(a.path(), &a.path().join("repo"))
+            .args(["knowledge", "pending", "--json"])
+            .output()
+            .unwrap(),
+    );
+    let discarded = okf::json(
+        okf::app(a.path(), &a.path().join("repo"))
+            .args([
+                "knowledge",
+                "recover",
+                pending["commit"].as_str().unwrap(),
+                "--discard",
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(discarded["outcome"], "archived_unconfirmed");
+    assert!(
+        discarded["archive_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("refs/ygg/drafts/")
+    );
+    let notes = okf::json(
+        okf::command(b.path(), &b.path().join("repo"))
+            .args(["--list", "--all", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        !notes["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["text"] == "ARCHIVED_NOTE")
+    );
+    let pending = okf::json(
+        okf::app(a.path(), &a.path().join("repo"))
+            .args(["knowledge", "pending", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert!(pending.is_null());
     assert!(!a.path().join("data").exists() && !b.path().join("data").exists());
 }

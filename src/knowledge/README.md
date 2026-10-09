@@ -638,8 +638,20 @@ rejected. A mutation is acknowledged only after its commit is confirmed reachabl
 from the fetched authoritative branch. An uncertain response retains a durable
 pending commit and prevents another write from silently duplicating it.
 `ygg knowledge sync --confirm-pending` can confirm that commit after connectivity
-returns; it never blindly republishes an unconfirmed draft. An unconfirmed draft
-currently requires further recovery tooling to discard or explicitly republish.
+returns; it never blindly republishes an unconfirmed draft.
+
+`ygg knowledge pending --json` inspects the retained commit, its parent and changed
+paths with before/after digests without fetching or needing a usable read cache.
+`ygg knowledge recover FULL_COMMIT --retry` explicitly retries that exact intent,
+rechecking every original affected digest against the current remote. A conflict
+keeps the pending draft. `--discard` instead retains the draft under
+`refs/ygg/drafts/FULL_COMMIT`, refreshes the confirmed cache and clears the journal;
+it does not change remote content. Both actions first fetch and check whether the
+original commit already reached the remote; if so, they only confirm it. Neither
+action resolves an unavailable remote. A changed pending commit requires inspection
+again. Archived refs have no automatic expiry yet. `knowledge sync` can also repair
+a missing read-cache pointer. Recovery still validates selected corpus, generation,
+protocol, canonical path and identity bindings.
 
 Each host has its own cache and two-second cooperative transport-lock acquisition
 bound. Git invocations have a 30-second deadline, private bounded output files,
