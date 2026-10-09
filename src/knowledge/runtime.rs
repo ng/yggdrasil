@@ -52,6 +52,13 @@ pub struct Context {
 }
 impl Context {
     pub fn from_environment(env: Environment) -> Result<Option<Self>> {
+        Self::environment(env, true)
+    }
+    /// Subsequent edit hooks may reuse a remotely confirmed snapshot for 60 seconds.
+    pub fn for_edit_hook(env: Environment) -> Result<Option<Self>> {
+        Self::environment(env, false)
+    }
+    fn environment(env: Environment, refresh: bool) -> Result<Option<Self>> {
         let (config, env) = KnowledgeConfig::load(env)?;
         let user = env
             .get("YGG_USER")
@@ -67,7 +74,7 @@ impl Context {
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "default".into())
             });
-        let mut context = Self::open(&config, &user)?;
+        let mut context = Self::open_with_refresh(&config, &user, refresh)?;
         if let Some(context) = &mut context {
             context.agent_context = env.contains_key("YGG_AGENT_NAME");
             context.default_agent_name = env.get("YGG_AGENT_NAME").cloned().unwrap_or_else(|| {
@@ -80,6 +87,13 @@ impl Context {
         Ok(context)
     }
     pub fn open(config: &KnowledgeConfig, legacy_user: &str) -> Result<Option<Self>> {
+        Self::open_with_refresh(config, legacy_user, true)
+    }
+    fn open_with_refresh(
+        config: &KnowledgeConfig,
+        legacy_user: &str,
+        refresh: bool,
+    ) -> Result<Option<Self>> {
         match std::fs::symlink_metadata(&config.knowledge_policy_dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -131,11 +145,22 @@ impl Context {
             .filter(|u| !u.trim().is_empty())
             .ok_or_else(|| anyhow!("explicit knowledge user mapping required"))?
             .clone();
-        let service = KnowledgeService::new(
-            KnowledgeStore::open(&config.knowledge_dir, false)?,
-            IdentityRegistry::open(&config.knowledge_policy_dir, false)?,
-            user.clone(),
-        )?;
+        let service = if let Some(shared) = policy.read_control("shared.json")? {
+            let shared: super::shared::Config = serde_json::from_str(&shared)?;
+            KnowledgeService::shared_with_refresh(
+                &config.knowledge_dir,
+                super::shared::SharedGit::open(&config.knowledge_dir, shared)?,
+                IdentityRegistry::open(&config.knowledge_policy_dir, false)?,
+                user.clone(),
+                refresh,
+            )?
+        } else {
+            KnowledgeService::new(
+                KnowledgeStore::open(&config.knowledge_dir, false)?,
+                IdentityRegistry::open(&config.knowledge_policy_dir, false)?,
+                user.clone(),
+            )?
+        };
         Ok(Some(Self {
             service,
             default_agent_name: "ygg".into(),

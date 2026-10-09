@@ -48,6 +48,13 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Refresh the configured shared corpus, optionally confirming an uncertain push
+    Sync {
+        #[arg(long)]
+        confirm_pending: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inventory a consistent source snapshot and verify explicit mappings
     Migrate {
         /// Assess only; required because publication/cutover is not available
@@ -1342,6 +1349,12 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Knowledge { action } => match action {
+            KnowledgeAction::Sync {
+                confirm_pending,
+                json,
+            } => {
+                ygg::cli::knowledge_cmd::sync(confirm_pending, json)?;
+            }
             KnowledgeAction::Migrate {
                 dry_run: _,
                 mapping_file,

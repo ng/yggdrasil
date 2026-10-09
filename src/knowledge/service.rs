@@ -34,7 +34,7 @@ pub struct RuleInput {
 }
 
 pub struct KnowledgeService {
-    store: KnowledgeStore,
+    store: super::backend::Backend,
     registry: IdentityRegistry,
     user: String,
 }
@@ -47,10 +47,42 @@ impl KnowledgeService {
         );
         registry.read()?;
         Ok(Self {
-            store,
+            store: super::backend::Backend::Private(store),
             registry,
             user,
         })
+    }
+
+    pub fn shared(
+        root: &std::path::Path,
+        transport: super::shared::SharedGit,
+        registry: IdentityRegistry,
+        user: String,
+    ) -> Result<Self> {
+        Self::shared_with_refresh(root, transport, registry, user, true)
+    }
+
+    pub(crate) fn shared_with_refresh(
+        root: &std::path::Path,
+        transport: super::shared::SharedGit,
+        registry: IdentityRegistry,
+        user: String,
+        refresh: bool,
+    ) -> Result<Self> {
+        ensure!(
+            !user.trim().is_empty(),
+            "explicit nonempty knowledge user mapping required"
+        );
+        registry.read()?;
+        Ok(Self {
+            store: super::backend::Backend::shared(root, transport, refresh)?,
+            registry,
+            user,
+        })
+    }
+
+    pub fn sync_shared(&self, confirm_pending: bool) -> Result<String> {
+        self.store.sync(confirm_pending)
     }
 
     fn policy(&self) -> Result<Identities> {
@@ -347,6 +379,7 @@ impl KnowledgeService {
     /// Prime keeps the established five-note cap, after freshness filtering.
     /// Explicit browsing remains able to display stale/deprecated documents.
     pub fn prime_notes(&self, repo: Option<Uuid>, now: DateTime<Utc>) -> Result<Snapshot> {
+        self.store.fresh(now)?;
         let policy = self.policy()?;
         Self::scope(&policy, repo)?;
         if !policy.trusted {
@@ -391,6 +424,7 @@ impl KnowledgeService {
         repo: Option<Uuid>,
         now: DateTime<Utc>,
     ) -> Result<Option<Document>> {
+        self.store.fresh(now)?;
         let policy = self.policy()?;
         Self::scope(&policy, repo)?;
         if !policy.trusted {
@@ -461,6 +495,7 @@ impl KnowledgeService {
     }
 
     pub fn rules(&self, filters: &Filters<'_>, now: DateTime<Utc>) -> Result<Snapshot> {
+        self.store.fresh(now)?;
         let policy = self.policy()?;
         Self::scope(&policy, filters.repo)?;
         let candidates = self.store.candidates();
@@ -513,6 +548,7 @@ impl KnowledgeService {
         filters: &Filters<'_>,
         now: DateTime<Utc>,
     ) -> Result<Snapshot> {
+        self.store.fresh(now)?;
         let policy = self.policy()?;
         Self::scope(&policy, filters.repo)?;
         let mut snapshot = self.store.revalidate_selected(selected);
@@ -541,6 +577,7 @@ impl KnowledgeService {
         repo: Option<Uuid>,
         now: DateTime<Utc>,
     ) -> Result<Snapshot> {
+        self.store.fresh(now)?;
         let policy = self.policy()?;
         Self::scope(&policy, repo)?;
         let mut snapshot = self.store.revalidate_selected(selected);
@@ -572,6 +609,7 @@ impl KnowledgeService {
         filters: &Filters<'_>,
         now: DateTime<Utc>,
     ) -> Result<Option<Document>> {
+        self.store.fresh(now)?;
         let policy = self.policy()?;
         let Some(current) = self.get(selected.key.id)? else {
             return Ok(None);

@@ -25,3 +25,9 @@ pub mod injection;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod usage;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod shared;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod backend;

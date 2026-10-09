@@ -609,3 +609,56 @@ Persistent lock files are opened by existing inode or exclusive creation, with a
 bounded retry if another creator wins. This avoids a reproduced concurrent first
 creation failure on macOS without replacing a held lock. The usage-cache fixture
 races twenty independent contexts over five fresh directories.
+
+### Shared Git transport and service routing
+
+A selected runtime may carry private policy `shared.json` with
+`{"version":1,"remote":"…","branch":"knowledge"}`. Its configured knowledge
+directory is then a dedicated Git transport cache. Selection/configuration is
+still published by the unfinished validated cutover workflow, not by editing
+these files as a supported migration. No existing private files are uploaded.
+A hosted database alone never selects shared knowledge.
+
+The ordinary note/rule service uses complete confirmed Git trees through disposable
+private views. It never checks out repository files, executes their hooks/filters,
+or follows their remote links. Explicit commands and session entry fetch the configured branch; subsequent edit
+hooks reuse a confirmed snapshot for up to 60 seconds. Automatic note/rule
+selection and revalidation enforce a maximum 60-second
+confirmed-snapshot age. Explicit browsing can retain cached content during outage.
+A failed mandatory session refresh omits automatic instructions even if an older
+cache is young. A fetched but unusable newer tree marks the older cache superseded
+even within that window. Private local mode remains independent of Git and PostgreSQL.
+
+Mutations fetch first, compare every affected path's exact SHA-256 or required
+absence, construct a complete tree with Git plumbing, and push without force.
+Scope moves change both paths in one commit. Definitive non-fast-forward rejection
+retries at most three times, only while the affected expected digests still match;
+conflicting text, scope or approval is never merged. UUID-path collisions are
+rejected. A mutation is acknowledged only after its commit is confirmed reachable
+from the fetched authoritative branch. An uncertain response retains a durable
+pending commit and prevents another write from silently duplicating it.
+`ygg knowledge sync --confirm-pending` can confirm that commit after connectivity
+returns; it never blindly republishes an unconfirmed draft. An unconfirmed draft
+currently requires further recovery tooling to discard or explicitly republish.
+
+Each host has its own cache and two-second cooperative transport-lock acquisition
+bound. Git invocations have a 30-second deadline, private bounded output files,
+redacted failure messages and process-group cancellation. Existing Git/SSH
+credentials are used; repository/index/config environment overrides are cleared.
+The client disables hooks, checkout filters, replacement objects, automatic Git
+maintenance and implicit signing. Git authorship is the Yggdrasil client identity;
+human approval remains the separately recorded document evidence.
+
+Current transport limits are 20,000 regular non-executable files, 64 MiB batch
+input/output and 32 path components. Hidden path components, symlinks, submodules,
+executables and traversal are refused. Raw document bytes and unknown metadata
+survive commits unchanged. These snapshot/output limits are not a quota on fetched
+Git history; remote transport and large-repository resource validation remain release
+work. Shared-network latency is measured separately from private local lookup.
+
+Backups acquire the transport lease before export/writer leases, retain the bare
+objects, confirmed snapshot pointer, remote binding and uncertain-publication
+journal, and omit transient views/command files/locks. Restored caches preserve
+confirmed bytes for offline browsing. Deployment moves still need the planned
+validated rebinding of the runtime's canonical bundle path. Automatic Git/cache
+retention cleanup and a supported cutover/configuration publisher remain unfinished.

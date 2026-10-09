@@ -213,7 +213,7 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
     let mut observed = None;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if matches!(tool, "Edit" | "Write" | "NotebookEdit") && !file.is_empty() {
-        match crate::knowledge::runtime::Context::from_environment(std::env::vars().collect()) {
+        match crate::knowledge::runtime::Context::for_edit_hook(std::env::vars().collect()) {
             Ok(Some(context)) => {
                 legacy_knowledge = false;
                 let session = payload

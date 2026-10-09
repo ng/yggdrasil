@@ -27,11 +27,32 @@ pub struct KnowledgeBackup {
     pub entries: BTreeMap<String, BackupEntry>,
 }
 
-fn skipped(name: &str, root: bool) -> bool {
-    root && matches!(
+fn skipped(name: &str, root: bool, shared: bool) -> bool {
+    if !root {
+        return false;
+    }
+    if matches!(
         name,
-        ".writer.lock" | ".export.lock" | ".selection.lock" | ".lookup.json" | ".sessions"
-    )
+        ".writer.lock"
+            | ".export.lock"
+            | ".selection.lock"
+            | ".shared.lock"
+            | ".lookup.json"
+            | ".sessions"
+    ) {
+        return true;
+    }
+    shared
+        && (name
+            .strip_prefix(".view-")
+            .is_some_and(|s| Uuid::parse_str(s).is_ok())
+            || name
+                .strip_prefix('.')
+                .and_then(|s| {
+                    s.strip_suffix(".tmp")
+                        .or_else(|| s.strip_suffix(".tmp.lock"))
+                })
+                .is_some_and(|s| Uuid::parse_str(s).is_ok()))
 }
 
 fn inventory(
@@ -47,8 +68,10 @@ fn inventory(
         depth <= 32,
         "knowledge backup exceeds directory depth limit"
     );
+    let shared =
+        depth == 0 && skip_cache && KnowledgeStore::read_at(source, ".shared-mode.json")?.is_some();
     for name in names_limited(source, MAX_ENTRIES.saturating_sub(entries.len()) + 3)? {
-        if skip_cache && skipped(&name, depth == 0) {
+        if skip_cache && skipped(&name, depth == 0, shared) {
             continue;
         }
         ensure!(
@@ -186,9 +209,18 @@ impl KnowledgeStore {
         destination: &Path,
         checkpoint: &dyn Fn(&str),
     ) -> Result<KnowledgeBackup> {
+        let _shared = self.shared_backup_lease()?;
         let _export = self.operation_lock(".export.lock")?;
         let _writer = self.lock()?;
         self.backup_under_leases(destination, checkpoint)
+    }
+
+    fn shared_backup_lease(&self) -> Result<Option<File>> {
+        if self.read_control(".shared-mode.json")?.is_some() {
+            Ok(Some(self.bounded_lock(".shared.lock")?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Snapshot a bundle and its separate policy directory under both leases.
@@ -204,6 +236,8 @@ impl KnowledgeStore {
         let b = (b.dev(), b.ino());
         ensure!(a != b, "bundle and policy must be separate directories");
         let (first, second) = if a < b { (self, other) } else { (other, self) };
+        let _shared_a = first.shared_backup_lease()?;
+        let _shared_b = second.shared_backup_lease()?;
         let _export_a = first.operation_lock(".export.lock")?;
         let _writer_a = first.lock()?;
         let _export_b = second.operation_lock(".export.lock")?;

@@ -56,3 +56,18 @@ pub async fn dry_run(mapping_file: Option<&Path>, json: bool) -> Result<()> {
     );
     Ok(())
 }
+
+pub fn sync(confirm_pending: bool, json: bool) -> Result<()> {
+    let context = crate::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
+        .ok_or_else(|| anyhow::anyhow!("no selected OKF corpus"))?;
+    let commit = context.service.sync_shared(confirm_pending)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"commit": commit, "confirmed": true})
+        );
+    } else {
+        println!("Shared knowledge confirmed at {commit}");
+    }
+    Ok(())
+}

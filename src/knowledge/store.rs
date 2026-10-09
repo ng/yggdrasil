@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 mod backup;
 pub use backup::{BackupEntry, KnowledgeBackup};
 mod index;
+pub(crate) use index::{Candidate, Candidates};
 mod moves;
 use uuid::Uuid;
 
@@ -522,7 +523,15 @@ impl KnowledgeStore {
         name: &str,
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
     ) -> Result<T> {
-        let file = lock_file(&self.root, ".writer.lock")?;
+        self.update_control_locked(name, update, self.bounded_lock(".writer.lock")?)
+    }
+
+    pub(super) fn bounded_lock(&self, name: &str) -> Result<File> {
+        ensure!(
+            !name.contains('/') && !name.contains('\\') && name != "..",
+            "invalid lock filename"
+        );
+        let file = lock_file(&self.root, name)?;
         use std::os::unix::fs::MetadataExt;
         let metadata = file.metadata()?;
         ensure!(
@@ -545,7 +554,7 @@ impl KnowledgeStore {
                 Err(error) => return Err(error.into()),
             }
         }
-        self.update_control_locked(name, update, file)
+        Ok(file)
     }
 
     fn update_control_locked<T>(
