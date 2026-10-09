@@ -45,6 +45,7 @@ pub struct Context {
     registry: IdentityRegistry,
     agents: BTreeMap<String, Uuid>,
     policy: KnowledgeStore,
+    pub(super) user: String,
     pub agent_context: bool,
     _selection_lease: File,
 }
@@ -132,7 +133,7 @@ impl Context {
         let service = KnowledgeService::new(
             KnowledgeStore::open(&config.knowledge_dir, false)?,
             IdentityRegistry::open(&config.knowledge_policy_dir, false)?,
-            user,
+            user.clone(),
         )?;
         Ok(Some(Self {
             service,
@@ -141,9 +142,13 @@ impl Context {
             registry,
             agents: binding.agents,
             policy,
+            user,
             agent_context: false,
             _selection_lease: lease,
         }))
+    }
+    pub(super) fn session_store(&self) -> Result<KnowledgeStore> {
+        self.policy.private_child(".sessions")
     }
     pub fn approver(&self, explicit_agent: Option<&str>) -> Result<super::service::Approver> {
         if explicit_agent.is_some() || self.agent_context {

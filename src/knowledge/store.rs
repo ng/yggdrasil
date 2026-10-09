@@ -232,6 +232,25 @@ impl KnowledgeStore {
         Ok(Self { root })
     }
 
+    pub(super) fn private_child(&self, name: &str) -> Result<Self> {
+        ensure!(
+            !name.is_empty()
+                && name != "."
+                && name != ".."
+                && !name.contains('/')
+                && !name.contains('\\'),
+            "invalid private child name"
+        );
+        let root = directory(&self.root, name, true)?;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = root.metadata()?;
+        ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+            "knowledge session directory must be private and owned"
+        );
+        Ok(Self { root })
+    }
+
     fn lock(&self) -> Result<File> {
         self.operation_lock(".writer.lock")
     }
@@ -468,7 +487,53 @@ impl KnowledgeStore {
         name: &str,
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
     ) -> Result<T> {
-        let _lock = self.lock()?;
+        self.update_control_locked(name, update, self.lock()?)
+    }
+
+    /// Optional session state cannot hold up a hook indefinitely behind a paused
+    /// process. The caller falls back to freshly validated, possibly repeated rules.
+    pub(super) fn update_session_control<T>(
+        &self,
+        name: &str,
+        update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
+    ) -> Result<T> {
+        let file = child(
+            &self.root,
+            ".writer.lock",
+            libc::O_RDWR | libc::O_CREAT,
+            0o600,
+        )?;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.nlink() == 1
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0,
+            "invalid session writer lease"
+        );
+        let began = std::time::Instant::now();
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && began.elapsed() < std::time::Duration::from_secs(2) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.update_control_locked(name, update, file)
+    }
+
+    fn update_control_locked<T>(
+        &self,
+        name: &str,
+        update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
+        _lock: File,
+    ) -> Result<T> {
         self.recover_move_locked()?;
         let current = self.read_control(name)?;
         let (text, result) = update(current.as_deref())?;

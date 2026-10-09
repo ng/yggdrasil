@@ -208,3 +208,30 @@ pub fn delete(context: &Context, id: Uuid) -> Result<()> {
     println!("deleted {id}");
     Ok(())
 }
+
+pub fn surface_for_edit(
+    context: &Context,
+    file: &str,
+    agent: &str,
+    session: &str,
+) -> Result<Vec<String>> {
+    crate::knowledge::injection::for_edit(context, file, agent, session)?
+        .into_iter()
+        .map(|doc| {
+            let p = doc
+                .document
+                .profile()?
+                .ok_or_else(|| anyhow!("rule profile required"))?;
+            let scope = super::format_scope_label(
+                p.repo,
+                p.file_glob.as_deref(),
+                p.rule_id.as_deref(),
+                &serde_json::to_value(&p.scope_tags)?,
+            );
+            Ok(format!(
+                "[ygg learning · {scope}] {}",
+                super::short(&doc.document.body, 200)
+            ))
+        })
+        .collect()
+}

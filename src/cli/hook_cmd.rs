@@ -188,7 +188,69 @@ async fn handle_prompt_submit(
 /// 2. Heartbeat — silent
 /// 3. For Edit/Write/NotebookEdit with a file path: acquire lock, warn on conflict
 /// 4. Always exit 0
+fn print_edit_context(lines: &[String]) {
+    if !lines.is_empty() {
+        println!(
+            "{}",
+            serde_json::json!({ "hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "additionalContext": lines.join("\n")
+            }})
+        );
+    }
+}
+
 async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let file = payload
+        .get("tool_input")
+        .and_then(|v| v.get("file_path").or_else(|| v.get("path")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mut legacy_knowledge = true;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if matches!(tool, "Edit" | "Write" | "NotebookEdit") && !file.is_empty() {
+        match crate::knowledge::runtime::Context::from_environment(std::env::vars().collect()) {
+            Ok(Some(context)) => {
+                legacy_knowledge = false;
+                let session = payload
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match crate::cli::learning_cmd::local::surface_for_edit(
+                    &context,
+                    file,
+                    &context.default_agent_name,
+                    session,
+                ) {
+                    Ok(lines) => print_edit_context(&lines),
+                    Err(error) => eprintln!("knowledge: edit-time rules unavailable: {error}"),
+                }
+            }
+            Err(error) => {
+                legacy_knowledge = false;
+                eprintln!("knowledge: edit-time rules unavailable: {error}");
+            }
+            Ok(None) => {}
+        }
+    }
+    // Knowledge is emitted independently. Coordination can still acquire shared
+    // locks while healthy, but a failed query cannot indefinitely delay the hook.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pre_tool_coordination(agent_name, payload, legacy_knowledge),
+    )
+    .await;
+    Ok(())
+}
+
+async fn pre_tool_coordination(
+    agent_name: &str,
+    payload: &serde_json::Value,
+    legacy_knowledge: bool,
+) -> anyhow::Result<()> {
     let tool_name = payload
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -245,28 +307,19 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
                 }
             }
 
-            // yggdrasil-180: surface scoped learnings whose file_glob matches
-            // the file being edited, injected as a system reminder before the
-            // edit runs. Deduped per session so the same learning fires once.
-            let session_id = payload
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let lines = crate::cli::learning_cmd::surface_for_edit(
-                &pool,
-                file_path,
-                Some(agent_name),
-                session_id,
-            )
-            .await;
-            if !lines.is_empty() {
-                let out = serde_json::json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "additionalContext": lines.join("\n"),
-                    }
-                });
-                println!("{out}");
+            if legacy_knowledge {
+                let session_id = payload
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let lines = crate::cli::learning_cmd::surface_for_edit(
+                    &pool,
+                    file_path,
+                    Some(agent_name),
+                    session_id,
+                )
+                .await;
+                print_edit_context(&lines);
             }
         }
         _ => {}

@@ -526,3 +526,35 @@ invented. Degraded output states that coordination and handoff were not loaded,
 without echoing database credentials or claiming that shared locks work offline.
 SessionStart and PreCompact inherit this path. Edit-time learning injection,
 per-session deduplication, optional live telemetry and TUI integration remain open.
+
+### Edit-time injection and session receipts
+
+PreToolUse now resolves selected OKF rules before coordination work. Edit, Write
+and NotebookEdit retain file/agent matching and emit only file-scoped, active,
+trusted, current rules. Selection is revalidated before emission; pending,
+changed, deleted or revoked rules cannot be authorized by session state. An
+unmapped cwd permits only explicitly global rules. A selected or invalid/fenced
+binding never falls back to SQL rules. Healthy coordination still records tool
+use, sends heartbeats and acquires the shared database lock; its complete attempt
+is bounded to three seconds independently of local injection.
+
+Private policy `.sessions/` receipts use a SHA-256 key over corpus, mapped user
+and the exact session ID, avoiding path traversal and lossy identifier collisions.
+The directory is opened relative to the held policy descriptor without following
+symlinks. Waiting for a paused cache writer is bounded to two seconds, after which
+the hook uses the same duplicates-possible fallback as a cache write failure.
+Cooperative writers serialize claims, revalidate eligibility under the
+receipt lease, and durably publish the last emitted approval digest per UUID.
+Receipts are bounded to 10,000 rules and 1 MiB per session; raw session IDs are
+limited to 4096 bytes and are not retained. Changed, reapproved content can fire
+again in the same session. Display-only changes do not reset deduplication.
+
+A receipt is committed before stdout emission. A crash in between can suppress an
+undelivered rule for that session; this is best-effort deduplication, not an
+exactly-once delivery protocol. Corrupt receipts reset with a diagnostic. If the
+cache cannot be used or written, the hook freshly revalidates eligible rules and
+emits them with a duplicates-possible diagnostic. Missing session IDs skip
+deduplication. These disposable receipts are excluded from backups, contain no
+exclusive knowledge or activation evidence, and may be removed explicitly when
+sessions are no longer active. Automatic cache retention cleanup and live
+telemetry recording remain unfinished, as do task-claim and TUI integration.
