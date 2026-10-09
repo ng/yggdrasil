@@ -123,6 +123,78 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         );
         first.unwrap();
         second.unwrap();
+        // External roles are operator-provided. A runtime without DDL rights
+        // cannot migrate; an explicit owner credential migrates the same DB.
+        sqlx::query("CREATE DATABASE ygg_owner_test OWNER ygg_owner")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("REVOKE ALL ON DATABASE ygg_owner_test FROM PUBLIC")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("GRANT CONNECT ON DATABASE ygg_owner_test TO ygg_runtime")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let connection_url = |user: &str| {
+            format!(
+                "postgresql://{user}@localhost/ygg_owner_test?host={}",
+                root.join("runtime").display()
+            )
+        };
+        let cli = || {
+            let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+            command
+                .env("DATABASE_URL", connection_url("ygg_runtime"))
+                .env("YGG_DB_MODE", "external")
+                .env("YGG_CONFIG_DIR", temp.path().join("role-config"))
+                .env("YGG_DATA_DIR", temp.path().join("role-data"))
+                .env_remove("YGG_DATABASE_OWNER_URL");
+            command
+        };
+        assert!(
+            !cli()
+                .arg("migrate")
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+        let migrated = cli()
+            .arg("migrate")
+            .env("YGG_DATABASE_OWNER_URL", connection_url("ygg_owner"))
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            migrated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&migrated.stderr)
+        );
+        let operator = ygg::db::create_pool(&connection_url("ygg_bootstrap"))
+            .await
+            .unwrap();
+        sqlx::query("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ygg_runtime")
+            .execute(&operator)
+            .await
+            .unwrap();
+        operator.close().await;
+        // Read-only checks never contact the configured owner, even when that
+        // credential is unusable. Ordinary runtime connections stay limited.
+        assert!(
+            cli()
+                .args(["migrate", "--check"])
+                .env("YGG_DATABASE_OWNER_URL", connection_url("no_such_role"))
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(!temp.path().join("role-data").exists());
+
         let runtime = PgPoolOptions::new()
             .max_connections(2)
             .connect_with(ygg::db::provision::runtime_options(&cluster))

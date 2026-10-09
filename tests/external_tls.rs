@@ -252,3 +252,24 @@ async fn native_tls_checks_ca_hostname_and_refuses_plaintext() {
         .expect_err("TLS must not downgrade");
     assert!(matches!(&error, sqlx::Error::Tls(_)), "{error:?}");
 }
+
+#[test]
+fn migration_owner_cannot_redirect_database_or_endpoint() {
+    use ygg::db::external::validate_owner_target;
+    let runtime = "postgres://runtime@localhost/application";
+    validate_owner_target(runtime, "postgres://owner:private@localhost/application").unwrap();
+    for owner in [
+        "postgres://owner@localhost/other",
+        "postgres://owner@localhost:5544/application",
+        "postgres://owner@127.0.0.1/application",
+        "postgres://owner@localhost/application?host=/tmp/other",
+        "postgres://owner@localhost",
+    ] {
+        assert!(validate_owner_target(runtime, owner).is_err());
+    }
+    assert!(
+        validate_owner_target("postgres://runtime@localhost", "postgres://owner@localhost")
+            .is_err(),
+        "default DB follows username"
+    );
+}

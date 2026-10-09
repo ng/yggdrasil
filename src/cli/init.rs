@@ -381,6 +381,7 @@ async fn init(
             &deployment.database,
             postgres_archive,
             !skipping(&all_skips, "migrations"),
+            deployment.owner_url.as_ref(),
         )
         .await?;
         ok("postgresql", "ready");

@@ -141,3 +141,28 @@ fn application_config_uses_user_defaults_and_redacts_database() {
     assert!(!temp.path().join("Library").exists());
     assert!(!temp.path().join(".local").exists());
 }
+
+#[test]
+fn external_owner_is_separate_redacted_and_environment_overrides_config() {
+    let config = resolve("[database]\nurl='postgres://runtime@localhost/app'\nowner_url='postgres://owner:private@localhost/app'", &[]).unwrap();
+    assert!(
+        matches!(config.database, DatabaseTarget::External { ref url } if url.contains("runtime"))
+    );
+    assert!(!format!("{:?}", config.owner_url).contains("private"));
+    let config = resolve("[database]\nurl='postgres://runtime@localhost/app'\nowner_url='postgres://old@localhost/app'", &[("YGG_DATABASE_OWNER_URL", "postgres://new@localhost/app")]).unwrap();
+    assert!(config.owner_url.unwrap().as_str().contains("new"));
+    assert!(
+        resolve(
+            "",
+            &[("YGG_DATABASE_OWNER_URL", "postgres://owner@localhost/app")]
+        )
+        .is_err()
+    );
+    assert!(
+        resolve(
+            "[database]\nurl='postgres://runtime@localhost/app'",
+            &[("YGG_DATABASE_OWNER_URL", "")]
+        )
+        .is_err()
+    );
+}

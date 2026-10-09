@@ -109,16 +109,23 @@ pub async fn connect(target: &crate::config::database::DatabaseTarget) -> anyhow
 /// Operator-only migration path. Ordinary pools always retain runtime identity.
 pub async fn migrate_target(
     target: &crate::config::database::DatabaseTarget,
+    owner: Option<&crate::config::database::MigrationOwnerUrl>,
 ) -> anyhow::Result<()> {
     use crate::config::database::DatabaseTarget;
     match target {
         DatabaseTarget::External { url } => {
-            let pool = create_pool(url).await?;
+            let selected = owner.map(|owner| owner.as_str()).unwrap_or(url);
+            external::validate_owner_target(url, selected)?;
+            let pool = create_pool(selected).await?;
             let result = run_migrations(&pool).await;
             pool.close().await;
             result?;
         }
         DatabaseTarget::ManagedLocal { data_dir } => {
+            anyhow::ensure!(
+                owner.is_none(),
+                "managed mode cannot use an external owner URL"
+            );
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 let cluster = runtime::ManagedCluster::open(&data_dir.join("postgres"))?;
@@ -179,6 +186,7 @@ pub async fn initialize_target(
     target: &crate::config::database::DatabaseTarget,
     archive: Option<&std::path::Path>,
     migrations: bool,
+    owner: Option<&crate::config::database::MigrationOwnerUrl>,
 ) -> anyhow::Result<()> {
     use crate::config::database::DatabaseTarget;
     match target {
@@ -188,7 +196,7 @@ pub async fn initialize_target(
                 "offline PostgreSQL archive requires managed mode"
             );
             if migrations {
-                migrate_target(target).await?;
+                migrate_target(target, owner).await?;
             } else {
                 let pool = connect(target).await?;
                 sqlx::query("SELECT 1").execute(&pool).await?;
@@ -196,6 +204,10 @@ pub async fn initialize_target(
             }
         }
         DatabaseTarget::ManagedLocal { data_dir } => {
+            anyhow::ensure!(
+                owner.is_none(),
+                "managed mode cannot use an external owner URL"
+            );
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             initialize::run(data_dir, archive, migrations).await?;
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]

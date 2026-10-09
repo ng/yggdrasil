@@ -1248,7 +1248,7 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             } else {
-                ygg::db::migrate_target(&config.database).await?;
+                ygg::db::migrate_target(&config.database, config.owner_url.as_ref()).await?;
                 println!("Schema is up to date.");
             }
         }

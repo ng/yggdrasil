@@ -37,6 +37,7 @@ pub enum DatabaseMode {
 pub struct DatabaseSettings {
     pub mode: Option<DatabaseMode>,
     pub url: Option<String>,
+    pub owner_url: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -53,8 +54,24 @@ pub struct UserSettings {
 /// This also permits deterministic configuration tests without unsafe set_var.
 pub type Environment = BTreeMap<String, String>;
 
+#[derive(Clone)]
+pub struct MigrationOwnerUrl(String);
+
+impl MigrationOwnerUrl {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for MigrationOwnerUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MigrationOwnerUrl([redacted])")
+    }
+}
+
 pub struct DeploymentConfig {
     pub database: DatabaseTarget,
+    pub owner_url: Option<MigrationOwnerUrl>,
     pub data_dir: PathBuf,
     pub knowledge_dir: PathBuf,
 }
@@ -175,7 +192,19 @@ impl DeploymentConfig {
                 data_dir: data_dir.clone(),
             },
         };
+        let owner_url = env
+            .get("YGG_DATABASE_OWNER_URL")
+            .or(settings.database.owner_url.as_ref());
+        if owner_url.is_some_and(|value| value.trim().is_empty()) {
+            return Err(error("migration owner URL is empty"));
+        }
+        if owner_url.is_some() && matches!(database, DatabaseTarget::ManagedLocal { .. }) {
+            return Err(error(
+                "managed mode provisions its own owner; external owner URL conflicts with managed mode",
+            ));
+        }
         Ok(Self {
+            owner_url: owner_url.cloned().map(MigrationOwnerUrl),
             database,
             data_dir,
             knowledge_dir,

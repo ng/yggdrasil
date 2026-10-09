@@ -6,6 +6,7 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub database: database::DatabaseTarget,
+    pub owner_url: Option<database::MigrationOwnerUrl>,
     pub context_limit_tokens: usize,
     pub context_hard_cap_tokens: usize,
     pub lock_ttl_secs: u64,
@@ -33,6 +34,7 @@ impl AppConfig {
         let deployment = database::DeploymentConfig::from_user_environment(&env, &dir)?;
         Ok(Self {
             database: deployment.database,
+            owner_url: deployment.owner_url,
             context_limit_tokens: env
                 .get("CONTEXT_LIMIT_TOKENS")
                 .map(String::as_str)

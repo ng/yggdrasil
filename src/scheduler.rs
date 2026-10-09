@@ -1265,6 +1265,7 @@ mod tests {
     #[test]
     fn config_defaults_reasonable() {
         let app = AppConfig {
+            owner_url: None,
             database: crate::config::database::DatabaseTarget::External { url: "test".into() },
             context_limit_tokens: 250_000,
             context_hard_cap_tokens: 300_000,

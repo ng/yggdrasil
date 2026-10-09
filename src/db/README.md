@@ -236,3 +236,23 @@ before SQLx can log ignored parameters. Keep credentials in user-owned config or
 environment. A native test creates a disposable CA/server certificate, verifies
 an encrypted session, rejects an unrelated CA and hostname mismatch, and refuses
 a server that does not offer TLS. The native release matrix runs this test.
+
+## External migration credentials
+
+Set `YGG_DATABASE_OWNER_URL` or `[database].owner_url` in the user configuration
+to supply a separate migration credential. The environment value takes precedence.
+Only explicit `ygg migrate` and the migration phase of `ygg init` use it;
+ordinary commands and `ygg migrate --check` use the runtime database URL.
+Without an owner URL, explicit migrations retain the configured database
+credential for compatibility. The operator must provision runtime grants and
+either allow the owner to install `uuid-ossp` or preinstall that extension.
+
+The owner URL must select the same effective host, socket, port and database as
+the runtime URL. Different credentials are allowed; endpoint aliases and a
+different default database are rejected before connecting. Both URLs obey the
+external TLS policy. Owner credentials are redacted from debug configuration.
+Managed mode rejects external owner configuration and provisions its own roles.
+
+The native package test creates a separate external database, proves that its
+restricted runtime role cannot migrate, applies migrations with its owner, and
+runs `migrate --check` with an unusable owner credential to verify separation.

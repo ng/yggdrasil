@@ -60,3 +60,28 @@ pub fn options(database_url: &str) -> Result<PgConnectOptions, sqlx::Error> {
     }
     Ok(options.ssl_mode(PgSslMode::VerifyFull))
 }
+
+/// Role credentials may differ, but an owner URL must not silently redirect an
+/// operator migration. Compare effective SQLx endpoints, including query/env
+/// defaults, before opening either connection. Different transport endpoints
+/// require an explicit deployment move rather than implicit owner selection.
+pub fn validate_owner_target(runtime: &str, owner: &str) -> Result<(), sqlx::Error> {
+    let runtime = options(runtime)?;
+    let owner = options(owner)?;
+    let database = |options: &PgConnectOptions| {
+        options
+            .get_database()
+            .unwrap_or(options.get_username())
+            .to_owned()
+    };
+    if runtime.get_host() != owner.get_host()
+        || runtime.get_socket() != owner.get_socket()
+        || runtime.get_port() != owner.get_port()
+        || database(&runtime) != database(&owner)
+    {
+        return Err(invalid(
+            "migration owner URL must select the same host, socket, port and database as the runtime URL",
+        ));
+    }
+    Ok(())
+}
