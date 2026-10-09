@@ -31,3 +31,6 @@ pub mod shared;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod backend;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod reverse;

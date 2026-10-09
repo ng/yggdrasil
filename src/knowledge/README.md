@@ -429,6 +429,32 @@ unlisted files, independent target edits, incomplete archives and changed source
 generations. They do not substitute for full killed-process migration, coordinated
 configuration publication or rollback release gates.
 
+## Reverse-import candidate validation
+
+`reverse::build` constructs SQL row candidates from the **current** complete corpus
+snapshot, not from the frozen export. It compares UUIDs against the saved export to
+list deletions, accepts new documents, preserves current text and matching scope,
+and requires explicit current usage for every rule. Totals below the recorded
+migration baseline, missing usage, duplicate UUIDs, changed document kinds and
+snapshot diagnostics block the candidate. No missing counter becomes zero.
+
+The strict reverse adapters convert each row back into an OKF document and compare
+its modeled content. Exact body, nullable fields, owner, scope, source, state and
+approval actor/time must survive. They normalize the generated legacy provenance,
+original repository hint and activation representation; current scope still needs
+an unambiguous saved identity mapping. Manual creation evidence is retained in SQL
+approval columns instead of being omitted as in the display-only JSON adapter.
+Unknown document/profile/provenance/approval metadata, unsupported note fields and
+invalid active approvals block rollback rather than disappearing or being silently
+downgraded. Current edits must be reviewed or explicitly pending before reversal.
+
+A candidate records current document revisions and the original export digest.
+It is not an authorization or an applied rollback. The migration workflow must
+capture authoritative current usage, retain the exact current bundle as recovery
+evidence, quiesce writers, revalidate revisions under its leases, use the restricted
+SQL migration bypass, validate restored rows and then publish the storage/config
+transition. Those apply/orchestration steps and the rollback rehearsal remain open.
+
 ## Corpus backup component
 
 `KnowledgeStore::backup` creates an immutable snapshot directory containing

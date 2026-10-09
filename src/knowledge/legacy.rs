@@ -385,3 +385,84 @@ pub fn is_imported(doc: &Document) -> Result<bool> {
         .flatten()
         .is_some())
 }
+
+// These are representation fields introduced by the OKF transport, not SQL
+// knowledge fields. Validate their meaning before normalizing them for comparison.
+fn reverse_comparable(
+    doc: &Document,
+    mappings: &Mappings,
+) -> Result<(Document, serde_json::Value)> {
+    let mut normalized = doc.clone();
+    let mut p = doc
+        .profile()?
+        .ok_or_else(|| anyhow!("Yggdrasil profile required"))?;
+    let mut legacy_fields = serde_json::json!({"tags": null, "at": null, "actor": null});
+    if let Some(raw) = p.extra.get(PROVENANCE) {
+        let original: Provenance = serde_yaml_ng::from_value(raw.clone())?;
+        ensure!(
+            original.database_id == mappings.database_id
+                && serde_yaml_ng::to_value(&original)? == *raw,
+            "legacy provenance has foreign identity or unrepresentable fields"
+        );
+        legacy_fields["tags"] = serde_json::to_value(original.non_object_scope_tags)?;
+        if p.state == State::Pending {
+            legacy_fields["at"] = serde_json::to_value(original.approved_at)?;
+            legacy_fields["actor"] = serde_json::to_value(original.approved_by)?;
+        }
+    }
+    // This is the original scope hint, intentionally retained after a scope
+    // move. The adapter already resolved the CURRENT scope through explicit
+    // mappings, and the reconstructed profile must have that same scope.
+    p.legacy_repo_id = None;
+    p.extra.remove(PROVENANCE);
+    if let Some(approval) = &mut p.approval {
+        // SQL stores activation plus actor/time; corpus/digest are regenerated
+        // from the same identity/content. Keep all other approval fields exact.
+        approval.kind = ActivationKind::Legacy;
+    }
+    normalized.set_profile(&p)?;
+    Ok((normalized, legacy_fields))
+}
+
+/// Strict rollback conversion, unlike the display-only JSON adapter. Any field
+/// outside the legacy representation blocks rollback instead of disappearing.
+pub fn reverse_note(doc: &Document, mappings: &Mappings) -> Result<(Memory, String)> {
+    let user = legacy_user_id(doc, mappings)?;
+    let row = note_json_model(doc, mappings)?;
+    let restored = import_note(&row, &user, mappings)?;
+    ensure!(
+        reverse_comparable(doc, mappings)? == reverse_comparable(&restored, mappings)?,
+        "note cannot round-trip losslessly through legacy SQL"
+    );
+    Ok((row, user))
+}
+
+pub fn reverse_learning(
+    doc: &Document,
+    usage: &Usage,
+    mappings: &Mappings,
+) -> Result<(Learning, String)> {
+    let user = legacy_user_id(doc, mappings)?;
+    let p = doc
+        .profile()?
+        .ok_or_else(|| anyhow!("Yggdrasil profile required"))?;
+    let mut row = learning_json_model(doc, usage, mappings)?;
+    if p.state == State::Active {
+        ensure!(
+            doc.activation_valid(mappings.corpus_id)?,
+            "active rule has invalid approval; review before rollback"
+        );
+        let approval = p.approval.as_ref().unwrap();
+        // The public JSON adapter omits manual creation evidence for API
+        // compatibility. Reverse import must preserve its real actor and time.
+        row.approved_at = approval.at;
+        row.approved_by = approval.actor;
+    }
+    let (restored, restored_usage) = import_learning(&row, &user, mappings)?;
+    ensure!(
+        restored_usage == *usage
+            && reverse_comparable(doc, mappings)? == reverse_comparable(&restored, mappings)?,
+        "rule cannot round-trip losslessly through legacy SQL"
+    );
+    Ok((row, user))
+}
