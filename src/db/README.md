@@ -282,7 +282,8 @@ aliases, populates two backends and enables round-robin reuse. It verifies both
 library observations and CLI exit status. It also pins the original backend on
 another client to verify that the singleton guard rejects reassignment before
 polling work. The fixture accepts SQLx's `extra_float_digits` startup parameter
-through PgBouncer's `ignore_startup_parameters` setting. Run against an isolated database with
+through PgBouncer's `ignore_startup_parameters` setting and explicitly enables
+`max_prepared_statements = 100` for the authority-guard checks (PgBouncer 1.21+). Run against an isolated database with
 `YGG_TEST_PGBOUNCER_BIN` pointing to the binary and, when required, supply its
 upstream password separately through `YGG_TEST_PGBOUNCER_PASSWORD`:
 

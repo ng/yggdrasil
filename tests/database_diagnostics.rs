@@ -86,7 +86,7 @@ async fn pgbouncer_session_and_transaction_modes_have_distinct_observations() {
         }
     }
     let config = format!(
-        "[databases]\nsession = {target} pool_mode=session\ntransaction = {target} pool_mode=transaction\n[pgbouncer]\nlisten_addr =\nlisten_port = 6432\nunix_socket_dir = {}\nauth_type = any\ndefault_pool_size = 2\nserver_round_robin = 1\nignore_startup_parameters = extra_float_digits\nlogfile = {}\npidfile = {}\n",
+        "[databases]\nsession = {target} pool_mode=session\ntransaction = {target} pool_mode=transaction\n[pgbouncer]\nlisten_addr =\nlisten_port = 6432\nunix_socket_dir = {}\nauth_type = any\ndefault_pool_size = 2\nserver_round_robin = 1\nmax_prepared_statements = 100\nignore_startup_parameters = extra_float_digits\nlogfile = {}\npidfile = {}\n",
         root.display(),
         root.join("pool.log").display(),
         root.join("pool.pid").display()
