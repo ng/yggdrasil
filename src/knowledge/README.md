@@ -190,13 +190,24 @@ PostgreSQL 18.3 (Homebrew), 100 samples per mode:
 | --- | ---: | ---: | ---: | --- |
 | Global writer lease | 251.04 ms | 1,781.85 ms | 1,530.81 ms | Failed |
 | Session lease + shared compatibility lease | 251.06 ms | 1,568.37 ms | 1,317.31 ms | Failed |
+| Per-query file-pattern reuse | 262.44 ms | 637.42 ms | 374.98 ms | Failed |
+| Pattern reuse + moved warm index rows | 259.90 ms | 610.15 ms | 350.24 ms | Failed |
 
-Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-before-session-locks.json)
-and [with session locks](../../docs/performance/okf-hooks-2026-10-09-session-locks.json).
-Both runs verified identical rule output and all 2,400 usage observations per mode
+Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-before-session-locks.json),
+[with session locks](../../docs/performance/okf-hooks-2026-10-09-session-locks.json),
+[with pattern reuse](../../docs/performance/okf-hooks-2026-10-09-pattern-cache.json),
+and [with warm row moves](../../docs/performance/okf-hooks-2026-10-09-pattern-cache-index-moves.json).
+All runs verified identical rule output and all 2,400 usage observations per mode
 (including warmup). These are diagnostic runs on one host, not a cross-platform
 latency guarantee. Independent session leases remove one contention source, but
 the release's SQL-relative latency requirement remains **unmet**.
+
+File-pattern results are reused only within one immutable query, with at most 256
+keys and 64 KiB of pattern text retained. Every rule still undergoes its own scope,
+ownership, approval and fresh-byte checks; invalid patterns remain errors. Warm
+index reads move validated rows into the candidate list instead of cloning profiles
+and rebuilding a second map. Changed indexes serialize a sorted view of borrowed
+rows; live inventory/fingerprint checks and selected-document revalidation remain.
 
 Initial scan-only measurement (2026-10-08, engine at `cbed794`, release build,
 macOS arm64, 10 logical CPUs, 24 GiB RAM):

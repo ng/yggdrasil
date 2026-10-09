@@ -115,8 +115,8 @@ impl KnowledgeStore {
         // Their failure cannot erase authoritative documents or fail a read.
         let loaded = self.read_index();
         let mut dirty = loaded.is_err();
-        let old = loaded.unwrap_or_default();
-        let mut next = BTreeMap::new();
+        let mut old = loaded.unwrap_or_default();
+        let old_len = old.len();
         let mut counts = std::collections::HashMap::new();
         for key in &inventory.keys {
             *counts.entry(key.id).or_insert(0) += 1;
@@ -142,8 +142,11 @@ impl KnowledgeStore {
                 let directory = &parent.as_ref().unwrap().2;
                 let name = format!("{}.md", key.id);
                 let before = Stamp::at(directory, &name)?;
-                if let Some(row) = old.get(&path).filter(|r| r.key == key && r.stamp == before) {
-                    return Ok(row.clone());
+                if let Some(row) = old
+                    .remove(&path)
+                    .filter(|r| r.key == key && r.stamp == before)
+                {
+                    return Ok(row);
                 }
                 dirty = true;
                 let mut file = child(directory, &name, libc::O_RDONLY, 0)?;
@@ -177,16 +180,21 @@ impl KnowledgeStore {
                 })
             })();
             match row {
-                Ok(row) => {
-                    next.insert(path, row.clone());
-                    result.rows.push(row);
-                }
+                Ok(row) => result.rows.push(row),
                 Err(e) => result.diagnostics.push(format!("{path}: {e}")),
             }
         }
-        dirty |= old.len() != next.len();
+        dirty |= old_len != result.rows.len();
         if dirty {
             let save = (|| -> Result<()> {
+                // Warm reads move validated rows into the result without copying
+                // profiles or constructing a second index. Only changed indexes
+                // need a sorted serialization view; borrowed rows preserve format.
+                let next: BTreeMap<_, _> = result
+                    .rows
+                    .iter()
+                    .map(|row| (row.key.relative_path().to_string_lossy().into_owned(), row))
+                    .collect();
                 let body = serde_json::to_string(&next)?;
                 let header = serde_json::to_string(&Header {
                     version: 1,

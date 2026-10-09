@@ -467,13 +467,14 @@ impl KnowledgeService {
     /// freshness prevents automatic injection. Covered edits still revoke active status.
     pub fn list_rules(&self, filters: &Filters<'_>) -> Result<Snapshot> {
         let policy = self.policy()?;
+        let mut matcher = matching::Matcher::new(filters);
         Self::scope(&policy, filters.repo)?;
         let mut snapshot = self.browse()?;
         snapshot.documents.retain(|doc| {
             let result = (|| -> Result<bool> {
                 Ok(doc.key.kind == Kind::Learning
                     && doc.document.activation_valid(policy.corpus_id)?
-                    && matching::matches(&self.owned(&doc.document)?, filters)?)
+                    && matcher.matches(&self.owned(&doc.document)?)?)
             })();
             match result {
                 Ok(keep) => keep,
@@ -497,6 +498,7 @@ impl KnowledgeService {
     pub fn rules(&self, filters: &Filters<'_>, now: DateTime<Utc>) -> Result<Snapshot> {
         self.store.fresh(now)?;
         let policy = self.policy()?;
+        let mut matcher = matching::Matcher::new(filters);
         Self::scope(&policy, filters.repo)?;
         let candidates = self.store.candidates();
         let mut snapshot = Snapshot {
@@ -507,7 +509,7 @@ impl KnowledgeService {
             let result = (|| -> Result<Option<RevisionedDocument>> {
                 if row.key.kind != Kind::Learning
                     || row.profile.user_id.as_deref() != Some(&self.user)
-                    || !matching::matches(&row.profile, filters)?
+                    || !matcher.matches(&row.profile)?
                 {
                     return Ok(None);
                 }
@@ -518,7 +520,7 @@ impl KnowledgeService {
                 Ok((doc
                     .document
                     .eligible(policy.trusted.then_some(policy.corpus_id), now)?
-                    && matching::matches(&profile, filters)?)
+                    && matcher.matches(&profile)?)
                 .then_some(doc))
             })();
             match result {
@@ -550,6 +552,7 @@ impl KnowledgeService {
     ) -> Result<Snapshot> {
         self.store.fresh(now)?;
         let policy = self.policy()?;
+        let mut matcher = matching::Matcher::new(filters);
         Self::scope(&policy, filters.repo)?;
         let mut snapshot = self.store.revalidate_selected(selected);
         snapshot.documents.retain(|doc| {
@@ -558,7 +561,7 @@ impl KnowledgeService {
                     && doc
                         .document
                         .eligible(policy.trusted.then_some(policy.corpus_id), now)?
-                    && matching::matches(&self.owned(&doc.document)?, filters)?)
+                    && matcher.matches(&self.owned(&doc.document)?)?)
             })();
             match result {
                 Ok(eligible) => eligible,
