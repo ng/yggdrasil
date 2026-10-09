@@ -157,3 +157,33 @@ pub fn fence_local(generation: i64, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+pub async fn clients(json: bool) -> Result<()> {
+    let config = crate::config::AppConfig::from_env()?;
+    let report = crate::db::diagnostics::clients(&config).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{} live connections, {} compatibility blockers; generation {}.",
+            report.clients.len(),
+            report.live_blockers,
+            report.generation
+        );
+        for client in &report.clients {
+            println!(
+                "Backend {} ({}): {:?}, protocol {:?}",
+                client.backend_pid, client.role, client.compatibility, client.protocol
+            );
+        }
+        println!(
+            "Still requires: {}.",
+            report.remaining_verification.join("; ")
+        );
+    }
+    ensure!(
+        report.live_blockers == 0,
+        "unregistered or outdated live clients require upgrade/restart before cutover"
+    );
+    Ok(())
+}

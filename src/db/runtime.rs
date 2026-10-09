@@ -219,9 +219,13 @@ impl ManagedCluster {
         let bin = bin.canonicalize()?;
         let binary_version = output(
             command(&bin.join("postgres")).arg("--version"),
-            Duration::from_secs(5),
+            // Fresh native packages can take several seconds to load before
+            // even --version responds. Keep bootstrap bounded without treating
+            // the normal readiness probe budget as a cold executable deadline.
+            Duration::from_secs(30),
         )
-        .await?;
+        .await
+        .context("cannot inspect selected PostgreSQL version during bootstrap")?;
         ensure!(
             binary_version
                 .split_whitespace()
@@ -303,9 +307,10 @@ impl ManagedCluster {
         private_dir(&data, false)?;
         let control = output(
             command(&bin.join("pg_controldata")).arg(&data),
-            Duration::from_secs(5),
+            Duration::from_secs(30),
         )
-        .await?;
+        .await
+        .context("cannot inspect initialized PostgreSQL control data")?;
         let system_id = control
             .lines()
             .find_map(|line| line.strip_prefix("Database system identifier:"))
@@ -381,9 +386,10 @@ impl ManagedCluster {
         );
         let control = output(
             command(&manifest.bin.join("pg_controldata")).arg(source),
-            Duration::from_secs(5),
+            Duration::from_secs(30),
         )
-        .await?;
+        .await
+        .context("cannot verify retained PostgreSQL bootstrap control data")?;
         ensure!(
             control
                 .lines()

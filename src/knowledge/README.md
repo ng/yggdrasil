@@ -335,6 +335,38 @@ exist, but fleet compatibility inventory, complete backup/parity evidence and
 coordinated configuration/generation publication still need the cutover workflow.
 Never manually switch the marker as a substitute for those steps.
 
+`ygg knowledge clients [--json]` reports the current database's live client
+connections, excluding its own inspector. Application pools register each physical
+connection after migration `20261009000003_knowledge_clients.sql`; the server
+binds protocol, binary version and process UUID to its own PID and authenticated
+role. Audit joins the declared backend start time to the actual server lifetime.
+Missing registrations and protocols below the marker's minimum are blockers and
+produce a nonzero command exit, with JSON observations still printed. Connections
+opened before this migration remain unregistered until restarted. Runtime roles
+have function execution permission, not direct registry write permission. Each
+registration removes rows for ended connections and stale reuse of its own PID.
+
+The audit requires READ COMMITTED so a reused snapshot cannot hide a generation
+change. The CLI uses a dedicated read-only operator transaction, never application pool
+registration or managed startup. External deployments use `YGG_DATABASE_OWNER_URL`
+when configured, validate that it names the runtime endpoint, and require registry
+SELECT permission plus `pg_read_all_stats` or superuser visibility. Managed mode
+uses its existing private cluster's bootstrap connection only for this read-only
+inspection. Insufficient statistics visibility fails; hidden sessions are not
+silently omitted. Reports omit query text, network addresses and arbitrary
+application names.
+
+Registrations are client compatibility declarations, not signed executable
+attestations. A clean live report does not account for disconnected/offline hosts,
+external editors, clients that connect later or transaction-pool backend reuse.
+Verify session affinity and the complete participating-host inventory separately,
+then recheck under the migration lease before transition. Registration is
+independent of that lease so coordination connections remain available during
+knowledge cutover (forward migration `20261009000004`). The lease stabilizes the
+knowledge phase; it does not prevent new client connections. Connection admission
+and the complete host inventory need separate operator verification. Offline
+local-fence evidence and full fleet cutover orchestration remain required.
+
 Unaware older binaries can still SELECT frozen legacy tables: upgrade or retire
 them before cutover, as required by the plan. These triggers also do not constrain
 an administrator who disables triggers or changes table/function ownership. The

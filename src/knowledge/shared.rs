@@ -1289,6 +1289,7 @@ fi
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let diagnostics = temp.path().join("initializer.stderr");
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -1301,16 +1302,29 @@ fi
             .env("YGG_INIT_DONE", &done)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(&diagnostics).unwrap())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A newly linked test executable can load slowly on a busy native host.
+        // Preserve the fault boundary; do not kill it before setup can run.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while !ready.exists() && Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
-        child.kill().unwrap();
-        child.wait().unwrap();
-        assert!(ready.exists(), "initializer did not reach fault boundary");
+        if child.try_wait().unwrap().is_none() {
+            // The owned child may exit between try_wait and kill; wait still
+            // reaps that exact child and the assertions below reject bad setup.
+            let _ = child.kill();
+        }
+        let status = child.wait().unwrap();
+        assert!(
+            ready.exists(),
+            "initializer did not reach fault boundary ({status}): {}",
+            std::fs::read_to_string(&diagnostics).unwrap()
+        );
         let stage = PathBuf::from(std::fs::read_to_string(&ready).unwrap());
         assert!(
             stage.starts_with(root.canonicalize().unwrap())

@@ -71,6 +71,7 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .unwrap_or(DEFAULT_MAX_CONNECTIONS);
     PgPoolOptions::new()
         .max_connections(max_connections)
+        .after_connect(|connection, _| Box::pin(crate::knowledge::clients::register(connection)))
         .connect_with(external::options(database_url)?)
         .await
 }
@@ -104,6 +105,9 @@ pub async fn connect(target: &crate::config::database::DatabaseTarget) -> anyhow
                     .unwrap_or(DEFAULT_MAX_CONNECTIONS);
                 Ok(PgPoolOptions::new()
                     .max_connections(max_connections)
+                    .after_connect(|connection, _| {
+                        Box::pin(crate::knowledge::clients::register(connection))
+                    })
                     .connect_with(provision::runtime_options(&cluster))
                     .await
                     .context("managed runtime database unavailable; run ygg migrate explicitly")?)

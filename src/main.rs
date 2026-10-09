@@ -48,6 +48,11 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Audit live database client compatibility; offline hosts remain unverified
+    Clients {
+        #[arg(long)]
+        json: bool,
+    },
     /// Drain and durably fence this host's selected OKF commands, without SQL access
     FenceLocal {
         #[arg(long)]
@@ -1399,6 +1404,7 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 ygg::cli::knowledge_cmd::fence_local(expected_generation, json)?;
             }
+            KnowledgeAction::Clients { json } => ygg::cli::knowledge_cmd::clients(json).await?,
             KnowledgeAction::Migrate {
                 dry_run: _,
                 mapping_file,

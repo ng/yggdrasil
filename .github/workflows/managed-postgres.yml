@@ -7,6 +7,7 @@ on:
       - '.github/workflows/managed-postgres.yml'
       - 'scripts/prepare-postgres-smoke.py'
       - 'Cargo.*'
+      - 'build.rs'
       - 'src/db.rs'
       - 'src/db/**'
       - 'src/cli/db_cmd.rs'

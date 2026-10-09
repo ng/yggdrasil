@@ -22,6 +22,13 @@ identity mismatches fail without replacement. Legacy interrupted roots lacking
 an intent are not automatically adopted. Native unit tests kill subprocesses at
 six durable boundaries; the CI matrix runs these on all planned platforms.
 
+Bootstrap allows 30 seconds for each native version/control-data probe, including
+verification of a retained bootstrap attempt. Fresh executable loading exceeded
+the former five-second version deadline in native package testing. Errors identify
+the failed bootstrap stage; ordinary readiness/status deadlines are unchanged.
+Cargo watches the migrations directory so adding a forward migration also rebuilds
+the embedded migrator in the application, not only a changed integration test.
+
 `open` and `status` do not initialize or start PostgreSQL. `try_owner` obtains a
 nonblocking OS lease in the canonical cluster root. The returned `Owner` retains
 that lease for its lifetime; competing clients wait for bounded readiness.

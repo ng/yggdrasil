@@ -116,3 +116,45 @@ mod tests {
         );
     }
 }
+
+/// Operator-only live client audit; managed bootstrap credentials remain inside
+/// the database layer and are used only for a read-only transaction. No startup.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub async fn clients(
+    config: &crate::config::AppConfig,
+) -> anyhow::Result<crate::knowledge::clients::Audit> {
+    use crate::config::database::DatabaseTarget;
+    use sqlx::{Connection, PgConnection};
+    let options = match &config.database {
+        DatabaseTarget::External { url } => {
+            let selected = config
+                .owner_url
+                .as_ref()
+                .map(|url| url.as_str())
+                .unwrap_or(url);
+            crate::db::external::validate_owner_target(url, selected)?;
+            crate::db::external::options(selected)?
+        }
+        DatabaseTarget::ManagedLocal { data_dir } => {
+            crate::db::runtime::ManagedCluster::open(&data_dir.join("postgres"))?
+                .admin_options()
+                .database("ygg")
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut connection = PgConnection::connect_with(&options).await.map_err(|_| {
+            anyhow::anyhow!(
+                "client audit connection failed; verify operator credentials and endpoint"
+            )
+        })?;
+        let mut tx = connection.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        let report = crate::knowledge::clients::audit(&mut tx).await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(report)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("client audit timed out; no compatibility conclusion"))?
+}
