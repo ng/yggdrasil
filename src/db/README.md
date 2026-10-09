@@ -322,11 +322,49 @@ must retain incomplete staging privately and publish only on success.
 The pinned-package test exports while another transaction commits a new row,
 restores into a disposable empty database and compares every inventoried table
 count, the original UUID and database identity, and a restored check constraint.
-TLS tests exercise native `pg_dump` as well as SQLx. The snapshot component is not
-yet a complete deployment backup: bundle/policy snapshots, a combined manifest,
-operator CLI, validated restore/publication and deployment moves remain to be wired.
+TLS tests exercise native `pg_dump` as well as SQLx. The combined backup command below includes bundle/policy snapshots and publishes
+a manifest. Validated restore and deployment moves remain to be implemented.
 Roles and tablespaces are cluster objects outside this single-database dump;
 restoration must explicitly provision target roles and validate grants.
 
 See [PostgreSQL pg_dump](https://www.postgresql.org/docs/18/app-pgdump.html) for
 exported snapshots and archive semantics.
+
+
+## Combined operator backups
+
+`ygg db backup /absolute/path/to/new-backup [--policy-dir /path/to/policy] [--json]`
+creates a private directory containing `database.dump`, `backup.json`, and—when
+knowledge exists—`knowledge/` and `policy/` snapshots. The destination parent must
+exist, be owned by the operator and not be writable by other users. Existing
+files, directories and symlinks are never replaced. Failed attempts retain private
+`.deployment-backup-<UUID>` stages for inspection; retries use new stages.
+
+Managed mode requires an already-running initialized server and uses its pinned
+native tools and migration owner. It never installs or starts PostgreSQL. External
+mode requires `--pg-bin /absolute/path/to/postgresql/bin` and uses the configured
+owner credential when present, otherwise the runtime credential. The selected
+credential must read all database contents. Remote verified TLS also requires an
+explicit CA file as described above.
+
+The bundle path comes from deployment configuration (`YGG_KNOWLEDGE_DIR` or
+`knowledge_dir`). If it exists, `--policy-dir` must identify its separate initialized
+identity registry; neither directory may overlap the other or the backup destination.
+If both are absent, only a database still using SQL knowledge can be backed up.
+A file-backed or fenced database cannot publish a database-only backup. No policy
+path is guessed, and no source files are deleted.
+
+Bundle and policy snapshots hold both stores' writer/export leases in a stable
+order. Database and filesystem revisions are recorded separately; this is not a
+cross-storage transaction. Quiesce writers and external editors for deployment
+moves or any recovery point requiring a single coordinated instant. A change to
+the database storage-generation marker during capture prevents publication, as
+does a mismatch between database and policy corpus IDs.
+
+`ygg db verify-backup /absolute/path/to/backup [--json]` performs offline integrity
+checks without loading database configuration or contacting a server. It checks
+the exact component inventory, custom archive header, hashes, knowledge revisions
+and corpus binding. It does not establish provenance, validate every SQL object,
+or replace a restore rehearsal. The whole stage is verified and synced before
+exclusive publication. Restore, upgrade and deployment-switch commands remain
+unfinished; no existing database or active configuration is changed by backup.

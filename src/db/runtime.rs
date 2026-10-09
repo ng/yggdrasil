@@ -411,6 +411,10 @@ impl ManagedCluster {
         Ok(Self { root, manifest })
     }
 
+    pub(super) fn bin(&self) -> &Path {
+        &self.manifest.bin
+    }
+
     pub fn id(&self) -> Uuid {
         self.manifest.cluster_id
     }

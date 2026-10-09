@@ -124,3 +124,30 @@ pub async fn diagnose(json: bool) -> Result<()> {
     );
     Ok(())
 }
+
+pub async fn backup(
+    destination: &std::path::Path,
+    pg_bin: Option<&std::path::Path>,
+    policy_dir: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let config = DeploymentConfig::load(std::env::vars().collect())?;
+    let manifest =
+        crate::db::deployment_backup::create(&config, destination, pg_bin, policy_dir).await?;
+    if json {
+        println!("{}", serde_json::to_string(&manifest)?);
+    } else {
+        println!("Backup verified and saved to {}", destination.display());
+    }
+    Ok(())
+}
+
+pub fn verify_backup(path: &std::path::Path, json: bool) -> Result<()> {
+    let manifest = crate::db::deployment_backup::verify(path)?;
+    if json {
+        println!("{}", serde_json::to_string(&manifest)?);
+    } else {
+        println!("Backup integrity verified: {}", path.display());
+    }
+    Ok(())
+}

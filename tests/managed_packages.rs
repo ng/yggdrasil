@@ -258,6 +258,69 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         let roundtrip = ygg::db::backup::dump(&bin, &restored_options, &mut second_output).await.unwrap();
         assert_eq!(roundtrip.database_id, receipt.database_id);
         assert_eq!(roundtrip.table_rows, receipt.table_rows);
+        // Exercise the actual external backup CLI, including separate policy,
+        // owner selection, exclusive publication and offline verification.
+        let bundle_path = temp.path().join("backup-knowledge");
+        let policy_path = temp.path().join("backup-policy");
+        let store = ygg::knowledge::store::KnowledgeStore::open(&bundle_path, true).unwrap();
+        let document = ygg::knowledge::document::Document::parse(include_str!("fixtures/knowledge/rule.md")).unwrap();
+        let saved = store.put(&document, ygg::knowledge::store::ExpectedRevision::Absent).unwrap();
+        let registry = ygg::knowledge::identity::IdentityRegistry::open(&policy_path, true).unwrap();
+        let corpus = registry.initialize(true).unwrap().corpus_id;
+        let destination = temp.path().join("deployment-backup");
+        let backup_command = |destination: &std::path::Path| {
+            let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+            cmd.env("DATABASE_URL", format!("postgres://ygg_runtime@localhost/postgres?host={}", root.join("runtime").display()))
+                .env("YGG_DATABASE_OWNER_URL", format!("postgres://ygg_bootstrap@localhost/postgres?host={}", root.join("runtime").display()))
+                .env("YGG_DB_MODE", "external").env("YGG_KNOWLEDGE_DIR", &bundle_path)
+                .env("YGG_CONFIG_DIR", temp.path().join("backup-config"))
+                .env("YGG_DATA_DIR", temp.path().join("backup-data"))
+                .args(["db", "backup"]).arg(&destination).arg("--pg-bin").arg(&bin).arg("--json");
+            cmd
+        };
+        assert!(!backup_command(&destination).output().await.unwrap().status.success());
+        assert!(!destination.exists());
+        let backed_up = backup_command(&destination).arg("--policy-dir").arg(&policy_path).output().await.unwrap();
+        assert!(backed_up.status.success(), "{}", String::from_utf8_lossy(&backed_up.stderr));
+        let combined: ygg::db::deployment_backup::Manifest = serde_json::from_slice(&backed_up.stdout).unwrap();
+        assert_eq!(combined.knowledge.as_ref().unwrap().corpus_id, corpus);
+        assert_eq!(ygg::db::deployment_backup::verify(&destination).unwrap(), combined);
+        assert!(!backup_command(&destination).arg("--policy-dir").arg(&policy_path).output().await.unwrap().status.success());
+        assert_eq!(ygg::db::deployment_backup::verify(&destination).unwrap(), combined);
+        assert!(!temp.path().join("backup-data").exists());
+        // Force a storage-generation change after the database snapshot but
+        // before the paired filesystem snapshot. No combined backup may publish.
+        let policy_lease = std::fs::OpenOptions::new().read(true).write(true).open(policy_path.join(".writer.lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&policy_lease).unwrap();
+        let racing_destination = temp.path().join("racing-backup");
+        let mut racing = backup_command(&racing_destination).arg("--policy-dir").arg(&policy_path)
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let copying = std::fs::read_dir(temp.path()).unwrap().flatten().any(|entry| entry.file_name().to_string_lossy().starts_with(".deployment-backup-") && entry.path().join("database.dump").metadata().is_ok_and(|m| m.len() > 5));
+                if copying { break; }
+                assert!(racing.try_wait().unwrap().is_none(), "backup exited before dump stage");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.unwrap();
+        sqlx::query("UPDATE knowledge_storage SET generation = generation + 1").execute(&pool).await.unwrap();
+        fs2::FileExt::unlock(&policy_lease).unwrap();
+        let failed = racing.wait_with_output().await.unwrap();
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("generation changed"), "{}", String::from_utf8_lossy(&failed.stderr));
+        assert!(!racing_destination.exists());
+
+        let verify_command = || {
+            let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+            cmd.env("YGG_DB_MODE", "invalid-for-offline-check")
+                .env("DATABASE_URL", "not-a-database-secret")
+                .args(["db", "verify-backup"]).arg(&destination).arg("--json");
+            cmd
+        };
+        assert!(verify_command().output().await.unwrap().status.success());
+        std::fs::write(destination.join("knowledge/corpus").join(saved.key.relative_path()), "tampered").unwrap();
+        assert!(!verify_command().output().await.unwrap().status.success());
+
         let runtime = PgPoolOptions::new()
             .max_connections(2)
             .connect_with(ygg::db::provision::runtime_options(&cluster))
@@ -446,6 +509,22 @@ async fn real_init_installs_offline_converges_and_reuses_cluster_without_archive
             !home.join("config/.env").exists(),
             "managed init must not manufacture a localhost URL"
         );
+        let backup_path = temp.path().join("managed-backup");
+        let backup = command()
+            .args(["db", "backup"])
+            .arg(&backup_path)
+            .arg("--json")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            backup.status.success(),
+            "{}",
+            String::from_utf8_lossy(&backup.stderr)
+        );
+        let manifest = ygg::db::deployment_backup::verify(&backup_path).unwrap();
+        assert!(manifest.knowledge.is_none());
+        assert_eq!(cluster.status().await.unwrap(), status);
         supervisor::stop(&cluster, Duration::from_secs(15))
             .await
             .unwrap();

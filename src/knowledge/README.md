@@ -421,8 +421,9 @@ a substitute for the full killed-process migration and rollback release gates.
 empty directories. Identity/policy lives in a separate `IdentityRegistry` directory:
 a deployment backup must snapshot that directory as well as its document bundle,
 and record both returned revisions alongside its consistent PostgreSQL dump.
-This library component alone is not a complete Yggdrasil deployment backup; the
-`db backup`/restore/upgrade orchestration is still pending.
+This library component alone is not a complete Yggdrasil deployment backup.
+`db backup` pairs bundle and policy snapshots with a database dump; validated
+restore and upgrade orchestration remain pending.
 
 The snapshot holds the export and writer leases, completes pending scope-move
 recovery, copies through held directory descriptors, and rereads source hashes

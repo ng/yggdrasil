@@ -64,6 +64,22 @@ enum KnowledgeAction {
 #[derive(Subcommand)]
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 enum DbAction {
+    /// Back up database and configured knowledge into a new private directory
+    Backup {
+        destination: std::path::PathBuf,
+        #[arg(long)]
+        pg_bin: Option<std::path::PathBuf>,
+        #[arg(long)]
+        policy_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify a combined backup offline without contacting a database
+    VerifyBackup {
+        path: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect runtime privileges and session observations without starting a server
     Diagnose {
         #[arg(long)]
@@ -1230,6 +1246,21 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Db { action } => match action {
+            DbAction::Backup {
+                destination,
+                pg_bin,
+                policy_dir,
+                json,
+            } => {
+                ygg::cli::db_cmd::backup(
+                    &destination,
+                    pg_bin.as_deref(),
+                    policy_dir.as_deref(),
+                    json,
+                )
+                .await?
+            }
+            DbAction::VerifyBackup { path, json } => ygg::cli::db_cmd::verify_backup(&path, json)?,
             DbAction::Diagnose { json } => ygg::cli::db_cmd::diagnose(json).await?,
             DbAction::Status { json } => ygg::cli::db_cmd::status(json).await?,
             DbAction::Start { timeout, json } => ygg::cli::db_cmd::start(timeout, json).await?,

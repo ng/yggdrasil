@@ -183,6 +183,39 @@ impl KnowledgeStore {
         destination: &Path,
         checkpoint: &dyn Fn(&str),
     ) -> Result<KnowledgeBackup> {
+        let _export = self.operation_lock(".export.lock")?;
+        let _writer = self.lock()?;
+        self.backup_under_leases(destination, checkpoint)
+    }
+
+    /// Snapshot a bundle and its separate policy directory under both leases.
+    pub(crate) fn backup_pair(
+        &self,
+        other: &Self,
+        destination: &Path,
+        other_destination: &Path,
+    ) -> Result<(KnowledgeBackup, KnowledgeBackup)> {
+        let a = self.root.metadata()?;
+        let b = other.root.metadata()?;
+        let a = (a.dev(), a.ino());
+        let b = (b.dev(), b.ino());
+        ensure!(a != b, "bundle and policy must be separate directories");
+        let (first, second) = if a < b { (self, other) } else { (other, self) };
+        let _export_a = first.operation_lock(".export.lock")?;
+        let _writer_a = first.lock()?;
+        let _export_b = second.operation_lock(".export.lock")?;
+        let _writer_b = second.lock()?;
+        Ok((
+            self.backup_under_leases(destination, &|_| {})?,
+            other.backup_under_leases(other_destination, &|_| {})?,
+        ))
+    }
+
+    fn backup_under_leases(
+        &self,
+        destination: &Path,
+        checkpoint: &dyn Fn(&str),
+    ) -> Result<KnowledgeBackup> {
         ensure!(
             destination.is_absolute(),
             "absolute backup destination required"
@@ -207,9 +240,6 @@ impl KnowledgeStore {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&parent_path)?;
-        // Match export's lock ordering; artifact writes use its separate lease.
-        let _export = self.operation_lock(".export.lock")?;
-        let _writer = self.lock()?;
         self.recover_move_locked()?;
         let stage_name = format!(".knowledge-backup-{}", Uuid::new_v4());
         let stage = directory(&parent, &stage_name, true)?;

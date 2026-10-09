@@ -97,6 +97,7 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `up`        | Launch the tmux dashboard (default when run bare).                     |
 | `dashboard` | Launch the TUI dashboard directly.                                      |
 | `status`    | Quick text output of agent + system state; `--format codex` emits one line. |
+| `db`        | Database lifecycle, diagnostics, combined backup and offline verification; [operator guide](src/db/README.md#combined-operator-backups). |
 | `migrate`   | Run database migrations.                                                |
 | `spawn`     | Spawn a new agent in a tmux window, registered in the DB.               |
 | `task`      | Task tracking: `create / list / ready / claim / close / dep / show / dupes`. |
