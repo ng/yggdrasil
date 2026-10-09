@@ -3,7 +3,7 @@
 #[path = "support/okf.rs"]
 mod okf;
 use futures::FutureExt;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{Connection, PgPool, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, path::Path};
 use uuid::Uuid;
 use ygg::{
@@ -55,7 +55,7 @@ impl Fixture {
     }
     async fn cleanup(self) {
         self.pool.close().await;
-        sqlx::query(&format!("DROP DATABASE {}", self.database))
+        sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
             .execute(&self.admin)
             .await
             .unwrap();
@@ -332,7 +332,16 @@ async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
         okf::select(root, &binding);
         assert!(!claim(&f, root, b, true).await.contains("[ygg learning"));
     }).catch_unwind().await;
+    // CLI exit can precede server-side socket cleanup. This connection makes
+    // that teardown case deterministic; FORCE is scoped to our unique fixture DB.
+    let mut lingering = sqlx::PgConnection::connect(&f.url).await.unwrap();
     f.cleanup().await;
+    assert!(
+        sqlx::query("SELECT 1")
+            .execute(&mut lingering)
+            .await
+            .is_err()
+    );
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
