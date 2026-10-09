@@ -123,6 +123,18 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         );
         first.unwrap();
         second.unwrap();
+        let diagnostic =
+            ygg::db::diagnostics::inspect(&ygg::db::provision::runtime_options(&cluster))
+                .await
+                .unwrap();
+        assert!(diagnostic.uuid_ossp_installed);
+        assert!(diagnostic.tested_major);
+        assert!(!diagnostic.runtime_superuser);
+        assert!(!diagnostic.runtime_create_role);
+        assert!(!diagnostic.runtime_create_database);
+        assert!(!diagnostic.runtime_create_schema);
+        assert!(!diagnostic.runtime_create_public_objects);
+
         // External roles are operator-provided. A runtime without DDL rights
         // cannot migrate; an explicit owner credential migrates the same DB.
         sqlx::query("CREATE DATABASE ygg_owner_test OWNER ygg_owner")

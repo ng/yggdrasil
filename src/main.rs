@@ -64,6 +64,11 @@ enum KnowledgeAction {
 #[derive(Subcommand)]
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 enum DbAction {
+    /// Inspect runtime privileges and session observations without starting a server
+    Diagnose {
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect the selected target without starting or initializing it
     Status {
         #[arg(long)]
@@ -1225,6 +1230,7 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Db { action } => match action {
+            DbAction::Diagnose { json } => ygg::cli::db_cmd::diagnose(json).await?,
             DbAction::Status { json } => ygg::cli::db_cmd::status(json).await?,
             DbAction::Start { timeout, json } => ygg::cli::db_cmd::start(timeout, json).await?,
             DbAction::Stop { timeout, json } => ygg::cli::db_cmd::stop(timeout, json).await?,

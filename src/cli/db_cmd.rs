@@ -1,5 +1,5 @@
-//! Database lifecycle commands resolve deployment without requiring AppConfig or
-//! opening an external pool. No lifecycle command installs or initializes data.
+//! Database lifecycle commands and explicit read-only connection diagnostics.
+//! Lifecycle commands never open an external pool or initialize data.
 use crate::{
     config::database::{DatabaseTarget, DeploymentConfig},
     db::{runtime::ManagedCluster, supervisor},
@@ -100,4 +100,27 @@ pub async fn serve(root: Option<PathBuf>, expected_id: Option<Uuid>) -> Result<(
         _ => anyhow::bail!("internal supervisor launch requires root and cluster ID together"),
     };
     supervisor::serve(cluster).await
+}
+
+/// Diagnose the runtime endpoint without invoking lifecycle or owner operations.
+pub async fn diagnose(json: bool) -> Result<()> {
+    let options = match target()? {
+        DatabaseTarget::External { url } => crate::db::external::options(&url)?,
+        DatabaseTarget::ManagedLocal { data_dir } => {
+            let cluster = ManagedCluster::open(&data_dir.join("postgres"))
+                .context("managed cluster unavailable; diagnostic does not initialize it")?;
+            crate::db::provision::runtime_options(&cluster)
+        }
+    };
+    let report = crate::db::diagnostics::inspect(&options).await?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+    ensure!(
+        !report.observed_incompatibility(),
+        "backend changed between transactions; endpoint cannot preserve singleton authority"
+    );
+    Ok(())
 }

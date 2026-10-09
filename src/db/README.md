@@ -256,3 +256,40 @@ Managed mode rejects external owner configuration and provisions its own roles.
 The native package test creates a separate external database, proves that its
 restricted runtime role cannot migrate, applies migrations with its owner, and
 runs `migrate --check` with an unusable owner credential to verify separation.
+
+## Connection diagnostics
+
+Run `ygg db diagnose --json` to inspect the configured runtime credential without
+starting, initializing or migrating a server. The bounded, read-only probe reports
+PostgreSQL major version (16 and 18 are the tested suite), `uuid-ossp` availability,
+role and schema-creation privileges, and backend identity across five separate
+transactions on one client connection. Owner credentials are not used. Elevated
+runtime privileges indicate that the operator should supply a restricted role;
+missing `uuid-ossp` requires explicit owner migration or administrator setup.
+`postgres_backend_tls` describes the PostgreSQL connection, which may be the
+proxy-to-server leg; it does not certify the client-to-proxy TLS configuration.
+
+A changed backend produces `backend_changed_incompatible` and a failing exit
+status. An unchanged backend produces `stable_but_unverified`: this is **not** a
+certificate of session support. Confirm a direct or session-pooling endpoint with
+the provider/operator before running scheduler or watcher. Transaction pooling is
+unsupported, even if a quiet pool happens to reuse one backend during this probe.
+The probe only issues SELECTs, so it leaves no session advisory locks or modified
+session state on pooled servers. Connection/query failures are redacted.
+
+The integration test starts a private PgBouncer with session and transaction
+aliases, populates two backends and enables round-robin reuse. It verifies both
+library observations and CLI exit status. It also pins the original backend on
+another client to verify that the singleton guard rejects reassignment before
+polling work. The fixture accepts SQLx's `extra_float_digits` startup parameter
+through PgBouncer's `ignore_startup_parameters` setting. Run against an isolated database with
+`YGG_TEST_PGBOUNCER_BIN` pointing to the binary and, when required, supply its
+upstream password separately through `YGG_TEST_PGBOUNCER_PASSWORD`:
+
+```sh
+cargo test --test database_diagnostics -- --include-ignored --test-threads=1
+```
+
+The PostgreSQL 16/18 CI jobs run this test with the distribution PgBouncer package.
+See [PgBouncer's pooling configuration](https://www.pgbouncer.org/config) for the
+session and transaction guarantees.

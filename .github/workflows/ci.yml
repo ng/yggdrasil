@@ -81,11 +81,17 @@ jobs:
       - name: Install test runtime tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux
+          sudo apt-get install -y tmux pgbouncer
           tmux new-session -d -s ygg-test-runtime
 
       - name: Run all tests against isolated Postgres
         run: cargo test --quiet -- --test-threads=1
+
+      - name: Verify session and transaction pool diagnostics
+        env:
+          YGG_TEST_PGBOUNCER_BIN: /usr/sbin/pgbouncer
+          YGG_TEST_PGBOUNCER_PASSWORD: postgres
+        run: cargo test --test database_diagnostics pgbouncer_session -- --include-ignored --test-threads=1
 
   clippy:
     name: clippy
