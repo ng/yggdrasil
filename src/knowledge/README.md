@@ -461,6 +461,33 @@ unlisted files, independent target edits, incomplete archives and changed source
 generations. They do not substitute for full killed-process migration, coordinated
 configuration publication or rollback release gates.
 
+## Transactional forward activation
+
+`forward::activate_on` performs the database half of cutover on the coordinator's
+existing READ COMMITTED transaction. The migration owner takes an exclusive
+generation lease, rejects unregistered/outdated live clients, checks the source
+column inventory even for empty tables, and revalidates every manifest row,
+document digest and usage baseline. It seeds imported telemetry without changing
+observed applications, advances the fenced marker to the next OKF generation,
+and inserts an immutable receipt bound to the operation UUID and manifest digest.
+The receipt and all database changes commit together. A savepoint removes partial
+seeding even if the caller commits its outer transaction after a validation error.
+
+After an uncertain commit, the same operation/manifest returns
+`PreviouslyActivated` only when the receipt, selected generation, complete frozen
+source and imported baselines still match. Retry does not reseed missing or changed
+baselines, reset post-cutover observations, or reactivate a later fenced generation.
+Source-table locks allow a queued legacy writer to finish waiting on the generation
+fence and fail, without inverting advisory/table lock order.
+
+This is a library transaction step, not an operator cutover command. Its caller
+must persist the operation ID before sending SQL, validate retained publication
+and backup evidence, and retain filesystem/selection leases through commit.
+The live audit is neither a full participating-host census nor an admission
+barrier. Durable workflow resumption, offline-host quiescence, schema/constraint
+parity beyond column names, local binding/trust publication and complete forward/
+reverse rehearsals remain required before enabling the migration CLI.
+
 ## Reverse-import candidate validation
 
 `reverse::build` constructs SQL row candidates from the **current** complete corpus

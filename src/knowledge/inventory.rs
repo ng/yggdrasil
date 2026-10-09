@@ -153,12 +153,7 @@ pub(crate) async fn visit(
 pub(crate) async fn visit_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     mappings: Option<&Mappings>,
-    mut visitor: impl FnMut(
-        &Source,
-        &Row,
-        &super::document::Document,
-        Option<&legacy::Usage>,
-    ) -> Result<()>,
+    visitor: impl FnMut(&Source, &Row, &super::document::Document, Option<&legacy::Usage>) -> Result<()>,
 ) -> Result<Report> {
     // Guard row locks require a read/write-capable transaction, but this routine
     // issues no data mutations. RR pins one snapshot across both source tables.
@@ -172,8 +167,24 @@ pub(crate) async fn visit_transaction(
         .bind(CLIENT_PROTOCOL)
         .execute(&mut **tx)
         .await?;
+    visit_on(tx, mappings, visitor).await
+}
+
+/// Caller retains a compatible generation lease for the whole scan. The owner
+/// activation path uses this after its exclusive lease, including receipt-only
+/// recovery after OKF was selected; ordinary readers use visit_transaction.
+pub(crate) async fn visit_on(
+    connection: &mut sqlx::PgConnection,
+    mappings: Option<&Mappings>,
+    mut visitor: impl FnMut(
+        &Source,
+        &Row,
+        &super::document::Document,
+        Option<&legacy::Usage>,
+    ) -> Result<()>,
+) -> Result<Report> {
     let source = sqlx::query_as::<_, Source>("SELECT database_id, generation, backend, corpus_id, pg_current_snapshot()::text AS snapshot FROM public.knowledge_storage WHERE singleton")
-        .fetch_one(&mut **tx).await?;
+        .fetch_one(&mut *connection).await?;
     if let Some(mappings) = mappings {
         ensure!(
             mappings.database_id == source.database_id,
@@ -208,7 +219,7 @@ pub(crate) async fn visit_transaction(
             "SELECT to_jsonb(legacy_row.*) FROM public.learnings AS legacy_row ORDER BY learning_id",
         ),
     ] {
-        let mut stream = sqlx::query_scalar::<_, Value>(query).fetch(&mut **tx);
+        let mut stream = sqlx::query_scalar::<_, Value>(query).fetch(&mut *connection);
         while let Some(raw) = stream.try_next().await? {
             let (row, converted) = inspect(table, raw, mappings);
             if let Some((document, usage)) = &converted {
