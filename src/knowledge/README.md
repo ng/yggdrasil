@@ -507,3 +507,22 @@ than fabricated zero counts. New rules begin at zero. CLI listing labels these
 values as last-known on stderr while preserving the JSON schema. The live
 telemetry refresh/cache publisher and per-session injection deduplication still
 need integration. Neither usage file is part of a rule's activation digest.
+
+### Prime during coordination outages
+
+`prime` resolves local knowledge selection independently of coordination. With a
+selected or invalid/fenced OKF binding it never reads legacy SQL notes. It bounds
+the complete coordination attempt to three seconds, then reads and immediately
+revalidates local notes while retaining the selection lease through output.
+The existing five-note cap, newest ordering, snippet formatting and explicit
+global labels remain unchanged. Trust revocation, deprecation, deletion and
+malformed files are checked independently of database health. If the cwd has no
+valid repository binding, only explicitly global notes are eligible and a scope
+diagnostic explains the omission.
+
+Healthy coordination still supplies agent/task/lock state. Handoff reads have a
+separate half-second bound and an unavailable indicator; no local handoff copy is
+invented. Degraded output states that coordination and handoff were not loaded,
+without echoing database credentials or claiming that shared locks work offline.
+SessionStart and PreCompact inherit this path. Edit-time learning injection,
+per-session deduplication, optional live telemetry and TUI integration remain open.
