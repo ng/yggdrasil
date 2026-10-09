@@ -38,7 +38,18 @@ fn cli(data: &Path) -> Command {
 }
 
 async fn success(cmd: &mut Command) -> String {
-    let output = timeout(WAIT, cmd.output()).await.unwrap().unwrap();
+    let args: Vec<_> = cmd
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    eprintln!("CLI request: {args:?}");
+    // Product startup has its own 30s deadline. Leave time for its diagnostic
+    // response instead of racing it with an identical observation deadline.
+    let output = timeout(WAIT + Duration::from_secs(15), cmd.output())
+        .await
+        .unwrap_or_else(|_| panic!("CLI request did not terminate: {args:?}"))
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -55,6 +66,33 @@ async fn json(cmd: &mut Command) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn external_init_rejects_managed_archive_and_never_bootstraps_local_database() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let output = app(&data)
+        .env("YGG_DB_MODE", "external")
+        .env("DATABASE_URL", "postgres://private:secret@host/db")
+        .args(["init", "--yes", "--postgres-archive", "/missing/archive"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!data.exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
+    let output = app(&data)
+        .env("YGG_DB_MODE", "external")
+        .env("DATABASE_URL", "invalid-postgresql-url")
+        .args(["init", "--yes", "--skip", "tmux,jq,rtk,hooks,project"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!data.join("postgres").exists());
+    assert!(!data.join("binaries").exists());
+    assert!(!data.join("config/.env").exists());
 }
 
 #[tokio::test]

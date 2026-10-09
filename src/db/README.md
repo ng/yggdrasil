@@ -1,8 +1,8 @@
 # Managed PostgreSQL process prototype
 
 `runtime::ManagedCluster` implements the process-ownership part of M1. It is
-connected to hooks and application pools through `db::connect`; `ygg init`
-integration remains unfinished. Existing URLs continue to select external mode. No managed platform is advertised
+connected to hooks and application pools through `db::connect`; `ygg init` uses
+the pinned installer. Existing URLs continue to select external mode. No managed platform is advertised
 as release-ready by this prototype.
 
 Explicit `initialize(root, bin, major)` creates a new private persistent cluster
@@ -12,7 +12,8 @@ and durably saves the PostgreSQL system identifier, independent cluster UUID,
 major version, binary path and version string. It refuses nonempty roots and never
 deletes an interrupted initialization. This is not an installer: release archive
 verification and atomic extraction live in `package`; interrupted-bootstrap
-recovery remains required before user-facing initialization is enabled.
+recovery remains a release gate: interrupted roots are retained and reported,
+never erased or overwritten on retry.
 
 `open` and `status` do not initialize or start PostgreSQL. `try_owner` obtains a
 nonblocking OS lease in the canonical cluster root. The returned `Owner` retains
@@ -73,8 +74,15 @@ The `db` commands and `AppConfig` use the same deployment resolver. Ordinary
 commands start/adopt initialized managed clusters through `db::connect`; configuration
 loading and status do not start servers. For managed mode they select
 `<resolved-profile-data-dir>/postgres`; that root must already have been initialized
-by the native runtime. The pinned installer exists, but its `ygg init` integration is
-still pending, so these commands are not yet a clean-machine installation path.
+by the native runtime. Run `ygg init` to install the pinned native package, initialize the private
+cluster and provision roles/schema. Offline installations use
+`ygg init --postgres-archive /absolute/native-release.tar.gz`. Concurrent init
+processes serialize, and reruns retain the cluster identity and installed version
+without downloading. Managed init never writes a localhost URL. External init
+uses the configured database and role, does not start services or create roles/
+databases, and requires owner privileges when running migrations.
+`--database-url` is an invocation-only override; persistent selection belongs in
+user config or environment.
 They never download binaries, initialize data, migrate schemas or upgrade binaries.
 
 - `ygg db status [--json]` reads configuration, checks a managed server's identity
@@ -154,8 +162,8 @@ macOS OpenSSL 3.6.3 libraries. Linux uses system runtime libraries.
 
 The downloaded macOS arm64 16.15 archive passed the runtime and supervisor native
 suite, including 20 starts, crashes and adoption. An installed copy also starts,
-runs all migrations and loads `uuid-ossp`. These results do not establish the
-other platform gates. `.github/workflows/managed-postgres.yml` now runs release-mode
+runs all migrations and loads `uuid-ossp`. The installer/lifecycle suite has also passed on Intel macOS and GNU Linux
+x86_64; those results do not establish quarantine or clean-machine dependency gates. `.github/workflows/managed-postgres.yml` now runs release-mode
 installer/lifecycle smoke on macOS arm64, macOS Intel and Ubuntu 24.04. Its Linux
 job installs runtime libraries (not PostgreSQL) needed by the GNU artifact, and
 its macOS jobs verify the upstream ad-hoc signature. `scripts/prepare-postgres-smoke.py`

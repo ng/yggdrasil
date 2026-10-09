@@ -86,6 +86,35 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
             .await
             .unwrap();
         assert!(version.starts_with("16.15"), "{version}");
+        // External init must retain the URL database (postgres here), and must
+        // never manufacture a different database named ygg or managed state.
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"))
+            .env("YGG_DB_MODE", "external")
+            .env(
+                "DATABASE_URL",
+                format!(
+                    "postgresql://ygg_bootstrap@localhost/postgres?host={}",
+                    root.join("runtime").display()
+                ),
+            )
+            .env("YGG_CONFIG_DIR", temp.path().join("external-config"))
+            .env("YGG_DATA_DIR", temp.path().join("external-data"))
+            .args(["init", "--yes", "--skip", "tmux,jq,rtk,hooks,project"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = 'ygg')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!exists);
+        assert!(!temp.path().join("external-data").exists());
         // Concurrent explicit provisioning must converge on the same roles and
         // schema. Re-running must preserve database/knowledge identities.
         let (first, second) = tokio::join!(
@@ -178,4 +207,113 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
     std::fs::write(&edited, "independent edit").unwrap();
     assert!(package::install_offline(&base, &archive).is_err());
     assert_eq!(std::fs::read_to_string(edited).unwrap(), "independent edit");
+}
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_ARCHIVE pointing to the exact native pinned archive"]
+async fn real_init_installs_offline_converges_and_reuses_cluster_without_archive() {
+    use ygg::db::supervisor;
+    let archive = PathBuf::from(std::env::var("YGG_TEST_PG_ARCHIVE").unwrap());
+    let temp = tempfile::Builder::new()
+        .prefix("yini-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let data = temp.path().canonicalize().unwrap().join("data");
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let command = || {
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+        cmd.env("HOME", &home)
+            .env("YGG_DATA_DIR", &data)
+            .env("YGG_CONFIG_DIR", home.join("config"))
+            .env("YGG_DB_MODE", "managed")
+            .env_remove("DATABASE_URL")
+            .env_remove("YGG_PROFILE")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        cmd
+    };
+    let result = std::panic::AssertUnwindSafe(async {
+        let mut first = command();
+        first
+            .args([
+                "init",
+                "--yes",
+                "--skip",
+                "tmux,jq,rtk,hooks,project",
+                "--postgres-archive",
+            ])
+            .arg(&archive);
+        let mut second = command();
+        second
+            .args([
+                "init",
+                "--yes",
+                "--skip",
+                "tmux,jq,rtk,hooks,project",
+                "--postgres-archive",
+            ])
+            .arg(&archive);
+        let (first, second) = tokio::join!(first.output(), second.output());
+        for output in [first.unwrap(), second.unwrap()] {
+            assert!(
+                output.status.success(),
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let cluster = ManagedCluster::open(&data.join("postgres")).unwrap();
+        let identity = cluster.id();
+        let runtime = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(ygg::db::provision::runtime_options(&cluster))
+            .await
+            .unwrap();
+        let user: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&runtime)
+            .await
+            .unwrap();
+        assert_eq!(user, "ygg_runtime");
+        assert!(
+            ygg::db::pending_migrations(&runtime)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        runtime.close().await;
+        let status = cluster.status().await.unwrap();
+        // Existing clusters require neither the input archive nor a download.
+        let output = command()
+            .args(["init", "--yes", "--skip", "tmux,jq,rtk,hooks,project"])
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            ManagedCluster::open(&data.join("postgres")).unwrap().id(),
+            identity
+        );
+        assert_eq!(cluster.status().await.unwrap(), status);
+        assert!(
+            !home.join("config/.env").exists(),
+            "managed init must not manufacture a localhost URL"
+        );
+        supervisor::stop(&cluster, Duration::from_secs(15))
+            .await
+            .unwrap();
+    })
+    .catch_unwind()
+    .await;
+    if let Ok(cluster) = ManagedCluster::open(&data.join("postgres")) {
+        let _ = supervisor::stop(&cluster, Duration::from_secs(15)).await;
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

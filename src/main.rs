@@ -102,15 +102,18 @@ enum Commands {
         /// Show command output for debugging
         #[arg(short, long)]
         verbose: bool,
-        /// Skip specific deps (pg, models, statusbar, hooks)
+        /// Skip named setup steps (pg, migrations, tmux, jq, rtk, hooks, project)
         #[arg(long, value_delimiter = ',')]
         skip: Vec<String>,
         /// Clear saved skip decisions and re-prompt everything
         #[arg(long)]
         reset: bool,
-        /// PostgreSQL connection URL (overrides DATABASE_URL)
+        /// PostgreSQL connection URL for this invocation (overrides DATABASE_URL)
         #[arg(long)]
         database_url: Option<String>,
+        /// Verified native PostgreSQL archive for offline managed installation
+        #[arg(long)]
+        postgres_archive: Option<std::path::PathBuf>,
         /// Run unattended: answer every prompt with its default (no stdin).
         /// For the install script, CI, and spawned agents.
         #[arg(short = 'y', long = "yes", visible_alias = "non-interactive")]
@@ -1203,11 +1206,12 @@ async fn main() -> anyhow::Result<()> {
             skip,
             reset,
             database_url,
+            postgres_archive,
             yes,
         } => {
             if reset {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                let skips_path = std::path::Path::new(&home).join(".config/ygg/skips.json");
+                let config_dir = ygg::config::database::config_dir(&std::env::vars().collect())?;
+                let skips_path = config_dir.join("skips.json");
                 let _ = std::fs::remove_file(&skips_path);
                 println!("Saved skip decisions cleared.");
             }
@@ -1216,7 +1220,8 @@ async fn main() -> anyhow::Result<()> {
                     std::env::set_var("DATABASE_URL", url);
                 }
             }
-            ygg::cli::init::execute_with_options(verbose, &skip, yes).await?;
+            ygg::cli::init::execute_with_options(verbose, &skip, yes, postgres_archive.as_deref())
+                .await?;
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Db { action } => match action {

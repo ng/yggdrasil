@@ -5,6 +5,8 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod initialize;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod package;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod provision;
@@ -165,4 +167,40 @@ pub async fn pending_migrations(pool: &PgPool) -> Result<Vec<String>, anyhow::Er
         .map(|m| m.description.to_string())
         .collect();
     Ok(pending)
+}
+
+/// Explicit installation entry point. External targets never invoke any managed
+/// lifecycle or create databases/roles. The supplied URL needs migration rights
+/// only when migrations were requested.
+pub async fn initialize_target(
+    target: &crate::config::database::DatabaseTarget,
+    archive: Option<&std::path::Path>,
+    migrations: bool,
+) -> anyhow::Result<()> {
+    use crate::config::database::DatabaseTarget;
+    match target {
+        DatabaseTarget::External { .. } => {
+            anyhow::ensure!(
+                archive.is_none(),
+                "offline PostgreSQL archive requires managed mode"
+            );
+            if migrations {
+                migrate_target(target).await?;
+            } else {
+                let pool = connect(target).await?;
+                sqlx::query("SELECT 1").execute(&pool).await?;
+                pool.close().await;
+            }
+        }
+        DatabaseTarget::ManagedLocal { data_dir } => {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            initialize::run(data_dir, archive, migrations).await?;
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                let _ = data_dir;
+                anyhow::bail!("managed installation unsupported; configure an external database");
+            }
+        }
+    }
+    Ok(())
 }

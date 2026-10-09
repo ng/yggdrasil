@@ -16,9 +16,11 @@ fn managed() -> Result<ManagedCluster> {
     match target()? {
         DatabaseTarget::ManagedLocal { data_dir } => {
             ManagedCluster::open(&data_dir.join("postgres"))
-                .context("managed cluster unavailable; lifecycle commands require an initialized cluster (managed installer pending)")
+                .context("managed cluster unavailable; run ygg init to initialize it")
         }
-        DatabaseTarget::External { .. } => anyhow::bail!("external database selected; Yggdrasil does not manage its process lifecycle"),
+        DatabaseTarget::External { .. } => anyhow::bail!(
+            "external database selected; Yggdrasil does not manage its process lifecycle"
+        ),
     }
 }
 
