@@ -514,6 +514,21 @@ not capture source evidence or activate SQL, and must be enclosed by the complet
 quiesced rollback workflow. Tests use disposable databases and distinct runtime
 credentials to verify privilege boundaries, exact row results and failure rollback.
 
+`reverse::apply_once_on` adds an operation receipt to that same SQL transaction.
+The migration workflow must durably save the operation UUID, candidate and
+`RecoveryEvidence` before sending it. Evidence binds the candidate digest, exact
+corpus/policy backup revisions and optional shared commit. The owner-only function
+holds the exclusive migration lease, requires READ COMMITTED and the exact fenced
+generation, and hashes the complete request and restored rows. A retry waits for
+any earlier transaction to finish; an identical committed operation returns
+`PreviouslyApplied` after verifying row hashes, without repeating the import.
+Conflicting operation IDs or changed restored rows fail. Rolling back removes
+both row changes and receipt. Receipts cannot be updated, deleted or truncated;
+runtime credentials cannot insert them even with an accidental table grant.
+The returned outcome remains provisional until commit. Receipts prove the SQL
+apply, not filesystem quiescence, schema parity or configuration activation; the
+durable local journal and complete resume/activation workflow remain required.
+
 ## Corpus backup component
 
 `KnowledgeStore::backup` creates an immutable snapshot directory containing

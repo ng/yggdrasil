@@ -152,6 +152,15 @@ async fn runtime_cannot_forge_the_migration_flag_or_call_the_owner_function() {
         // Defense in depth: even an accidental EXECUTE grant cannot authorize it.
         sqlx::query(&format!("GRANT EXECUTE ON FUNCTION public.ygg_knowledge_reverse_import(UUID,UUID,BIGINT,JSONB,JSONB) TO {role}")).execute(&f.pool).await.unwrap();
         assert!(sqlx::query(call).bind(database).bind(corpus).execute(&runtime).await.is_err());
+        let receipt_call = "SELECT public.ygg_knowledge_reverse_apply_once(gen_random_uuid(),$1,$2,2,'{}','[]','[]')";
+        assert!(sqlx::query(receipt_call).bind(database).bind(corpus).execute(&runtime).await.is_err());
+        sqlx::query(&format!("GRANT EXECUTE ON FUNCTION public.ygg_knowledge_reverse_apply_once(UUID,UUID,UUID,BIGINT,JSONB,JSONB,JSONB) TO {role}")).execute(&f.pool).await.unwrap();
+        let error = sqlx::query(receipt_call).bind(database).bind(corpus).execute(&runtime).await.unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("42501"));
+        sqlx::query(&format!("GRANT ALL ON knowledge_reverse_receipts TO {role}")).execute(&f.pool).await.unwrap();
+        let error = sqlx::query("INSERT INTO knowledge_reverse_receipts(operation_id,database_id,corpus_id,fenced_generation,request_sha256,notes_sha256,rules_sha256,evidence) VALUES(gen_random_uuid(),$1,$2,2,repeat('0',64),repeat('0',64),repeat('0',64),'{}')")
+            .bind(database).bind(corpus).execute(&runtime).await.unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("42501"));
         let mut tx = runtime.begin().await.unwrap();
         // Temporary relations must not shadow the catalog owner lookup inside
         // the SECURITY DEFINER write fence.
@@ -294,6 +303,194 @@ async fn capture_uses_frozen_database_totals_and_rejects_missing_or_conflicting_
         assert!(reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.is_err());
         tx.rollback().await.unwrap();
     }).catch_unwind().await;
+    f.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn receipts_commit_atomically_and_verify_retries_without_reapplying_rows() {
+    let f = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let note = Uuid::new_v4();
+        sqlx::query("INSERT INTO memories(memory_id,text,user_id) VALUES($1,'before','alice')")
+            .bind(note)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let source = inventory::assess(&f.pool, None).await.unwrap().source;
+        let mappings = Mappings {
+            database_id: source.database_id,
+            corpus_id: Uuid::new_v4(),
+            repos: BTreeMap::new(),
+            users: BTreeMap::from([("alice".into(), "owner".into())]),
+        };
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced',generation=2,corpus_id=$1")
+            .bind(mappings.corpus_id)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let stage = temp.path().join("bundle");
+        let manifest = export::stage(&f.pool, &mappings, &stage).await.unwrap();
+        let store = KnowledgeStore::open(&stage, false).unwrap();
+        let old = store.snapshot().documents.remove(0);
+        let mut doc = old.document;
+        doc.body = "current acknowledged content".into();
+        store
+            .put(&doc, ExpectedRevision::Digest(&old.revision))
+            .unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='okf',generation=3")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced',generation=4")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let policy = KnowledgeStore::open(&temp.path().join("policy"), true).unwrap();
+        let recovery = store
+            .backup_pair_retained(
+                &policy,
+                &temp.path().join("archive"),
+                &temp.path().join("policy-archive"),
+            )
+            .unwrap();
+        let operation = Uuid::new_v4();
+        let mut tx = f.pool.begin().await.unwrap();
+        let candidate = reverse::capture_recovery_on(&mut tx, &manifest, &recovery, 4)
+            .await
+            .unwrap();
+        let evidence = reverse::RecoveryEvidence::new(&candidate, &recovery, None).unwrap();
+        assert_eq!(
+            reverse::apply_once_on(&mut tx, operation, &candidate, &evidence, 4)
+                .await
+                .unwrap(),
+            reverse::ApplyOutcome::Applied
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT text FROM memories WHERE memory_id=$1")
+                .bind(note)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            "before"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM knowledge_reverse_receipts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(
+            reverse::apply_once_on(&mut tx, operation, &candidate, &evidence, 5)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        assert_eq!(
+            reverse::apply_once_on(&mut tx, operation, &candidate, &evidence, 4)
+                .await
+                .unwrap(),
+            reverse::ApplyOutcome::Applied
+        );
+        recovery.verify_sources().unwrap();
+        // A second connection cannot treat an uncommitted receipt as absent:
+        // it waits for the original migration transaction to resolve.
+        let resumed = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&f.url)
+            .await
+            .unwrap();
+        let mut resumed_tx = resumed.begin().await.unwrap();
+        let mut pending = Box::pin(reverse::apply_once_on(
+            &mut resumed_tx,
+            operation,
+            &candidate,
+            &evidence,
+            4,
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), pending.as_mut())
+                .await
+                .is_err()
+        );
+        tx.commit().await.unwrap();
+        assert_eq!(
+            pending.await.unwrap(),
+            reverse::ApplyOutcome::PreviouslyApplied
+        );
+        resumed_tx.commit().await.unwrap();
+        resumed.close().await;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM knowledge_reverse_receipts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        for statement in [
+            "UPDATE knowledge_reverse_receipts SET notes_sha256=repeat('0',64)",
+            "DELETE FROM knowledge_reverse_receipts",
+            "TRUNCATE knowledge_reverse_receipts",
+        ] {
+            assert!(sqlx::query(statement).execute(&f.pool).await.is_err());
+        }
+        let mut conflict = evidence.clone();
+        conflict.policy_revision = "0".repeat(64);
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(
+            reverse::apply_once_on(&mut tx, operation, &candidate, &conflict, 4)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(
+            reverse::apply_once_on(&mut tx, operation, &candidate, &evidence, 4)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+        // An owner edit after the receipt must be detected and preserved.
+        let mut tx = f.pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL ygg.knowledge_reverse_import='on'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memories SET text='independent owner edit' WHERE memory_id=$1")
+            .bind(note)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(
+            reverse::apply_once_on(&mut tx, operation, &candidate, &evidence, 4)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT text FROM memories WHERE memory_id=$1")
+                .bind(note)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            "independent owner edit"
+        );
+    })
+    .catch_unwind()
+    .await;
     f.cleanup().await;
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);

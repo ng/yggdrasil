@@ -332,3 +332,77 @@ pub async fn apply_on(
         .await?;
     Ok(())
 }
+
+/// Exact recovery evidence saved by the migration journal before apply.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryEvidence {
+    pub version: u32,
+    pub candidate_sha256: String,
+    pub corpus_revision: String,
+    pub policy_revision: String,
+    pub shared_commit: Option<String>,
+}
+impl RecoveryEvidence {
+    pub fn new(
+        candidate: &Candidate,
+        recovery: &super::store::PairedBackup,
+        shared_commit: Option<String>,
+    ) -> Result<Self> {
+        recovery.verify_sources()?;
+        Ok(Self {
+            version: 1,
+            candidate_sha256: digest(&serde_json::to_vec(candidate)?),
+            corpus_revision: recovery.corpus().revision.clone(),
+            policy_revision: recovery.policy().revision.clone(),
+            shared_commit,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyOutcome {
+    Applied,
+    PreviouslyApplied,
+}
+
+/// Apply once and persist a receipt in the SAME caller transaction. A repeated
+/// operation ID verifies its original request and restored row hashes without
+/// repeating writes. Keep the durable operation ID/evidence across uncertain
+/// commits; retain and revalidate filesystem/remote leases through final commit.
+/// A returned outcome is provisional until that transaction commits.
+pub async fn apply_once_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    operation: Uuid,
+    candidate: &Candidate,
+    evidence: &RecoveryEvidence,
+    fenced_generation: i64,
+) -> Result<ApplyOutcome> {
+    ensure!(
+        candidate.version == 1
+            && evidence.version == 1
+            && fenced_generation > candidate.export_generation,
+        "unsupported reverse-import receipt request"
+    );
+    ensure!(
+        evidence.candidate_sha256 == digest(&serde_json::to_vec(candidate)?),
+        "candidate differs from retained recovery evidence"
+    );
+    let applied: bool =
+        sqlx::query_scalar("SELECT public.ygg_knowledge_reverse_apply_once($1,$2,$3,$4,$5,$6,$7)")
+            .bind(operation)
+            .bind(candidate.database_id)
+            .bind(candidate.corpus_id)
+            .bind(fenced_generation)
+            .bind(serde_json::to_value(evidence)?)
+            .bind(serde_json::to_value(&candidate.notes)?)
+            .bind(serde_json::to_value(&candidate.learnings)?)
+            .fetch_one(&mut **transaction)
+            .await?;
+    Ok(if applied {
+        ApplyOutcome::Applied
+    } else {
+        ApplyOutcome::PreviouslyApplied
+    })
+}
