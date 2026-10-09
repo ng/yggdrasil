@@ -13,6 +13,8 @@ pub mod provision;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod runtime;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod runtime_endpoint;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod supervisor;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

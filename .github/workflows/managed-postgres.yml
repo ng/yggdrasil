@@ -64,3 +64,5 @@ jobs:
         run: cargo test --release --lib db::runtime::bootstrap_tests -- --include-ignored --test-threads=1
       - name: Test killed deployment configuration publication
         run: cargo test --release --lib config::switch::tests -- --test-threads=1
+      - name: Test short runtime endpoint identity and containment
+        run: cargo test --release --lib db::runtime_endpoint -- --test-threads=1

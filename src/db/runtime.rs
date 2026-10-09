@@ -32,6 +32,8 @@ struct Manifest {
     major: u32,
     binary_version: String,
     bin: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    socket_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -218,10 +220,12 @@ impl ManagedCluster {
             );
             intent
         } else {
+            let cluster_id = Uuid::new_v4();
             let intent = Manifest {
+                socket_dir: super::runtime_endpoint::choose(&root, cluster_id)?,
                 version: 1,
                 root: root.clone(),
-                cluster_id: Uuid::new_v4(),
+                cluster_id,
                 system_id: String::new(),
                 major,
                 binary_version: binary_version.clone(),
@@ -230,6 +234,11 @@ impl ManagedCluster {
             publish_metadata(&root, ".bootstrap.json", &intent)?;
             intent
         };
+        super::runtime_endpoint::validate_selection(
+            &root,
+            intent.cluster_id,
+            intent.socket_dir.as_deref(),
+        )?;
         bootstrap_checkpoint(&root, "intent");
         if root.join(".bootstrap-ready.json").try_exists()? {
             return Self::finish_bootstrap(&root, &intent).await;
@@ -238,13 +247,14 @@ impl ManagedCluster {
             !root.join("data").try_exists()?,
             "data exists without completed bootstrap receipt; refusing replacement"
         );
-        let socket = root.join("runtime");
-        // Portable sockaddr_un budget, including /.s.PGSQL.5432 and NUL.
-        ensure!(
-            socket.as_os_str().as_encoded_bytes().len() + 15 < 104,
-            "managed socket path too long"
-        );
-        private_dir(&socket, true)?;
+        private_dir(&root.join("runtime"), true)?;
+        super::runtime_endpoint::check(
+            &root,
+            intent.cluster_id,
+            intent.socket_dir.as_deref(),
+            true,
+        )?;
+        let socket = super::runtime_endpoint::path(&root, intent.socket_dir.as_deref());
         private_dir(&root.join("logs"), true)?;
         // Never reuse an unfinished attempt: an initdb child may have survived
         // the caller. Its writes stay confined to its unique retained directory.
@@ -297,6 +307,7 @@ impl ManagedCluster {
         )?;
         config.sync_all()?;
         let manifest = Manifest {
+            socket_dir: intent.socket_dir.clone(),
             version: 1,
             root: root.clone(),
             cluster_id: intent.cluster_id,
@@ -324,7 +335,8 @@ impl ManagedCluster {
                 && manifest.cluster_id == intent.cluster_id
                 && manifest.bin == intent.bin
                 && manifest.major == intent.major
-                && manifest.binary_version == intent.binary_version,
+                && manifest.binary_version == intent.binary_version
+                && manifest.socket_dir == intent.socket_dir,
             "bootstrap receipt differs from intent"
         );
         let stage = root.join(format!(".bootstrap-data-{}", ready.attempt));
@@ -397,10 +409,12 @@ impl ManagedCluster {
                 && manifest.system_id.parse::<u64>().is_ok(),
             "invalid cluster manifest or relocated cluster; explicit move required"
         );
-        ensure!(
-            root.join("runtime").to_str().is_some(),
-            "managed socket path must be UTF-8"
-        );
+        super::runtime_endpoint::check(
+            &root,
+            manifest.cluster_id,
+            manifest.socket_dir.as_deref(),
+            false,
+        )?;
         for dir in ["data", "runtime", "logs"] {
             private_dir(&root.join(dir), false)?;
         }
@@ -415,6 +429,12 @@ impl ManagedCluster {
         &self.manifest.bin
     }
 
+    /// Selected PostgreSQL and supervisor endpoint directory. Inspection only;
+    /// this path may be absent after temporary-directory cleanup while stopped.
+    pub fn socket_dir(&self) -> PathBuf {
+        super::runtime_endpoint::path(&self.root, self.manifest.socket_dir.as_deref())
+    }
+
     pub fn id(&self) -> Uuid {
         self.manifest.cluster_id
     }
@@ -427,7 +447,7 @@ impl ManagedCluster {
     /// connections must use the separately provisioned limited runtime role.
     pub(super) fn admin_options(&self) -> PgConnectOptions {
         PgConnectOptions::new()
-            .host(self.root.join("runtime").to_str().unwrap())
+            .host(self.socket_dir().to_str().unwrap())
             .port(5432)
             .username(BOOTSTRAP)
             .database("postgres")
@@ -435,6 +455,12 @@ impl ManagedCluster {
     }
 
     async fn verified_pid(&self) -> Result<i32> {
+        super::runtime_endpoint::check(
+            &self.root,
+            self.id(),
+            self.manifest.socket_dir.as_deref(),
+            false,
+        )?;
         let before = read(&self.root.join("data/postmaster.pid"))?;
         let lines: Vec<_> = before.lines().collect();
         ensure!(lines.len() >= 8, "incomplete server PID file");
@@ -445,18 +471,20 @@ impl ManagedCluster {
                 && start > 0
                 && Path::new(lines[1]) == self.root.join("data")
                 && lines[3] == "5432"
-                && Path::new(lines[4]) == self.root.join("runtime"),
+                && Path::new(lines[4]) == self.socket_dir(),
             "server PID identity mismatch"
         );
         let mut conn = PgConnection::connect_with(&self.admin_options()).await?;
-        let (directory, system_id, version, listen, backend): (String, String, i32, String, i32) = sqlx::query_as(
-            "SELECT current_setting('data_directory'), system_identifier::text, current_setting('server_version_num')::int, current_setting('listen_addresses'), pg_backend_pid() FROM pg_control_system()")
+        let (directory, system_id, version, listen, backend, sockets, permissions): (String, String, i32, String, i32, String, String) = sqlx::query_as(
+            "SELECT current_setting('data_directory'), system_identifier::text, current_setting('server_version_num')::int, current_setting('listen_addresses'), pg_backend_pid(), current_setting('unix_socket_directories'), current_setting('unix_socket_permissions') FROM pg_control_system()")
             .fetch_one(&mut conn).await?;
         ensure!(
             Path::new(&directory) == self.root.join("data")
                 && system_id == self.manifest.system_id
                 && version / 10000 == self.manifest.major as i32
-                && listen.is_empty(),
+                && listen.is_empty()
+                && Path::new(&sockets) == self.socket_dir()
+                && u32::from_str_radix(&permissions, 8).ok() == Some(0o700),
             "live server identity mismatch"
         );
         // PostgreSQL writes MyStartTime into the PID file, but the SQL function
@@ -535,6 +563,26 @@ impl ManagedCluster {
 }
 
 impl Owner {
+    pub(super) async fn prepare_endpoint(&self) -> Result<()> {
+        let missing_directory = std::fs::symlink_metadata(self.cluster.socket_dir())
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        let missing_identity = self.cluster.manifest.socket_dir.is_some()
+            && std::fs::symlink_metadata(self.cluster.socket_dir().join("cluster.json"))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        if missing_directory || missing_identity {
+            ensure!(
+                self.cluster.status().await? == Status::Stopped,
+                "missing endpoint for an unverified live server; refusing recreation"
+            );
+        }
+        super::runtime_endpoint::check(
+            &self.cluster.root,
+            self.cluster.id(),
+            self.cluster.manifest.socket_dir.as_deref(),
+            true,
+        )
+    }
+
     pub async fn start_or_adopt(&mut self, duration: Duration) -> Result<i32> {
         timeout(duration, self.start_or_adopt_inner(duration))
             .await
@@ -554,6 +602,7 @@ impl Owner {
                 Status::Unverified => sleep(Duration::from_millis(50)).await,
             }
         }
+        self.prepare_endpoint().await?;
         ensure!(
             read(&self.cluster.root.join("data/PG_VERSION"))?
                 .trim()
@@ -673,7 +722,12 @@ mod bootstrap_tests {
                 .prefix("ybr-")
                 .tempdir_in("/tmp")
                 .unwrap();
-            let root = temp.path().canonicalize().unwrap().join("cluster");
+            let name = if matches!(phase, "attempt" | "ready" | "manifest") {
+                "long-cluster-".to_owned() + &"x".repeat(120)
+            } else {
+                "cluster".to_owned()
+            };
+            let root = temp.path().canonicalize().unwrap().join(name);
             let mut child = Worker(
                 std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
@@ -719,6 +773,7 @@ mod bootstrap_tests {
                 .block_on(ManagedCluster::resume_initialization(&root))
                 .unwrap();
             assert_eq!(cluster.id(), intent.cluster_id, "{phase}");
+            assert_eq!(cluster.manifest.socket_dir, intent.socket_dir, "{phase}");
             assert_eq!(runtime.block_on(cluster.status()).unwrap(), Status::Stopped);
             if let Some(ready) = ready {
                 let before: BootstrapReady = serde_json::from_slice(&ready).unwrap();
@@ -731,6 +786,10 @@ mod bootstrap_tests {
                     fs::write(attempt.join("late-child-write"), "retained").unwrap();
                     assert!(!root.join("data/late-child-write").exists());
                 }
+            }
+            if cluster.manifest.socket_dir.is_some() {
+                fs::remove_dir_all(cluster.socket_dir()).unwrap();
+                assert_eq!(ManagedCluster::open(&root).unwrap().id(), cluster.id());
             }
             // A completed receipt cannot authorize replacement of changed data.
             if phase == "data" {

@@ -48,7 +48,7 @@ pub struct Reply {
 }
 
 fn socket(cluster: &ManagedCluster) -> PathBuf {
-    cluster.root().join("runtime/control.sock")
+    cluster.socket_dir().join("control.sock")
 }
 
 async fn read_frame<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
@@ -286,6 +286,7 @@ pub async fn serve(cluster: ManagedCluster) -> Result<()> {
     };
     // Bind while owning the lease, before any server start; never replace a
     // live cooperating owner's socket. Endpoint drops before the owner lease.
+    owner.prepare_endpoint().await?;
     let (listener, _endpoint) = bind(&cluster)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;

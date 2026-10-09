@@ -352,3 +352,130 @@ async fn real_cli_supervises_adopts_recovers_and_drains_without_restarting_after
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and YGG_TEST_PG_MAJOR; isolated long-path cluster"]
+async fn long_paths_use_private_bound_endpoints_and_recover_only_when_stopped() {
+    use std::os::unix::fs::DirBuilderExt;
+    let bin = PathBuf::from(std::env::var("YGG_TEST_PG_BIN").unwrap());
+    let major = std::env::var("YGG_TEST_PG_MAJOR").unwrap().parse().unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("ygg-long-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let base = temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("data with spaces, punctuation");
+    let profile = "p".repeat(64);
+    let data = base.join("profiles").join(&profile);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&data)
+        .unwrap();
+    let profile_cli = || {
+        let mut cmd = cli(&base);
+        cmd.env("YGG_PROFILE", &profile)
+            .env_remove("YGG_DATABASE_OWNER_URL");
+        cmd
+    };
+    let root = data.join("postgres");
+    let cluster = ManagedCluster::initialize(&root, &bin, major)
+        .await
+        .unwrap();
+    let endpoint = cluster.socket_dir();
+    let moved = endpoint.with_extension("moved");
+    let result = std::panic::AssertUnwindSafe(async {
+        assert!(root.as_os_str().as_encoded_bytes().len() > 104);
+        assert!(endpoint.as_os_str().as_encoded_bytes().len() + 15 < 104);
+        assert!(!endpoint.starts_with(&root));
+        let starts = (0..20).map(|_| async { json(profile_cli().args(["start", "--json"])).await });
+        let replies = futures::future::join_all(starts).await;
+        let pid = replies[0]["postgres"]["pid"].as_i64().unwrap();
+        assert!(
+            replies
+                .iter()
+                .all(|r| r["postgres"]["pid"].as_i64() == Some(pid))
+        );
+        let options = PgConnectOptions::new()
+            .host(endpoint.to_str().unwrap())
+            .port(5432)
+            .username("ygg_bootstrap")
+            .database("postgres");
+        let mut connection = PgConnection::connect_with(&options).await.unwrap();
+        sqlx::query("CREATE TABLE retained(id int PRIMARY KEY)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO retained VALUES (42)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        // Lose only the supervisor, then hide the transient directory while the
+        // postmaster survives. Missing sockets never authorize a second server.
+        let supervisor_pid = replies[0]["supervisor_pid"].as_u64().unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(supervisor_pid, libc::SIGTERM) }, 0);
+        let mut owner = timeout(WAIT, async {
+            loop {
+                if let Some(owner) = cluster.try_owner().unwrap() {
+                    break owner;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::rename(&endpoint, &moved).unwrap();
+        let reopened = ManagedCluster::open(&root).unwrap();
+        assert_eq!(reopened.status().await.unwrap(), Status::Unverified);
+        assert!(!endpoint.exists());
+        assert!(
+            owner
+                .start_or_adopt(Duration::from_millis(300))
+                .await
+                .is_err()
+        );
+        assert!(!endpoint.exists());
+        std::fs::rename(&moved, &endpoint).unwrap();
+        assert_eq!(owner.start_or_adopt(WAIT).await.unwrap(), pid as i32);
+        owner.stop(WAIT).await.unwrap();
+        drop(owner);
+        std::fs::remove_dir_all(&endpoint).unwrap();
+        let reopened = ManagedCluster::open(&root).unwrap();
+        assert_eq!(reopened.status().await.unwrap(), Status::Stopped);
+        assert!(
+            !endpoint.exists(),
+            "read-only inspection recreated endpoint"
+        );
+        json(profile_cli().args(["status", "--json"])).await;
+        assert!(!endpoint.exists());
+        success(profile_cli().arg("start")).await;
+        let mut connection = PgConnection::connect_with(&options).await.unwrap();
+        let id: i32 = sqlx::query_scalar("SELECT id FROM retained")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(id, 42);
+        connection.close().await.unwrap();
+        success(profile_cli().arg("stop")).await;
+    })
+    .catch_unwind()
+    .await;
+    if moved.exists() && !endpoint.exists() {
+        std::fs::rename(&moved, &endpoint).unwrap();
+    }
+    let _ = supervisor::stop(&cluster, WAIT).await;
+    let _ = Command::new(bin.join("pg_ctl"))
+        .arg("-D")
+        .arg(root.join("data"))
+        .args(["-m", "fast", "-w", "stop"])
+        .output()
+        .await;
+    let _ = std::fs::remove_dir_all(&endpoint);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

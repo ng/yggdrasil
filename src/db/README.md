@@ -497,3 +497,31 @@ against an uncooperative editor racing the final rename.
 The previous config is a recovery artifact, not an automatic rollback command.
 After new writes, switching back to the frozen source can lose those changes;
 validated reverse import/recovery remains a separate required operation.
+
+### Long data paths and transient sockets
+
+New clusters keep their sockets in `postgres/runtime` when that canonical path
+fits the portable Unix socket limit and needs no directory-list quoting. Longer
+paths and paths containing spaces or punctuation select a short endpoint under
+canonical `/tmp`, named with the OS user ID and random cluster UUID. This supports
+64-character profiles and data directories such as macOS `Application Support`.
+Persistent data, binaries, logs, ownership leases and authoritative manifests stay
+under the configured data directory. Existing manifests without an endpoint field
+continue using their original `runtime` directory; they are not relocated silently.
+
+The short directory is private (`0700`) under a root-owned sticky parent. Its
+private identity marker binds the directory to the exact canonical cluster root
+and UUID. Unexpected paths, ownership, permissions, symlinks, identity markers or
+unrecognized preexisting contents fail instead of being adopted. Marker publication
+is exclusive and synced; interrupted private marker stages are retained for retry.
+Both PostgreSQL and supervisor sockets use the same selected directory. Readiness
+checks the PID-file endpoint, live socket configuration/permissions, database
+system identity, major version, data directory, postmaster process and disabled TCP.
+
+Temporary-directory cleanup does not remove database state. `status` and metadata
+inspection never recreate a missing endpoint. An owner may recreate it under the
+persistent cluster lease only after proving PostgreSQL is stopped. If a live server
+loses its endpoint, it remains unverified: Yggdrasil neither starts a competitor nor
+signals an unverified PID. Restore the original endpoint directory if it was moved,
+or resolve the server state explicitly before restarting. Ordinary stop keeps the
+small endpoint identity directory so subsequent starts reuse the same binding.
