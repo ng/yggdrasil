@@ -680,6 +680,35 @@ impl KnowledgeBackup {
         Ok(expected)
     }
 
+    /// Permit only the independently derived runtime binding bytes to differ.
+    pub(crate) fn verify_restored_rebased_selection(
+        path: &Path,
+        restored: &Path,
+        selection: &str,
+    ) -> Result<()> {
+        let mut expected = Self::verify(path)?;
+        let name = crate::knowledge::runtime::SELECTION_FILE;
+        ensure!(
+            expected.entries.contains_key(name),
+            "backup has no selection to rebase"
+        );
+        expected.entries.insert(
+            name.to_owned(),
+            BackupEntry::File {
+                bytes: selection.len() as u64,
+                sha256: crate::knowledge::document::digest(selection.as_bytes()),
+            },
+        );
+        let restored = KnowledgeStore::open(restored, false)?;
+        let mut entries = BTreeMap::new();
+        inventory(&restored.root, None, "", 0, true, &mut entries, &mut 0)?;
+        ensure!(
+            entries == expected.entries,
+            "restored policy differs from backup and derived selection binding"
+        );
+        Ok(())
+    }
+
     /// Restore exact bytes into an absent directory. Never changes trust or
     /// overwrites an existing corpus. Caller authorizes the backed-up policy.
     pub fn restore(path: &Path, destination: &Path) -> Result<Self> {

@@ -349,6 +349,27 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         let saved = store.put(&document, ygg::knowledge::store::ExpectedRevision::Absent).unwrap();
         let registry = ygg::knowledge::identity::IdentityRegistry::open(&policy_path, true).unwrap();
         let corpus = registry.initialize(true).unwrap().corpus_id;
+        // Move an actively selected OKF corpus, not just an unselected file tree.
+        let note = ygg::knowledge::service::KnowledgeService::new(
+            ygg::knowledge::store::KnowledgeStore::open(&bundle_path, false).unwrap(),
+            ygg::knowledge::identity::IdentityRegistry::open(&policy_path, false).unwrap(),
+            "portable-move-user".into(),
+        ).unwrap().create_note(None, "retained across deployment move".into(), None, chrono::Utc::now()).unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced', generation=generation+1, corpus_id=$1").bind(corpus).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='okf', generation=generation+1").execute(&pool).await.unwrap();
+        let (source_database, source_generation): (uuid::Uuid, i64) = sqlx::query_as("SELECT database_id, generation FROM knowledge_storage").fetch_one(&pool).await.unwrap();
+        let binding = ygg::knowledge::runtime::Binding {
+            version: 1, minimum_client: ygg::knowledge::guard::CLIENT_PROTOCOL,
+            generation: source_generation, phase: ygg::knowledge::runtime::Phase::Okf,
+            bundle: bundle_path.canonicalize().unwrap(),
+            mappings: ygg::knowledge::legacy::Mappings {
+                database_id: source_database, corpus_id: corpus, repos: Default::default(),
+                users: std::collections::BTreeMap::from([("move-user".into(), "portable-move-user".into())]),
+            }, agents: Default::default(),
+        };
+        let original_binding = serde_json::to_vec_pretty(&binding).unwrap();
+        std::fs::write(policy_path.join("runtime.json"), &original_binding).unwrap();
+        std::fs::set_permissions(policy_path.join("runtime.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
         let destination = temp.path().join("deployment-backup");
         let backup_command = |destination: &std::path::Path| {
             let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
@@ -457,6 +478,15 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
                 .arg("--restore-dir").arg(files).arg("--target-config").arg(&proposed).arg("--json");
             cmd
         };
+        let assert_moved_note = || {
+            let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+            for name in ["DATABASE_URL", "YGG_DATABASE_OWNER_URL", "YGG_DB_MODE", "YGG_DATA_DIR", "YGG_PROFILE", "YGG_KNOWLEDGE_DIR", "YGG_KNOWLEDGE_POLICY_DIR"] { cmd.env_remove(name); }
+            let output = cmd.env("YGG_CONFIG_DIR", &switch_config).env("YGG_USER", "move-user")
+                .args(["remember", "--list", "--all", "--json"]).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(result["results"].as_array().unwrap().iter().any(|row| row["memory_id"] == note.key.id.to_string() && row["text"] == "retained across deployment move"));
+        };
         write_proposed(false);
         std::fs::write(switch_config.join(".env"), "DATABASE_URL=postgres://private-secret@localhost/wrong\n").unwrap();
         let refused = switch_command(&restored_files).output().await.unwrap();
@@ -478,7 +508,17 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         let selected = switch_command(&restored_files).output().await.unwrap();
         assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
         assert_eq!(std::fs::read(switch_config.join("config.toml")).unwrap(), std::fs::read(&proposed).unwrap());
+        assert_moved_note();
+        assert_eq!(std::fs::read(policy_path.join("runtime.json")).unwrap(), original_binding);
+        assert_eq!(std::fs::read(destination.join("policy/corpus/runtime.json")).unwrap(), original_binding);
         write_proposed(true);
+        // The receipt is evidence, not permission to ignore other policy edits.
+        let rebased = std::fs::read(managed_files.join("policy/runtime.json")).unwrap();
+        let mut changed: serde_json::Value = serde_json::from_slice(&rebased).unwrap();
+        changed["minimum_client"] = serde_json::json!(9999);
+        std::fs::write(managed_files.join("policy/runtime.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(!switch_command(&managed_files).output().await.unwrap().status.success());
+        std::fs::write(managed_files.join("policy/runtime.json"), &rebased).unwrap();
         std::fs::write(managed_files.join("knowledge/unexpected"), b"independent edit").unwrap();
         assert!(!switch_command(&managed_files).output().await.unwrap().status.success());
         std::fs::remove_file(managed_files.join("knowledge/unexpected")).unwrap();
@@ -488,6 +528,7 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         assert_eq!(outcome["already_applied"], false);
         assert_eq!(std::fs::read(switch_config.join("config.toml")).unwrap(), std::fs::read(&proposed).unwrap());
         assert!(matches!(recovered.status().await.unwrap(), ygg::db::runtime::Status::Ready{..}));
+        assert_moved_note();
         let application = ygg::config::database::DeploymentConfig::load(std::collections::BTreeMap::from([("YGG_CONFIG_DIR".into(), switch_config.to_str().unwrap().into())])).unwrap();
         assert_eq!(application.knowledge_policy_dir, managed_files.join("policy"));
         assert!(matches!(application.database, ygg::config::database::DatabaseTarget::ManagedLocal{data_dir} if data_dir==managed_data));

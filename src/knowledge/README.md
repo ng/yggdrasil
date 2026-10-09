@@ -825,8 +825,13 @@ a deployment backup must snapshot that directory as well as its document bundle,
 and record both returned revisions alongside its consistent PostgreSQL dump.
 This library component alone is not a complete Yggdrasil deployment backup.
 `db backup` pairs bundle and policy snapshots with a database dump. `db restore`
-restores exact corpus/policy bytes into a new destination and validates the database;
-explicit `db switch` selects a validated restored deployment. Binary upgrades remain pending.
+restores exact corpus bytes into a new destination and validates the database.
+For a selected corpus, it changes only the archived runtime binding's bundle path
+after verifying its identities, mappings, generation and phase against the backup.
+Version 2 restore receipts record the original and restored binding digests;
+`db switch` independently derives the same change and rejects other policy edits.
+The source/archive remain unchanged, and a fenced selection stays fenced.
+Explicit `db switch` selects a validated restored deployment. Binary upgrades remain pending.
 
 New deployment backups use manifest version 2 and include a digest-bound, private
 `configuration.json`. It preserves exact user `config.toml` and `.env` text,
@@ -1132,8 +1137,9 @@ work. Shared-network latency is measured separately from private local lookup.
 Backups acquire the transport lease before export/writer leases, retain the bare
 objects, confirmed snapshot pointer, remote binding and uncertain-publication
 journal, and omit transient views/command files/locks. Restored caches preserve
-confirmed bytes for offline browsing. Deployment moves still need the planned
-validated rebinding of the runtime's canonical bundle path. Automatic Git/cache
+confirmed bytes for offline browsing. Deployment restore rebases the runtime's
+canonical bundle path with retained evidence; shared/fleet move qualification
+remains open. Automatic Git/cache
 retention cleanup and a supported cutover/configuration publisher remain unfinished.
 
 

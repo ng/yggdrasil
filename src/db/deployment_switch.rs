@@ -82,7 +82,8 @@ pub async fn run(
     let restored = restored.canonicalize()?;
     let receipt: Receipt = serde_json::from_slice(&private_bytes(&restored.join("restore.json"))?)?;
     ensure!(
-        receipt.version == 1
+        matches!(receipt.version, 1 | 2)
+            && (receipt.version == 2 || receipt.selection_rebase.is_none())
             && !receipt.configuration_switched
             && receipt.database_id == manifest.database.database_id
             && receipt.generation == manifest.database.generation
@@ -141,7 +142,9 @@ pub async fn run(
         );
     } else {
         ensure!(
-            receipt.knowledge_dir.is_none() && receipt.policy_dir.is_none(),
+            receipt.knowledge_dir.is_none()
+                && receipt.policy_dir.is_none()
+                && receipt.selection_rebase.is_none(),
             "unexpected corpus in SQL-only restore receipt"
         );
         ensure!(
@@ -158,6 +161,11 @@ pub async fn run(
         &restored,
         digest(&serde_json::to_vec(&manifest)?),
     ))?);
+    let binding = if receipt.version == 2 {
+        digest(&serde_json::to_vec(&(&binding, &receipt.selection_rebase))?)
+    } else {
+        binding
+    };
     let publication = Publication::begin(&root, &next, &binding, resume)?;
     let operation = publication.operation();
     let result = async {
@@ -166,7 +174,13 @@ pub async fn run(
         }
         if manifest.knowledge.is_some() {
             KnowledgeBackup::verify_restored(&backup.join("knowledge"), &target.knowledge_dir)?;
-            KnowledgeBackup::verify_restored(&backup.join("policy"), &target.knowledge_policy_dir)?;
+            crate::knowledge::relocation::verify_restored(
+                &backup.join("policy"),
+                &target.knowledge_policy_dir,
+                &target.knowledge_dir,
+                &manifest.database,
+                receipt.selection_rebase.as_ref(),
+            )?;
         }
         let (owner, runtime, started) = match &target.database {
             DatabaseTarget::External { url } => {
@@ -213,9 +227,12 @@ pub async fn run(
             );
             if manifest.knowledge.is_some() {
                 KnowledgeBackup::verify_restored(&backup.join("knowledge"), &target.knowledge_dir)?;
-                KnowledgeBackup::verify_restored(
+                crate::knowledge::relocation::verify_restored(
                     &backup.join("policy"),
                     &target.knowledge_policy_dir,
+                    &target.knowledge_dir,
+                    &manifest.database,
+                    receipt.selection_rebase.as_ref(),
                 )?;
             }
             ensure!(

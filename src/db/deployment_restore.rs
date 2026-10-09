@@ -29,6 +29,8 @@ pub struct Receipt {
     pub policy_dir: Option<PathBuf>,
     pub configuration_switched: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_rebase: Option<crate::knowledge::relocation::SelectionRebase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_configuration_sha256: Option<String>,
 }
 
@@ -122,12 +124,25 @@ pub async fn run(
             None
         }
     };
+    let selection = if manifest.knowledge.is_some() {
+        crate::knowledge::relocation::prepare(
+            &source.join("policy"),
+            &destination.join("knowledge"),
+            &manifest.database,
+        )?
+    } else {
+        None
+    };
     let stage = parent.join(format!(".deployment-restore-{}", Uuid::new_v4()));
     std::fs::DirBuilder::new().mode(0o700).create(&stage)?;
     File::open(&parent)?.sync_all()?;
     if manifest.knowledge.is_some() {
         KnowledgeBackup::restore(&source.join("knowledge"), &stage.join("knowledge"))?;
         KnowledgeBackup::restore(&source.join("policy"), &stage.join("policy"))?;
+        if let Some(selection) = &selection {
+            selection.apply(&stage.join("policy"))?;
+            selection.verify(&source.join("policy"), &stage.join("policy"))?;
+        }
     }
     if let Some(configuration) = &manifest.configuration {
         let bytes = deployment_backup::configuration_bytes(
@@ -174,8 +189,16 @@ pub async fn run(
         deployment_backup::verify(source)? == manifest,
         "backup changed during restore; target retained without publication"
     );
+    if manifest.knowledge.is_some() {
+        KnowledgeBackup::verify_restored(&source.join("knowledge"), &stage.join("knowledge"))?;
+        if let Some(selection) = &selection {
+            selection.verify(&source.join("policy"), &stage.join("policy"))?;
+        } else {
+            KnowledgeBackup::verify_restored(&source.join("policy"), &stage.join("policy"))?;
+        }
+    }
     let receipt = Receipt {
-        version: 1,
+        version: 2,
         restored_at: chrono::Utc::now(),
         database_id: manifest.database.database_id,
         generation: manifest.database.generation,
@@ -191,6 +214,7 @@ pub async fn run(
             .map(|_| destination.join("policy")),
         destination: destination.clone(),
         configuration_switched: false,
+        selection_rebase: selection.map(|selection| selection.evidence),
         source_configuration_sha256: manifest.configuration.as_ref().map(|c| c.sha256.clone()),
     };
     let mut output = OpenOptions::new()

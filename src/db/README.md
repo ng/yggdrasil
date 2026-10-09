@@ -224,8 +224,11 @@ python3 scripts/smoke-release-bundle.py /absolute/bundle-offline.tar.gz \
   --directory /absolute/new-disposable-profile
 ```
 
-The native workflow assembles and uploads candidate bundles after its lifecycle
-suite, then exercises the extracted binaries in separate disposable profiles.
+The native workflow assembles bundles after its lifecycle suite, exercises the
+extracted binaries in separate disposable profiles, then uploads the candidates.
+[Run 37991943961](https://github.com/ng/yggdrasil/actions/runs/37991943961), at
+`b3153a7`, passed both bundle flavors on macOS arm64/Intel and GNU Linux x86_64;
+all three assembly reports recorded a clean source checkout and uploaded artifacts.
 Offline smoke denies curl, initializes/migrates, proves stable cluster/process
 identity on archive-free reuse, creates/verifies a database backup and stops the
 owned supervisor. Online smoke uses `--allow-download` for first initialization,
@@ -372,7 +375,7 @@ The pinned-package test exports while another transaction commits a new row,
 restores into a disposable empty database and compares every inventoried table
 count, the original UUID and database identity, and a restored check constraint.
 TLS tests exercise native `pg_dump` as well as SQLx. The combined backup command below includes bundle/policy snapshots and publishes
-a manifest. Validated restore is described below; automated deployment switching remains unfinished.
+a manifest. Validated restore and explicit deployment switching are described below.
 Roles and tablespaces are cluster objects outside this single-database dump;
 restoration must explicitly provision target roles and validate grants.
 
@@ -419,7 +422,7 @@ the exact component inventory, custom archive header, hashes, knowledge revision
 and corpus binding. It does not establish provenance, validate every SQL object,
 or replace a restore rehearsal. The whole stage is verified and synced before
 exclusive publication. No existing database or active configuration is changed by
-backup. Restore is described below; upgrade and deployment-switch commands remain
+backup. Restore and deployment switching are described below; upgrade commands remain
 unfinished.
 
 ### Validated restore
@@ -480,6 +483,23 @@ Validation failure never cleans the target or overwrites the source. The databas
 commit and filesystem publication are separate boundaries, so a crash can leave a
 complete target without a published receipt.
 
+For a selected OKF corpus, restore derives one policy change: `runtime.json`'s
+bundle path becomes the canonical restored knowledge directory. The original
+archive and source policy remain unchanged. Version 2 restore receipts retain the
+old/new paths and exact-byte digests; all other binding values and policy/document
+files are preserved. Before changing target database state, restore checks the
+binding's phase, generation, database/corpus identity, client protocol and repository
+mappings against the backup. Fenced bindings stay fenced. Inconsistent source
+bindings are refused rather than repaired or promoted.
+
+Switch recomputes that transformation from the retained archive, verifies its
+receipt and all restored policy files, and binds the evidence into its durable
+publication journal. Version 1 receipts remain usable for restores without a local selection binding;
+a selected corpus restored by an older client requires a new restore that records
+the path-rebinding evidence. A resumed completed switch still preserves later
+writes. This changes only local selection paths; it does not provide shared/fleet
+quiescence or rewrite repository aliases for a different host.
+
 `restore.json` always reports `configuration_switched: false`. Keep writers stopped
 until an explicit, reviewed configuration switch selects both the target database
 and restored corpus/policy paths. The explicit switch command below selects those paths together. Upgrade commands
@@ -519,8 +539,8 @@ The current config directory must exist and be owned/private (`0700`). Conflicti
 environment or legacy user `.env` settings cause refusal rather than a switch that
 future commands would silently ignore. The proposed configuration is checked with
 the same resolver used by normal commands. The command rechecks database contents,
-recorded schema and identity, runtime CRUD/marker permissions, exact corpus/policy
-bytes, the backup, and the proposed configuration before publication. It does not
+recorded schema and identity, runtime CRUD/marker permissions, exact corpus and
+policy bytes (apart from the independently derived selection path), the backup, and the proposed configuration before publication. It does not
 change corpus trust, UUIDs or existing database identity mappings.
 
 Each attempt retains a private `deployment-switch-UUID/` journal in the config
