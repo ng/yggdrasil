@@ -505,8 +505,7 @@ a cache that predates the baseline cannot reduce its count or last-applied time.
 Imported rules without any recorded totals produce a repair diagnostic rather
 than fabricated zero counts. New rules begin at zero. CLI listing labels these
 values as last-known on stderr while preserving the JSON schema. The live
-telemetry refresh/cache publisher and per-session injection deduplication still
-need integration. Neither usage file is part of a rule's activation digest.
+telemetry refresh/cache publisher still needs integration. Neither usage file is part of a rule's activation digest.
 
 ### Prime during coordination outages
 
@@ -524,8 +523,8 @@ Healthy coordination still supplies agent/task/lock state. Handoff reads have a
 separate half-second bound and an unavailable indicator; no local handoff copy is
 invented. Degraded output states that coordination and handoff were not loaded,
 without echoing database credentials or claiming that shared locks work offline.
-SessionStart and PreCompact inherit this path. Edit-time learning injection,
-per-session deduplication, optional live telemetry and TUI integration remain open.
+SessionStart and PreCompact inherit this path. Optional live telemetry and TUI
+integration remain open.
 
 ### Edit-time injection and session receipts
 
@@ -557,4 +556,24 @@ emits them with a duplicates-possible diagnostic. Missing session IDs skip
 deduplication. These disposable receipts are excluded from backups, contain no
 exclusive knowledge or activation evidence, and may be removed explicitly when
 sessions are no longer active. Automatic cache retention cleanup and live
-telemetry recording remain unfinished, as do task-claim and TUI integration.
+telemetry recording remain unfinished, as does TUI integration.
+
+### Connected task-claim injection
+
+Task claims retain PostgreSQL coordination and route selected knowledge to OKF.
+The task's explicit database repository UUID is mapped to portable scope; the cwd
+cannot substitute another repository. Before matching, the local selection's
+source database, corpus and generation must agree with the connected public
+storage marker, which must select OKF and support this client. Missing mappings,
+fenced/invalid selections and mismatched markers omit instructions with a concise
+diagnostic; they never fall back to frozen SQL and do not undo a successful claim.
+
+The operation holds the local selection lease and a shared database migration
+lease through emission, acquiring them in that order. Connected lease acquisition
+is bounded to three seconds. Migration publication must use the same lock order.
+The advisory lease stabilizes the marker without taking a tuple lock, avoiding a
+reader/transition-trigger lock inversion. File order, file/rule predicates,
+agent/kind matching and within-call UUID deduplication retain the SQL behavior;
+when no paths are mentioned, only rules without file or rule scope are included.
+Current document bytes, activation, trust and freshness are revalidated before
+formatting. Local claim injection does not yet record optional usage telemetry.

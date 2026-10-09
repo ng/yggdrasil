@@ -152,3 +152,47 @@ pub fn for_edit(
         }
     }
 }
+
+/// Task claim matching preserves file order and within-call UUID deduplication.
+/// A task without paths receives only general rules, matching the SQL contract.
+pub fn for_task(
+    context: &Context,
+    repo: Uuid,
+    files: &[String],
+    agent: &str,
+    kind: &str,
+) -> Result<Vec<RevisionedDocument>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let paths: Vec<Option<&str>> = if files.is_empty() {
+        vec![None]
+    } else {
+        files.iter().map(|file| Some(file.as_str())).collect()
+    };
+    for file in paths {
+        let filters = Filters {
+            repo: Some(repo),
+            file,
+            agent: Some(agent),
+            kind: Some(kind),
+            ..Filters::default()
+        };
+        let selected = context.service.rules(&filters, chrono::Utc::now())?;
+        diagnostics(&selected);
+        let current =
+            context
+                .service
+                .revalidate_rules(&selected.documents, &filters, chrono::Utc::now())?;
+        diagnostics(&current);
+        for doc in current.documents {
+            let p = doc.document.profile()?.expect("validated rule profile");
+            if file.is_none() && (p.file_glob.is_some() || p.rule_id.is_some()) {
+                continue;
+            }
+            if seen.insert(doc.key.id) {
+                out.push(doc);
+            }
+        }
+    }
+    Ok(out)
+}

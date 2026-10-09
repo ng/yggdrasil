@@ -215,7 +215,27 @@ pub fn surface_for_edit(
     agent: &str,
     session: &str,
 ) -> Result<Vec<String>> {
-    crate::knowledge::injection::for_edit(context, file, agent, session)?
+    format_documents(crate::knowledge::injection::for_edit(
+        context, file, agent, session,
+    )?)
+}
+
+pub fn surface_for_files(
+    context: &Context,
+    repo: Uuid,
+    files: &[String],
+    agent: &str,
+    kind: &str,
+) -> Result<Vec<String>> {
+    format_documents(crate::knowledge::injection::for_task(
+        context, repo, files, agent, kind,
+    )?)
+}
+
+fn format_documents(
+    documents: Vec<crate::knowledge::store::RevisionedDocument>,
+) -> Result<Vec<String>> {
+    documents
         .into_iter()
         .map(|doc| {
             let p = doc

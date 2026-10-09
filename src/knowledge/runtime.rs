@@ -42,6 +42,7 @@ pub struct Context {
     pub service: KnowledgeService,
     pub default_agent_name: String,
     pub mappings: Mappings,
+    generation: i64,
     registry: IdentityRegistry,
     agents: BTreeMap<String, Uuid>,
     policy: KnowledgeStore,
@@ -139,6 +140,7 @@ impl Context {
             service,
             default_agent_name: "ygg".into(),
             mappings: binding.mappings,
+            generation: binding.generation,
             registry,
             agents: binding.agents,
             policy,
@@ -211,6 +213,29 @@ impl Context {
     pub fn repo(&self, cwd: &Path) -> Result<Uuid> {
         self.registry.resolve(&GitIdentity::discover(cwd)?)?
             .ok_or_else(|| anyhow!("repository has no explicit knowledge binding; use --global only for intentional global scope"))
+    }
+    /// Connected task claims use the task's database scope, never checkout scope.
+    /// Hold both this context and the returned transaction through emission.
+    pub async fn task_scope(
+        &self,
+        pool: &sqlx::PgPool,
+        legacy_repo: Uuid,
+    ) -> Result<(Uuid, sqlx::Transaction<'static, sqlx::Postgres>)> {
+        let transaction = super::guard::selected_transaction(
+            pool,
+            self.mappings.database_id,
+            self.mappings.corpus_id,
+            self.generation,
+        )
+        .await?;
+        let repo = self
+            .registry
+            .from_legacy(self.mappings.database_id, legacy_repo)?;
+        ensure!(
+            self.mappings.repos.get(&legacy_repo) == Some(&repo),
+            "task repository has no matching selection binding"
+        );
+        Ok((repo, transaction))
     }
     pub fn agent(&self, name: &str) -> Option<Uuid> {
         self.agents.get(name).copied()
