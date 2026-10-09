@@ -43,6 +43,15 @@ reap and restart a crashed child. Explicit `stop` verifies identity before askin
 `pg_ctl` for smart shutdown, which drains clients; timeout does not escalate to
 an immediate shutdown. Readiness timeouts retain server state for inspection.
 
+Readiness must not equate the PID-file timestamp with
+`pg_postmaster_start_time()`. PostgreSQL captures `MyStartTime` before startup work
+and `PgStartTime` after shared-preload initialization; these can cross a second
+boundary. See the [PostgreSQL startup implementation](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/backend/postmaster/postmaster.c).
+Verification binds a live authenticated backend's parent PID to the unchanged PID
+file while also checking directory, system identifier, version and disabled TCP.
+The native regression test compiles a small preload library that sleeps for two
+seconds, proves the timestamps differ, and verifies readiness and draining stop.
+
 The native-process approach avoids putting a `postgresql_embedded` handle in
 short-lived clients: the candidate's current [Drop implementation](https://raw.githubusercontent.com/theseus-rs/postgresql-embedded/main/postgresql_embedded/src/postgresql.rs)
 stops a started server even with persistent data. PostgreSQL documents native

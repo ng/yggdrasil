@@ -438,23 +438,27 @@ impl ManagedCluster {
         let start: i64 = lines[2].parse()?;
         ensure!(
             pid > 1
+                && start > 0
                 && Path::new(lines[1]) == self.root.join("data")
                 && lines[3] == "5432"
                 && Path::new(lines[4]) == self.root.join("runtime"),
             "server PID identity mismatch"
         );
         let mut conn = PgConnection::connect_with(&self.admin_options()).await?;
-        let (directory, system_id, version, listen, started, backend): (String, String, i32, String, i64, i32) = sqlx::query_as(
-            "SELECT current_setting('data_directory'), system_identifier::text, current_setting('server_version_num')::int, current_setting('listen_addresses'), floor(extract(epoch FROM pg_postmaster_start_time()))::bigint, pg_backend_pid() FROM pg_control_system()")
+        let (directory, system_id, version, listen, backend): (String, String, i32, String, i32) = sqlx::query_as(
+            "SELECT current_setting('data_directory'), system_identifier::text, current_setting('server_version_num')::int, current_setting('listen_addresses'), pg_backend_pid() FROM pg_control_system()")
             .fetch_one(&mut conn).await?;
         ensure!(
             Path::new(&directory) == self.root.join("data")
                 && system_id == self.manifest.system_id
                 && version / 10000 == self.manifest.major as i32
-                && listen.is_empty()
-                && started == start,
+                && listen.is_empty(),
             "live server identity mismatch"
         );
+        // PostgreSQL writes MyStartTime into the PID file, but the SQL function
+        // pg_postmaster_start_time() returns PgStartTime captured later (after
+        // shared-preload initialization). Equality rejects healthy slow starts.
+        // See PostgreSQL src/backend/postmaster/postmaster.c and miscinit.c.
         // Bind the PID file to the actual parent of our authenticated backend,
         // not merely to an unrelated process currently using a recycled PID.
         let parent = output(

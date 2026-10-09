@@ -247,3 +247,90 @@ async fn refuses_wrong_major_and_unrelated_live_pid() {
     std::fs::write(root.join("data/PG_VERSION"), (major + 1).to_string()).unwrap();
     assert!(ManagedCluster::open(&root).is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires native PostgreSQL headers, C compiler, YGG_TEST_PG_BIN and YGG_TEST_PG_MAJOR"]
+async fn delayed_postmaster_start_verifies_distinct_process_and_sql_timestamps() {
+    let bin = PathBuf::from(std::env::var("YGG_TEST_PG_BIN").unwrap());
+    let major = std::env::var("YGG_TEST_PG_MAJOR").unwrap().parse().unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("ydelay-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let source = base.join("startup_delay.c");
+    let library = base.join("startup_delay.so");
+    std::fs::write(
+        &source,
+        r#"
+#include "postgres.h"
+#include "fmgr.h"
+PG_MODULE_MAGIC;
+PGDLLEXPORT void _PG_init(void);
+void _PG_init(void) { pg_usleep(2000000L); }
+"#,
+    )
+    .unwrap();
+    let mut compile = Command::new("cc");
+    compile
+        .arg("-I")
+        .arg(bin.parent().unwrap().join("include/server"));
+    if cfg!(target_os = "macos") {
+        compile.args(["-bundle", "-undefined", "dynamic_lookup"]);
+    } else {
+        compile.args(["-shared", "-fPIC"]);
+    }
+    let output = compile
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let root = base.join("cluster");
+    let cluster = ManagedCluster::initialize(&root, &bin, major)
+        .await
+        .unwrap();
+    let _cleanup = Cleanup {
+        children: vec![],
+        bin,
+        root: root.clone(),
+    };
+    use std::io::Write;
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(root.join("data/postgresql.conf"))
+        .unwrap();
+    writeln!(config, "shared_preload_libraries = '{}'", library.display()).unwrap();
+    config.sync_all().unwrap();
+    let mut owner = cluster.try_owner().unwrap().unwrap();
+    let started = owner.start_or_adopt(Duration::from_secs(8)).await;
+    // Read both timestamps even if the product rejected the ready server, so a
+    // regression failure shows the actual legitimate divergence.
+    let mut conn = connect(&root).await;
+    let sql_start: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM pg_postmaster_start_time()))::bigint")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+    let pid_file = std::fs::read_to_string(root.join("data/postmaster.pid")).unwrap();
+    let process_start: i64 = pid_file.lines().nth(2).unwrap().parse().unwrap();
+    assert!(
+        sql_start >= process_start + 2,
+        "preload must separate timestamp capture points"
+    );
+    assert!(
+        started.is_ok(),
+        "ready server rejected: {started:?}; pid-file start={process_start}, SQL start={sql_start}"
+    );
+    assert!(matches!(
+        cluster.status().await.unwrap(),
+        Status::Ready { .. }
+    ));
+    conn.close().await.unwrap();
+    owner.stop(WAIT).await.unwrap();
+}
