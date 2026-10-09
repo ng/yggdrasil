@@ -385,7 +385,7 @@ impl KnowledgeService {
         if !policy.trusted {
             return Ok(Snapshot::default());
         }
-        let mut candidates = self.store.candidates();
+        let mut candidates = self.store.candidates(Kind::Note);
         candidates.rows.retain(|row| {
             row.key.kind == Kind::Note
                 && row.profile.user_id.as_deref() == Some(&self.user)
@@ -500,7 +500,7 @@ impl KnowledgeService {
         let policy = self.policy()?;
         let mut matcher = matching::Matcher::new(filters);
         Self::scope(&policy, filters.repo)?;
-        let candidates = self.store.candidates();
+        let candidates = self.store.candidates(Kind::Learning);
         let mut snapshot = Snapshot {
             documents: Vec::new(),
             diagnostics: candidates.diagnostics,

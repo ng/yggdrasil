@@ -15,12 +15,16 @@ fn backup_preserves_exact_bytes_unknown_files_empty_dirs_and_separate_identity()
     let written = store.put(&document, ExpectedRevision::Absent).unwrap();
     std::fs::create_dir(source.join("empty")).unwrap();
     std::fs::write(source.join("opaque"), [0, 255, 0, 3]).unwrap();
-    std::fs::write(source.join(".lookup.json"), "discardable cache").unwrap();
+    for name in [".lookup.json", ".lookup-notes.json", ".lookup-rules.json"] {
+        std::fs::write(source.join(name), "discardable cache").unwrap();
+    }
     let target = temp.path().join("backup");
     let snapshot = store.backup(&target).unwrap();
     assert_eq!(snapshot, KnowledgeBackup::verify(&target).unwrap());
     assert!(!target.join("corpus/.writer.lock").exists());
-    assert!(!target.join("corpus/.lookup.json").exists());
+    for name in [".lookup.json", ".lookup-notes.json", ".lookup-rules.json"] {
+        assert!(!target.join("corpus").join(name).exists());
+    }
     assert!(target.join("corpus/empty").is_dir());
     assert_eq!(
         std::fs::read(target.join("corpus/opaque")).unwrap(),

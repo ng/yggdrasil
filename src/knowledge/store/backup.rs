@@ -254,6 +254,8 @@ fn skipped(name: &str, root: bool, shared: bool) -> bool {
             | ".selection.lock"
             | ".shared.lock"
             | ".lookup.json"
+            | ".lookup-notes.json"
+            | ".lookup-rules.json"
             | ".sessions"
     ) {
         return true;

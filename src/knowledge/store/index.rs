@@ -4,7 +4,12 @@ use super::*;
 use crate::knowledge::document::{PARSER_VERSION, Profile};
 use std::{collections::BTreeMap, os::unix::fs::MetadataExt};
 
-const INDEX: &str = ".lookup.json";
+fn index_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Note => ".lookup-notes.json",
+        Kind::Learning => ".lookup-rules.json",
+    }
+}
 const LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +75,8 @@ pub(crate) struct Candidate {
 struct Header {
     version: u32,
     parser: u32,
-    /// Digest of the complete sorted path/fingerprint/document-digest rows.
+    kind: Kind,
+    /// Digest of the complete sorted path/fingerprint/document-digest rows for this kind.
     corpus_revision: String,
 }
 
@@ -81,8 +87,8 @@ pub(crate) struct Candidates {
 }
 
 impl KnowledgeStore {
-    fn read_index(&self) -> Result<BTreeMap<String, Candidate>> {
-        let text = Self::read_limited(&self.root, INDEX, LIMIT)?
+    fn read_index(&self, kind: Kind) -> Result<BTreeMap<String, Candidate>> {
+        let text = Self::read_limited(&self.root, index_name(kind), LIMIT)?
             .ok_or_else(|| anyhow::anyhow!("lookup index absent"))?;
         let (header, body) = text
             .split_once('\n')
@@ -90,7 +96,7 @@ impl KnowledgeStore {
         ensure!(header.len() <= 1024, "lookup header exceeds limit");
         let header: Header = serde_json::from_str(header)?;
         ensure!(
-            header.version == 1 && header.parser == PARSER_VERSION,
+            header.version == 2 && header.parser == PARSER_VERSION && header.kind == kind,
             "lookup version changed"
         );
         ensure!(
@@ -100,7 +106,7 @@ impl KnowledgeStore {
         Ok(serde_json::from_str(body)?)
     }
 
-    pub(crate) fn candidates(&self) -> Candidates {
+    pub(crate) fn candidates(&self, kind: Kind) -> Candidates {
         let mut result = Candidates::default();
         let phase = crate::knowledge::timing::Phase::start("index_recovery");
         if let Err(e) = self.recover_move() {
@@ -118,7 +124,7 @@ impl KnowledgeStore {
         // Missing, damaged, stale-version or unwritable caches are rebuildable.
         // Their failure cannot erase authoritative documents or fail a read.
         let phase = crate::knowledge::timing::Phase::start("index_read");
-        let loaded = self.read_index();
+        let loaded = self.read_index(kind);
         drop(phase);
         let phase = crate::knowledge::timing::Phase::start("index_validate");
         let mut dirty = loaded.is_err();
@@ -131,14 +137,21 @@ impl KnowledgeStore {
         // Inventory groups rows by scope/kind. Reuse only the current anchored
         // directory descriptor, bounding open descriptors independently of size.
         let mut parent: Option<(Option<Uuid>, Kind, File)> = None;
+        // Keep global inventory/duplicate checks, but parse and fingerprint only
+        // the requested kind. Content diagnostics for other kinds are produced
+        // by their own lookups or a full authoritative browse.
         for key in inventory.keys {
-            let path = key.relative_path().to_string_lossy().into_owned();
             if counts[&key.id] != 1 {
+                let path = key.relative_path().to_string_lossy().into_owned();
                 result
                     .diagnostics
                     .push(format!("{path}: duplicate document UUID"));
                 continue;
             }
+            if key.kind != kind {
+                continue;
+            }
+            let path = key.relative_path().to_string_lossy().into_owned();
             let row = (|| -> Result<Candidate> {
                 if !parent
                     .as_ref()
@@ -205,15 +218,16 @@ impl KnowledgeStore {
                     .collect();
                 let body = serde_json::to_string(&next)?;
                 let header = serde_json::to_string(&Header {
-                    version: 1,
+                    version: 2,
                     parser: PARSER_VERSION,
+                    kind,
                     corpus_revision: digest(body.as_bytes()),
                 })?;
                 let text = format!("{header}\n{body}");
                 ensure!(text.len() <= LIMIT, "lookup index exceeds byte limit");
                 // Cache writers may publish an older observation concurrently;
                 // the next read checks every live fingerprint again regardless.
-                Self::replace_at(&self.root, INDEX, &text)
+                Self::replace_at(&self.root, index_name(kind), &text)
             })();
             if let Err(e) = save {
                 tracing::debug!(error = %e, "disposable knowledge index was not saved");

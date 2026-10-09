@@ -3,7 +3,8 @@ use super::{
     document::{Document, digest},
     shared::{Change, SharedGit, Snapshot as RemoteSnapshot},
     store::{
-        Candidate, Candidates, ExpectedRevision, Key, KnowledgeStore, RevisionedDocument, Snapshot,
+        Candidate, Candidates, ExpectedRevision, Key, Kind, KnowledgeStore, RevisionedDocument,
+        Snapshot,
     },
 };
 use anyhow::{Result, ensure};
@@ -145,8 +146,8 @@ impl Backend {
     pub fn snapshot(&self) -> Snapshot {
         self.read(KnowledgeStore::snapshot)
     }
-    pub fn candidates(&self) -> Candidates {
-        self.read(KnowledgeStore::candidates)
+    pub fn candidates(&self, kind: Kind) -> Candidates {
+        self.read(|s| s.candidates(kind))
     }
     pub fn load_candidate(&self, row: &Candidate) -> Result<Option<RevisionedDocument>> {
         self.read(|s| s.load_candidate(row))

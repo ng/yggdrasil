@@ -219,19 +219,33 @@ PostgreSQL 18.3 (Homebrew), 100 samples per mode:
 | Pattern reuse + moved warm index rows | 259.90 ms | 610.15 ms | 350.24 ms | Failed |
 | Above + batched usage recording | 207.08 ms | 569.17 ms | 362.09 ms | Failed |
 | Above + disposable cache publication | 210.95 ms | 467.02 ms | 256.07 ms | Failed |
+| Above + kind-specific indexes (initial run) | 231.56 ms | 298.33 ms | 66.78 ms | Failed |
+| Kind-specific indexes (final verification) | 227.02 ms | 320.01 ms | 92.99 ms | Failed |
 
 Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-before-session-locks.json),
 [with session locks](../../docs/performance/okf-hooks-2026-10-09-session-locks.json),
 [with pattern reuse](../../docs/performance/okf-hooks-2026-10-09-pattern-cache.json),
 [with warm row moves](../../docs/performance/okf-hooks-2026-10-09-pattern-cache-index-moves.json),
 [with batched usage](../../docs/performance/okf-hooks-2026-10-09-batched-telemetry.json),
-and [with disposable cache publication](../../docs/performance/okf-hooks-2026-10-09-disposable-cache.json).
+[with disposable cache publication](../../docs/performance/okf-hooks-2026-10-09-disposable-cache.json),
+[initial kind-specific indexes](../../docs/performance/okf-hooks-2026-10-09-kind-index.json),
+and [final kind-specific indexes](../../docs/performance/okf-hooks-2026-10-09-kind-index-final.json).
 All runs verified identical rule output and all 2,400 usage observations per mode
 (including warmup). These are diagnostic runs on one host, not a cross-platform
 latency guarantee. Independent session leases remove one contention source, but
 the release's SQL-relative latency requirement remains **unmet**. Batching reduces
 usage recording from about 80 calls for 20 fresh applications to two calls, but
 this run does not show improvement in the SQL-relative gap.
+
+Kind-specific index qualification retains a [diagnostic profile](../../docs/performance/okf-hooks-2026-10-09-kind-index-phases.json).
+Two subsequent inventory-allocation experiments were reverted because they did not
+improve measured inventory time or establish an end-to-end benefit. Their raw
+[stack-format/counter-map run](../../docs/performance/okf-hooks-2026-10-09-kind-inventory.json),
+[direct-entry run](../../docs/performance/okf-hooks-2026-10-09-stream-inventory.json)
+and [direct-entry phase profile](../../docs/performance/okf-hooks-2026-10-09-stream-inventory-phases.json)
+remain available; added p95 was 82.78 ms and 116.79 ms in the uninstrumented runs.
+These experiments are not part of the current implementation. Directory inventory
+still reads all live names, preserving canonical spelling and global duplicate checks.
 
 File-pattern results are reused only within one immutable query, with at most 256
 keys and 64 KiB of pattern text retained. Every rule still undergoes its own scope,
@@ -282,15 +296,22 @@ by the persistent index; the SQL-relative 50 ms target remains unverified.
 
 ### Persistent metadata lookup
 
-Rule matching and prime-note selection now use a disposable `.lookup.json` in the
-private bundle root. Its versioned header pins the parser version and contains a
-SHA-256 corpus revision over the sorted path, file-fingerprint, document-digest
-and matching-metadata rows. The file is bounded to 64 MiB and replaced atomically.
+Rule matching uses `.lookup-rules.json` and prime-note selection uses
+`.lookup-notes.json` in the private bundle root. Each disposable version-2 header
+pins the parser version and document kind, with a SHA-256 revision over that kind's
+sorted path, file-fingerprint, document-digest and matching-metadata rows. Each
+file is bounded to 64 MiB and replaced atomically. A wrong-kind or legacy cache
+is rebuilt from documents; the old `.lookup.json` is ignored. Backups exclude all
+three cache filenames.
 It contains no Markdown bodies, activation evidence or unknown YAML metadata.
 Notes/proposals requested for explicit browsing still use authoritative snapshots.
 
-Each lookup inventories all live UUIDs to exclude ambiguous copies, then checks
-file metadata relative to held directory descriptors without following symlinks.
+Each lookup inventories all live UUIDs across both kinds to exclude ambiguous
+copies, including a duplicate note filename that conflicts with a rule UUID.
+It then checks metadata only for the requested kind, relative to held directory
+descriptors without following symlinks. Content diagnostics apply to the requested
+kind; full explicit browsing still parses all documents. This avoids reading and
+fingerprinting unrelated note metadata on every rule lookup.
 It reuses one directory descriptor per contiguous scope/kind group, and opens
 only changed or selected files through the existing containment checks. Cached rows are
 reused only when device, inode, size, mtime and ctime (including nanoseconds) match.
