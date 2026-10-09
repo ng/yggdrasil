@@ -242,6 +242,10 @@ PostgreSQL 18.3 (Homebrew), 100 samples per mode:
 | Above + disposable cache publication | 210.95 ms | 467.02 ms | 256.07 ms | Failed |
 | Above + kind-specific indexes (initial run) | 231.56 ms | 298.33 ms | 66.78 ms | Failed |
 | Kind-specific indexes (final verification) | 227.02 ms | 320.01 ms | 92.99 ms | Failed |
+| Selected-UUID point checks, individual candidates | 307.08 ms | 345.29 ms | 38.21 ms | Passed |
+| Individual point checks, unchanged repeat | 317.15 ms | 334.80 ms | 17.65 ms | Passed |
+| Batched selected-UUID checks | 551.26 ms | 344.01 ms | -207.25 ms | Passed |
+| Batched checks, unchanged repeat | 279.39 ms | 387.96 ms | 108.57 ms | Failed |
 
 Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-before-session-locks.json),
 [with session locks](../../docs/performance/okf-hooks-2026-10-09-session-locks.json),
@@ -251,6 +255,18 @@ Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-
 [with disposable cache publication](../../docs/performance/okf-hooks-2026-10-09-disposable-cache.json),
 [initial kind-specific indexes](../../docs/performance/okf-hooks-2026-10-09-kind-index.json),
 and [final kind-specific indexes](../../docs/performance/okf-hooks-2026-10-09-kind-index-final.json).
+Selected-UUID reports: [individual checks](../../docs/performance/okf-hooks-2026-10-09-selected-uuid.json),
+[individual repeat](../../docs/performance/okf-hooks-2026-10-09-selected-uuid-repeat.json),
+[batched checks](../../docs/performance/okf-hooks-2026-10-09-selected-uuid-batch.json),
+and [batched repeat](../../docs/performance/okf-hooks-2026-10-09-selected-uuid-batch-repeat.json).
+The first batch run had a SQL tail spike; its negative delta does not demonstrate
+an equivalent speedup. The unchanged repeat failed, so selected-UUID checks do
+not yet establish repeatable compliance with the latency target. A separate
+[phase profile](../../docs/performance/okf-hooks-2026-10-09-selected-uuid-batch-phases.json)
+measured index-inventory p95 10.25 ms, index-read 11.68 ms and index-validation
+25.84 ms; repository discovery was 125.47 ms and rule selection 122.56 ms.
+These nested, instrumented measurements are diagnostic only and must not be summed.
+
 All runs verified identical rule output and all 2,400 usage observations per mode
 (including warmup). These are diagnostic runs on one host, not a cross-platform
 latency guarantee. Independent session leases remove one contention source, but
@@ -265,8 +281,19 @@ improve measured inventory time or establish an end-to-end benefit. Their raw
 [direct-entry run](../../docs/performance/okf-hooks-2026-10-09-stream-inventory.json)
 and [direct-entry phase profile](../../docs/performance/okf-hooks-2026-10-09-stream-inventory-phases.json)
 remain available; added p95 was 82.78 ms and 116.79 ms in the uninstrumented runs.
-These experiments are not part of the current implementation. Directory inventory
-still reads all live names, preserving canonical spelling and global duplicate checks.
+These experiments are not part of the current implementation.
+
+Candidate indexing now enumerates filenames only for the requested kind. Before
+loading selected documents, fresh descriptor-relative existence checks resolve
+those UUIDs across both kinds and every freshly discovered repository scope,
+including unregistered scopes. Rule candidates share one batch inventory; prime
+notes check candidates individually until enough current notes are found. Final
+injection revalidation checks the batch again. Malformed files, dangling symlinks
+and directories occupying a canonical UUID name still make that UUID ambiguous;
+an inaccessible scope suppresses the batch. No directory timestamp or persisted
+membership cache authorizes injection. Every selected body is read and hashed.
+Point checks scale with selected IDs times scopes, so the small-selection fixture
+does not establish performance for corpora with many scopes or large selections.
 
 File-pattern results are reused only within one immutable query, with at most 256
 keys and 64 KiB of pattern text retained. Every rule still undergoes its own scope,

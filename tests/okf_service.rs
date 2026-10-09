@@ -570,3 +570,77 @@ fn batch_revalidation_preserves_matching_freshness_and_trust() {
             .is_empty()
     );
 }
+
+#[test]
+fn selected_uuid_checks_discover_new_scopes_and_cross_kind_ambiguity_without_reading_bodies() {
+    let (temp, service, repo) = setup();
+    let first = service
+        .create_rule(input(repo), Creation::ManualActive, now())
+        .unwrap();
+    let second = service
+        .create_rule(input(repo), Creation::ManualActive, now())
+        .unwrap();
+    let filters = Filters {
+        repo: Some(repo),
+        file: Some("src/main.rs"),
+        ..Filters::default()
+    };
+    let selected = service.rules(&filters, now()).unwrap().documents;
+    assert_eq!(selected.len(), 2);
+    // This unregistered scope did not exist when the candidates were selected.
+    let extra = temp
+        .path()
+        .join("bundle/repos")
+        .join(Uuid::new_v4().to_string())
+        .join("notes");
+    std::fs::create_dir_all(&extra).unwrap();
+    let duplicate = extra.join(format!("{}.md", first.key.id));
+    std::fs::write(
+        &duplicate,
+        "invalid content still makes this UUID ambiguous",
+    )
+    .unwrap();
+    for result in [
+        service.rules(&filters, now()).unwrap(),
+        service
+            .revalidate_rules(&selected, &filters, now())
+            .unwrap(),
+    ] {
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.documents[0].key.id, second.key.id);
+        assert!(!result.diagnostics.is_empty());
+    }
+    std::fs::remove_file(&duplicate).unwrap();
+    // A dangling symlink also occupies the canonical name; never follow it.
+    std::os::unix::fs::symlink(temp.path().join("absent"), &duplicate).unwrap();
+    assert_eq!(
+        service
+            .revalidate_rules(&selected, &filters, now())
+            .unwrap()
+            .documents
+            .len(),
+        1
+    );
+    std::fs::remove_file(&duplicate).unwrap();
+    // Nor may a directory in place of a document make identity appear unique.
+    std::fs::create_dir(&duplicate).unwrap();
+    assert_eq!(service.rules(&filters, now()).unwrap().documents.len(), 1);
+    std::fs::remove_dir(&duplicate).unwrap();
+    assert_eq!(
+        service
+            .revalidate_rules(&selected, &filters, now())
+            .unwrap()
+            .documents
+            .len(),
+        2
+    );
+    // Unrelated malformed filenames do not hide an otherwise eligible UUID.
+    std::fs::write(extra.join("unrelated.md"), "broken").unwrap();
+    assert_eq!(service.rules(&filters, now()).unwrap().documents.len(), 2);
+    std::fs::remove_file(temp.path().join("bundle").join(first.key.relative_path())).unwrap();
+    let current = service
+        .revalidate_rules(&selected, &filters, now())
+        .unwrap();
+    assert_eq!(current.documents.len(), 1);
+    assert_eq!(current.documents[0].key.id, second.key.id);
+}

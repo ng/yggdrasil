@@ -162,6 +162,9 @@ impl Backend {
     pub fn candidates(&self, kind: Kind) -> Candidates {
         self.read(|s| s.candidates(kind))
     }
+    pub fn load_candidates(&self, rows: &[Candidate]) -> Snapshot {
+        self.read(|s| s.load_candidates(rows))
+    }
     pub fn load_candidate(&self, row: &Candidate) -> Result<Option<RevisionedDocument>> {
         self.read(|s| s.load_candidate(row))
     }

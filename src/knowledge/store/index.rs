@@ -115,7 +115,7 @@ impl KnowledgeStore {
         }
         drop(phase);
         let phase = crate::knowledge::timing::Phase::start("index_inventory");
-        let inventory = self.inventory();
+        let inventory = self.inventory_for(Some(kind));
         drop(phase);
         result.diagnostics.extend(inventory.diagnostics);
         if inventory.incomplete {
@@ -137,9 +137,9 @@ impl KnowledgeStore {
         // Inventory groups rows by scope/kind. Reuse only the current anchored
         // directory descriptor, bounding open descriptors independently of size.
         let mut parent: Option<(Option<Uuid>, Kind, File)> = None;
-        // Keep global inventory/duplicate checks, but parse and fingerprint only
-        // the requested kind. Content diagnostics for other kinds are produced
-        // by their own lookups or a full authoritative browse.
+        // Inventory and fingerprint the requested kind. A candidate's UUID is
+        // checked across every kind/scope immediately before loading its bytes.
+        // Other kinds produce diagnostics in their own lookups or full browsing.
         for key in inventory.keys {
             if counts[&key.id] != 1 {
                 let path = key.relative_path().to_string_lossy().into_owned();
@@ -236,7 +236,25 @@ impl KnowledgeStore {
         result
     }
 
+    pub(crate) fn load_candidates(&self, rows: &[Candidate]) -> super::Snapshot {
+        let selected: Vec<_> = rows
+            .iter()
+            .map(|row| (row.key, row.revision.as_str()))
+            .collect();
+        self.revalidate_keys(&selected)
+    }
+
     pub(crate) fn load_candidate(&self, row: &Candidate) -> Result<Option<RevisionedDocument>> {
+        let inventory = self.inventory_ids([row.key.id]);
+        ensure!(
+            !inventory.incomplete,
+            "cannot resolve UUID in an incomplete bundle inventory: {:?}",
+            inventory.diagnostics
+        );
+        ensure!(inventory.keys.len() <= 1, "duplicate document UUID");
+        if inventory.keys.is_empty() {
+            return Ok(None);
+        }
         Ok(self
             .get_unchecked(row.key)?
             .filter(|current| current.revision == row.revision))

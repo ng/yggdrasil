@@ -696,8 +696,7 @@ impl KnowledgeStore {
     /// Scan fresh bytes. No cached approval or exclusive index content can make
     /// a deleted, edited or corrupted document eligible. One corrupt file does
     /// not suppress unrelated knowledge.
-    fn inventory(&self) -> Inventory {
-        let mut result = Inventory::default();
+    fn scopes(&self, result: &mut Inventory) -> Vec<Option<Uuid>> {
         let mut scopes = vec![None];
         match directory(&self.root, "repos", false) {
             Ok(repos) => match names(&repos) {
@@ -722,8 +721,21 @@ impl KnowledgeStore {
                 result.diagnostics.push(format!("repos: {e}"));
             }
         }
+        scopes
+    }
+
+    fn inventory(&self) -> Inventory {
+        self.inventory_for(None)
+    }
+
+    fn inventory_for(&self, requested: Option<Kind>) -> Inventory {
+        let mut result = Inventory::default();
+        let scopes = self.scopes(&mut result);
         for repo in scopes {
             for kind in [Kind::Note, Kind::Learning] {
+                if requested.is_some_and(|requested| requested != kind) {
+                    continue;
+                }
                 let key = Key {
                     repo,
                     kind,
@@ -774,6 +786,73 @@ impl KnowledgeStore {
         }
         result
     }
+    /// Resolve only requested UUID filenames, but across every freshly discovered
+    /// scope and both kinds. No persisted or timestamp-based membership evidence
+    /// is used; malformed contents, symlinks and special files still count as
+    /// ambiguous names just as they do during a complete directory inventory.
+    fn inventory_ids(&self, ids: impl IntoIterator<Item = Uuid>) -> Inventory {
+        let mut result = Inventory::default();
+        let names: Vec<_> = ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .map(|id| (id, CString::new(format!("{id}.md")).unwrap()))
+            .collect();
+        if names.is_empty() {
+            return result;
+        }
+        for repo in self.scopes(&mut result) {
+            for kind in [Kind::Note, Kind::Learning] {
+                let key = Key {
+                    repo,
+                    kind,
+                    id: Uuid::nil(),
+                };
+                let parent = match self.parent(key, false) {
+                    Ok(parent) => parent,
+                    Err(error)
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => {
+                        result.incomplete = true;
+                        result.diagnostics.push(format!(
+                            "{:?}: {error}",
+                            key.relative_path().parent().unwrap()
+                        ));
+                        continue;
+                    }
+                };
+                for (id, name) in &names {
+                    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+                    // SAFETY: both pointers remain valid for this call; the
+                    // metadata is never read. The final component isn't followed.
+                    let status = unsafe {
+                        libc::fstatat(
+                            parent.as_raw_fd(),
+                            name.as_ptr(),
+                            stat.as_mut_ptr(),
+                            libc::AT_SYMLINK_NOFOLLOW,
+                        )
+                    };
+                    if status == 0 {
+                        result.keys.push(Key { id: *id, ..key });
+                    } else {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            result.incomplete = true;
+                            result.diagnostics.push(format!("{id}: {error}"));
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         if let Err(e) = self.recover_move() {
             return Snapshot {
@@ -818,13 +897,21 @@ impl KnowledgeStore {
     /// Individual file bytes are still read and hashed immediately; this is not
     /// a transaction snapshot across files or a cached membership assertion.
     pub fn revalidate_selected(&self, selected: &[RevisionedDocument]) -> Snapshot {
+        let selected: Vec<_> = selected
+            .iter()
+            .map(|doc| (doc.key, doc.revision.as_str()))
+            .collect();
+        self.revalidate_keys(&selected)
+    }
+
+    fn revalidate_keys(&self, selected: &[(Key, &str)]) -> Snapshot {
         if let Err(e) = self.recover_move() {
             return Snapshot {
                 documents: Vec::new(),
                 diagnostics: vec![format!("scope move recovery: {e}")],
             };
         }
-        let inventory = self.inventory();
+        let inventory = self.inventory_ids(selected.iter().map(|(key, _)| key.id));
         let mut result = Snapshot {
             documents: Vec::new(),
             diagnostics: inventory.diagnostics,
@@ -837,23 +924,29 @@ impl KnowledgeStore {
             *counts.entry(key.id).or_insert(0) += 1;
         }
         let mut seen = std::collections::HashSet::new();
-        for previous in selected {
-            if !seen.insert(previous.key.id) {
+        for &(key, revision) in selected {
+            if !seen.insert(key.id) {
                 continue;
             }
-            if counts.get(&previous.key.id).copied().unwrap_or(0) != 1 {
-                result.diagnostics.push(format!(
-                    "{}: selected UUID missing or ambiguous",
-                    previous.key.id
-                ));
-                continue;
-            }
-            match self.get_unchecked(previous.key) {
-                Ok(Some(current)) if current.revision == previous.revision => {
-                    result.documents.push(current)
+            match counts.get(&key.id).copied().unwrap_or(0) {
+                1 => {}
+                0 => {
+                    result
+                        .diagnostics
+                        .push(format!("{}: selected UUID missing", key.id));
+                    continue;
                 }
+                _ => {
+                    result
+                        .diagnostics
+                        .push(format!("{}: duplicate document UUID", key.id));
+                    continue;
+                }
+            }
+            match self.get_unchecked(key) {
+                Ok(Some(current)) if current.revision == revision => result.documents.push(current),
                 Ok(_) => {}
-                Err(e) => result.diagnostics.push(format!("{}: {e}", previous.key.id)),
+                Err(e) => result.diagnostics.push(format!("{}: {e}", key.id)),
             }
         }
         result

@@ -510,28 +510,33 @@ impl KnowledgeService {
             documents: Vec::new(),
             diagnostics: candidates.diagnostics,
         };
+        let mut selected = Vec::new();
         for row in candidates.rows {
-            let result = (|| -> Result<Option<RevisionedDocument>> {
-                if row.key.kind != Kind::Learning
-                    || row.profile.user_id.as_deref() != Some(&self.user)
-                    || !matcher.matches(&row.profile)?
-                {
-                    return Ok(None);
-                }
-                let Some(doc) = self.store.load_candidate(&row)? else {
-                    return Ok(None);
-                };
+            if row.key.kind != Kind::Learning || row.profile.user_id.as_deref() != Some(&self.user)
+            {
+                continue;
+            }
+            match matcher.matches(&row.profile) {
+                Ok(true) => selected.push(row),
+                Ok(false) => {}
+                Err(e) => snapshot.diagnostics.push(format!("{}: {e}", row.key.id)),
+            }
+        }
+        let current = self.store.load_candidates(&selected);
+        snapshot.diagnostics.extend(current.diagnostics);
+        for doc in current.documents {
+            let id = doc.key.id;
+            let result = (|| -> Result<bool> {
                 let profile = self.owned(&doc.document)?;
-                Ok((doc
+                Ok(doc
                     .document
                     .eligible(policy.trusted.then_some(policy.corpus_id), now)?
                     && matcher.matches(&profile)?)
-                .then_some(doc))
             })();
             match result {
-                Ok(Some(doc)) => snapshot.documents.push(doc),
-                Ok(None) => {}
-                Err(e) => snapshot.diagnostics.push(format!("{}: {e}", row.key.id)),
+                Ok(true) => snapshot.documents.push(doc),
+                Ok(false) => {}
+                Err(e) => snapshot.diagnostics.push(format!("{id}: {e}")),
             }
         }
         snapshot.documents.sort_by_cached_key(|doc| {
