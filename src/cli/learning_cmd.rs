@@ -565,3 +565,6 @@ mod tests {
         assert_eq!(label, "src/*.rs · agent=foo · kind=bug");
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod local;

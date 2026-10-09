@@ -759,8 +759,7 @@ enum LearnAction {
         json: bool,
     },
     /// List learnings whose scope matches the given filters. No filters = all
-    /// learnings visible from the current repo. Deterministic SQL match, not
-    /// similarity search. Only `active` learnings are shown.
+    /// active learnings visible from the current repo.
     List {
         /// A file path to test against each learning's file_glob
         #[arg(long)]
@@ -2342,6 +2341,105 @@ async fn main() -> anyhow::Result<()> {
             ygg::cli::rollup_cmd::execute(&pool, days, repo.as_deref(), fmt).await?;
         }
         Commands::Learn { action } => {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if let Some(local) =
+                ygg::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
+            {
+                use ygg::{
+                    cli::learning_cmd,
+                    knowledge::service::{Creation, RuleInput},
+                };
+                let uuid = |id: &str| {
+                    uuid::Uuid::parse_str(id).map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))
+                };
+                match action {
+                    LearnAction::Create {
+                        text,
+                        global,
+                        file_glob,
+                        rule_id,
+                        context,
+                        agent,
+                        scope,
+                        pending,
+                        json,
+                    } => {
+                        let scope_tags =
+                            serde_json::from_value(learning_cmd::parse_scope_tags(&scope)?)?;
+                        learning_cmd::local::create(
+                            &local,
+                            RuleInput {
+                                text,
+                                file_glob,
+                                rule_id,
+                                context,
+                                scope_tags,
+                                ..RuleInput::default()
+                            },
+                            global,
+                            agent.as_deref(),
+                            if pending {
+                                Creation::ManualPending
+                            } else {
+                                Creation::ManualActive
+                            },
+                            json,
+                        )?;
+                    }
+                    LearnAction::Propose {
+                        text,
+                        global,
+                        file_glob,
+                        rule_id,
+                        context,
+                        agent,
+                        scope,
+                        json,
+                    } => {
+                        let scope_tags =
+                            serde_json::from_value(learning_cmd::parse_scope_tags(&scope)?)?;
+                        learning_cmd::local::create(
+                            &local,
+                            RuleInput {
+                                text,
+                                file_glob,
+                                rule_id,
+                                context,
+                                scope_tags,
+                                ..RuleInput::default()
+                            },
+                            global,
+                            agent.as_deref(),
+                            Creation::Proposal,
+                            json,
+                        )?;
+                    }
+                    LearnAction::Pending { all, json } => {
+                        learning_cmd::local::list(&local, None, None, all, true, json)?
+                    }
+                    LearnAction::List {
+                        file,
+                        rule_id,
+                        all,
+                        json,
+                    } => learning_cmd::local::list(
+                        &local,
+                        file.as_deref(),
+                        rule_id.as_deref(),
+                        all,
+                        false,
+                        json,
+                    )?,
+                    LearnAction::Approve { id, agent } => {
+                        learning_cmd::local::approve(&local, uuid(&id)?, agent.as_deref())?
+                    }
+                    LearnAction::Reject { id, reason } => {
+                        learning_cmd::local::reject(&local, uuid(&id)?, reason.as_deref())?
+                    }
+                    LearnAction::Delete { id } => learning_cmd::local::delete(&local, uuid(&id)?)?,
+                }
+                return Ok(());
+            }
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::connect(&config.database).await?;
             let agent_name_default = || {

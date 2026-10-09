@@ -293,7 +293,13 @@ pub fn learning_json_model(doc: &Document, usage: &Usage, mappings: &Mappings) -
     let active = doc.activation_valid(mappings.corpus_id)?;
     let (approved_at, approved_by) = if active {
         let approval = p.approval.as_ref().unwrap();
-        (approval.at, approval.actor)
+        if approval.kind == ActivationKind::Manual {
+            // Manual creation has activation evidence, but was not a separate
+            // approval action in the legacy API.
+            (None, None)
+        } else {
+            (approval.at, approval.actor)
+        }
     } else if p.state == State::Pending && p.approval.is_none() {
         provenance
             .as_ref()
@@ -368,4 +374,14 @@ pub fn legacy_user_id(doc: &Document, mappings: &Mappings) -> Result<String> {
         "owner needs one explicit legacy mapping for this output"
     );
     Ok(candidates[0].clone())
+}
+
+/// Migrated rules require recorded usage; absence must not fabricate zero totals.
+pub fn is_imported(doc: &Document) -> Result<bool> {
+    Ok(doc
+        .profile()?
+        .map(|p| provenance(&p))
+        .transpose()?
+        .flatten()
+        .is_some())
 }

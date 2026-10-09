@@ -429,6 +429,37 @@ impl KnowledgeService {
         Ok(snapshot)
     }
 
+    /// Explicit browsing retains active rules even when corpus trust or document
+    /// freshness prevents automatic injection. Covered edits still revoke active status.
+    pub fn list_rules(&self, filters: &Filters<'_>) -> Result<Snapshot> {
+        let policy = self.policy()?;
+        Self::scope(&policy, filters.repo)?;
+        let mut snapshot = self.browse()?;
+        snapshot.documents.retain(|doc| {
+            let result = (|| -> Result<bool> {
+                Ok(doc.key.kind == Kind::Learning
+                    && doc.document.activation_valid(policy.corpus_id)?
+                    && matching::matches(&self.owned(&doc.document)?, filters)?)
+            })();
+            match result {
+                Ok(keep) => keep,
+                Err(error) => {
+                    snapshot
+                        .diagnostics
+                        .push(format!("{}: {error}", doc.key.id));
+                    false
+                }
+            }
+        });
+        snapshot.documents.sort_by(|a, b| {
+            matching::compare(
+                &a.document.profile().unwrap().unwrap(),
+                &b.document.profile().unwrap().unwrap(),
+            )
+        });
+        Ok(snapshot)
+    }
+
     pub fn rules(&self, filters: &Filters<'_>, now: DateTime<Utc>) -> Result<Snapshot> {
         let policy = self.policy()?;
         Self::scope(&policy, filters.repo)?;

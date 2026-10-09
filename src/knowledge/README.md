@@ -475,4 +475,35 @@ identity. An unmapped/non-Git cwd is never silently promoted to global scope;
 use `--global` deliberately. New repo notes require an unambiguous legacy output
 mapping before writing. Listing retains the `count`/`results` JSON envelope,
 reports malformed-document diagnostics separately, and performs no telemetry or
-database access. `learn`, `prime`, hooks and UI dispatch still require integration.
+database access. `prime`, hooks and UI dispatch still require integration.
+
+
+### Offline learning commands
+
+All ordinary `learn` actions now dispatch through the selected OKF context before
+constructing database configuration. Create/manual-pending/propose retain their
+status/source distinction, exact rule text, context, scope tags and legacy JSON
+fields. Manual activation evidence remains in the document but does not invent a
+separate `approved_at`/`approved_by` action in API output. Explicit listing can
+browse untrusted or stale active rules; automatic injection still requires trust,
+freshness and matching approval digests. Pending triage includes edited rules
+whose prior approval digest no longer matches.
+
+Approval without an agent argument or `YGG_AGENT_NAME` is a human action. An
+explicit or environment-selected agent must resolve to an identity binding and
+be present in the registry's approval-lead set. An unknown agent cannot fall back
+to human authority. This is policy for cooperating callers, not protection from
+the owning OS user who can edit their policy or environment. Approve/reject/delete
+load the selected revision and use the store's conditional mutation; learning
+commands refuse note UUIDs. Creation and approval never depend on telemetry.
+
+`usage-baseline.json` in the policy directory records the validated migration's
+original totals using `runtime::UsageSnapshot`. Optional `usage-snapshot.json`
+uses the same schema for last-known operational totals. Both are identity-bound
+and bounded to 64 MiB. A corrupt optional cache falls back to migration baselines;
+a cache that predates the baseline cannot reduce its count or last-applied time.
+Imported rules without any recorded totals produce a repair diagnostic rather
+than fabricated zero counts. New rules begin at zero. CLI listing labels these
+values as last-known on stderr while preserving the JSON schema. The live
+telemetry refresh/cache publisher and per-session injection deduplication still
+need integration. Neither usage file is part of a rule's activation digest.
