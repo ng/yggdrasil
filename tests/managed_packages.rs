@@ -250,12 +250,19 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         // Compare existing database semantics before pg_restore can publish any
         // object. Both client UTF8 with SQL_ASCII storage and UTF8 with a
         // different libc locale must leave the isolated target empty.
-        for (database, encoding, locale) in [
-            ("ygg_encoding_mismatch", "SQL_ASCII", "C"),
-            ("ygg_locale_mismatch", "UTF8", "POSIX"),
+        // C/POSIX aliases can normalize identically on Linux. Select an
+        // installed, encoding-compatible libc locale instead of guessing one.
+        let (collate, ctype): (String, String) = sqlx::query_as("SELECT quote_literal(c.collcollate), quote_literal(c.collctype) FROM pg_collation c CROSS JOIN pg_database d WHERE d.datname=current_database() AND c.collprovider='c' AND c.collencoding=pg_char_to_encoding('UTF8') AND c.collcollate NOT IN ('C','POSIX') AND (c.collcollate,c.collctype) IS DISTINCT FROM (d.datcollate,d.datctype) ORDER BY c.collname COLLATE \"C\" LIMIT 1")
+            .fetch_one(&pool).await.expect("native fixture requires a distinct installed UTF8 libc locale");
+        for (database, encoding, collate, ctype) in [
+            ("ygg_encoding_mismatch", "SQL_ASCII", "'C'", "'C'"),
+            ("ygg_locale_mismatch", "UTF8", collate.as_str(), ctype.as_str()),
         ] {
-            sqlx::query(&format!("CREATE DATABASE {database} TEMPLATE template0 ENCODING '{encoding}' LOCALE_PROVIDER libc LC_COLLATE '{locale}' LC_CTYPE '{locale}'"))
+            sqlx::query(&format!("CREATE DATABASE {database} TEMPLATE template0 ENCODING '{encoding}' LOCALE_PROVIDER libc LC_COLLATE {collate} LC_CTYPE {ctype}"))
                 .execute(&pool).await.unwrap();
+            let differs: bool = sqlx::query_scalar("SELECT (target.encoding,target.datcollate,target.datctype) IS DISTINCT FROM (source.encoding,source.datcollate,source.datctype) FROM pg_database target, pg_database source WHERE target.datname=$1 AND source.datname=current_database()")
+                .bind(database).fetch_one(&pool).await.unwrap();
+            assert!(differs, "restore test target must actually differ from source");
             let options = source_options.clone().database(database);
             let error = ygg::db::restore::database(&bin, &options, &mut std::fs::File::open(&archive).unwrap(), &receipt).await.unwrap_err();
             assert!(error.to_string().contains("encoding/locale differs"), "{error:#}");
