@@ -413,7 +413,12 @@ async fn long_paths_use_private_bound_endpoints_and_recover_only_when_stopped() 
             .execute(&mut connection)
             .await
             .unwrap();
-        connection.close().await.unwrap();
+        if let Err(error) = connection.close().await {
+            // On Darwin the peer can close after Terminate before SQLx shuts
+            // down its socket. The INSERT was already acknowledged; ENOTCONN
+            // during this fixture's graceful close is not a lost commit.
+            assert!(matches!(&error, sqlx::Error::Io(io) if io.kind() == std::io::ErrorKind::NotConnected), "{error}");
+        }
         // Lose only the supervisor, then hide the transient directory while the
         // postmaster survives. Missing sockets never authorize a second server.
         let supervisor_pid = replies[0]["supervisor_pid"].as_u64().unwrap() as i32;
