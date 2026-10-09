@@ -27,6 +27,10 @@ fn ordinary_remember_uses_selected_okf_offline_and_shares_worktree_scope() {
     assert_eq!(note["created_by"], agent.to_string());
     assert_eq!(note["text"], "exact note Ω");
     assert_eq!(note.as_object().unwrap().len(), 5);
+    let created: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(note["created_at"].clone()).unwrap();
+    assert_eq!(created.timestamp_subsec_nanos() % 1000, 0);
+
     let global = json(
         command(root, root)
             .args(["global", "--global", "--json"])
@@ -158,6 +162,10 @@ fn ordinary_learn_preserves_lifecycle_and_blocks_unauthorized_approval_offline()
     );
     assert_eq!(list["count"], 1);
     assert_eq!(list["results"][0]["approved_by"], agent.to_string());
+    let approved: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(list["results"][0]["approved_at"].clone()).unwrap();
+    assert_eq!(approved.timestamp_subsec_nanos() % 1000, 0);
+
     assert_eq!(
         list["results"][0]["scope_tags"],
         serde_json::json!({"kind":"bug"})
@@ -211,6 +219,20 @@ fn ordinary_learn_preserves_lifecycle_and_blocks_unauthorized_approval_offline()
     assert_eq!(manual["status"], "active");
     assert!(manual["approved_at"].is_null());
     assert!(manual["approved_by"].is_null());
+    let manual_id = Uuid::parse_str(manual["learning_id"].as_str().unwrap()).unwrap();
+    let current = store.find(manual_id).unwrap().unwrap();
+    ygg::knowledge::legacy::reverse_learning(
+        &current.document,
+        &ygg::knowledge::legacy::Usage {
+            corpus_id: binding.mappings.corpus_id,
+            document_id: manual_id,
+            applied_count: 0,
+            last_applied_at: None,
+        },
+        &binding.mappings,
+    )
+    .unwrap();
+
     // Untrusted corpus remains explicitly browseable, but service injection still checks trust.
     let (mut policy, revision) = registry.read().unwrap();
     policy.trusted = false;

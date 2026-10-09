@@ -26,9 +26,11 @@ pub fn create(
         Some(context.writable_repo(&std::env::current_dir()?)?)
     };
     input.created_by = context.agent(agent.unwrap_or(&context.default_agent_name));
-    let doc = context
-        .service
-        .create_rule(input, creation, chrono::Utc::now())?;
+    let doc = context.service.create_rule(
+        input,
+        creation,
+        crate::knowledge::document::timestamp_now(),
+    )?;
     // A newly created rule has never been injected. Telemetry outages cannot
     // turn this acknowledged write into a reported failure.
     let usage = Usage {
@@ -181,7 +183,7 @@ pub fn approve(context: &Context, id: Uuid, agent: Option<&str>) -> Result<()> {
         id,
         &doc.revision,
         context.approver(agent)?,
-        chrono::Utc::now(),
+        crate::knowledge::document::timestamp_now(),
     )?;
     println!(
         "approved {id} → active {}",

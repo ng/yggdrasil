@@ -134,7 +134,7 @@ pub fn remember_local(
         repo,
         text.into(),
         context.agent(agent_name),
-        chrono::Utc::now(),
+        crate::knowledge::document::timestamp_now(),
     )?;
     let memory = crate::knowledge::legacy::note_json_model(&doc.document, &context.mappings)?;
     if json {

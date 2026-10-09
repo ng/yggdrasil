@@ -1,6 +1,6 @@
-//! Lossless reverse-import candidates from CURRENT corpus bytes. This module
-//! neither selects SQL nor writes it: the fenced apply workflow must recapture
-//! these revisions and usage under its leases before applying a candidate.
+//! Lossless reverse-import candidates from CURRENT corpus bytes and an owner-only
+//! transactional SQL apply primitive. The migration workflow must recapture these
+//! revisions and usage under its leases; this module never activates SQL storage.
 use super::{
     document::digest,
     export::Manifest,
@@ -153,4 +153,27 @@ pub fn build(
         .learnings
         .sort_by_key(|r| r["learning_id"].as_str().unwrap().to_owned());
     Ok(candidate)
+}
+
+/// Low-level fenced SQL apply. The owning migration workflow must retain the
+/// current bundle/usage evidence and its filesystem leases, then commit this
+/// transaction only after all rollback checks pass. This never selects SQL.
+pub async fn apply_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    candidate: &Candidate,
+    fenced_generation: i64,
+) -> Result<()> {
+    ensure!(
+        candidate.version == 1 && fenced_generation > candidate.export_generation,
+        "reverse apply requires a later fenced generation"
+    );
+    sqlx::query("SELECT public.ygg_knowledge_reverse_import($1,$2,$3,$4,$5)")
+        .bind(candidate.database_id)
+        .bind(candidate.corpus_id)
+        .bind(fenced_generation)
+        .bind(serde_json::to_value(&candidate.notes)?)
+        .bind(serde_json::to_value(&candidate.learnings)?)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
 }

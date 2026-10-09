@@ -424,11 +424,21 @@ fn reverse_comparable(
     Ok((normalized, legacy_fields))
 }
 
+fn reverse_timestamp(value: Option<DateTime<Utc>>) -> Result<()> {
+    ensure!(
+        value.is_none_or(|t| t.timestamp_subsec_nanos() < 1_000_000_000
+            && t.timestamp_subsec_nanos() % 1_000 == 0),
+        "timestamp exceeds legacy PostgreSQL microsecond precision"
+    );
+    Ok(())
+}
+
 /// Strict rollback conversion, unlike the display-only JSON adapter. Any field
 /// outside the legacy representation blocks rollback instead of disappearing.
 pub fn reverse_note(doc: &Document, mappings: &Mappings) -> Result<(Memory, String)> {
     let user = legacy_user_id(doc, mappings)?;
     let row = note_json_model(doc, mappings)?;
+    reverse_timestamp(Some(row.created_at))?;
     let restored = import_note(&row, &user, mappings)?;
     ensure!(
         reverse_comparable(doc, mappings)? == reverse_comparable(&restored, mappings)?,
@@ -457,6 +467,9 @@ pub fn reverse_learning(
         // compatibility. Reverse import must preserve its real actor and time.
         row.approved_at = approval.at;
         row.approved_by = approval.actor;
+    }
+    for time in [Some(row.created_at), row.approved_at, row.last_applied_at] {
+        reverse_timestamp(time)?;
     }
     let (restored, restored_usage) = import_learning(&row, &user, mappings)?;
     ensure!(

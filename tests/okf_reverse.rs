@@ -133,6 +133,13 @@ fn rollback_rejects_lossy_metadata_invalid_approvals_and_ambiguous_owners() {
         .insert("future_field".into(), true.into());
     unknown.set_profile(&p).unwrap();
     assert!(legacy::reverse_learning(&unknown, &usage, &map).is_err());
+    let mut precise = row.clone();
+    precise.created_at += chrono::Duration::nanoseconds(1);
+    let (precise_doc, precise_usage) = legacy::import_learning(&precise, "", &map).unwrap();
+    assert!(legacy::reverse_learning(&precise_doc, &precise_usage, &map).is_err());
+    precise.created_at = "2016-12-31T23:59:60Z".parse().unwrap();
+    let (precise_doc, precise_usage) = legacy::import_learning(&precise, "", &map).unwrap();
+    assert!(legacy::reverse_learning(&precise_doc, &precise_usage, &map).is_err());
     let mut new = doc.clone();
     without_provenance(&mut new);
     map.users.insert("other".into(), "owner".into());

@@ -326,13 +326,13 @@ is rejected. Guard functions use fixed qualified objects and a fixed search path
 security-definer access permits read-only clients to lock/read the marker without
 granting them permission to update it.
 
-This is a compatibility foundation, not a ready-to-run cutover. Production commands
-still select SQL and will report a guard error if an administrator switches the
-marker to OKF. The guarded repository calls discover the current generation;
-`guard::legacy_transaction` also accepts an expected generation for future adapters
-that hold a configuration snapshot. OKF dispatch/local generation publication,
-manifest validation, minimum-client inventory, migration-only reverse-import bypass
-and restricted runtime/migration roles remain required before exposing cutover.
+This is a compatibility foundation, not a ready-to-run cutover. SQL remains the
+default; an explicitly selected local binding routes knowledge to OKF. Switching
+only the database marker cannot publish that binding. Guarded repository calls
+discover the current generation; `guard::legacy_transaction` also accepts an
+expected generation. Export/publication and owner-only reverse-apply primitives
+exist, but fleet compatibility inventory, complete backup/parity evidence and
+coordinated configuration/generation publication still need the cutover workflow.
 Never manually switch the marker as a substitute for those steps.
 
 Unaware older binaries can still SELECT frozen legacy tables: upgrade or retire
@@ -453,7 +453,31 @@ It is not an authorization or an applied rollback. The migration workflow must
 capture authoritative current usage, retain the exact current bundle as recovery
 evidence, quiesce writers, revalidate revisions under its leases, use the restricted
 SQL migration bypass, validate restored rows and then publish the storage/config
-transition. Those apply/orchestration steps and the rollback rehearsal remain open.
+transition. The complete orchestration and rollback rehearsal remain open.
+
+`reverse::apply_on` and the owner-only `ygg_knowledge_reverse_import` function
+provide the SQL apply layer. The function takes an exclusive generation lease,
+requires the exact database/corpus/fenced generation and supported protocol,
+validates complete row schemas and types, deletes absent UUIDs, upserts current
+rows and compares the complete resulting tables with normalized typed input.
+JSONB `null` tags remain JSONB values rather than becoming SQL NULL. Unknown
+columns/fields, duplicate UUIDs, constraint violations and timestamp precision
+beyond PostgreSQL's microseconds fail atomically. The strict candidate adapters
+also reject excess timestamp precision before SQL apply. This is a representability
+check; it does not silently round existing document timestamps. New CLI note/rule
+creation and approval timestamps use microsecond precision so ordinary new records
+remain representable during rollback.
+
+The bypass is transaction-local and requires an authenticated migration-owner
+session; setting its flag as a runtime user cannot open the fence. Function EXECUTE
+is revoked from PUBLIC and an explicit owner check still rejects runtime users if
+EXECUTE is accidentally granted. Catalog references are qualified and function
+search paths put temporary objects last; a runtime-owned temporary `pg_class` cannot
+forge ownership. Successful calls restore the prior flag and leave
+the storage marker fenced. Caller rollback undoes all row changes. This layer does
+not capture source evidence or activate SQL, and must be enclosed by the complete
+quiesced rollback workflow. Tests use disposable databases and distinct runtime
+credentials to verify privilege boundaries, exact row results and failure rollback.
 
 ## Corpus backup component
 

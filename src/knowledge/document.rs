@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail, ensure};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
 use sha2::{Digest, Sha256};
@@ -83,6 +83,12 @@ pub struct Profile {
     pub approval: Option<Approval>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Client-generated times retain legacy PostgreSQL's microsecond precision.
+/// Imported or explicitly supplied document timestamps are never rounded here.
+pub fn timestamp_now() -> DateTime<Utc> {
+    Utc::now().trunc_subsecs(6)
 }
 
 pub fn digest(bytes: &[u8]) -> String {
