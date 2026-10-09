@@ -1,0 +1,1666 @@
+{
+  "recorded_at": "2026-10-09",
+  "source_commit": "f820a9df195c5eaddb798dd4e4f9c55a56bdfede",
+  "source_dirty": true,
+  "modified_production_paths": [
+    "src/db/runtime.rs"
+  ],
+  "restore_source_blob": "3710ee0eafc14fcc25199cd3dc4dcddc1abea5ad",
+  "fixture": "Fresh disposable migrated PostgreSQL 16.15 database restored into empty isolated PostgreSQL 18 database; UTF8/C/C/libc on both sides. Application tables empty; metadata rows retained.",
+  "target_server_version": "18.3 (Homebrew)",
+  "dump_sha256": "a491645084ec5cf14bb260f28d8e86c414da7aad10b3515b581681a2c581c0a8",
+  "restore_exit": 1,
+  "restore_error": "restored content or schema differs from backup",
+  "configuration_switched": false,
+  "not_null_constraint_groups": [
+    {
+      "count": 204,
+      "local": true,
+      "enforced": true,
+      "key_count": 1,
+      "validated": true,
+      "no_inherit": false,
+      "ancestor_count": 0
+    }
+  ],
+  "source_major": 16,
+  "target_major": 18,
+  "timezone": "UTC",
+  "missing": [],
+  "added": [
+    [
+      "constraint",
+      "public",
+      "_sqlx_migrations_checksum_not_null",
+      "public._sqlx_migrations",
+      true,
+      "NOT NULL checksum"
+    ],
+    [
+      "constraint",
+      "public",
+      "_sqlx_migrations_description_not_null",
+      "public._sqlx_migrations",
+      true,
+      "NOT NULL description"
+    ],
+    [
+      "constraint",
+      "public",
+      "_sqlx_migrations_execution_time_not_null",
+      "public._sqlx_migrations",
+      true,
+      "NOT NULL execution_time"
+    ],
+    [
+      "constraint",
+      "public",
+      "_sqlx_migrations_installed_on_not_null",
+      "public._sqlx_migrations",
+      true,
+      "NOT NULL installed_on"
+    ],
+    [
+      "constraint",
+      "public",
+      "_sqlx_migrations_success_not_null",
+      "public._sqlx_migrations",
+      true,
+      "NOT NULL success"
+    ],
+    [
+      "constraint",
+      "public",
+      "_sqlx_migrations_version_not_null",
+      "public._sqlx_migrations",
+      true,
+      "NOT NULL version"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_agent_id_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL agent_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_cache_read_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL cache_read"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_cache_write_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL cache_write"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_estimated_cost_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL estimated_cost"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_id_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL id"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_input_tokens_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL input_tokens"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_output_tokens_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL output_tokens"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_period_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL period"
+    ],
+    [
+      "constraint",
+      "public",
+      "agent_stats_tool_calls_not_null",
+      "public.agent_stats",
+      true,
+      "NOT NULL tool_calls"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_agent_id_not_null",
+      "public.agents",
+      true,
+      "NOT NULL agent_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_agent_name_not_null",
+      "public.agents",
+      true,
+      "NOT NULL agent_name"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_context_tokens_not_null",
+      "public.agents",
+      true,
+      "NOT NULL context_tokens"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_created_at_not_null",
+      "public.agents",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_current_state_not_null",
+      "public.agents",
+      true,
+      "NOT NULL current_state"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_metadata_not_null",
+      "public.agents",
+      true,
+      "NOT NULL metadata"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_updated_at_not_null",
+      "public.agents",
+      true,
+      "NOT NULL updated_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "agents_user_id_not_null",
+      "public.agents",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_metrics_metric_not_null",
+      "public.bench_metrics",
+      true,
+      "NOT NULL metric"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_metrics_run_id_not_null",
+      "public.bench_metrics",
+      true,
+      "NOT NULL run_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_metrics_value_not_null",
+      "public.bench_metrics",
+      true,
+      "NOT NULL value"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_runs_baseline_not_null",
+      "public.bench_runs",
+      true,
+      "NOT NULL baseline"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_runs_harness_sha_not_null",
+      "public.bench_runs",
+      true,
+      "NOT NULL harness_sha"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_runs_model_not_null",
+      "public.bench_runs",
+      true,
+      "NOT NULL model"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_runs_parallelism_not_null",
+      "public.bench_runs",
+      true,
+      "NOT NULL parallelism"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_runs_run_id_not_null",
+      "public.bench_runs",
+      true,
+      "NOT NULL run_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_runs_scenario_not_null",
+      "public.bench_runs",
+      true,
+      "NOT NULL scenario"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_runs_started_at_not_null",
+      "public.bench_runs",
+      true,
+      "NOT NULL started_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_task_results_passed_not_null",
+      "public.bench_task_results",
+      true,
+      "NOT NULL passed"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_task_results_reopened_not_null",
+      "public.bench_task_results",
+      true,
+      "NOT NULL reopened"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_task_results_run_id_not_null",
+      "public.bench_task_results",
+      true,
+      "NOT NULL run_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_task_results_task_idx_not_null",
+      "public.bench_task_results",
+      true,
+      "NOT NULL task_idx"
+    ],
+    [
+      "constraint",
+      "public",
+      "bench_task_results_wall_clock_s_not_null",
+      "public.bench_task_results",
+      true,
+      "NOT NULL wall_clock_s"
+    ],
+    [
+      "constraint",
+      "public",
+      "events_agent_name_not_null",
+      "public.events",
+      true,
+      "NOT NULL agent_name"
+    ],
+    [
+      "constraint",
+      "public",
+      "events_created_at_not_null",
+      "public.events",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "events_event_kind_not_null",
+      "public.events",
+      true,
+      "NOT NULL event_kind"
+    ],
+    [
+      "constraint",
+      "public",
+      "events_id_not_null",
+      "public.events",
+      true,
+      "NOT NULL id"
+    ],
+    [
+      "constraint",
+      "public",
+      "events_payload_not_null",
+      "public.events",
+      true,
+      "NOT NULL payload"
+    ],
+    [
+      "constraint",
+      "public",
+      "events_user_id_not_null",
+      "public.events",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "handoffs_created_at_not_null",
+      "public.handoffs",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "handoffs_handoff_id_not_null",
+      "public.handoffs",
+      true,
+      "NOT NULL handoff_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "handoffs_text_not_null",
+      "public.handoffs",
+      true,
+      "NOT NULL text"
+    ],
+    [
+      "constraint",
+      "public",
+      "handoffs_user_id_not_null",
+      "public.handoffs",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_applications_application_id_not_null",
+      "public.knowledge_applications",
+      true,
+      "NOT NULL application_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_applications_applied_at_not_null",
+      "public.knowledge_applications",
+      true,
+      "NOT NULL applied_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_applications_corpus_id_not_null",
+      "public.knowledge_applications",
+      true,
+      "NOT NULL corpus_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_applications_document_id_not_null",
+      "public.knowledge_applications",
+      true,
+      "NOT NULL document_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_clients_backend_pid_not_null",
+      "public.knowledge_clients",
+      true,
+      "NOT NULL backend_pid"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_clients_backend_start_not_null",
+      "public.knowledge_clients",
+      true,
+      "NOT NULL backend_start"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_clients_binary_version_not_null",
+      "public.knowledge_clients",
+      true,
+      "NOT NULL binary_version"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_clients_process_id_not_null",
+      "public.knowledge_clients",
+      true,
+      "NOT NULL process_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_clients_protocol_not_null",
+      "public.knowledge_clients",
+      true,
+      "NOT NULL protocol"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_clients_registered_at_not_null",
+      "public.knowledge_clients",
+      true,
+      "NOT NULL registered_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_clients_role_oid_not_null",
+      "public.knowledge_clients",
+      true,
+      "NOT NULL role_oid"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_forward_receipts_activated_at_not_null",
+      "public.knowledge_forward_receipts",
+      true,
+      "NOT NULL activated_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_forward_receipts_active_generation_not_null",
+      "public.knowledge_forward_receipts",
+      true,
+      "NOT NULL active_generation"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_forward_receipts_corpus_id_not_null",
+      "public.knowledge_forward_receipts",
+      true,
+      "NOT NULL corpus_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_forward_receipts_database_id_not_null",
+      "public.knowledge_forward_receipts",
+      true,
+      "NOT NULL database_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_forward_receipts_fenced_generation_not_null",
+      "public.knowledge_forward_receipts",
+      true,
+      "NOT NULL fenced_generation"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_forward_receipts_manifest_sha256_not_null",
+      "public.knowledge_forward_receipts",
+      true,
+      "NOT NULL manifest_sha256"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_forward_receipts_operation_id_not_null",
+      "public.knowledge_forward_receipts",
+      true,
+      "NOT NULL operation_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_migration_events_database_id_not_null",
+      "public.knowledge_migration_events",
+      true,
+      "NOT NULL database_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_migration_events_operation_id_not_null",
+      "public.knowledge_migration_events",
+      true,
+      "NOT NULL operation_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_migration_events_recorded_at_not_null",
+      "public.knowledge_migration_events",
+      true,
+      "NOT NULL recorded_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_migration_events_request_sha256_not_null",
+      "public.knowledge_migration_events",
+      true,
+      "NOT NULL request_sha256"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_migration_events_step_not_null",
+      "public.knowledge_migration_events",
+      true,
+      "NOT NULL step"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_migration_events_target_generation_not_null",
+      "public.knowledge_migration_events",
+      true,
+      "NOT NULL target_generation"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_recovery_events_corpus_id_not_null",
+      "public.knowledge_recovery_events",
+      true,
+      "NOT NULL corpus_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_recovery_events_database_id_not_null",
+      "public.knowledge_recovery_events",
+      true,
+      "NOT NULL database_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_recovery_events_generation_not_null",
+      "public.knowledge_recovery_events",
+      true,
+      "NOT NULL generation"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_recovery_events_operation_id_not_null",
+      "public.knowledge_recovery_events",
+      true,
+      "NOT NULL operation_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_recovery_events_recorded_at_not_null",
+      "public.knowledge_recovery_events",
+      true,
+      "NOT NULL recorded_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_recovery_events_request_sha256_not_null",
+      "public.knowledge_recovery_events",
+      true,
+      "NOT NULL request_sha256"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_recovery_events_step_not_null",
+      "public.knowledge_recovery_events",
+      true,
+      "NOT NULL step"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_applied_at_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL applied_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_corpus_id_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL corpus_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_database_id_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL database_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_evidence_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL evidence"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_fenced_generation_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL fenced_generation"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_notes_sha256_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL notes_sha256"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_operation_id_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL operation_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_request_sha256_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL request_sha256"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_reverse_receipts_rules_sha256_not_null",
+      "public.knowledge_reverse_receipts",
+      true,
+      "NOT NULL rules_sha256"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_storage_backend_not_null",
+      "public.knowledge_storage",
+      true,
+      "NOT NULL backend"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_storage_database_id_not_null",
+      "public.knowledge_storage",
+      true,
+      "NOT NULL database_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_storage_generation_not_null",
+      "public.knowledge_storage",
+      true,
+      "NOT NULL generation"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_storage_minimum_client_not_null",
+      "public.knowledge_storage",
+      true,
+      "NOT NULL minimum_client"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_storage_singleton_not_null",
+      "public.knowledge_storage",
+      true,
+      "NOT NULL singleton"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_usage_corpus_id_not_null",
+      "public.knowledge_usage",
+      true,
+      "NOT NULL corpus_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_usage_document_id_not_null",
+      "public.knowledge_usage",
+      true,
+      "NOT NULL document_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "knowledge_usage_observed_count_not_null",
+      "public.knowledge_usage",
+      true,
+      "NOT NULL observed_count"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_applied_count_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL applied_count"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_created_at_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_learning_id_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL learning_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_scope_tags_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL scope_tags"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_source_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL source"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_status_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL status"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_text_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL text"
+    ],
+    [
+      "constraint",
+      "public",
+      "learnings_user_id_not_null",
+      "public.learnings",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "locks_acquired_at_not_null",
+      "public.locks",
+      true,
+      "NOT NULL acquired_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "locks_agent_id_not_null",
+      "public.locks",
+      true,
+      "NOT NULL agent_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "locks_expires_at_not_null",
+      "public.locks",
+      true,
+      "NOT NULL expires_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "locks_heartbeat_at_not_null",
+      "public.locks",
+      true,
+      "NOT NULL heartbeat_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "locks_id_not_null",
+      "public.locks",
+      true,
+      "NOT NULL id"
+    ],
+    [
+      "constraint",
+      "public",
+      "locks_resource_key_not_null",
+      "public.locks",
+      true,
+      "NOT NULL resource_key"
+    ],
+    [
+      "constraint",
+      "public",
+      "locks_user_id_not_null",
+      "public.locks",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "memories_created_at_not_null",
+      "public.memories",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "memories_memory_id_not_null",
+      "public.memories",
+      true,
+      "NOT NULL memory_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "memories_text_not_null",
+      "public.memories",
+      true,
+      "NOT NULL text"
+    ],
+    [
+      "constraint",
+      "public",
+      "memories_user_id_not_null",
+      "public.memories",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_created_at_not_null",
+      "public.repos",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_local_paths_not_null",
+      "public.repos",
+      true,
+      "NOT NULL local_paths"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_metadata_not_null",
+      "public.repos",
+      true,
+      "NOT NULL metadata"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_name_not_null",
+      "public.repos",
+      true,
+      "NOT NULL name"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_repo_id_not_null",
+      "public.repos",
+      true,
+      "NOT NULL repo_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_task_prefix_not_null",
+      "public.repos",
+      true,
+      "NOT NULL task_prefix"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_updated_at_not_null",
+      "public.repos",
+      true,
+      "NOT NULL updated_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "repos_user_id_not_null",
+      "public.repos",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_agent_id_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL agent_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_agent_name_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL agent_name"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_finalized_at_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL finalized_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_interrupts_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL interrupts"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_lock_conflicts_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL lock_conflicts"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_locks_acquired_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL locks_acquired"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_locks_released_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL locks_released"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_session_id_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL session_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_started_at_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL started_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_tasks_closed_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL tasks_closed"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_tasks_created_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL tasks_created"
+    ],
+    [
+      "constraint",
+      "public",
+      "session_summaries_user_prompts_not_null",
+      "public.session_summaries",
+      true,
+      "NOT NULL user_prompts"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_agent_id_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL agent_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_context_tokens_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL context_tokens"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_current_state_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL current_state"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_metadata_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL metadata"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_session_id_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL session_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_started_at_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL started_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_updated_at_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL updated_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "sessions_user_id_not_null",
+      "public.sessions",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_deps_blocker_id_not_null",
+      "public.task_deps",
+      true,
+      "NOT NULL blocker_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_deps_created_at_not_null",
+      "public.task_deps",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_deps_task_id_not_null",
+      "public.task_deps",
+      true,
+      "NOT NULL task_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_events_created_at_not_null",
+      "public.task_events",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_events_event_id_not_null",
+      "public.task_events",
+      true,
+      "NOT NULL event_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_events_kind_not_null",
+      "public.task_events",
+      true,
+      "NOT NULL kind"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_events_payload_not_null",
+      "public.task_events",
+      true,
+      "NOT NULL payload"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_events_task_id_not_null",
+      "public.task_events",
+      true,
+      "NOT NULL task_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_labels_label_not_null",
+      "public.task_labels",
+      true,
+      "NOT NULL label"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_labels_task_id_not_null",
+      "public.task_labels",
+      true,
+      "NOT NULL task_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_links_created_at_not_null",
+      "public.task_links",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_links_kind_not_null",
+      "public.task_links",
+      true,
+      "NOT NULL kind"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_links_target_id_not_null",
+      "public.task_links",
+      true,
+      "NOT NULL target_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_links_task_id_not_null",
+      "public.task_links",
+      true,
+      "NOT NULL task_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_attempt_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL attempt"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_created_at_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_heartbeat_ttl_s_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL heartbeat_ttl_s"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_idempotency_key_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL idempotency_key"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_input_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL input"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_max_attempts_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL max_attempts"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_reason_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL reason"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_retry_strategy_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL retry_strategy"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_run_id_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL run_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_scheduled_at_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL scheduled_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_state_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL state"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_task_id_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL task_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_runs_updated_at_not_null",
+      "public.task_runs",
+      true,
+      "NOT NULL updated_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_seq_next_seq_not_null",
+      "public.task_seq",
+      true,
+      "NOT NULL next_seq"
+    ],
+    [
+      "constraint",
+      "public",
+      "task_seq_repo_id_not_null",
+      "public.task_seq",
+      true,
+      "NOT NULL repo_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_approval_level_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL approval_level"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_created_at_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL created_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_description_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL description"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_human_flag_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL human_flag"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_input_spec_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL input_spec"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_kind_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL kind"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_max_attempts_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL max_attempts"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_output_spec_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL output_spec"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_priority_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL priority"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_relevance_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL relevance"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_repo_id_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL repo_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_required_locks_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL required_locks"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_runnable_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL runnable"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_seq_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL seq"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_status_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL status"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_task_id_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL task_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_title_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL title"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_updated_at_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL updated_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "tasks_user_id_not_null",
+      "public.tasks",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_branch_merged_not_null",
+      "public.workers",
+      true,
+      "NOT NULL branch_merged"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_branch_pushed_not_null",
+      "public.workers",
+      true,
+      "NOT NULL branch_pushed"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_last_seen_at_not_null",
+      "public.workers",
+      true,
+      "NOT NULL last_seen_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_started_at_not_null",
+      "public.workers",
+      true,
+      "NOT NULL started_at"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_state_not_null",
+      "public.workers",
+      true,
+      "NOT NULL state"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_task_id_not_null",
+      "public.workers",
+      true,
+      "NOT NULL task_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_tmux_session_not_null",
+      "public.workers",
+      true,
+      "NOT NULL tmux_session"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_tmux_window_not_null",
+      "public.workers",
+      true,
+      "NOT NULL tmux_window"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_user_id_not_null",
+      "public.workers",
+      true,
+      "NOT NULL user_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_window_reaped_not_null",
+      "public.workers",
+      true,
+      "NOT NULL window_reaped"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_worker_id_not_null",
+      "public.workers",
+      true,
+      "NOT NULL worker_id"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_worktree_path_not_null",
+      "public.workers",
+      true,
+      "NOT NULL worktree_path"
+    ],
+    [
+      "constraint",
+      "public",
+      "workers_worktree_removed_not_null",
+      "public.workers",
+      true,
+      "NOT NULL worktree_removed"
+    ]
+  ],
+  "counts_equal": true,
+  "table_sha256_equal": true
+}

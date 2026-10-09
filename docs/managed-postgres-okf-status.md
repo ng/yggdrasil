@@ -21,7 +21,7 @@ to repository evidence and explicitly identifies missing implementation or proof
 | M1: managed runtime | `src/db/runtime.rs`, `supervisor.rs`, `package.rs`; native installer/lifecycle fixtures, 20-process startup race, surviving-server adoption, killed bootstrap recovery and committed-row preservation. Native candidate bundles pass on three platforms. | Public released-artifact qualification, macOS quarantine/signing path and clean-machine dependency handling. |
 | M2: integration | `src/config/database.rs`, `src/db.rs`, init and `db` commands; common connection resolver, existing URL preservation, no fallback on external failure, no hook download/init/upgrade. | Clean-machine operator qualification using the final released artifacts. Default knowledge rollout remains M7. |
 | M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch, current selection-path rebasing and preserved database/knowledge IDs. | **Explicit PostgreSQL patch/major upgrade commands are absent.** Broader deployment-move, credential/provider recovery and published-platform qualification remain. |
-| M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation and offline fixtures. | SQL-relative latency gate remains failed on its latest repeat; cross-platform real-disk-full CI is pending below. Broader filesystem fault qualification remains open. |
+| M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation, offline fixtures and real-disk-full tests on all three native platforms. | SQL-relative latency gate remains failed on its latest repeat. Broader filesystem fault qualification remains open. |
 | M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures. | Shared remote credential/provider and resource/latency qualification; complete shared cutover and rollback orchestration. Component fixtures do not prove a deployed fleet. |
 | M6: cutover/dogfood | Database generation/write guards and client registration; full row export/round-trip validation; private single-host forward/abort/current-state rollback coordinators with journals, backups, apply-once receipts and killed-process resumption. | Shared/multi-host execution is rejected. Deployment-wide client compatibility and writer quiescence must be established; local operator declarations alone do not demonstrate them. Full recovery/rollback rehearsal and recorded dogfooding remain. |
 | M7: removal/default rollout | Deliberately deferred; legacy tables/repositories remain available for the compatibility/recovery window. | **14 days of dogfooding plus successful rollback rehearsal**, preceding milestone gates, then a new forward removal migration, repository removal, installer/default changes and final restore/coordination qualification. |
@@ -64,6 +64,17 @@ limit. Migration requires UTF8 server semantics; restore verifies recorded targe
 encoding/locale compatibility before import. These are admission checks, not an
 encoding conversion facility.
 
+A disposable 16.15→18.3 restore rehearsal currently fails final catalog validation:
+all table counts and row hashes match, but PostgreSQL 18 adds 204 table `NOT NULL`
+constraint entries. No configuration switch occurs. The
+[raw comparison](validation/pg16-to-pg18-2026-10-09.json) records this failed case;
+its application tables were empty, so it is not a complete data-move rehearsal.
+[PostgreSQL 18](https://www.postgresql.org/docs/18/catalog-pg-constraint.html)
+records these table constraints in `pg_constraint`, while
+[earlier versions](https://www.postgresql.org/docs/17/catalog-pg-constraint.html)
+represent table nullability through `pg_attribute`. Major-upgrade support needs
+version-aware semantic verification without dropping unrelated constraint checks.
+
 Combined backups bind a consistent dump to corpus/policy revisions and exact user
 configuration evidence. Restore preserves database IDs and document UUIDs. A
 selected restored corpus changes only its local runtime bundle path, with
@@ -88,23 +99,32 @@ exist, but there is no complete shared/fleet migration command.
 | Interrupted bootstrap/cutover/config publication | Native subprocess kills and resume fixtures cover durable boundaries, orphan initializer isolation, source preservation and later-write preservation. |
 | Lost singleton session | Tests terminate the lock backend and require dispatch/reaping authority to stop until a new lock is acquired. |
 | Ambiguous shared push, stale activation, unmapped scope, old SQL writer | Shared/store/migration fixtures cover conditional conflicts, reachability recovery, fresh approval checks, scope refusal and database write fences. Full deployed-client admission remains an operator/release requirement. |
-| Full filesystem | `tests/okf_disk_full.rs` passed locally on a private 128 MiB APFS image after real `ENOSPC`; update/create failures preserved acknowledged bytes, then retry/reopen passed after freeing space. Native three-platform CI was added in `a97f8fa`. Linux uses isolated tmpfs, which tests allocation failure rather than disk durability. Earlier `RLIMIT_FSIZE` coverage remains a distinct partial-write test. |
+| Full filesystem | `tests/okf_disk_full.rs` passed locally and in release-mode native CI on all three platforms at `a97f8fa`: update/create failures preserved acknowledged bytes after real `ENOSPC`, then retry/reopen passed after freeing space. The 128 MiB APFS images filled after 129,368,064 bytes; Linux tmpfs filled after 134,152,192 bytes. Tmpfs tests allocation failure rather than disk durability. Earlier `RLIMIT_FSIZE` coverage remains a distinct partial-write test. |
 | Warm hook latency | Actual release CLI: 10,000 documents, 20 concurrent clients, 100 warm samples/mode; ordered output and all 2,400 observations pass. Latest unchanged batching repeat: SQL 279.39 ms / OKF 387.96 ms p95, **108.57 ms added**, exceeding the **50 ms** target. Earlier passing samples do not qualify the release. Reports: `docs/performance/okf-hooks-2026-10-09-selected-uuid*.json`. |
 | Separate latency cases | Shared-network, database cold-start, broader scope distributions and cross-platform qualification remain. Warm local measurements cannot stand in for these cases. |
 | Native bundles | Online/offline assembler, manifests, license retention, deterministic checksums, bounded extraction and extracted-binary lifecycle/backup smoke passed on all three target platforms at `b3153a7` in [run 37991943961](https://github.com/ng/yggdrasil/actions/runs/37991943961). CI candidates are not public release artifacts. |
 | Final distribution | Release publication, macOS quarantine/Developer ID/notarization workflow and clean-machine Linux runtime dependency qualification remain. |
 
+A separate local debug-build initialization, running alongside the full suite,
+hit the 30-second `postgres --version` bootstrap deadline for newly extracted
+binaries. No server, data directory or bootstrap intent was created, and process
+inspection found no surviving child. A later standalone version probe completed
+in 17 ms. This remains cold-start evidence to investigate; the warm retry does not
+qualify a clean-machine first initialization.
+
 Local full-suite validation at `f62d529`: **585 passed, 22 opt-in ignored**, plus
 all-target, formatting and diff checks. The following `a97f8fa` change adds the
 disk-full test/workflow/documentation without changing production Rust; its local
 native test, all-target check, formatting, diff and workflow lint passed.
-[Standard CI 37995721951](https://github.com/ng/yggdrasil/actions/runs/37995721951)
-passed on `f62d529`, including PostgreSQL 16 and 18. Native Linux and arm64 macOS
-also passed on that head; its Intel macOS job and `a97f8fa` runs are still active.
-The real disk-full step passed on Linux in
-[native run 37995932262](https://github.com/ng/yggdrasil/actions/runs/37995932262);
-its two macOS disk-full steps remain pending.
-New-head standard and native CI results must be recorded when terminal; observation
+[Standard CI 37995932270](https://github.com/ng/yggdrasil/actions/runs/37995932270)
+passed on `a97f8fa`, including PostgreSQL 16 and 18.
+[Native run 37995932262](https://github.com/ng/yggdrasil/actions/runs/37995932262)
+passed lifecycle/restore, real disk-full and both bundle-flavor smoke tests on all
+three platforms. Every assembly recorded a clean source checkout and uploaded its
+candidate artifact. The following documentation-only `f820a9d` also passed
+[standard CI 37996388468](https://github.com/ng/yggdrasil/actions/runs/37996388468)
+and [native CI 37996388458](https://github.com/ng/yggdrasil/actions/runs/37996388458).
+New-head CI results must be recorded when terminal; observation
 timeouts are not test failures or reasons to restart a running job.
 
 ## Next release work

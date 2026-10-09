@@ -32,6 +32,11 @@ the embedded migrator in the application, not only a changed integration test.
 `open` and `status` do not initialize or start PostgreSQL. `try_owner` obtains a
 nonblocking OS lease in the canonical cluster root. The returned `Owner` retains
 that lease for its lifetime; competing clients wait for bounded readiness.
+After acquiring the lease, it re-reads the cluster manifest and rejects a cached
+handle if binary selection or any identity metadata changed while it waited.
+Missing or malformed metadata also refuses ownership; the lease is released so
+a newly resolved valid selection can proceed. This prepares lifecycle ownership
+for explicit maintenance; it does not itself implement a PostgreSQL upgrade.
 `start_or_adopt` starts a detached postmaster only if the cluster is stopped, or
 checks the on-disk PostgreSQL system identifier before launch, and
 adopts the existing server after checking:

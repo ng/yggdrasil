@@ -62,6 +62,11 @@ The native platform workflow runs the same fixture in release mode. Local macOS
 arm64 APFS validation reached `ENOSPC` after 129,368,064 filler bytes and passed
 all preservation/retry assertions. This is disk-full write evidence, not arbitrary
 filesystem or power-loss qualification; Linux tmpfs is not a disk durability test.
+[Native run 37995932262](https://github.com/ng/yggdrasil/actions/runs/37995932262)
+at `a97f8fa` passed this fixture in release mode on macOS arm64, Intel macOS and
+GNU Linux x86_64. Both APFS jobs reached `ENOSPC` after 129,368,064 filler bytes;
+Linux tmpfs reached it after 134,152,192 bytes. All three jobs also passed native
+lifecycle/restore tests and both extracted-bundle smoke tests.
 
 ## Identity and policy configuration
 

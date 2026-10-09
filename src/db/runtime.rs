@@ -22,7 +22,7 @@ use uuid::Uuid;
 const BOOTSTRAP: &str = "ygg_bootstrap";
 const LIMIT: u64 = 16 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     version: u32,
@@ -571,7 +571,18 @@ impl ManagedCluster {
     }
 
     pub fn try_owner(&self) -> Result<Option<Owner>> {
-        Ok(lease(&self.root)?.map(|lease| Owner {
+        let Some(lease) = lease(&self.root)? else {
+            return Ok(None);
+        };
+        // A caller can wait while maintenance changes the selected binaries or
+        // cluster identity. Only the metadata observed under ownership may
+        // authorize lifecycle operations; never revive a cached selection.
+        let current: Manifest = serde_json::from_str(&read(&self.root.join("cluster.json"))?)?;
+        ensure!(
+            current == self.manifest,
+            "managed cluster metadata changed; reopen the selected cluster before retrying"
+        );
+        Ok(Some(Owner {
             cluster: self.clone(),
             _lease: lease,
             child: None,
@@ -711,6 +722,67 @@ impl Owner {
             child.wait().await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ownership_metadata_tests {
+    use super::*;
+
+    fn fixture(root: &Path) -> ManagedCluster {
+        let root = root.canonicalize().unwrap();
+        let cluster = ManagedCluster {
+            manifest: Manifest {
+                version: 1,
+                root: root.clone(),
+                cluster_id: Uuid::new_v4(),
+                system_id: "1234".into(),
+                major: 16,
+                binary_version: "postgres (PostgreSQL) 16.14".into(),
+                bin: root.join("old-bin"),
+                socket_dir: None,
+            },
+            root,
+        };
+        publish_metadata(&cluster.root, "cluster.json", &cluster.manifest).unwrap();
+        cluster
+    }
+
+    #[test]
+    fn waiting_handle_cannot_own_a_changed_binary_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = fixture(temp.path());
+        let maintenance = old.try_owner().unwrap().unwrap();
+        let mut selected = old.clone();
+        selected.manifest.bin = old.root.join("new-bin");
+        selected.manifest.binary_version = "postgres (PostgreSQL) 16.15".into();
+        fs::write(
+            old.root.join("cluster.json"),
+            serde_json::to_vec(&selected.manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(old.try_owner().unwrap().is_none());
+        drop(maintenance);
+        assert!(old.try_owner().is_err());
+        // Refusal releases ownership, so a newly resolved selection can proceed.
+        assert!(selected.try_owner().unwrap().is_some());
+    }
+
+    #[test]
+    fn unreadable_or_changed_identity_never_grants_cached_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let cluster = fixture(temp.path());
+        let path = cluster.root.join("cluster.json");
+        fs::remove_file(&path).unwrap();
+        assert!(cluster.try_owner().is_err());
+        fs::write(&path, "{unfinished").unwrap();
+        assert!(cluster.try_owner().is_err());
+        let mut replaced = cluster.manifest.clone();
+        replaced.cluster_id = Uuid::new_v4();
+        fs::write(&path, serde_json::to_vec(&replaced).unwrap()).unwrap();
+        assert!(cluster.try_owner().is_err());
+        fs::write(&path, serde_json::to_vec_pretty(&cluster.manifest).unwrap()).unwrap();
+        assert!(cluster.try_owner().unwrap().is_some());
     }
 }
 
