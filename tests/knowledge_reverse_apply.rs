@@ -178,3 +178,88 @@ async fn runtime_cannot_forge_the_migration_flag_or_call_the_owner_function() {
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test]
+async fn capture_uses_frozen_database_totals_and_rejects_missing_or_conflicting_baselines() {
+    use ygg::knowledge::telemetry::Telemetry;
+    let f = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let rule = Uuid::new_v4();
+        sqlx::query("INSERT INTO learnings(learning_id,text,user_id,status,source,applied_count) VALUES($1,'original','alice','pending','proposed',5)")
+            .bind(rule).execute(&f.pool).await.unwrap();
+        let source = inventory::assess(&f.pool, None).await.unwrap().source;
+        let mappings = Mappings { database_id: source.database_id, corpus_id: Uuid::new_v4(), repos: BTreeMap::new(), users: BTreeMap::from([("alice".into(), "owner".into())]) };
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced',generation=2,corpus_id=$1").bind(mappings.corpus_id).execute(&f.pool).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let stage = temp.path().join("bundle");
+        let manifest = export::stage(&f.pool, &mappings, &stage).await.unwrap();
+        let store = KnowledgeStore::open(&stage, false).unwrap();
+        // A genuinely new pending rule has no migration baseline or observations.
+        let mut new = store.snapshot().documents.remove(0).document;
+        let mut profile = new.profile().unwrap().unwrap();
+        let added = Uuid::new_v4();
+        profile.id = added;
+        profile.extra.remove("legacy");
+        profile.legacy_repo_id = None;
+        new.set_profile(&profile).unwrap();
+        store.put(&new, ExpectedRevision::Absent).unwrap();
+        let snapshot = store.snapshot();
+        sqlx::query("UPDATE knowledge_storage SET backend='okf',generation=3").execute(&f.pool).await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.is_err());
+        tx.rollback().await.unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced',generation=4").execute(&f.pool).await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.is_err());
+        tx.rollback().await.unwrap();
+        let baseline = manifest.entries[0].usage.as_ref().unwrap();
+        let telemetry = Telemetry::new(&f.pool);
+        telemetry.seed(baseline).await.unwrap();
+        let at = Utc::now().trunc_subsecs(6);
+        for _ in 0..2 { telemetry.record(mappings.corpus_id, rule, Uuid::new_v4(), at).await.unwrap(); }
+        let mut tx = f.pool.begin().await.unwrap();
+        let candidate = reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.unwrap();
+        let old = candidate.learnings.iter().find(|r| r["learning_id"] == rule.to_string()).unwrap();
+        assert_eq!(old["applied_count"], 7);
+        assert_eq!(serde_json::from_value::<chrono::DateTime<Utc>>(old["last_applied_at"].clone()).unwrap(), at);
+        let new = candidate.learnings.iter().find(|r| r["learning_id"] == added.to_string()).unwrap();
+        assert_eq!(new["applied_count"], 0);
+        assert!(new["last_applied_at"].is_null());
+        // The same lock protects existing rows and inserts for absent rules.
+        let mut other = f.pool.acquire().await.unwrap();
+        sqlx::query("SET statement_timeout='200ms'").execute(&mut *other).await.unwrap();
+        for id in [rule, added] {
+            let error = sqlx::query("INSERT INTO knowledge_usage(corpus_id,document_id,observed_count) VALUES($1,$2,1) ON CONFLICT(corpus_id,document_id) DO UPDATE SET observed_count=knowledge_usage.observed_count+1")
+                .bind(mappings.corpus_id).bind(id).execute(&mut *other).await.unwrap_err();
+            assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("57014"));
+        }
+        sqlx::query("RESET statement_timeout").execute(&mut *other).await.unwrap();
+        drop(other);
+        reverse::apply_on(&mut tx, &candidate, 4).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i32>("SELECT applied_count FROM learnings WHERE learning_id=$1").bind(rule).fetch_one(&f.pool).await.unwrap(), 7);
+        // Table locks are released on commit, and overflow is rejected instead of clamped.
+        sqlx::query("UPDATE knowledge_usage SET observed_count=2147483647 WHERE corpus_id=$1 AND document_id=$2").bind(mappings.corpus_id).bind(rule).execute(&f.pool).await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.is_err());
+        tx.rollback().await.unwrap();
+        sqlx::query("UPDATE knowledge_usage SET observed_count=2 WHERE corpus_id=$1 AND document_id=$2").bind(mappings.corpus_id).bind(rule).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_usage(corpus_id,document_id,imported_count) VALUES($1,$2,0)").bind(mappings.corpus_id).bind(added).execute(&f.pool).await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.is_err());
+        tx.rollback().await.unwrap();
+        sqlx::query("DELETE FROM knowledge_usage WHERE corpus_id=$1 AND document_id=$2").bind(mappings.corpus_id).bind(added).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE knowledge_usage SET imported_count=6 WHERE corpus_id=$1 AND document_id=$2").bind(mappings.corpus_id).bind(rule).execute(&f.pool).await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        assert!(reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.is_err());
+        tx.rollback().await.unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await.unwrap();
+        assert!(reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.is_err());
+        tx.rollback().await.unwrap();
+    }).catch_unwind().await;
+    f.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

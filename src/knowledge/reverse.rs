@@ -155,6 +155,120 @@ pub fn build(
     Ok(candidate)
 }
 
+/// Capture authoritative committed usage and build a current reverse candidate.
+/// The caller must already quiesce filesystem writers and retain the current
+/// bundle backup/leases. Keep this READ COMMITTED transaction through apply and
+/// commit: its migration and telemetry locks prevent totals from changing.
+/// Offline deliveries were never recorded and cannot be reconstructed here.
+pub async fn capture_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    original: &Manifest,
+    current: &Snapshot,
+    fenced_generation: i64,
+) -> Result<Candidate> {
+    ensure!(
+        original.version == 1 && fenced_generation > original.generation,
+        "reverse capture requires a later fenced generation"
+    );
+    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&mut **transaction)
+        .await?;
+    ensure!(
+        isolation == "read committed",
+        "reverse capture requires READ COMMITTED isolation"
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(1497843531, 1)")
+        .execute(&mut **transaction)
+        .await?;
+    let marker: (Uuid, Option<Uuid>, i64, i32, String) = sqlx::query_as(
+        "SELECT database_id,corpus_id,generation,minimum_client,backend FROM public.knowledge_storage WHERE singleton FOR UPDATE"
+    ).fetch_one(&mut **transaction).await?;
+    ensure!(
+        marker.0 == original.database_id
+            && marker.1 == Some(original.corpus_id)
+            && marker.2 == fenced_generation
+            && marker.3 > 0
+            && marker.3 <= super::guard::CLIENT_PROTOCOL
+            && marker.4 == "fenced",
+        "reverse capture requires the expected compatible fenced generation"
+    );
+    // Also drain direct telemetry callers which do not take the generation
+    // lease. Table-level SHARE blocks inserts/updates/deletes, including rows
+    // that do not yet exist; row locks alone cannot stabilize absent totals.
+    sqlx::query("LOCK TABLE public.knowledge_usage IN SHARE MODE")
+        .execute(&mut **transaction)
+        .await?;
+    let ids: Vec<_> = current
+        .documents
+        .iter()
+        .filter(|d| d.key.kind == Kind::Learning)
+        .map(|d| d.key.id)
+        .collect();
+    #[derive(sqlx::FromRow)]
+    struct Recorded {
+        document_id: Uuid,
+        imported_count: Option<i32>,
+        imported_last_applied_at: Option<chrono::DateTime<chrono::Utc>>,
+        observed_count: i64,
+        last_applied_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    let rows: Vec<Recorded> = sqlx::query_as(
+        "SELECT document_id,imported_count,imported_last_applied_at,observed_count, \
+         GREATEST(imported_last_applied_at,observed_last_applied_at) AS last_applied_at \
+         FROM public.knowledge_usage WHERE corpus_id=$1 AND document_id=ANY($2)",
+    )
+    .bind(original.corpus_id)
+    .bind(&ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let rows: BTreeMap<_, _> = rows.into_iter().map(|r| (r.document_id, r)).collect();
+    let originals: BTreeMap<_, _> = original.entries.iter().map(|e| (e.key.id, e)).collect();
+    let mut usage = BTreeMap::new();
+    for id in ids {
+        let row = rows.get(&id);
+        match originals.get(&id) {
+            Some(entry) => {
+                let baseline = entry
+                    .usage
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("missing export rule baseline"))?;
+                let row = row.ok_or_else(|| anyhow!("missing imported telemetry for rule {id}"))?;
+                ensure!(
+                    row.imported_count == Some(baseline.applied_count)
+                        && row.imported_last_applied_at == baseline.last_applied_at,
+                    "imported telemetry differs from export baseline for rule {id}"
+                );
+            }
+            None => ensure!(
+                row.is_none_or(
+                    |r| r.imported_count.is_none() && r.imported_last_applied_at.is_none()
+                ),
+                "unexpected imported telemetry for new rule {id}"
+            ),
+        }
+        let count = match row {
+            Some(row) => {
+                ensure!(row.observed_count >= 0, "negative observed telemetry");
+                i64::from(row.imported_count.unwrap_or(0))
+                    .checked_add(row.observed_count)
+                    .ok_or_else(|| anyhow!("telemetry count overflow"))?
+                    .try_into()?
+            }
+            None => 0, // Proven absent under the table lock, and not an imported rule.
+        };
+        usage.insert(
+            id,
+            Usage {
+                corpus_id: original.corpus_id,
+                document_id: id,
+                applied_count: count,
+                last_applied_at: row.and_then(|r| r.last_applied_at),
+            },
+        );
+    }
+    build(original, current, &usage)
+}
+
 /// Low-level fenced SQL apply. The owning migration workflow must retain the
 /// current bundle/usage evidence and its filesystem leases, then commit this
 /// transaction only after all rollback checks pass. This never selects SQL.

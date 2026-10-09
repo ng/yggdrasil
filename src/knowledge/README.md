@@ -455,6 +455,18 @@ evidence, quiesce writers, revalidate revisions under its leases, use the restri
 SQL migration bypass, validate restored rows and then publish the storage/config
 transition. The complete orchestration and rollback rehearsal remain open.
 
+`reverse::capture_on` builds a candidate using committed database usage in the
+caller's READ COMMITTED transaction. It verifies the expected fenced generation,
+holds the exclusive migration lease and a SHARE lock on the usage table through
+transaction completion, and verifies each imported baseline against the export.
+Missing or conflicting imported baselines block capture. A new rule with no usage
+row receives zero only after the table lock proves that absence; unexpected
+imported baselines on new rules and totals outside the legacy integer range fail.
+It never reads the local usage cache. Keep the same transaction for `apply_on`;
+the caller still owns filesystem quiescence, recovery evidence and activation.
+These totals reflect recorded deliveries only: offline deliveries were not queued
+and cannot be reconstructed during rollback.
+
 `reverse::apply_on` and the owner-only `ygg_knowledge_reverse_import` function
 provide the SQL apply layer. The function takes an exclusive generation lease,
 requires the exact database/corpus/fenced generation and supported protocol,
