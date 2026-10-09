@@ -6,6 +6,9 @@ on:
     paths:
       - '.github/workflows/managed-postgres.yml'
       - 'scripts/prepare-postgres-smoke.py'
+      - 'scripts/*release-bundle*.py'
+      - 'tests/release_bundles.py'
+      - 'LICENSE'
       - 'Cargo.*'
       - 'build.rs'
       - 'src/db.rs'
@@ -70,3 +73,20 @@ jobs:
         run: cargo test --release --lib config::switch::tests -- --test-threads=1
       - name: Test short runtime endpoint identity and containment
         run: cargo test --release --lib db::runtime_endpoint -- --test-threads=1
+      - name: Verify release bundle integrity and publication rules
+        run: python3 tests/release_bundles.py
+      - name: Assemble online and offline native bundles
+        run: |
+          cargo build --release --locked --bin ygg
+          python3 scripts/build-release-bundles.py --binary target/release/ygg --postgres-archive "$YGG_TEST_PG_ARCHIVE" --target '${{ matrix.target }}' --output "$RUNNER_TEMP/ygg-bundles"
+      - name: Smoke-test extracted release bundles
+        shell: bash
+        run: |
+          python3 scripts/smoke-release-bundle.py "$RUNNER_TEMP"/ygg-bundles/*-offline.tar.gz --directory "$RUNNER_TEMP/bundle-offline-smoke"
+          python3 scripts/smoke-release-bundle.py "$RUNNER_TEMP"/ygg-bundles/*-online.tar.gz --directory "$RUNNER_TEMP/bundle-online-smoke" --allow-download
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ygg-native-bundles-${{ matrix.target }}
+          path: ${{ runner.temp }}/ygg-bundles/
+          if-no-files-found: error
+          retention-days: 14

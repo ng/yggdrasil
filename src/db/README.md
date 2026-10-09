@@ -88,8 +88,7 @@ and adopt its surviving server, kill/recover PostgreSQL and verify acknowledged
 rows, and prove client-draining shutdown. Negative tests cover wrong major and an
 unrelated live PID without signaling it. Local validation uses Homebrew PostgreSQL
 18.3 and pinned 16.15 on macOS arm64. The native installer/lifecycle CI matrix
-also passed on Intel macOS and GNU Linux x86_64; quarantine and offline release
-bundle assembly remain release gates. These tests do not use `DATABASE_URL`.
+also passed on Intel macOS and GNU Linux x86_64; quarantine and publication of qualified release artifacts remain release gates. These tests do not use `DATABASE_URL`.
 
 ## Supervisor commands
 
@@ -162,8 +161,8 @@ were checked against the release asset digests; they include `uuid-ossp`.
 bounded regular-file descriptor and verifies its exact bytes before creating any
 destination state. `install_download` explicitly downloads the same HTTPS artifact
 using curl (which is not required for offline installation). Neither is called
-from ordinary runtime, status, hooks or scheduler paths. User-facing `ygg init`
-and offline release-bundle assembly remain pending.
+from ordinary runtime, status, hooks or scheduler paths. Native bundle assembly
+and artifact smoke are described below.
 
 Installation holds a private OS lock, extracts into a fresh private staging
 directory, syncs files and directories, then publishes using an exclusive atomic
@@ -193,6 +192,49 @@ its macOS jobs verify the upstream ad-hoc signature. `scripts/prepare-postgres-s
 is CI-only preparation, not the product installer. Platform results, clean-machine
 dependency handling, quarantine behavior and offline release packaging must be
 verified before advertising managed installation as release-ready.
+
+### Native online/offline bundles
+
+`scripts/build-release-bundles.py` assembles native artifacts from a freshly built
+`ygg` and the exact pinned PostgreSQL archive. It verifies archive size/digest,
+binary architecture and CLI version, preserves PostgreSQL/theseus-rs/OpenSSL and
+Yggdrasil license notices, and emits an online tarball, an offline tarball, a plain
+binary compatible with the existing `install` script, and `SHA256SUMS`. It never
+replaces an existing output directory/artifact. Tar metadata and gzip timestamps
+are deterministic for fixed inputs and source commit.
+
+Each tarball contains `bin/ygg`, an `initialize` launcher, instructions, the pin
+manifest and a file-digest manifest with source commit and dirty-tree status. The
+offline tarball also contains the original PostgreSQL archive. Extract into an
+empty directory and run `./initialize`; the online launcher uses the ordinary
+pinned download path, while the offline launcher supplies `--postgres-archive`.
+Both preserve configuration selection; an external selection rejects the managed
+archive. Keep the extracted directory stable while its supervisor runs.
+For database-only unattended setup, use
+`./initialize --yes --skip tmux,jq,rtk,hooks,project` to avoid optional dependency
+installers and hook/project changes. Ordinary commands use `./bin/ygg`.
+
+```sh
+cargo build --release --locked --bin ygg
+python3 scripts/build-release-bundles.py --binary target/release/ygg \
+  --postgres-archive /absolute/pinned-postgresql.tar.gz \
+  --target aarch64-apple-darwin --output /absolute/new-output-directory
+python3 tests/release_bundles.py
+python3 scripts/smoke-release-bundle.py /absolute/bundle-offline.tar.gz \
+  --directory /absolute/new-disposable-profile
+```
+
+The native workflow assembles and uploads candidate bundles after its lifecycle
+suite, then exercises the extracted binaries in separate disposable profiles.
+Offline smoke denies curl, initializes/migrates, proves stable cluster/process
+identity on archive-free reuse, creates/verifies a database backup and stops the
+owned supervisor. Online smoke uses `--allow-download` for first initialization,
+then denies downloads during reuse. Checksums establish byte identity, not release
+authenticity or independently reproducible builds. CI artifacts are candidates;
+release publication, macOS Developer ID/notarization/quarantine behavior and
+clean-machine OS dependencies remain separate gates. No unsigned macOS quarantine
+bypass is built into the launcher. Linux still needs the distribution libraries
+listed by the native workflow.
 
 To test an offline archive locally:
 
