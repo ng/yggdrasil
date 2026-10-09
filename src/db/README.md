@@ -484,6 +484,21 @@ before publishing the filesystem receipt. Cancellation kills the native client;
 a disconnected PostgreSQL backend may take time to finish its current statement
 and roll back. An error or lost response is not permission to retry a possibly
 committed operation: retain and inspect the target and private staging directory.
+PG16/17→18 restore validation accounts for PostgreSQL 18's separate table `NOT NULL`
+catalog entries only when the source column already records that requirement and
+the target constraint is ordinary, validated, enforced, local and non-inherited.
+Same-major comparisons remain exact. Domain constraints, partitioned/inherited
+constraints and unknown catalog differences retain strict comparison. This is not
+a general cross-version schema equivalence guarantee or an upgrade command.
+
+The opt-in native regression starts two disposable clusters and checks populated
+rows, task/run claims and rejection of altered constraints:
+
+```sh
+YGG_TEST_PG16_BIN=/absolute/pg16/bin YGG_TEST_PG18_BIN=/absolute/pg18/bin \
+  cargo test --test restore_major -- --include-ignored --test-threads=1
+```
+
 Validation failure never cleans the target or overwrites the source. The database
 commit and filesystem publication are separate boundaries, so a crash can leave a
 complete target without a published receipt.

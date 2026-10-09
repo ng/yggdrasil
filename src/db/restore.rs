@@ -178,6 +178,79 @@ async fn require_database_properties(
     Ok(())
 }
 
+/// PG18 records table NOT NULL constraints separately; PG16/17 recorded the
+/// same requirement in attnotnull. Keep archived evidence and same-major checks
+/// exact. For this one forward boundary, omit only ordinary target constraints
+/// whose column was already NOT NULL in the source. Domain constraints and
+/// newer validation/enforcement/inheritance semantics are never omitted.
+async fn restore_evidence_matches(
+    connection: &mut PgConnection,
+    mut actual: Evidence,
+    expected: &Evidence,
+    source_major: i32,
+) -> Result<bool> {
+    let target_major: i32 =
+        sqlx::query_scalar("SELECT current_setting('server_version_num')::int / 10000")
+            .fetch_one(&mut *connection)
+            .await?;
+    if matches!(source_major, 16 | 17) && target_major == 18 {
+        let candidates: Vec<(String, String, String, String)> = sqlx::query_as(
+            r#"
+SELECT jsonb_build_array('constraint', n.nspname, c.conname, c.conrelid::regclass::text,
+                         c.convalidated, pg_get_constraintdef(c.oid))::text,
+       n.nspname::text, r.relname::text, a.attname::text
+FROM pg_constraint c
+JOIN pg_namespace n ON n.oid=c.connamespace
+JOIN pg_class r ON r.oid=c.conrelid
+JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1]
+WHERE c.contype='n' AND c.contypid=0 AND r.relkind='r'
+  AND cardinality(c.conkey)=1 AND a.attnotnull AND NOT a.attisdropped
+  AND c.convalidated AND c.conenforced AND c.conislocal
+  AND NOT c.condeferrable AND NOT c.condeferred AND NOT c.connoinherit
+  AND c.coninhcount=0 AND c.conparentid=0
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname !~ '^pg_toast' AND n.nspname !~ '^pg_temp'
+"#,
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        let source_columns: std::collections::BTreeSet<(String, String, String)> = expected
+            .schema
+            .iter()
+            .map(|definition| serde_json::from_str::<serde_json::Value>(definition))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|value| {
+                let fields = value.as_array()?;
+                if fields.len() != 11 || fields[0] != "column" || fields[6] != true {
+                    return None;
+                }
+                Some((
+                    fields[1].as_str()?.into(),
+                    fields[2].as_str()?.into(),
+                    fields[4].as_str()?.into(),
+                ))
+            })
+            .collect();
+        let mut omitted_columns = std::collections::BTreeSet::new();
+        for (definition, schema, table, column) in candidates {
+            let column = (schema, table, column);
+            if source_columns.contains(&column) && !expected.schema.contains(&definition) {
+                ensure!(
+                    omitted_columns.insert(column),
+                    "ambiguous restored NOT NULL constraints"
+                );
+                let Some(position) = actual.schema.iter().position(|entry| entry == &definition)
+                else {
+                    anyhow::bail!("restored constraint catalog changed during validation");
+                };
+                actual.schema.remove(position);
+            }
+        }
+    }
+    Ok(actual == *expected)
+}
+
 pub async fn validate(options: &PgConnectOptions, expected: &DatabaseSnapshot) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(1800), async {
         let mut connection = PgConnection::connect_with(options).await.map_err(|_| anyhow::anyhow!("restore validation connection failed"))?;
@@ -188,7 +261,8 @@ pub async fn validate(options: &PgConnectOptions, expected: &DatabaseSnapshot) -
         ensure!(migrations == expected.migrations, "restored migration versions differ");
         let (actual, counts) = evidence(&mut connection).await?;
         ensure!(counts == expected.table_rows, "restored table inventory or counts differ");
-        ensure!(Some(&actual) == expected.validation.as_ref(), "restored content or schema differs from backup");
+        let source = expected.validation.as_ref().ok_or_else(|| anyhow::anyhow!("backup lacks restore evidence"))?;
+        ensure!(restore_evidence_matches(&mut connection, actual, source, expected.server_major).await?, "restored content or schema differs from backup");
         sqlx::query("ROLLBACK").execute(&mut connection).await?;
         connection.close().await?;
         Ok(())
@@ -266,6 +340,108 @@ pub async fn database(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pg18_restore_compatibility_keeps_other_schema_and_row_checks() {
+        let options =
+            crate::db::external::options(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+        let mut connection = PgConnection::connect_with(&options).await.unwrap();
+        let major: i32 =
+            sqlx::query_scalar("SELECT current_setting('server_version_num')::int / 10000")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        if major != 18 {
+            return; // The standard CI matrix includes PG18 and exercises this case.
+        }
+        // Transactional fixture: even a panic drops the connection and rolls back.
+        sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let schema = format!("restore_{}", uuid::Uuid::new_v4().simple());
+        sqlx::raw_sql(&format!(
+            "CREATE SCHEMA {schema};
+             CREATE DOMAIN {schema}.positive AS int CONSTRAINT positive_check CHECK (VALUE > 0);
+             CREATE TABLE {schema}.items (id int PRIMARY KEY, required text CONSTRAINT required_nn NOT NULL,
+                 optional text, value {schema}.positive, CONSTRAINT required_check CHECK (required <> ''));
+             INSERT INTO {schema}.items VALUES (1, 'preserved', 'present', 1)"
+        )).execute(&mut connection).await.unwrap();
+        let (original, _) = evidence(&mut connection).await.unwrap();
+        let added: Vec<String> = sqlx::query_scalar(
+            "SELECT jsonb_build_array('constraint', n.nspname, c.conname, c.conrelid::regclass::text, c.convalidated, pg_get_constraintdef(c.oid))::text FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=$1 AND c.contype='n' AND c.conrelid<>0"
+        ).bind(&schema).fetch_all(&mut connection).await.unwrap();
+        assert_eq!(added.len(), 2);
+        let mut legacy = original.clone();
+        legacy.schema.retain(|entry| !added.contains(entry));
+        for source_major in [16, 17] {
+            assert!(
+                restore_evidence_matches(&mut connection, original.clone(), &legacy, source_major)
+                    .await
+                    .unwrap()
+            );
+        }
+        for source_major in [15, 18, 19] {
+            assert!(
+                !restore_evidence_matches(&mut connection, original.clone(), &legacy, source_major)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(
+            restore_evidence_matches(&mut connection, original.clone(), &original, 18)
+                .await
+                .unwrap()
+        );
+        for change in [
+            "ALTER TABLE SCHEMA.items DROP CONSTRAINT required_check",
+            "ALTER DOMAIN SCHEMA.positive DROP CONSTRAINT positive_check",
+            "ALTER DOMAIN SCHEMA.positive SET NOT NULL",
+            "ALTER TABLE SCHEMA.items DROP CONSTRAINT items_pkey",
+            "ALTER TABLE SCHEMA.items ALTER COLUMN required DROP NOT NULL",
+            "ALTER TABLE SCHEMA.items ALTER COLUMN optional SET NOT NULL",
+            "ALTER TABLE SCHEMA.items DROP CONSTRAINT required_nn; ALTER TABLE SCHEMA.items ADD CONSTRAINT required_nn NOT NULL required NOT VALID",
+            "ALTER TABLE SCHEMA.items DROP CONSTRAINT required_nn; ALTER TABLE SCHEMA.items ADD CONSTRAINT required_nn NOT NULL required NO INHERIT",
+            "UPDATE SCHEMA.items SET required='changed'",
+        ] {
+            sqlx::query("SAVEPOINT mutation")
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            sqlx::raw_sql(&change.replace("SCHEMA", &schema))
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            let (changed, _) = evidence(&mut connection).await.unwrap();
+            assert!(
+                !restore_evidence_matches(&mut connection, changed, &legacy, 16)
+                    .await
+                    .unwrap(),
+                "accepted {change}"
+            );
+            sqlx::query("ROLLBACK TO SAVEPOINT mutation")
+                .execute(&mut connection)
+                .await
+                .unwrap();
+        }
+        sqlx::query(&format!(
+            "ALTER TABLE {schema}.items RENAME CONSTRAINT required_nn TO renamed_nn"
+        ))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        let (renamed, _) = evidence(&mut connection).await.unwrap();
+        assert!(
+            !restore_evidence_matches(&mut connection, renamed, &original, 18)
+                .await
+                .unwrap()
+        );
+        sqlx::query("ROLLBACK")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+    }
 
     #[test]
     fn restore_requires_one_complete_database_properties_record() {

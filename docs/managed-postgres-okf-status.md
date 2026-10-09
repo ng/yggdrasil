@@ -64,7 +64,7 @@ limit. Migration requires UTF8 server semantics; restore verifies recorded targe
 encoding/locale compatibility before import. These are admission checks, not an
 encoding conversion facility.
 
-A disposable 16.15→18.3 restore rehearsal currently fails final catalog validation:
+A disposable 16.15→18.3 restore rehearsal initially failed final catalog validation:
 all table counts and row hashes match, but PostgreSQL 18 adds 204 table `NOT NULL`
 constraint entries. No configuration switch occurs. The
 [raw comparison](validation/pg16-to-pg18-2026-10-09.json) records this failed case;
@@ -74,6 +74,16 @@ records these table constraints in `pg_constraint`, while
 [earlier versions](https://www.postgresql.org/docs/17/catalog-pg-constraint.html)
 represent table nullability through `pg_attribute`. Major-upgrade support needs
 version-aware semantic verification without dropping unrelated constraint checks.
+
+Restore now handles this specific PG16/17→18 catalog transition: it compares
+ordinary validated, enforced, local table `NOT NULL` entries against the source
+column's recorded nullability. Same-major evidence stays exact; domain constraints,
+inherited/partitioned constraints and newer constraint semantics are not omitted.
+The populated native `tests/restore_major.rs` fixture passed locally on 16.15→18.3,
+preserving task/run claims, IDs and row hashes, and rejecting changed rows,
+nullability, checks and domain checks. The original failed report remains historical
+evidence. This does not implement the explicit upgrade command or qualify all
+cross-major catalog differences. PG17 has not had a native restore rehearsal.
 
 Combined backups bind a consistent dump to corpus/policy revisions and exact user
 configuration evidence. Restore preserves database IDs and document UUIDs. A
@@ -124,6 +134,12 @@ three platforms. Every assembly recorded a clean source checkout and uploaded it
 candidate artifact. The following documentation-only `f820a9d` also passed
 [standard CI 37996388468](https://github.com/ng/yggdrasil/actions/runs/37996388468)
 and [native CI 37996388458](https://github.com/ng/yggdrasil/actions/runs/37996388458).
+Ownership-guard head `df918f7` passed
+[standard CI 37999389831](https://github.com/ng/yggdrasil/actions/runs/37999389831)
+and [native CI 37999389807](https://github.com/ng/yggdrasil/actions/runs/37999389807)
+on all three platforms. The subsequent restore-compatibility change passed 588
+local tests (24 opt-in ignored, 90 result groups), plus the separately invoked
+populated PG16→18 native restore fixture.
 New-head CI results must be recorded when terminal; observation
 timeouts are not test failures or reasons to restart a running job.
 
