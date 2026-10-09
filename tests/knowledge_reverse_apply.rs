@@ -522,7 +522,7 @@ async fn durable_journal_resumes_missing_local_receipt_and_rejects_changed_evide
             .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let paths = RecoveryPaths {
+        let mut paths = RecoveryPaths {
             corpus: root.join("bundle"),
             policy: root.join("policy"),
             corpus_archive: root.join("archive"),
@@ -547,6 +547,19 @@ async fn durable_journal_resumes_missing_local_receipt_and_rejects_changed_evide
             .await
             .unwrap();
         let policy = KnowledgeStore::open(&paths.policy, true).unwrap();
+        let binding = ygg::knowledge::runtime::Binding {
+            version: 1,
+            minimum_client: 1,
+            generation: 3,
+            phase: ygg::knowledge::runtime::Phase::Okf,
+            bundle: paths.corpus.clone(),
+            mappings: serde_json::from_value(manifest.mappings.clone()).unwrap(),
+            agents: BTreeMap::new(),
+        };
+        let selection = paths.policy.join(ygg::knowledge::runtime::SELECTION_FILE);
+        std::fs::write(&selection, serde_json::to_vec(&binding).unwrap()).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600)).unwrap();
         let recovery = store
             .backup_pair_retained(&policy, &paths.corpus_archive, &paths.policy_archive)
             .unwrap();
@@ -555,6 +568,44 @@ async fn durable_journal_resumes_missing_local_receipt_and_rejects_changed_evide
             .await
             .unwrap();
         tx.rollback().await.unwrap();
+        let unfenced_journal = root.join("unfenced-journal");
+        assert!(
+            Journal::prepare(
+                &unfenced_journal,
+                serde_json::from_value(serde_json::to_value(&manifest).unwrap()).unwrap(),
+                serde_json::from_value(serde_json::to_value(&candidate).unwrap()).unwrap(),
+                &recovery,
+                paths.clone(),
+                4,
+                None
+            )
+            .is_err()
+        );
+        assert!(!unfenced_journal.exists());
+        drop(recovery);
+        let env = BTreeMap::from([
+            ("HOME".into(), root.to_string_lossy().into_owned()),
+            (
+                "YGG_CONFIG_DIR".into(),
+                root.join("config").to_string_lossy().into_owned(),
+            ),
+            (
+                "YGG_KNOWLEDGE_DIR".into(),
+                paths.corpus.to_string_lossy().into_owned(),
+            ),
+            (
+                "YGG_KNOWLEDGE_POLICY_DIR".into(),
+                paths.policy.to_string_lossy().into_owned(),
+            ),
+        ]);
+        let (config, _) = ygg::config::database::KnowledgeConfig::load(env).unwrap();
+        ygg::knowledge::fence::local(&config, 3).unwrap();
+        // The exact recovery evidence must include the durable local fence.
+        paths.corpus_archive = root.join("fenced-archive");
+        paths.policy_archive = root.join("fenced-policy-archive");
+        let recovery = store
+            .backup_pair_retained(&policy, &paths.corpus_archive, &paths.policy_archive)
+            .unwrap();
         let prepare = |destination: &std::path::Path, generation| {
             Journal::prepare(
                 destination,

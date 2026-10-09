@@ -37,3 +37,6 @@ pub mod reverse;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod rollback;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod fence;

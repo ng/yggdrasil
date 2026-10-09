@@ -142,3 +142,18 @@ pub fn rollback_status(journal: &Path, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn fence_local(generation: i64, json: bool) -> Result<()> {
+    let (config, _) = crate::config::database::KnowledgeConfig::load(std::env::vars().collect())?;
+    let report = crate::knowledge::fence::local(&config, generation)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Local OKF commands fenced at source generation {} (operation {}).",
+            report.source_generation, report.operation
+        );
+        println!("Database state and other hosts still require migration verification.");
+    }
+    Ok(())
+}

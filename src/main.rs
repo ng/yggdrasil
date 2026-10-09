@@ -48,6 +48,13 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Drain and durably fence this host's selected OKF commands, without SQL access
+    FenceLocal {
+        #[arg(long)]
+        expected_generation: i64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect retained rollback evidence offline; local markers are not SQL proof
     RollbackStatus {
         journal: std::path::PathBuf,
@@ -1385,6 +1392,12 @@ async fn main() -> anyhow::Result<()> {
             }
             KnowledgeAction::RollbackStatus { journal, json } => {
                 ygg::cli::knowledge_cmd::rollback_status(&journal, json)?;
+            }
+            KnowledgeAction::FenceLocal {
+                expected_generation,
+                json,
+            } => {
+                ygg::cli::knowledge_cmd::fence_local(expected_generation, json)?;
             }
             KnowledgeAction::Migrate {
                 dry_run: _,

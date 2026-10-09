@@ -383,3 +383,126 @@ fn imported_usage_is_preserved_and_telemetry_metadata_never_blocks_rule_creation
     );
     assert!(!root.join("data").exists());
 }
+
+#[test]
+fn local_fence_is_offline_resumable_and_preserves_conflicting_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let (mut binding, _, _) = fixture(root);
+    select(root, &binding);
+    let original = std::fs::read(root.join("policy/runtime.json")).unwrap();
+    let fence = |generation: &str| {
+        app(root, root)
+            .args([
+                "knowledge",
+                "fence-local",
+                "--expected-generation",
+                generation,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(!fence("3").status.success());
+    assert_eq!(
+        std::fs::read(root.join("policy/runtime.json")).unwrap(),
+        original
+    );
+    assert!(!root.join("policy/local-fence-3.json").exists());
+    let first = json(fence("2"));
+    assert_eq!(first["source_generation"], 2);
+    assert_eq!(first["corpus_id"], binding.mappings.corpus_id.to_string());
+    let journal = std::fs::read(root.join("policy/local-fence-2.json")).unwrap();
+    let fenced = std::fs::read(root.join("policy/runtime.json")).unwrap();
+    let actual: ygg::knowledge::runtime::Binding = serde_json::from_slice(&fenced).unwrap();
+    assert!(actual.phase == Phase::Fenced);
+    assert_eq!(json(fence("2")), first);
+    let output = command(root, root)
+        .args(["must not write", "--global"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cutover is fenced"));
+    assert!(!root.join("data").exists());
+    // Recreate the durable state of a crash after intent but before selection.
+    std::fs::write(root.join("policy/runtime.json"), &original).unwrap();
+    assert_eq!(json(fence("2")), first);
+    assert_eq!(
+        std::fs::read(root.join("policy/runtime.json")).unwrap(),
+        fenced
+    );
+    assert_eq!(
+        std::fs::read(root.join("policy/local-fence-2.json")).unwrap(),
+        journal
+    );
+    // Independent edits must never be replaced by replaying the retained intent.
+    binding.agents.insert("independent".into(), Uuid::new_v4());
+    select(root, &binding);
+    let edited = std::fs::read(root.join("policy/runtime.json")).unwrap();
+    assert!(!fence("2").status.success());
+    assert_eq!(
+        std::fs::read(root.join("policy/runtime.json")).unwrap(),
+        edited
+    );
+    std::fs::write(root.join("policy/runtime.json"), &original).unwrap();
+    // Replacing the corpus at the same path cannot inherit the old fencing proof.
+    std::fs::rename(root.join("bundle"), root.join("saved-bundle")).unwrap();
+    KnowledgeStore::open(&root.join("bundle"), true).unwrap();
+    assert!(!fence("2").status.success());
+    assert_eq!(
+        std::fs::read(root.join("policy/runtime.json")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn local_fence_drains_existing_selection_readers_before_publication() {
+    use fs2::FileExt;
+    use std::{os::unix::fs::OpenOptionsExt, sync::mpsc, time::Duration};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let (binding, _, _) = fixture(root);
+    select(root, &binding);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(root.join("policy/.selection.lock"))
+        .unwrap();
+    FileExt::lock_shared(&file).unwrap();
+    let env = BTreeMap::from([
+        ("HOME".to_string(), root.to_string_lossy().into_owned()),
+        (
+            "YGG_KNOWLEDGE_DIR".into(),
+            root.join("bundle").to_string_lossy().into_owned(),
+        ),
+        (
+            "YGG_KNOWLEDGE_POLICY_DIR".into(),
+            root.join("policy").to_string_lossy().into_owned(),
+        ),
+    ]);
+    let (config, _) = ygg::config::database::KnowledgeConfig::load(env).unwrap();
+    let (started, ready) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        done.send(ygg::knowledge::fence::local(&config, 2)).unwrap();
+    });
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(result.recv_timeout(Duration::from_millis(200)).is_err());
+    assert!(!root.join("policy/local-fence-2.json").exists());
+    let current: ygg::knowledge::runtime::Binding =
+        serde_json::from_slice(&std::fs::read(root.join("policy/runtime.json")).unwrap()).unwrap();
+    assert!(current.phase == Phase::Okf);
+    drop(file);
+    result
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    thread.join().unwrap();
+    let current: ygg::knowledge::runtime::Binding =
+        serde_json::from_slice(&std::fs::read(root.join("policy/runtime.json")).unwrap()).unwrap();
+    assert!(current.phase == Phase::Fenced);
+}

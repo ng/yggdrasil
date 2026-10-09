@@ -123,6 +123,24 @@ impl Request {
             "rollback source directory identity changed"
         );
         recovery.verify_paths(&self.paths.corpus, &self.paths.policy)?;
+        // A coordinator without a local selection cannot write OKF through the
+        // runtime. Any existing selection must already be durably fenced before
+        // capturing the policy archive, and must remain fenced through apply.
+        let policy = KnowledgeStore::open(&self.paths.policy, false)?;
+        if let Some(text) = policy.read_control(super::runtime::SELECTION_FILE)? {
+            let binding: super::runtime::Binding = serde_json::from_str(&text)?;
+            ensure!(
+                binding.version == 1
+                    && binding.minimum_client > 0
+                    && binding.minimum_client <= super::guard::CLIENT_PROTOCOL
+                    && binding.phase == super::runtime::Phase::Fenced
+                    && binding.generation > self.original.generation
+                    && binding.generation < self.fenced_generation
+                    && binding.bundle == self.paths.corpus
+                    && serde_json::to_value(&binding.mappings)? == self.original.mappings,
+                "rollback requires the matching local selection to be fenced before recovery backup"
+            );
+        }
         ensure!(
             recovery.corpus().revision == self.evidence.corpus_revision
                 && recovery.policy().revision == self.evidence.policy_revision,

@@ -590,10 +590,23 @@ A selected context requires a versioned OKF binding with a positive storage
 generation, supported minimum client protocol, canonical bundle path, corpus
 UUID, explicit source user/repository mappings and optional agent-name mappings.
 Repository bindings must agree with the identity registry. Each command holds a
-shared `.selection.lock` lease in the policy directory. A future cutover/rollback
-publisher must hold its exclusive lease while publishing or fencing selection.
+shared `.selection.lock` lease in the policy directory. Cutover/rollback
+publication takes its exclusive lease while changing selection.
 Malformed, fenced, unsupported or mismatched bindings fail without SQL fallback.
 The selection lease is disposable and excluded from corpus/policy backups.
+
+`ygg knowledge fence-local --expected-generation GENERATION [--json]` drains
+compatible commands using this policy directory and durably fences their selected
+OKF generation without a database connection. It saves the exact original and
+fenced bindings, operation UUID and source directory identities in
+`local-fence-GENERATION.json` before publishing the fence. A retry resumes the same
+operation only when the selection is exactly the saved original or fenced bytes;
+conflicting edits and replaced directories fail without overwriting them. This
+leaves the generation unchanged: it is the last selected OKF generation, not proof
+of a PostgreSQL transition. Take policy recovery backups after local fencing;
+rollback preparation rejects a live or mismatched local selection. The command
+does not stop external editors or other hosts, and does not provide an unfence
+shortcut. Activation still requires the complete validated migration workflow.
 
 This checkpoint does **not** expose a command for minting a selection or enable
 OKF by default. The validated migration/cutover publisher remains required;
