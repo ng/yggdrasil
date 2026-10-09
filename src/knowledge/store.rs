@@ -13,6 +13,8 @@ use anyhow::{Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+mod backup;
+pub use backup::{BackupEntry, KnowledgeBackup};
 mod index;
 mod moves;
 use uuid::Uuid;
@@ -141,6 +143,10 @@ fn unlink(dir: &File, name: &str) -> std::io::Result<()> {
 
 /// Read directory names from the held descriptor, never reopening a pathname.
 fn names(dir: &File) -> Result<Vec<String>> {
+    names_limited(dir, usize::MAX)
+}
+
+fn names_limited(dir: &File, limit: usize) -> Result<Vec<String>> {
     // Opening "." gives an independent directory offset (dup would share it).
     let reader = child(dir, ".", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
     use std::os::fd::IntoRawFd;
@@ -185,6 +191,7 @@ fn names(dir: &File) -> Result<Vec<String>> {
             .to_string_lossy()
             .into_owned();
         if name != "." && name != ".." {
+            ensure!(result.len() < limit, "directory exceeds entry limit");
             result.push(name);
         }
     }

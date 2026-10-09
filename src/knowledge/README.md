@@ -413,3 +413,31 @@ unlisted files from a staging directory. Fleet upgrade, backups, scope-fixture
 parity, local generation/configuration publication and reverse import remain
 required. The tests exercise durable partial states and conflicts; they are not
 a substitute for the full killed-process migration and rollback release gates.
+
+## Corpus backup component
+
+`KnowledgeStore::backup` creates an immutable snapshot directory containing
+`corpus/` and `knowledge-backup.json`. It preserves exact bytes, unknown files and
+empty directories. Identity/policy lives in a separate `IdentityRegistry` directory:
+a deployment backup must snapshot that directory as well as its document bundle,
+and record both returned revisions alongside its consistent PostgreSQL dump.
+This library component alone is not a complete Yggdrasil deployment backup; the
+`db backup`/restore/upgrade orchestration is still pending.
+
+The snapshot holds the export and writer leases, completes pending scope-move
+recovery, copies through held directory descriptors, and rereads source hashes
+before publication. Quiesce external editors: cooperative locks cannot establish
+an atomic snapshot against tools that ignore them. Root writer/export locks and
+the disposable lookup cache are excluded. Symlinks, hardlinked files and special
+files fail rather than being followed or silently skipped. Limits are 100,000
+entries, 32 directory levels, 1 GiB per file and 4 GiB total; oversized input fails.
+Malformed document bytes are retained for recovery, not treated as valid rules.
+
+Files and directories are private and synced before exclusive atomic publication.
+An existing destination is never replaced. Interrupted or failed attempts retain
+private `.knowledge-backup-<UUID>` staging directories; a new attempt uses a new
+stage. `KnowledgeBackup::verify` checks the complete inventory, hashes and revision,
+including unexpected and missing files. Checksums prove integrity against the
+manifest, not provenance or permission to activate imported rules. Tests kill real
+backup processes before and after publication, verify retry behavior, preserve a
+separate registry's identity/trust, reject tampering, and keep reading the held source if its pathname is replaced.
