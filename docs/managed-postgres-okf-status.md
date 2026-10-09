@@ -140,6 +140,14 @@ and [native CI 37999389807](https://github.com/ng/yggdrasil/actions/runs/3799938
 on all three platforms. The subsequent restore-compatibility change passed 588
 local tests (24 opt-in ignored, 90 result groups), plus the separately invoked
 populated PG16→18 native restore fixture.
+Restore head `054aaba` passed standard PG16/18 CI and native Linux/Apple Silicon
+jobs, but its Intel native job failed the disk-full fixture: a document update
+succeeded after the filler had reported `ENOSPC`. The fixture now refills between
+bounded attempts and retains every successful publication as acknowledged state.
+It still requires actual failed update and create operations with `ENOSPC`, checks
+all acknowledged documents and staging cleanup, then verifies retry after freeing
+space. New Intel qualification is required; the failed run is
+[38002643029](https://github.com/ng/yggdrasil/actions/runs/38002643029).
 New-head CI results must be recorded when terminal; observation
 timeouts are not test failures or reasons to restart a running job.
 

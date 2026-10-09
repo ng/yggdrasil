@@ -102,16 +102,16 @@ impl FullFilesystem {
     fn fill(&self) -> PathBuf {
         let path = self.mount.join("filler");
         let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+            .append(true)
+            .create(true)
             .open(&path)
             .unwrap();
         let block: Vec<u8> = (0..65536).map(|i| ((i * 31 + 17) % 251) as u8).collect();
-        let mut written = 0;
+        let mut written = output.metadata().unwrap().len();
         loop {
             match output.write_all(&block) {
                 Ok(()) => {
-                    written += block.len();
+                    written += block.len() as u64;
                     assert!(
                         written <= 256 * 1024 * 1024,
                         "fixture did not reach its capacity"
@@ -122,6 +122,9 @@ impl FullFilesystem {
                     break;
                 }
             }
+        }
+        if let Err(error) = output.sync_all() {
+            assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
         }
         eprintln!("real ENOSPC after {written} bytes");
         path
@@ -170,56 +173,99 @@ fn actual_disk_full_preserves_acknowledged_documents_and_allows_retry() {
     let filesystem = FullFilesystem::new();
     let root = filesystem.mount.join("knowledge");
     let store = KnowledgeStore::open(&root, true).unwrap();
-    let original = store
+    let mut acknowledged = store
         .put(
             &Document::parse(include_str!("fixtures/knowledge/rule.md")).unwrap(),
             ExpectedRevision::Absent,
         )
         .unwrap();
     let filler = filesystem.fill();
-    let mut edited = original.document.clone();
-    edited.body = "full filesystem must not replace acknowledged bytes\n".repeat(10_000);
-    no_space(
-        &store
-            .put(&edited, ExpectedRevision::Digest(&original.revision))
-            .unwrap_err(),
+    let mut edited = acknowledged.document.clone();
+    let mut update_failed = false;
+    // ENOSPC from the filler does not promise that a later operation will also
+    // fail: the filesystem may make space available between operations. Any
+    // successful publication is acknowledged state, never a failed-write case.
+    for attempt in 0..8 {
+        if attempt > 0 {
+            filesystem.fill();
+        }
+        edited.body = format!("attempt {attempt}\n")
+            + &"full filesystem must not replace acknowledged bytes\n".repeat(10_000);
+        match store.put(&edited, ExpectedRevision::Digest(&acknowledged.revision)) {
+            Ok(saved) => {
+                eprintln!("update succeeded after filler ENOSPC; refill attempt {attempt}");
+                acknowledged = saved;
+            }
+            Err(error) => {
+                no_space(&error);
+                update_failed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        update_failed,
+        "did not observe an actual ENOSPC update failure"
     );
-    let current = store.get(original.key).unwrap().unwrap();
-    assert_eq!(current.revision, original.revision);
-    assert_eq!(current.document, original.document);
+    let current = store.get(acknowledged.key).unwrap().unwrap();
+    assert_eq!(current.revision, acknowledged.revision);
+    assert_eq!(current.document, acknowledged.document);
 
-    let mut fresh = edited.clone();
-    let mut profile = fresh.profile().unwrap().unwrap();
-    profile.id = uuid::Uuid::new_v4();
-    fresh.set_profile(&profile).unwrap();
-    no_space(&store.put(&fresh, ExpectedRevision::Absent).unwrap_err());
+    let mut documents = vec![acknowledged.clone()];
+    let mut create_failed = false;
+    for attempt in 0..8 {
+        filesystem.fill();
+        let mut fresh = edited.clone();
+        let mut profile = fresh.profile().unwrap().unwrap();
+        profile.id = uuid::Uuid::new_v4();
+        fresh.set_profile(&profile).unwrap();
+        match store.put(&fresh, ExpectedRevision::Absent) {
+            Ok(saved) => {
+                eprintln!("create succeeded after filler ENOSPC; refill attempt {attempt}");
+                documents.push(saved);
+            }
+            Err(error) => {
+                no_space(&error);
+                create_failed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        create_failed,
+        "did not observe an actual ENOSPC create failure"
+    );
     let snapshot = store.snapshot();
     assert!(snapshot.diagnostics.is_empty());
-    assert_eq!(snapshot.documents.len(), 1);
-    assert_eq!(snapshot.documents[0].revision, original.revision);
+    assert_eq!(snapshot.documents.len(), documents.len());
+    for saved in &documents {
+        let current = store.get(saved.key).unwrap().unwrap();
+        assert_eq!(current.revision, saved.revision);
+        assert_eq!(current.document, saved.document);
+    }
     let parent = root
-        .join(original.key.relative_path())
+        .join(acknowledged.key.relative_path())
         .parent()
         .unwrap()
         .to_owned();
     assert_eq!(
         fs::read_dir(parent).unwrap().count(),
-        1,
+        documents.len(),
         "failed writes left staging files"
     );
 
     fs::remove_file(filler).unwrap();
     File::open(&filesystem.mount).unwrap().sync_all().unwrap();
     let replacement = store
-        .put(&edited, ExpectedRevision::Digest(&original.revision))
+        .put(&edited, ExpectedRevision::Digest(&acknowledged.revision))
         .unwrap();
     drop(store);
     let reopened = KnowledgeStore::open(&root, false)
         .unwrap()
-        .get(original.key)
+        .get(acknowledged.key)
         .unwrap()
         .unwrap();
     assert_eq!(reopened.revision, replacement.revision);
     assert_eq!(reopened.document, edited);
-    assert_ne!(reopened.revision, original.revision);
+    assert_ne!(reopened.revision, acknowledged.revision);
 }
