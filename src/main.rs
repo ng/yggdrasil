@@ -2454,6 +2454,18 @@ async fn main() -> anyhow::Result<()> {
             agent,
             json,
         } => {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if let Some(context) =
+                ygg::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
+            {
+                if list {
+                    ygg::cli::remember_cmd::list_local(&context, all || global, limit, json)?;
+                } else {
+                    let name = agent.as_deref().unwrap_or(&context.default_agent_name);
+                    ygg::cli::remember_cmd::remember_local(&context, &text, global, name, json)?;
+                }
+                return Ok(());
+            }
             let config = ygg::config::AppConfig::from_env()?;
             let pool = ygg::db::connect(&config.database).await?;
             if list {

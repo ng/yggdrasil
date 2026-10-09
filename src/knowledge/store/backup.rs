@@ -28,7 +28,10 @@ pub struct KnowledgeBackup {
 }
 
 fn skipped(name: &str, root: bool) -> bool {
-    root && matches!(name, ".writer.lock" | ".export.lock" | ".lookup.json")
+    root && matches!(
+        name,
+        ".writer.lock" | ".export.lock" | ".selection.lock" | ".lookup.json"
+    )
 }
 
 fn inventory(

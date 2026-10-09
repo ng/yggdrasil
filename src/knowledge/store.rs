@@ -250,6 +250,32 @@ impl KnowledgeStore {
         Ok(file)
     }
 
+    /// Runtime readers hold a shared lease; cutover/rollback takes the exclusive
+    /// lease before changing selection. Separate from document writer locks.
+    pub(super) fn selection_lease(&self, exclusive: bool) -> Result<File> {
+        let file = child(
+            &self.root,
+            ".selection.lock",
+            libc::O_RDWR | libc::O_CREAT,
+            0o600,
+        )?;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.nlink() == 1
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0,
+            "invalid knowledge selection lease"
+        );
+        if exclusive {
+            file.lock_exclusive()?;
+        } else {
+            FileExt::lock_shared(&file)?;
+        }
+        Ok(file)
+    }
+
     /// Export artifacts are bounded independently of single OKF documents.
     pub(super) fn read_artifact(&self, name: &str) -> Result<Option<String>> {
         ensure!(

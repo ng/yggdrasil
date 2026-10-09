@@ -78,72 +78,21 @@ pub struct DeploymentConfig {
     pub knowledge_policy_dir: PathBuf,
 }
 
-fn error(message: &str) -> YggError {
-    YggError::Config(message.into())
+/// Knowledge paths resolve without validating or connecting to a database.
+/// Existing deployment commands use the same resolver, including profiles.
+pub struct KnowledgeConfig {
+    pub data_dir: PathBuf,
+    pub knowledge_dir: PathBuf,
+    pub knowledge_policy_dir: PathBuf,
 }
-
-fn absolute(path: PathBuf, key: &str) -> Result<PathBuf, YggError> {
-    if !path.is_absolute() {
-        return Err(error(&format!("{key} must be an absolute path")));
-    }
-    Ok(path)
-}
-
-pub fn config_dir(env: &Environment) -> Result<PathBuf, YggError> {
-    if let Some(path) = env.get("YGG_CONFIG_DIR") {
-        return absolute(path.into(), "YGG_CONFIG_DIR");
-    }
-    if let Some(path) = env.get("XDG_CONFIG_HOME") {
-        return absolute(PathBuf::from(path).join("ygg"), "XDG_CONFIG_HOME");
-    }
-    let home = env
-        .get("HOME")
-        .ok_or_else(|| error("HOME or YGG_CONFIG_DIR required"))?;
-    absolute(PathBuf::from(home).join(".config/ygg"), "HOME")
-}
-
-impl DeploymentConfig {
-    /// Read only user-owned configuration. The legacy .env supplies defaults;
-    /// the inherited environment wins, including deliberately empty values.
-    pub fn load(env: Environment) -> Result<Self, YggError> {
+impl KnowledgeConfig {
+    pub fn load(env: Environment) -> Result<(Self, Environment), YggError> {
         let dir = config_dir(&env)?;
-        Self::from_user_environment(&user_environment(env)?, &dir)
+        let env = user_environment(env)?;
+        let settings = read_settings(&dir)?;
+        Ok((Self::resolve(&settings, &env)?, env))
     }
-
-    pub(super) fn from_user_environment(
-        env: &Environment,
-        dir: &std::path::Path,
-    ) -> Result<Self, YggError> {
-        let settings = match std::fs::read_to_string(dir.join("config.toml")) {
-            // Do not echo TOML parse errors: source excerpts can contain secrets.
-            Ok(text) => toml::from_str(&text).map_err(|_| error("invalid user config.toml"))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => UserSettings::default(),
-            Err(_) => return Err(error("cannot read user config.toml")),
-        };
-        Self::resolve(&settings, env)
-    }
-
     pub fn resolve(settings: &UserSettings, env: &Environment) -> Result<Self, YggError> {
-        let mode = match env.get("YGG_DB_MODE").map(String::as_str) {
-            Some("managed") => Some(DatabaseMode::Managed),
-            Some("external") => Some(DatabaseMode::External),
-            Some(_) => return Err(error("YGG_DB_MODE must be managed or external")),
-            None => settings.database.mode,
-        };
-        let url = env.get("DATABASE_URL").or(settings.database.url.as_ref());
-        if url.is_some_and(|url| url.trim().is_empty()) {
-            return Err(error("external database URL is empty"));
-        }
-        if mode == Some(DatabaseMode::Managed) && url.is_some() {
-            return Err(error(
-                "managed database mode conflicts with external URL; repair configuration",
-            ));
-        }
-        if mode == Some(DatabaseMode::External) && url.is_none() {
-            return Err(error(
-                "external database mode requires DATABASE_URL or database.url",
-            ));
-        }
         let profile = env
             .get("YGG_PROFILE")
             .or(settings.profile.as_ref())
@@ -200,6 +149,88 @@ impl DeploymentConfig {
         {
             return Err(error("knowledge and policy directories must not overlap"));
         }
+        Ok(Self {
+            data_dir,
+            knowledge_dir,
+            knowledge_policy_dir,
+        })
+    }
+}
+
+fn read_settings(dir: &std::path::Path) -> Result<UserSettings, YggError> {
+    match std::fs::read_to_string(dir.join("config.toml")) {
+        Ok(text) => toml::from_str(&text).map_err(|_| error("invalid user config.toml")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UserSettings::default()),
+        Err(_) => Err(error("cannot read user config.toml")),
+    }
+}
+
+fn error(message: &str) -> YggError {
+    YggError::Config(message.into())
+}
+
+fn absolute(path: PathBuf, key: &str) -> Result<PathBuf, YggError> {
+    if !path.is_absolute() {
+        return Err(error(&format!("{key} must be an absolute path")));
+    }
+    Ok(path)
+}
+
+pub fn config_dir(env: &Environment) -> Result<PathBuf, YggError> {
+    if let Some(path) = env.get("YGG_CONFIG_DIR") {
+        return absolute(path.into(), "YGG_CONFIG_DIR");
+    }
+    if let Some(path) = env.get("XDG_CONFIG_HOME") {
+        return absolute(PathBuf::from(path).join("ygg"), "XDG_CONFIG_HOME");
+    }
+    let home = env
+        .get("HOME")
+        .ok_or_else(|| error("HOME or YGG_CONFIG_DIR required"))?;
+    absolute(PathBuf::from(home).join(".config/ygg"), "HOME")
+}
+
+impl DeploymentConfig {
+    /// Read only user-owned configuration. The legacy .env supplies defaults;
+    /// the inherited environment wins, including deliberately empty values.
+    pub fn load(env: Environment) -> Result<Self, YggError> {
+        let dir = config_dir(&env)?;
+        Self::from_user_environment(&user_environment(env)?, &dir)
+    }
+
+    pub(super) fn from_user_environment(
+        env: &Environment,
+        dir: &std::path::Path,
+    ) -> Result<Self, YggError> {
+        let settings = read_settings(dir)?;
+        Self::resolve(&settings, env)
+    }
+
+    pub fn resolve(settings: &UserSettings, env: &Environment) -> Result<Self, YggError> {
+        let mode = match env.get("YGG_DB_MODE").map(String::as_str) {
+            Some("managed") => Some(DatabaseMode::Managed),
+            Some("external") => Some(DatabaseMode::External),
+            Some(_) => return Err(error("YGG_DB_MODE must be managed or external")),
+            None => settings.database.mode,
+        };
+        let url = env.get("DATABASE_URL").or(settings.database.url.as_ref());
+        if url.is_some_and(|url| url.trim().is_empty()) {
+            return Err(error("external database URL is empty"));
+        }
+        if mode == Some(DatabaseMode::Managed) && url.is_some() {
+            return Err(error(
+                "managed database mode conflicts with external URL; repair configuration",
+            ));
+        }
+        if mode == Some(DatabaseMode::External) && url.is_none() {
+            return Err(error(
+                "external database mode requires DATABASE_URL or database.url",
+            ));
+        }
+        let KnowledgeConfig {
+            data_dir,
+            knowledge_dir,
+            knowledge_policy_dir,
+        } = KnowledgeConfig::resolve(settings, env)?;
         let database = match url {
             Some(url) => DatabaseTarget::External { url: url.clone() },
             None => DatabaseTarget::ManagedLocal {

@@ -198,3 +198,35 @@ fn policy_path_is_separate_profile_scoped_and_explicitly_overridable() {
         .is_err()
     );
 }
+
+#[test]
+fn knowledge_paths_resolve_independently_of_database_validation() {
+    use ygg::config::database::{DeploymentConfig, Environment, KnowledgeConfig, UserSettings};
+    let settings = UserSettings::default();
+    let mut env = Environment::from([
+        ("YGG_DATA_DIR".into(), "/tmp/ygg-independent".into()),
+        ("YGG_PROFILE".into(), "offline".into()),
+        ("YGG_DB_MODE".into(), "external".into()),
+    ]);
+    assert!(DeploymentConfig::resolve(&settings, &env).is_err());
+    let knowledge = KnowledgeConfig::resolve(&settings, &env).unwrap();
+    assert_eq!(
+        knowledge.knowledge_dir,
+        std::path::Path::new("/tmp/ygg-independent/profiles/offline/knowledge")
+    );
+    env.insert(
+        "DATABASE_URL".into(),
+        "postgres://unreachable.invalid/db".into(),
+    );
+    let deployment = DeploymentConfig::resolve(&settings, &env).unwrap();
+    assert_eq!(knowledge.knowledge_dir, deployment.knowledge_dir);
+    assert_eq!(
+        knowledge.knowledge_policy_dir,
+        deployment.knowledge_policy_dir
+    );
+    env.insert(
+        "YGG_KNOWLEDGE_POLICY_DIR".into(),
+        knowledge.knowledge_dir.to_string_lossy().into_owned(),
+    );
+    assert!(KnowledgeConfig::resolve(&settings, &env).is_err());
+}

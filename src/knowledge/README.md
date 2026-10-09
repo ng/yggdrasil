@@ -424,7 +424,7 @@ and record both returned revisions alongside its consistent PostgreSQL dump.
 This library component alone is not a complete Yggdrasil deployment backup.
 `db backup` pairs bundle and policy snapshots with a database dump. `db restore`
 restores exact corpus/policy bytes into a new destination and validates the database;
-configuration switching and upgrades remain pending.
+explicit `db switch` selects a validated restored deployment. Binary upgrades remain pending.
 
 The snapshot holds the export and writer leases, completes pending scope-move
 recovery, copies through held directory descriptors, and rereads source hashes
@@ -443,3 +443,36 @@ including unexpected and missing files. Checksums prove integrity against the
 manifest, not provenance or permission to activate imported rules. Tests kill real
 backup processes before and after publication, verify retry behavior, preserve a
 separate registry's identity/trust, reject tampering, and keep reading the held source if its pathname is replaced.
+
+### Local command selection
+
+`remember` now has an offline OKF adapter using the same note JSON contract.
+Knowledge paths resolve independently of database validity, with the same profile,
+user configuration and environment precedence as deployment commands. Existing
+installations without a policy `runtime.json` continue using guarded SQL.
+
+A selected context requires a versioned OKF binding with a positive storage
+generation, supported minimum client protocol, canonical bundle path, corpus
+UUID, explicit source user/repository mappings and optional agent-name mappings.
+Repository bindings must agree with the identity registry. Each command holds a
+shared `.selection.lock` lease in the policy directory. A future cutover/rollback
+publisher must hold its exclusive lease while publishing or fencing selection.
+Malformed, fenced, unsupported or mismatched bindings fail without SQL fallback.
+The selection lease is disposable and excluded from corpus/policy backups.
+
+This checkpoint does **not** expose a command for minting a selection or enable
+OKF by default. The validated migration/cutover publisher remains required;
+hand-writing `runtime.json` is not a supported migration. Tests construct bindings
+only in disposable fixtures. The binding is local authority during database
+outages, not a fleet-wide revocation mechanism. Fleet quiescence and generation
+publication remain migration requirements, and deployment moves must explicitly
+rebind its canonical bundle path before enabling the target.
+
+Offline note creation preserves UUID/provenance fields and uses explicit agent
+bindings without querying PostgreSQL; unknown agents retain null provenance.
+Repo-scoped commands require a mapped Git identity, including shared worktree
+identity. An unmapped/non-Git cwd is never silently promoted to global scope;
+use `--global` deliberately. New repo notes require an unambiguous legacy output
+mapping before writing. Listing retains the `count`/`results` JSON envelope,
+reports malformed-document diagnostics separately, and performs no telemetry or
+database access. `learn`, `prime`, hooks and UI dispatch still require integration.
