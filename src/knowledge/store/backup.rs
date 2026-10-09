@@ -27,6 +27,66 @@ pub struct KnowledgeBackup {
     pub entries: BTreeMap<String, BackupEntry>,
 }
 
+/// Retained cooperative writer leases for a corpus and its separate policy.
+/// Keep this value alive through the transaction that consumes the backups.
+/// External editors must still be quiesced; `verify_sources` detects changes
+/// before committing but cannot prevent an uncooperative later filesystem edit.
+pub struct PairedBackup {
+    corpus: KnowledgeBackup,
+    policy: KnowledgeBackup,
+    corpus_root: File,
+    policy_root: File,
+    _leases: Vec<File>,
+}
+
+impl PairedBackup {
+    pub fn corpus(&self) -> &KnowledgeBackup {
+        &self.corpus
+    }
+    pub fn policy(&self) -> &KnowledgeBackup {
+        &self.policy
+    }
+
+    /// Parse the retained source roots without reacquiring their writer locks.
+    /// This is the private corpus snapshot; shared Git callers must resolve and
+    /// pin their authoritative confirmed tree separately, not use its cache root.
+    pub fn snapshot(&self) -> Result<Snapshot> {
+        self.verify_sources()?;
+        ensure!(
+            KnowledgeStore::read_at(&self.corpus_root, ".shared-mode.json")?.is_none(),
+            "shared recovery requires the pinned authoritative Git tree"
+        );
+        let source = KnowledgeStore {
+            root: self.corpus_root.try_clone()?,
+        };
+        let snapshot = source.snapshot_under_lease();
+        ensure!(
+            snapshot.diagnostics.is_empty(),
+            "incomplete recovery corpus: {:?}",
+            snapshot.diagnostics
+        );
+        self.verify_sources()?;
+        Ok(snapshot)
+    }
+
+    /// Revalidate exact current inventories using the originally opened roots.
+    /// Does not reacquire locks or modify the source or retained archives.
+    pub fn verify_sources(&self) -> Result<()> {
+        for (root, expected) in [
+            (&self.corpus_root, &self.corpus),
+            (&self.policy_root, &self.policy),
+        ] {
+            let mut entries = BTreeMap::new();
+            inventory(root, None, "", 0, true, &mut entries, &mut 0)?;
+            ensure!(
+                entries == expected.entries,
+                "knowledge or policy changed after recovery capture"
+            );
+        }
+        Ok(())
+    }
+}
+
 fn skipped(name: &str, root: bool, shared: bool) -> bool {
     if !root {
         return false;
@@ -231,22 +291,70 @@ impl KnowledgeStore {
         destination: &Path,
         other_destination: &Path,
     ) -> Result<(KnowledgeBackup, KnowledgeBackup)> {
+        let saved = self.backup_pair_retained(other, destination, other_destination)?;
+        Ok((saved.corpus.clone(), saved.policy.clone()))
+    }
+
+    /// Capture both trees and retain all cooperative writer/export/shared leases.
+    /// Acquire any selection lease before this call, then acquire database leases
+    /// afterward. Destination publication remains exclusive; failed captures are
+    /// retained and never authorize applying SQL or selecting a storage backend.
+    pub fn backup_pair_retained(
+        &self,
+        other: &Self,
+        destination: &Path,
+        other_destination: &Path,
+    ) -> Result<PairedBackup> {
         let a = self.root.metadata()?;
         let b = other.root.metadata()?;
         let a = (a.dev(), a.ino());
         let b = (b.dev(), b.ino());
         ensure!(a != b, "bundle and policy must be separate directories");
+        let mut targets = Vec::new();
+        for path in [destination, other_destination] {
+            ensure!(path.is_absolute(), "absolute backup destinations required");
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("backup parent required"))?
+                .canonicalize()?;
+            for ancestor in parent.ancestors() {
+                let metadata = std::fs::metadata(ancestor)?;
+                let identity = (metadata.dev(), metadata.ino());
+                ensure!(
+                    identity != a && identity != b,
+                    "paired backup destinations must be outside both sources"
+                );
+            }
+            targets.push(
+                parent.join(
+                    path.file_name()
+                        .ok_or_else(|| anyhow::anyhow!("backup filename required"))?,
+                ),
+            );
+        }
+        ensure!(
+            !targets[0].starts_with(&targets[1]) && !targets[1].starts_with(&targets[0]),
+            "paired backup destinations must be separate"
+        );
         let (first, second) = if a < b { (self, other) } else { (other, self) };
-        let _shared_a = first.shared_backup_lease()?;
-        let _shared_b = second.shared_backup_lease()?;
-        let _export_a = first.operation_lock(".export.lock")?;
-        let _writer_a = first.lock()?;
-        let _export_b = second.operation_lock(".export.lock")?;
-        let _writer_b = second.lock()?;
-        Ok((
-            self.backup_under_leases(destination, &|_| {})?,
-            other.backup_under_leases(other_destination, &|_| {})?,
-        ))
+        let mut leases = Vec::new();
+        leases.extend(first.shared_backup_lease()?);
+        leases.extend(second.shared_backup_lease()?);
+        leases.push(first.operation_lock(".export.lock")?);
+        leases.push(first.lock()?);
+        leases.push(second.operation_lock(".export.lock")?);
+        leases.push(second.lock()?);
+        let saved = PairedBackup {
+            corpus: self.backup_under_leases(destination, &|_| {})?,
+            policy: other.backup_under_leases(other_destination, &|_| {})?,
+            corpus_root: self.root.try_clone()?,
+            policy_root: other.root.try_clone()?,
+            _leases: leases,
+        };
+        // The second copy can take time; recheck the first tree as well before
+        // acknowledging the pair, while retaining both trees' leases.
+        saved.verify_sources()?;
+        Ok(saved)
     }
 
     fn backup_under_leases(

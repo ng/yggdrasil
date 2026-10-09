@@ -467,6 +467,19 @@ the caller still owns filesystem quiescence, recovery evidence and activation.
 These totals reflect recorded deliveries only: offline deliveries were not queued
 and cannot be reconstructed during rollback.
 
+`KnowledgeStore::backup_pair_retained` captures the corpus and separate policy
+while retaining both writer/export leases (and shared transport leases when
+present). The returned `PairedBackup` rechecks both complete source inventories
+against the retained evidence without reacquiring locks. Destinations must be
+outside both sources and separate from one another. Dropping the guard releases
+the leases. Independent editors still require explicit quiescence.
+`reverse::capture_recovery_on` parses the guarded private corpus, captures database
+usage and rechecks both inventories before returning the candidate. Hold the
+selection lease before capture and retain the backup guard through apply/commit.
+Shared cache roots are rejected here: shared rollback must pin and validate its
+authoritative Git tree separately. Neither helper publishes configuration or
+handles an uncertain database commit; those remain orchestrator responsibilities.
+
 `reverse::apply_on` and the owner-only `ygg_knowledge_reverse_import` function
 provide the SQL apply layer. The function takes an exclusive generation lease,
 requires the exact database/corpus/fenced generation and supported protocol,

@@ -269,6 +269,22 @@ pub async fn capture_on(
     build(original, current, &usage)
 }
 
+/// Capture private-corpus rollback rows from a retained exact corpus/policy
+/// backup, with database totals frozen in the same transaction. The caller must
+/// hold the selection lease and keep `recovery` alive through apply and commit.
+/// This does not resolve shared Git trees or activate SQL storage.
+pub async fn capture_recovery_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    original: &Manifest,
+    recovery: &super::store::PairedBackup,
+    fenced_generation: i64,
+) -> Result<Candidate> {
+    let current = recovery.snapshot()?;
+    let candidate = capture_on(transaction, original, &current, fenced_generation).await?;
+    recovery.verify_sources()?;
+    Ok(candidate)
+}
+
 /// Low-level fenced SQL apply. The owning migration workflow must retain the
 /// current bundle/usage evidence and its filesystem leases, then commit this
 /// transaction only after all rollback checks pass. This never selects SQL.

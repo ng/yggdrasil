@@ -14,7 +14,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 mod backup;
-pub use backup::{BackupEntry, KnowledgeBackup};
+pub use backup::{BackupEntry, KnowledgeBackup, PairedBackup};
 mod index;
 pub(crate) use index::{Candidate, Candidates};
 mod moves;
@@ -679,6 +679,11 @@ impl KnowledgeStore {
                 diagnostics: vec![format!("scope move recovery: {e}")],
             };
         }
+        self.snapshot_under_lease()
+    }
+
+    // The caller already recovered pending moves and holds the writer lease.
+    fn snapshot_under_lease(&self) -> Snapshot {
         let inventory = self.inventory();
         let mut result = Snapshot {
             documents: Vec::new(),

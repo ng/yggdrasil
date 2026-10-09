@@ -218,7 +218,9 @@ async fn capture_uses_frozen_database_totals_and_rejects_missing_or_conflicting_
         let at = Utc::now().trunc_subsecs(6);
         for _ in 0..2 { telemetry.record(mappings.corpus_id, rule, Uuid::new_v4(), at).await.unwrap(); }
         let mut tx = f.pool.begin().await.unwrap();
-        let candidate = reverse::capture_on(&mut tx, &manifest, &snapshot, 4).await.unwrap();
+        let policy = KnowledgeStore::open(&temp.path().join("policy"), true).unwrap();
+        let recovery = store.backup_pair_retained(&policy, &temp.path().join("recovery-corpus"), &temp.path().join("recovery-policy")).unwrap();
+        let candidate = reverse::capture_recovery_on(&mut tx, &manifest, &recovery, 4).await.unwrap();
         let old = candidate.learnings.iter().find(|r| r["learning_id"] == rule.to_string()).unwrap();
         assert_eq!(old["applied_count"], 7);
         assert_eq!(serde_json::from_value::<chrono::DateTime<Utc>>(old["last_applied_at"].clone()).unwrap(), at);
@@ -236,7 +238,9 @@ async fn capture_uses_frozen_database_totals_and_rejects_missing_or_conflicting_
         sqlx::query("RESET statement_timeout").execute(&mut *other).await.unwrap();
         drop(other);
         reverse::apply_on(&mut tx, &candidate, 4).await.unwrap();
+        recovery.verify_sources().unwrap();
         tx.commit().await.unwrap();
+        drop(recovery);
         assert_eq!(sqlx::query_scalar::<_,i32>("SELECT applied_count FROM learnings WHERE learning_id=$1").bind(rule).fetch_one(&f.pool).await.unwrap(), 7);
         // Table locks are released on commit, and overflow is rejected instead of clamped.
         sqlx::query("UPDATE knowledge_usage SET observed_count=2147483647 WHERE corpus_id=$1 AND document_id=$2").bind(mappings.corpus_id).bind(rule).execute(&f.pool).await.unwrap();

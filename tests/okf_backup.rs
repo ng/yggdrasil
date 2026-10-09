@@ -157,3 +157,74 @@ fn backup_uses_open_source_descriptor_and_rejects_oversized_files() {
     );
     assert!(!temp.path().join("oversized").exists());
 }
+
+#[test]
+fn paired_recovery_retains_both_writer_leases_and_detects_independent_edits() {
+    let temp = tempfile::tempdir().unwrap();
+    let corpus_path = temp.path().join("corpus");
+    let policy_path = temp.path().join("policy");
+    let corpus = KnowledgeStore::open(&corpus_path, true).unwrap();
+    let policy = KnowledgeStore::open(&policy_path, true).unwrap();
+    let document = Document::parse(include_str!("fixtures/knowledge/rule.md")).unwrap();
+    corpus.put(&document, ExpectedRevision::Absent).unwrap();
+    std::fs::write(policy_path.join("settings.json"), "{}").unwrap();
+    assert!(
+        corpus
+            .backup_pair_retained(
+                &policy,
+                &policy_path.join("nested-backup"),
+                &temp.path().join("unused-backup")
+            )
+            .is_err()
+    );
+    assert!(!policy_path.join("nested-backup").exists());
+    assert!(!temp.path().join("unused-backup").exists());
+    let corpus_archive = temp.path().join("corpus-archive");
+    let policy_archive = temp.path().join("policy-archive");
+    let saved = corpus
+        .backup_pair_retained(&policy, &corpus_archive, &policy_archive)
+        .unwrap();
+    assert_eq!(
+        saved.corpus(),
+        &KnowledgeBackup::verify(&corpus_archive).unwrap()
+    );
+    assert_eq!(
+        saved.policy(),
+        &KnowledgeBackup::verify(&policy_archive).unwrap()
+    );
+    assert_eq!(saved.snapshot().unwrap().documents.len(), 1);
+    let mut locks = Vec::new();
+    for path in [&corpus_path, &policy_path] {
+        for name in [".writer.lock", ".export.lock"] {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.join(name))
+                .unwrap();
+            assert!(fs2::FileExt::try_lock_exclusive(&file).is_err());
+            locks.push(file);
+        }
+    }
+    std::fs::write(policy_path.join("settings.json"), "{\"changed\":true}").unwrap();
+    assert!(saved.verify_sources().is_err());
+    assert!(saved.snapshot().is_err());
+    // Retained recovery bytes survive an independent source edit unchanged.
+    assert_eq!(
+        saved.policy(),
+        &KnowledgeBackup::verify(&policy_archive).unwrap()
+    );
+    drop(saved);
+    for file in locks {
+        fs2::FileExt::try_lock_exclusive(&file).unwrap();
+        fs2::FileExt::unlock(&file).unwrap();
+    }
+    assert!(
+        corpus
+            .backup_pair_retained(
+                &corpus,
+                &temp.path().join("same-a"),
+                &temp.path().join("same-b")
+            )
+            .is_err()
+    );
+}
