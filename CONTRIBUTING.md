@@ -15,16 +15,23 @@ Direct pushes to `main` are reserved for trivial fixes (typos, generated artifac
 ## Setting up
 
 ```bash
-docker-compose up -d              # Postgres (legacy compose setup)
 make install                      # cargo build --release && copy to ~/.local/bin
-ygg init                          # install hooks, run migrations
+ygg init                          # managed init, or existing external configuration
 ygg up                            # tmux dashboard
 ```
+
+Use stable Rust, matching CI. Managed initialization installs the pinned native
+PostgreSQL distribution on the candidate platforms; an existing `DATABASE_URL`
+continues to select external PostgreSQL. User configuration examples are
+[config.example.toml](config.example.toml) and [.env.example](.env.example).
+Never point integration tests at the database initialized for your ordinary work.
+See the [operator guide](src/db/README.md) and
+[release-gate ledger](docs/managed-postgres-okf-status.md) for supported evidence.
 
 ## Tests
 
 - **Library tests** are fast and don't need Postgres: `cargo test --lib`.
-- **Integration tests** require a running Postgres at `DATABASE_URL`. CI uses `postgres://postgres:postgres@localhost:5432/ygg` (the isolated service container's defaults). Locally the docker-compose default `postgres://localhost:5432/ygg` works too. Run: `DATABASE_URL=postgres://postgres:postgres@localhost:5432/ygg cargo test --test integration -- --test-threads=1`.
+- **Integration tests** require an isolated Postgres at `DATABASE_URL`. CI supplies PostgreSQL 16/18 service containers. Point `DATABASE_URL` at your disposable test cluster, clear unrelated `YGG_DATABASE_OWNER_URL`, `YGG_DB_MODE`, `YGG_CONFIG_DIR` and `YGG_DATA_DIR` overrides, and run `cargo test -- --test-threads=1`. Tests mutate schema and rows; never use an operator database. The legacy Compose file creates database/user/password `ygg`/`ygg`/`ygg`; its default URL is `postgres://ygg:ygg@localhost:5432/ygg`, and its named volume persists data. Reusing that volume does not provide test isolation.
 - **Deployment/OKF contracts**: `cargo test --test database_config --test okf_documents` needs no database. `cargo test --test knowledge_contracts` compares legacy retrieval and JSON fixtures against the migrated database. These fixtures live in `tests/fixtures/knowledge/`; do not run database tests against a user installation.
 - **Bench tests** use a fake `claude` binary at `benches/fixtures/fake-claude.sh` so they run in CI without API tokens. Real `ygg bench` runs invoke the real `claude` CLI; set `YGG_BENCH_CLAUDE_BIN` to override.
 
@@ -35,6 +42,13 @@ uses disposable clusters to verify backup/restore, preserved claims and explicit
 external/managed config selection. It must never target an operator database or
 rewrite the developer's configuration. Config proposals and recovery journals in
 these tests belong exclusively to their temporary directories.
+
+`cargo test --test okf_disk_full -- --ignored --nocapture --test-threads=1` mounts
+and fills a private 128 MiB filesystem to verify actual `ENOSPC` recovery. macOS
+uses an APFS image; Linux requires noninteractive `sudo` for an isolated tmpfs.
+The fixture verifies a separate bounded device before filling it and detaches
+before deleting its files. The native CI matrix runs this opt-in test; ordinary
+`cargo test` does not mount filesystems.
 
 ## ADRs
 

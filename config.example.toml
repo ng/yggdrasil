@@ -1,0 +1,20 @@
+# Copy to ~/.config/ygg/config.toml, or $YGG_CONFIG_DIR/config.toml.
+# Environment values override equivalent settings. Paths must be absolute;
+# tilde expansion is not performed. Keep state outside source worktrees.
+profile = "default"
+# data_dir = "/absolute/private/ygg-data"
+# knowledge_dir = "/absolute/private/knowledge"
+# knowledge_policy_dir = "/absolute/private/knowledge-policy"
+# Knowledge paths must not overlap and do not themselves activate OKF.
+
+[database]
+# Omitted mode preserves an existing DATABASE_URL; otherwise it selects managed.
+# Explicit managed mode conflicts with an external URL from any source.
+# mode = "managed"
+
+# External configuration (use your own credentials and verified TLS settings):
+# mode = "external"
+# url = "postgres://ygg_runtime:password@db.example/ygg?sslmode=verify-full"
+# owner_url = "postgres://ygg_owner:password@db.example/ygg?sslmode=verify-full"
+# Owner and runtime URLs must identify the same database. Use a direct or
+# session-preserving endpoint for scheduler/watcher ownership, not transaction pooling.
