@@ -87,10 +87,18 @@ pub async fn run(
             && receipt.database_id == manifest.database.database_id
             && receipt.generation == manifest.database.generation
             && receipt.source_dump_sha256 == manifest.database.sha256
+            && receipt.source_configuration_sha256
+                == manifest.configuration.as_ref().map(|c| c.sha256.clone())
             && receipt.corpus_id == manifest.knowledge.as_ref().map(|k| k.corpus_id)
             && receipt.destination.canonicalize()? == restored,
         "restore receipt does not match backup/destination"
     );
+    if let Some(configuration) = &manifest.configuration {
+        deployment_backup::configuration_bytes(
+            &restored.join("source-configuration.json"),
+            configuration,
+        )?;
+    }
     let next = private_bytes(target_config)?;
     let settings: UserSettings = toml::from_str(
         std::str::from_utf8(&next)

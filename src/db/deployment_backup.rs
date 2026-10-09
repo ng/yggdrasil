@@ -30,6 +30,13 @@ pub struct KnowledgeRevision {
     pub bundle: String,
     pub policy: String,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationRevision {
+    pub bytes: u64,
+    pub sha256: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -37,6 +44,8 @@ pub struct Manifest {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub database: DatabaseSnapshot,
     pub knowledge: Option<KnowledgeRevision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<ConfigurationRevision>,
 }
 
 fn private_root(path: &Path) -> Result<()> {
@@ -60,7 +69,7 @@ fn file(path: &Path, create: bool) -> Result<File> {
 }
 fn names(path: &Path) -> Result<Vec<String>> {
     let mut names = std::fs::read_dir(path)?
-        .take(5)
+        .take(6)
         .map(|entry| {
             let name = entry?.file_name();
             name.into_string()
@@ -115,7 +124,8 @@ pub fn verify(path: &Path) -> Result<Manifest> {
     );
     let manifest: Manifest = serde_json::from_slice(&encoded)?;
     ensure!(
-        manifest.version == 1,
+        matches!(manifest.version, 1 | 2)
+            && (manifest.version == 2) == manifest.configuration.is_some(),
         "unsupported deployment backup version"
     );
     ensure!(
@@ -124,15 +134,22 @@ pub fn verify(path: &Path) -> Result<Manifest> {
             && (manifest.database.backend == "sql") == manifest.database.corpus_id.is_none(),
         "invalid database storage binding in backup"
     );
-    let expected = if manifest.knowledge.is_some() {
+    let mut expected = if manifest.knowledge.is_some() {
         vec!["backup.json", "database.dump", "knowledge", "policy"]
     } else {
         vec!["backup.json", "database.dump"]
     };
+    if manifest.configuration.is_some() {
+        expected.push("configuration.json");
+        expected.sort();
+    }
     ensure!(
         names(path)? == expected,
         "unexpected deployment backup contents"
     );
+    if let Some(configuration) = &manifest.configuration {
+        configuration_bytes(&path.join("configuration.json"), configuration)?;
+    }
     let actual = checksum(&mut file(&path.join("database.dump"), false)?)?;
     ensure!(
         actual == (manifest.database.bytes, manifest.database.sha256.clone()),
@@ -164,6 +181,54 @@ pub fn verify(path: &Path) -> Result<Manifest> {
         );
     }
     Ok(manifest)
+}
+
+/// Read a private configuration component through one bounded, no-follow handle.
+/// Only its digest/size belongs in public manifests and command output.
+pub(crate) fn configuration_bytes(
+    path: &Path,
+    expected: &ConfigurationRevision,
+) -> Result<Vec<u8>> {
+    use crate::config::snapshot::{MAX_SNAPSHOT_BYTES, Snapshot};
+    ensure!(
+        expected.bytes <= MAX_SNAPSHOT_BYTES as u64,
+        "configuration component exceeds limit"
+    );
+    let input = file(path, false)?;
+    let meta = input.metadata()?;
+    ensure!(
+        meta.is_file()
+            && meta.nlink() == 1
+            && meta.uid() == unsafe { libc::geteuid() }
+            && meta.mode() & 0o077 == 0,
+        "configuration component must be a private owned regular file"
+    );
+    let mut bytes = Vec::new();
+    input
+        .take(MAX_SNAPSHOT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 == expected.bytes
+            && crate::knowledge::document::digest(&bytes) == expected.sha256,
+        "configuration backup integrity mismatch"
+    );
+    Snapshot::decode(&bytes)?;
+    Ok(bytes)
+}
+pub(crate) fn read_configuration(
+    path: &Path,
+    manifest: &Manifest,
+) -> Result<Option<crate::config::snapshot::Snapshot>> {
+    manifest
+        .configuration
+        .as_ref()
+        .map(|expected| {
+            crate::config::snapshot::Snapshot::decode(&configuration_bytes(
+                &path.join("configuration.json"),
+                expected,
+            )?)
+        })
+        .transpose()
 }
 
 pub async fn create(
@@ -226,6 +291,8 @@ pub async fn create(
         }
         Err(error) => return Err(error.into()),
     };
+    let configuration = crate::config::snapshot::Snapshot::capture(config, policy_dir)?;
+    let configuration_bytes = configuration.encode()?;
     let (bin, options) = match &config.database {
         DatabaseTarget::External { url } => {
             let selected = config
@@ -314,11 +381,19 @@ pub async fn create(
             ),
         "database storage generation changed during backup"
     );
+    configuration.verify_selection(config)?;
+    let mut saved_configuration = file(&stage.join("configuration.json"), true)?;
+    saved_configuration.write_all(&configuration_bytes)?;
+    saved_configuration.sync_all()?;
     let manifest = Manifest {
-        version: 1,
+        version: 2,
         created_at: chrono::Utc::now(),
         database,
         knowledge,
+        configuration: Some(ConfigurationRevision {
+            bytes: configuration_bytes.len() as u64,
+            sha256: crate::knowledge::document::digest(&configuration_bytes),
+        }),
     };
     let encoded = serde_json::to_vec_pretty(&manifest)?;
     ensure!(

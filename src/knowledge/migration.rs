@@ -255,6 +255,7 @@ impl Journal {
             self.intent.plan.mappings.database_id,
             self.intent.plan.source_generation,
         )?;
+        saved.verify_configuration(config)?;
         self.store.retain_artifact(
             "source-backup-digest.json",
             &serde_json::to_string(saved.digest())?,

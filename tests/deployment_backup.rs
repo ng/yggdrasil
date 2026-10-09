@@ -14,6 +14,7 @@ fn fixture(root: &std::path::Path) {
     std::fs::write(root.join("database.dump"), data).unwrap();
     let manifest = Manifest {
         version: 1,
+        configuration: None,
         created_at: chrono::Utc::now(),
         knowledge: None,
         database: DatabaseSnapshot {
@@ -156,4 +157,72 @@ async fn configured_policy_cannot_be_silently_omitted_without_a_bundle() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to omit policy"));
     assert!(!destination.exists());
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn version_two_configuration_is_private_integrity_bound_and_offline() {
+    use std::collections::BTreeMap;
+    use ygg::config::{database::DeploymentConfig, snapshot::Snapshot};
+    use ygg::db::deployment_backup::ConfigurationRevision;
+    let temp = tempfile::tempdir().unwrap();
+    let backup = temp.path().join("backup");
+    std::fs::create_dir(&backup).unwrap();
+    fixture(&backup);
+    let source = temp.path().join("source-config");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(
+        source.join(".env"),
+        "YGG_DATA_DIR=${HOME}/configuration-fixture\nYGG_USER=fixture-secret-user\n",
+    )
+    .unwrap();
+    let inputs = BTreeMap::from([
+        ("YGG_CONFIG_DIR".into(), source.display().to_string()),
+        ("HOME".into(), std::env::var("HOME").unwrap()),
+        (
+            "DATABASE_URL".into(),
+            "postgres://user:fixture-secret-password@127.0.0.1/db".into(),
+        ),
+    ]);
+    let config = DeploymentConfig::load_maintenance(inputs).unwrap();
+    let snapshot = Snapshot::capture(&config, None).unwrap().encode().unwrap();
+    let component = backup.join("configuration.json");
+    std::fs::write(&component, &snapshot).unwrap();
+    std::fs::set_permissions(&component, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut manifest = verify(&backup).err(); // Extra file is rejected until bound by v2.
+    assert!(manifest.take().is_some());
+    let mut saved: Manifest =
+        serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
+    saved.version = 2;
+    saved.configuration = Some(ConfigurationRevision {
+        bytes: snapshot.len() as u64,
+        sha256: ygg::knowledge::document::digest(&snapshot),
+    });
+    std::fs::write(
+        backup.join("backup.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(verify(&backup).unwrap(), saved);
+    std::fs::remove_file(source.join(".env")).unwrap();
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"))
+        .args(["db", "verify-backup"])
+        .arg(&backup)
+        .arg("--json")
+        .env("HOME", temp.path().join("different-home"))
+        .env("YGG_DB_MODE", "invalid")
+        .env("DATABASE_URL", "invalid-secret")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-secret"));
+    std::fs::write(&component, b"changed").unwrap();
+    assert!(verify(&backup).is_err());
+    std::fs::write(&component, &snapshot).unwrap();
+    std::fs::set_permissions(&component, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(verify(&backup).is_err());
 }

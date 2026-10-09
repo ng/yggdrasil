@@ -28,6 +28,8 @@ pub struct Receipt {
     pub knowledge_dir: Option<PathBuf>,
     pub policy_dir: Option<PathBuf>,
     pub configuration_switched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_configuration_sha256: Option<String>,
 }
 
 fn absent(path: &Path) -> Result<()> {
@@ -127,6 +129,19 @@ pub async fn run(
         KnowledgeBackup::restore(&source.join("knowledge"), &stage.join("knowledge"))?;
         KnowledgeBackup::restore(&source.join("policy"), &stage.join("policy"))?;
     }
+    if let Some(configuration) = &manifest.configuration {
+        let bytes = deployment_backup::configuration_bytes(
+            &source.join("configuration.json"),
+            configuration,
+        )?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(stage.join("source-configuration.json"))?;
+        output.write_all(&bytes)?;
+        output.sync_all()?;
+    }
     // Use the open archive descriptor for verification and native input. Source
     // replacement cannot redirect the child to a different path.
     let mut archive = OpenOptions::new()
@@ -176,6 +191,7 @@ pub async fn run(
             .map(|_| destination.join("policy")),
         destination: destination.clone(),
         configuration_switched: false,
+        source_configuration_sha256: manifest.configuration.as_ref().map(|c| c.sha256.clone()),
     };
     let mut output = OpenOptions::new()
         .write(true)

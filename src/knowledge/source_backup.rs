@@ -69,6 +69,20 @@ impl SourceBackup {
             super::document::digest(&serde_json::to_vec(&current)?) == self.digest,
             "source backup changed after migration preparation"
         );
+        if let Some(configuration) = deployment_backup::read_configuration(&self.path, &current)? {
+            configuration.verify_sources()?;
+        }
+        Ok(())
+    }
+    pub(crate) fn verify_configuration(
+        &self,
+        config: &crate::config::database::DeploymentConfig,
+    ) -> Result<()> {
+        if let Some(configuration) =
+            deployment_backup::read_configuration(&self.path, &self.manifest)?
+        {
+            configuration.verify_selection(config)?;
+        }
         Ok(())
     }
     /// Caller holds the migration lease before changing the storage marker.

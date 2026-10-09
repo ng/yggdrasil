@@ -71,6 +71,8 @@ impl fmt::Debug for MigrationOwnerUrl {
 }
 
 pub struct DeploymentConfig {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(crate) configuration_source: Option<super::snapshot::Origin>,
     pub database: DatabaseTarget,
     pub owner_url: Option<MigrationOwnerUrl>,
     pub data_dir: PathBuf,
@@ -194,7 +196,21 @@ impl DeploymentConfig {
     /// the inherited environment wins, including deliberately empty values.
     pub fn load(env: Environment) -> Result<Self, YggError> {
         let dir = config_dir(&env)?;
-        Self::from_user_environment(&user_environment(env)?, &dir)
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let origin = super::snapshot::Origin::new(&env)
+            .map_err(|_| error("invalid configuration source"))?;
+        let mut selected = Self::from_user_environment(&user_environment(env)?, &dir)?;
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            selected.configuration_source = Some(origin);
+        }
+        Ok(selected)
+    }
+
+    /// Maintenance snapshots use bounded, nonblocking, owned regular inputs.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn load_maintenance(env: Environment) -> anyhow::Result<Self> {
+        super::snapshot::Origin::new(&env)?.resolve()
     }
 
     pub(super) fn from_user_environment(
@@ -249,6 +265,8 @@ impl DeploymentConfig {
             ));
         }
         Ok(Self {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            configuration_source: None,
             owner_url: owner_url.cloned().map(MigrationOwnerUrl),
             database,
             data_dir,

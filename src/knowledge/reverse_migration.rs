@@ -262,6 +262,7 @@ impl Journal {
             p.source_generation,
             original.corpus_id,
         )?;
+        backup.verify_configuration(config)?;
         self.store.retain_artifact(
             "source-backup-digest.json",
             &serde_json::to_string(backup.digest())?,

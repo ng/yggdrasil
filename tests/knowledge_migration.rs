@@ -781,3 +781,42 @@ async fn native_unrepresentable_sql_schema_refuses_before_fencing() {
     assert_eq!(binding["phase"], "okf");
     f.pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN; starts disposable native PostgreSQL"]
+async fn native_config_change_after_backup_cannot_fence_or_activate() {
+    let server = Server::new();
+    let f = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
+    let plan_copy = serde_json::from_value(serde_json::to_value(&f.plan).unwrap()).unwrap();
+    drop(ygg::knowledge::migration::Journal::prepare(&f.journal, plan_copy, &config).unwrap());
+    let backup = ygg::db::deployment_backup::create(
+        &config,
+        &f.journal.join("source-backup"),
+        Some(&server.bin),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(backup.version, 2);
+    assert!(backup.configuration.is_some());
+    let config_dir = std::path::Path::new(&f.env["YGG_CONFIG_DIR"]);
+    std::fs::create_dir(config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "# independently edited after backup\n",
+    )
+    .unwrap();
+    let out = f.migrate(&server, false).await;
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("configuration changed"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(f.marker().await, (1, "sql".into()));
+    assert!(!std::path::Path::new(&f.env["YGG_KNOWLEDGE_DIR"]).exists());
+    // Offline integrity verification remains possible after source changes.
+    ygg::db::deployment_backup::verify(&f.journal.join("source-backup")).unwrap();
+    f.pool.close().await;
+}

@@ -337,9 +337,14 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         };
         assert!(!backup_command(&destination).output().await.unwrap().status.success());
         assert!(!destination.exists());
+        std::fs::create_dir(temp.path().join("backup-config")).unwrap();
+        std::fs::write(temp.path().join("backup-config/.env"),"YGG_USER=configuration-only-fixture-secret\n").unwrap();
         let backed_up = backup_command(&destination).env("YGG_KNOWLEDGE_POLICY_DIR", &policy_path).output().await.unwrap();
         assert!(backed_up.status.success(), "{}", String::from_utf8_lossy(&backed_up.stderr));
         let combined: ygg::db::deployment_backup::Manifest = serde_json::from_slice(&backed_up.stdout).unwrap();
+        assert_eq!(combined.version,2);
+        assert!(combined.configuration.is_some());
+        assert!(!String::from_utf8_lossy(&backed_up.stdout).contains("configuration-only-fixture-secret"));
         assert_eq!(combined.knowledge.as_ref().unwrap().corpus_id, corpus);
         assert_eq!(ygg::db::deployment_backup::verify(&destination).unwrap(), combined);
         assert!(!backup_command(&destination).arg("--policy-dir").arg(&policy_path).output().await.unwrap().status.success());
@@ -362,6 +367,8 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
         let restored_receipt: serde_json::Value = serde_json::from_slice(&restored.stdout).unwrap();
         assert_eq!(restored_receipt["configuration_switched"], false);
+        assert_eq!(std::fs::read(restored_files.join("source-configuration.json")).unwrap(),std::fs::read(destination.join("configuration.json")).unwrap());
+        assert!(restored_receipt["source_configuration_sha256"].is_string());
         assert_eq!(restored_receipt["database_id"], combined.database.database_id.to_string());
         assert_eq!(std::fs::read(restored_files.join("knowledge").join(saved.key.relative_path())).unwrap(), std::fs::read(destination.join("knowledge/corpus").join(saved.key.relative_path())).unwrap());
         assert_eq!(ygg::knowledge::identity::IdentityRegistry::open(&restored_files.join("policy"), false).unwrap().read().unwrap().0.corpus_id, corpus);

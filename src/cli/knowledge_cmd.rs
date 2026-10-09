@@ -204,7 +204,8 @@ pub async fn migrate(
         "migration plan exceeds 1 MiB limit"
     );
     let plan = serde_json::from_slice(&bytes)?;
-    let config = crate::config::database::DeploymentConfig::load(std::env::vars().collect())?;
+    let config =
+        crate::config::database::DeploymentConfig::load_maintenance(std::env::vars().collect())?;
     let journal = crate::knowledge::migration::Journal::prepare(journal, plan, &config)?;
     let report = if abort {
         journal.abort(&config).await?
@@ -239,7 +240,8 @@ pub async fn rollback(
         "rollback plan exceeds 1 MiB limit"
     );
     let plan = serde_json::from_slice(&bytes)?;
-    let config = crate::config::database::DeploymentConfig::load(std::env::vars().collect())?;
+    let config =
+        crate::config::database::DeploymentConfig::load_maintenance(std::env::vars().collect())?;
     let journal = crate::knowledge::reverse_migration::Journal::prepare(journal, plan, &config)?;
     let report = journal.execute(&config, pg_bin).await?;
     if json {

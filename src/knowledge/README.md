@@ -661,6 +661,27 @@ This library component alone is not a complete Yggdrasil deployment backup.
 restores exact corpus/policy bytes into a new destination and validates the database;
 explicit `db switch` selects a validated restored deployment. Binary upgrades remain pending.
 
+New deployment backups use manifest version 2 and include a digest-bound, private
+`configuration.json`. It preserves exact user `config.toml` and `.env` text,
+relevant inherited environment overrides, captured dotenv expansion results,
+effective deployment paths/URLs, and any explicit backup policy-directory override.
+These inputs can contain credentials: the component is mode 0600 and reports expose
+only its size and digest. Configuration files must be owned regular files without
+symlinks or hardlinks, at most 1 MiB each. Dotenv expansion is bounded; the serialized
+snapshot is limited to 16 MiB. Offline verification never reads the original files
+or re-expands variables using the verifying machine's environment.
+
+Forward migration and current-bundle rollback compare the saved configuration
+with the selected deployment and live source inputs before fencing or activation.
+Changed inputs require a new source backup. Restore retains exact configuration
+bytes as private `source-configuration.json`, bound to its receipt; `db switch`
+checks that evidence. Restore does not activate the source endpoint or overwrite
+user configuration: target configuration and credentials are explicitly supplied.
+Referenced certificate files, password files, and external provider assets are
+not bundled; their provisioning remains the operator's responsibility. Version 1
+archives remain verifiable and restorable, but have no configuration component and
+cannot provide the additional source-configuration evidence.
+
 The snapshot holds the export and writer leases, completes pending scope-move
 recovery, copies through held directory descriptors, and rereads source hashes
 before publication. Quiesce external editors: cooperative locks cannot establish

@@ -131,7 +131,7 @@ pub async fn backup(
     policy_dir: Option<&std::path::Path>,
     json: bool,
 ) -> Result<()> {
-    let config = DeploymentConfig::load(std::env::vars().collect())?;
+    let config = DeploymentConfig::load_maintenance(std::env::vars().collect())?;
     let manifest =
         crate::db::deployment_backup::create(&config, destination, pg_bin, policy_dir).await?;
     if json {
