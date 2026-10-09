@@ -653,6 +653,17 @@ again. Archived refs have no automatic expiry yet. `knowledge sync` can also rep
 a missing read-cache pointer. Recovery still validates selected corpus, generation,
 protocol, canonical path and identity bindings.
 
+New transport caches initialize in unique private `.init-UUID` directories. The
+client validates the bare repository, syncs the bounded generated tree, atomically
+renames it to `objects.git` and syncs the parent. A surviving initializer from a
+killed client can finish only its abandoned stage; subsequent attempts never reuse
+or delete that directory. Existing invalid object stores, and missing stores with
+retained snapshot/pending state, fail without replacement. Abandoned initialization
+stages are excluded from shared backups; automatic cleanup remains future work.
+The fault fixture kills the client while its initializer is alive, recovers with a
+new attempt, then resumes the orphan and checks the published directory inode and
+configuration remain unchanged.
+
 Each host has its own cache and two-second cooperative transport-lock acquisition
 bound. Git invocations have a 30-second deadline, private bounded output files,
 redacted failure messages and process-group cancellation. Existing Git/SSH

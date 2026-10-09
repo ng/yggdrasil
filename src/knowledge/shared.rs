@@ -8,7 +8,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    os::unix::{
+        fs::{DirBuilderExt, OpenOptionsExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -158,6 +161,37 @@ fn path(value: &str) -> Result<()> {
     );
     Ok(())
 }
+// Only the small, newly generated empty repository passes through this walker.
+// Never traverse an existing object store or delete an abandoned initializer.
+fn sync_initial_repository(path: &Path, depth: usize, entries: &mut usize) -> Result<()> {
+    ensure!(
+        depth <= 8 && *entries < 256,
+        "Git initialization exceeds bounds"
+    );
+    *entries += 1;
+    let metadata = std::fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_dir() || metadata.is_file(),
+        "unsafe Git initializer entry"
+    );
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            sync_initial_repository(&entry?.path(), depth + 1, entries)?;
+        }
+    } else {
+        ensure!(
+            metadata.len() <= 1024 * 1024,
+            "Git initializer file exceeds limit"
+        );
+    }
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?
+        .sync_all()?;
+    Ok(())
+}
+
 impl SharedGit {
     /// This opens a dedicated transport cache, never an existing private corpus.
     /// Initialization fetches nothing and never uploads content.
@@ -194,25 +228,49 @@ impl SharedGit {
             Ok((serde_json::to_string(&this.config)?, ()))
         })?;
         let repo = this.root.join("objects.git");
-        if !repo.try_exists()? {
-            this.checked(
-                &[
-                    "init",
-                    "--bare",
-                    "--template=",
-                    repo.to_str()
-                        .ok_or_else(|| anyhow!("non-UTF8 cache path"))?,
-                ],
-                &[],
-                None,
-            )?;
+        match std::fs::symlink_metadata(&repo) {
+            Ok(_) => this.validate_repository(&repo)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ensure!(
+                    this.control.read_control("snapshot.json")?.is_none()
+                        && this.pending()?.is_none(),
+                    "Git objects missing for retained cache state; restore the cache"
+                );
+                // Each attempt owns a different directory. A Git child surviving
+                // a killed client can finish only its abandoned staging attempt.
+                let stage = this.root.join(format!(".init-{}", Uuid::new_v4()));
+                std::fs::DirBuilder::new().mode(0o700).create(&stage)?;
+                let git_dir = format!("--git-dir={}", stage.display());
+                this.checked(&[&git_dir, "init", "--bare", "--template="], &[], None)?;
+                this.validate_repository(&stage)?;
+                sync_initial_repository(&stage, 0, &mut 0)?;
+                std::fs::rename(&stage, &repo)?;
+                File::open(&this.root)?.sync_all()?;
+            }
+            Err(e) => return Err(e.into()),
         }
-        let metadata = std::fs::symlink_metadata(&repo)?;
-        ensure!(
-            metadata.is_dir() && !metadata.file_type().is_symlink(),
-            "invalid Git cache directory"
-        );
         Ok(this)
+    }
+    fn validate_repository(&self, repo: &Path) -> Result<()> {
+        let metadata = std::fs::symlink_metadata(repo)?;
+        ensure!(metadata.is_dir(), "invalid Git cache directory");
+        for name in ["HEAD", "config", "objects", "refs"] {
+            let metadata = std::fs::symlink_metadata(repo.join(name))?;
+            ensure!(
+                if matches!(name, "objects" | "refs") {
+                    metadata.is_dir()
+                } else {
+                    metadata.is_file()
+                },
+                "invalid Git cache structure; existing objects retained"
+            );
+        }
+        let git_dir = format!("--git-dir={}", repo.display());
+        ensure!(
+            self.checked(&[&git_dir, "rev-parse", "--is-bare-repository"], &[], None)? == b"true\n",
+            "Git cache must be a valid bare repository"
+        );
+        Ok(())
     }
     fn run(&self, args: &[&str], input: &[u8], index: Option<&Path>) -> Result<Output> {
         ensure!(input.len() as u64 <= MAX_BYTES, "Git input exceeds limit");
@@ -1013,5 +1071,139 @@ mod tests {
             assert_eq!(a.fetch().unwrap(), head);
             assert!(a.pending_info().unwrap().is_none());
         }
+    }
+    #[test]
+    #[ignore = "subprocess helper for interrupted initialization"]
+    fn initialization_worker() {
+        let root = std::env::var_os("YGG_INIT_FIXTURE").unwrap();
+        SharedGit::open(
+            Path::new(&root),
+            Config {
+                version: 1,
+                remote: "unused".into(),
+                branch: "knowledge".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn abandoned_live_initializer_cannot_replace_recovered_repository() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let ready = temp.path().join("ready");
+        let resume = temp.path().join("resume");
+        let done = temp.path().join("done");
+        let wrapper = bin.join("git");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+initializing=false
+for arg do
+  case "$arg" in
+    init) initializing=true ;;
+    --git-dir=*) stage=${arg#--git-dir=} ;;
+  esac
+done
+if [ "$initializing" = true ]; then
+  printf '%s' "$stage" > "$YGG_INIT_READY.tmp"
+  mv "$YGG_INIT_READY.tmp" "$YGG_INIT_READY"
+  n=0
+  while [ ! -f "$YGG_INIT_RESUME" ]; do
+    n=$((n+1))
+    if [ "$n" -gt 100 ]; then exit 71; fi
+    sleep 0.1
+  done
+  /usr/bin/git "$@" && touch "$YGG_INIT_DONE"
+else
+  exec /usr/bin/git "$@"
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "knowledge::shared::tests::initialization_worker",
+            ])
+            .env("YGG_INIT_FIXTURE", &root)
+            .env("YGG_INIT_READY", &ready)
+            .env("YGG_INIT_RESUME", &resume)
+            .env("YGG_INIT_DONE", &done)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(ready.exists(), "initializer did not reach fault boundary");
+        let stage = PathBuf::from(std::fs::read_to_string(&ready).unwrap());
+        assert!(
+            stage.starts_with(root.canonicalize().unwrap())
+                && stage
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".init-")
+        );
+        assert!(!root.join("objects.git").exists());
+        let config = Config {
+            version: 1,
+            remote: "unused".into(),
+            branch: "knowledge".into(),
+        };
+        let recovered = SharedGit::open(&root, config.clone()).unwrap();
+        let published = std::fs::read(root.join("objects.git/config")).unwrap();
+        let inode = std::fs::metadata(root.join("objects.git")).unwrap().ino();
+        std::fs::write(&resume, b"resume").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(done.exists(), "orphan initializer did not finish");
+        assert!(stage.join("config").exists());
+        assert_eq!(
+            std::fs::metadata(root.join("objects.git")).unwrap().ino(),
+            inode
+        );
+        assert_eq!(
+            std::fs::read(root.join("objects.git/config")).unwrap(),
+            published
+        );
+        recovered
+            .validate_repository(&root.join("objects.git"))
+            .unwrap();
+        SharedGit::open(&root, config).unwrap();
+    }
+
+    #[test]
+    fn incomplete_or_missing_existing_objects_fail_without_replacement() {
+        let (temp, config) = fixture();
+        let root = temp.path().join("cache");
+        std::fs::create_dir_all(root.join("objects.git")).unwrap();
+        std::fs::write(root.join("objects.git/keep"), b"retained").unwrap();
+        assert!(SharedGit::open(&root, config.clone()).is_err());
+        assert_eq!(
+            std::fs::read(root.join("objects.git/keep")).unwrap(),
+            b"retained"
+        );
+        assert!(!root.join("objects.git/HEAD").exists());
+        let root = temp.path().join("missing");
+        let store = SharedGit::open(&root, config.clone()).unwrap();
+        store.refresh().unwrap();
+        std::fs::rename(root.join("objects.git"), root.join("retained.git")).unwrap();
+        assert!(SharedGit::open(&root, config).is_err());
+        assert!(!root.join("objects.git").exists());
+        assert!(root.join("retained.git/objects").exists());
     }
 }

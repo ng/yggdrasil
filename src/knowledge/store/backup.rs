@@ -45,6 +45,7 @@ fn skipped(name: &str, root: bool, shared: bool) -> bool {
     shared
         && (name
             .strip_prefix(".view-")
+            .or_else(|| name.strip_prefix(".init-"))
             .is_some_and(|s| Uuid::parse_str(s).is_ok())
             || name
                 .strip_prefix('.')

@@ -254,6 +254,9 @@ fn ordinary_commands_publish_shared_rules_and_remote_revocation_and_outage_gate_
     let abandoned = cache.join(format!(".view-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&abandoned).unwrap();
     std::os::unix::fs::symlink("/etc/passwd", abandoned.join("ignored")).unwrap();
+    let abandoned_init = cache.join(format!(".init-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&abandoned_init).unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", abandoned_init.join("ignored")).unwrap();
     let archive = parent.path().join("archive");
     let manifest = ygg::knowledge::store::KnowledgeStore::open(&cache, false)
         .unwrap()
@@ -263,7 +266,7 @@ fn ordinary_commands_publish_shared_rules_and_remote_revocation_and_outage_gate_
         !manifest
             .entries
             .keys()
-            .any(|p| p.starts_with(".view-") || p == ".shared.lock")
+            .any(|p| p.starts_with(".view-") || p.starts_with(".init-") || p == ".shared.lock")
     );
     let restored = parent.path().join("restored");
     ygg::knowledge::store::KnowledgeBackup::restore(&archive, &restored).unwrap();
