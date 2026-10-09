@@ -247,6 +247,24 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         assert_eq!(receipt.table_rows["\"public\".\"backup_probe\""], 1);
         assert_eq!(receipt.sha256.len(), 64);
         assert_eq!(receipt.bytes, std::fs::metadata(&archive).unwrap().len());
+        // Compare existing database semantics before pg_restore can publish any
+        // object. Both client UTF8 with SQL_ASCII storage and UTF8 with a
+        // different libc locale must leave the isolated target empty.
+        for (database, encoding, locale) in [
+            ("ygg_encoding_mismatch", "SQL_ASCII", "C"),
+            ("ygg_locale_mismatch", "UTF8", "POSIX"),
+        ] {
+            sqlx::query(&format!("CREATE DATABASE {database} TEMPLATE template0 ENCODING '{encoding}' LOCALE_PROVIDER libc LC_COLLATE '{locale}' LC_CTYPE '{locale}'"))
+                .execute(&pool).await.unwrap();
+            let options = source_options.clone().database(database);
+            let error = ygg::db::restore::database(&bin, &options, &mut std::fs::File::open(&archive).unwrap(), &receipt).await.unwrap_err();
+            assert!(error.to_string().contains("encoding/locale differs"), "{error:#}");
+            let target = PgPoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+            let empty: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql')")
+                .fetch_one(&target).await.unwrap();
+            assert!(empty, "encoding/locale refusal left restored objects");
+            target.close().await;
+        }
         // Cancel an actual pg_restore while post-data refresh sleeps. Earlier
         // table/COPY work must roll back with its single transaction.
         sqlx::query("CREATE DATABASE ygg_cancel_restore").execute(&pool).await.unwrap();

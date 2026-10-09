@@ -137,6 +137,47 @@ pub(crate) async fn table_evidence(
     ))
 }
 
+// Reuse the database tuple in version-1 schema evidence. A missing or ambiguous
+// tuple cannot establish compatibility; never infer defaults from the target.
+fn database_properties(evidence: &Evidence) -> Result<serde_json::Value> {
+    let mut database = None;
+    for definition in &evidence.schema {
+        let value: serde_json::Value = serde_json::from_str(definition)?;
+        if value.get(0).and_then(serde_json::Value::as_str) != Some("database") {
+            continue;
+        }
+        ensure!(
+            database.is_none(),
+            "backup has duplicate database encoding/locale evidence"
+        );
+        let fields = value.as_array().unwrap();
+        ensure!(
+            fields.len() == 6
+                && fields[1..4].iter().all(serde_json::Value::is_string)
+                && fields[4..].iter().all(|v| v.is_null() || v.is_string()),
+            "backup has unsupported database encoding/locale evidence"
+        );
+        database = Some(value);
+    }
+    database.ok_or_else(|| {
+        anyhow::anyhow!("backup lacks database encoding/locale evidence; create a new backup")
+    })
+}
+
+async fn require_database_properties(
+    connection: &mut PgConnection,
+    expected: &serde_json::Value,
+) -> Result<()> {
+    let actual: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_array('database', pg_encoding_to_char(d.encoding), d.datcollate, d.datctype, to_jsonb(d)->>'datlocprovider', COALESCE(to_jsonb(d)->>'datlocale', to_jsonb(d)->>'daticulocale')) FROM pg_database d WHERE d.datname=current_database()",
+    ).fetch_one(connection).await?;
+    ensure!(
+        actual == *expected,
+        "restore target database encoding/locale differs from backup; create a matching empty target before restoring"
+    );
+    Ok(())
+}
+
 pub async fn validate(options: &PgConnectOptions, expected: &DatabaseSnapshot) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(1800), async {
         let mut connection = PgConnection::connect_with(options).await.map_err(|_| anyhow::anyhow!("restore validation connection failed"))?;
@@ -167,6 +208,7 @@ pub async fn database(
     tokio::time::timeout(Duration::from_secs(1800), async {
         ensure!(bin.is_absolute(), "absolute PostgreSQL binary directory required");
         ensure!(expected.validation.as_ref().is_some_and(|v| v.version == 1), "backup lacks supported restore evidence; create a new backup");
+        let properties = database_properties(expected.validation.as_ref().unwrap())?;
         let meta = archive.metadata()?;
         ensure!(meta.is_file() && meta.nlink() == 1, "restore archive must be a regular non-hardlinked file");
         archive.seek(SeekFrom::Start(0))?;
@@ -188,6 +230,7 @@ pub async fn database(
         ensure!(locked, "another restore holds the target lease");
         let major: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int / 10000").fetch_one(&mut lease).await?;
         ensure!(major >= expected.server_major && tool_major >= expected.server_major, "restore cannot downgrade PostgreSQL major version");
+        require_database_properties(&mut lease, &properties).await?;
         let empty: bool = sqlx::query_scalar(r#"SELECT NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema','public') AND nspname !~ '^pg_toast' AND nspname !~ '^pg_temp') AND NOT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql')"#).fetch_one(&mut lease).await?;
         ensure!(empty, "restore target must be empty; existing objects are never removed");
         let others: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND pid<>pg_backend_pid()").fetch_one(&mut lease).await?;
@@ -218,4 +261,31 @@ pub async fn database(
         lease.close().await?;
         Ok(())
     }).await.map_err(|_|anyhow::anyhow!("restore timed out; target retained, inspect before retrying"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_requires_one_complete_database_properties_record() {
+        let property = serde_json::json!(["database", "UTF8", "C", "C", "c", null]);
+        let mut evidence = Evidence {
+            version: 1,
+            table_sha256: BTreeMap::new(),
+            schema: vec![],
+        };
+        assert!(database_properties(&evidence).is_err());
+        evidence.schema = vec![property.to_string()];
+        assert_eq!(database_properties(&evidence).unwrap(), property);
+        evidence.schema.push(property.to_string());
+        assert!(database_properties(&evidence).is_err());
+        for malformed in [
+            serde_json::json!(["database", "UTF8"]),
+            serde_json::json!(["database", "UTF8", "C", "C", 3, null]),
+        ] {
+            evidence.schema = vec![malformed.to_string()];
+            assert!(database_properties(&evidence).is_err());
+        }
+    }
 }

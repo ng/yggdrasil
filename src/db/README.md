@@ -398,7 +398,10 @@ Use only a trusted backup: PostgreSQL archives contain executable SQL, and resto
 policy retains the backup's trust/approval configuration. Keep source and target
 writers stopped throughout a deployment move. External targets must already exist,
 contain no user objects or additional extensions, and have no other connected
-sessions. Use matching database encoding and locale; managed destinations use UTF-8
+sessions. Before importing, restore compares the target database encoding, locale
+provider, collation and character classification against the recorded source
+properties. A mismatch or missing/ambiguous source evidence rejects the restore
+before creating database objects. Use matching database encoding and locale; managed destinations use UTF-8
 and the pinned initializer’s C locale. Supply an owner credential with the required schema/extension privileges;
 external runtime grants remain the operator's responsibility.
 
