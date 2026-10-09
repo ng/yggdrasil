@@ -196,3 +196,20 @@ YGG_TEST_PG_ARCHIVE=/absolute/postgresql-16.15.0-aarch64-apple-darwin.tar.gz \
 
 Set `YGG_TEST_PG_DOWNLOAD=1` too to exercise the explicit HTTPS downloader. The test
 creates only disposable private clusters and never reads `DATABASE_URL`.
+
+## Session-lock authority
+
+Scheduler and watcher daemons use `singleton::SingletonGuard` on a detached
+connection. The guard verifies the original backend PID and granted advisory lock
+before polling work and every 250 ms while it runs, with a three-second probe
+limit. A failed probe permanently invalidates that guard, drops the supervised
+future and exits the daemon. Pool recovery cannot revive the old authority;
+a new run must acquire a fresh session lock. Standalone scheduler ticks and
+watcher `--once` also use the guard.
+
+Cancellation cannot recall SQL or OS actions already issued. Their outcome can
+be unknown; the guard does not retry them. Checks require direct or session-
+preserving connections. Observing one successful probe does not certify a
+transaction-pooling endpoint as compatible. Integration tests terminate the
+actual lock backend, verify work cancellation and daemon exit while other pooled
+connections remain healthy, then acquire replacement authority.

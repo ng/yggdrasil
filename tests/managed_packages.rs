@@ -133,6 +133,13 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
             .await
             .unwrap();
         assert_eq!(user, "ygg_runtime");
+        let mut authority =
+            ygg::db::singleton::SingletonGuard::try_acquire(&runtime, 0x59504754455354)
+                .await
+                .unwrap()
+                .unwrap();
+        authority.verify().await.unwrap();
+        drop(authority);
         assert!(
             ygg::db::pending_migrations(&runtime)
                 .await
