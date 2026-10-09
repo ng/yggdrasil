@@ -46,6 +46,7 @@ async fn activate_inner(
     operation: Uuid,
     manifest: &Manifest,
 ) -> Result<Outcome> {
+    inventory::require_utf8(connection).await?;
     ensure!(
         !operation.is_nil()
             && manifest.version == 1

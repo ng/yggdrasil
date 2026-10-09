@@ -133,6 +133,20 @@ fn inspect(
     (result, extracted)
 }
 
+/// OKF matching operates on Unicode characters. In particular, SQL_ASCII LIKE
+/// treats UTF-8 bytes as separate characters, so equal exported text alone does
+/// not prove equivalent rule scope. Leave ordinary legacy SQL access unchanged.
+pub(crate) async fn require_utf8(connection: &mut sqlx::PgConnection) -> Result<()> {
+    let encoding: String = sqlx::query_scalar("SHOW server_encoding")
+        .fetch_one(connection)
+        .await?;
+    ensure!(
+        encoding == "UTF8",
+        "OKF migration requires UTF8 server encoding to preserve Unicode matching; selected database uses {encoding}"
+    );
+    Ok(())
+}
+
 pub async fn assess(pool: &PgPool, mappings: Option<&Mappings>) -> Result<Report> {
     visit(pool, mappings, |_, _, _, _| Ok(())).await
 }
@@ -183,6 +197,7 @@ pub(crate) async fn visit_on(
         Option<&legacy::Usage>,
     ) -> Result<()>,
 ) -> Result<Report> {
+    require_utf8(connection).await?;
     let source = sqlx::query_as::<_, Source>("SELECT database_id, generation, backend, corpus_id, pg_current_snapshot()::text AS snapshot FROM public.knowledge_storage WHERE singleton")
         .fetch_one(&mut *connection).await?;
     if let Some(mappings) = mappings {

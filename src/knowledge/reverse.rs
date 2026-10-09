@@ -168,6 +168,7 @@ pub async fn capture_on(
     current: &Snapshot,
     fenced_generation: i64,
 ) -> Result<Candidate> {
+    super::inventory::require_utf8(transaction).await?;
     ensure!(
         original.version == 1 && fenced_generation > original.generation,
         "reverse capture requires a later fenced generation"
@@ -320,6 +321,7 @@ pub async fn apply_on(
     candidate: &Candidate,
     fenced_generation: i64,
 ) -> Result<()> {
+    super::inventory::require_utf8(transaction).await?;
     ensure!(
         candidate.version == 1 && fenced_generation > candidate.export_generation,
         "reverse apply requires a later fenced generation"
@@ -381,6 +383,7 @@ pub async fn apply_once_on(
     evidence: &RecoveryEvidence,
     fenced_generation: i64,
 ) -> Result<ApplyOutcome> {
+    super::inventory::require_utf8(transaction).await?;
     ensure!(
         candidate.version == 1
             && evidence.version == 1

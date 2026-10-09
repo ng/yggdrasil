@@ -392,6 +392,7 @@ impl Journal {
         bin: Option<&Path>,
         pool: &PgPool,
     ) -> Result<Report> {
+        super::inventory::require_utf8(&mut *pool.acquire().await?).await?;
         let ready: bool = sqlx::query_scalar(
             "SELECT to_regclass('public.knowledge_recovery_events') IS NOT NULL",
         )

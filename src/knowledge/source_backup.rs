@@ -134,15 +134,14 @@ impl SourceBackup {
 pub(crate) async fn verify_guards(connection: &mut PgConnection) -> Result<()> {
     const ORIGINAL: &str =
         include_str!("../../migrations/20261008000002_knowledge_storage_guard.sql");
-    const REVERSE: &str =
-        include_str!("../../migrations/20261009000001_knowledge_reverse_import.sql");
+    const ENCODING: &str = include_str!("../../migrations/20261009000008_knowledge_encoding.sql");
     for (table, trigger, function, flags, migration, definer, path) in [
         (
             "memories",
             "ygg_knowledge_write_fence",
             "ygg_knowledge_write_fence",
             62i16,
-            REVERSE,
+            ENCODING,
             true,
             "search_path=pg_catalog, pg_temp",
         ),
@@ -151,7 +150,7 @@ pub(crate) async fn verify_guards(connection: &mut PgConnection) -> Result<()> {
             "ygg_knowledge_write_fence",
             "ygg_knowledge_write_fence",
             62,
-            REVERSE,
+            ENCODING,
             true,
             "search_path=pg_catalog, pg_temp",
         ),
@@ -169,7 +168,7 @@ pub(crate) async fn verify_guards(connection: &mut PgConnection) -> Result<()> {
             "ygg_knowledge_marker_change",
             "ygg_knowledge_marker_change",
             27,
-            ORIGINAL,
+            ENCODING,
             false,
             "search_path=pg_catalog, public",
         ),
@@ -178,7 +177,7 @@ pub(crate) async fn verify_guards(connection: &mut PgConnection) -> Result<()> {
             "ygg_knowledge_marker_truncate",
             "ygg_knowledge_marker_change",
             34,
-            ORIGINAL,
+            ENCODING,
             false,
             "search_path=pg_catalog, public",
         ),

@@ -490,6 +490,17 @@ fingerprints, proposed paths/document digests and unresolved issues. It reads al
 row fields but reports fingerprints rather than copying private text into the
 report. No bundle is created, counters seeded or storage marker changed.
 
+Migration requires `SHOW server_encoding` to return `UTF8`. A UTF-8 client
+connection alone is insufficient: SQL_ASCII treats the UTF-8 bytes of a character
+as separate characters for `LIKE '_'`, changing rule scope after conversion.
+Dry runs, exports, forward activation and reverse import reject other server
+encodings with an explicit diagnostic before changing knowledge state. The SQL
+guards also reject activation and fenced reverse writes on incompatible databases.
+Ordinary legacy SQL access and pre-activation abort remain available; no automatic
+encoding conversion occurs. Managed clusters are initialized with UTF-8. Encoding
+preservation and admission across deployment backup/restore/move remain a separate
+qualification requirement.
+
 Supply `--mapping-file /absolute/path/mapping.json` to verify conversions. The
 JSON object has exactly these fields:
 

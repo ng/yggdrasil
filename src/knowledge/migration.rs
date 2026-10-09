@@ -431,6 +431,7 @@ impl Journal {
         bin: Option<&Path>,
         pool: &PgPool,
     ) -> Result<Report> {
+        super::inventory::require_utf8(&mut *pool.acquire().await?).await?;
         // Fail before creating a dump if the compatibility migration is missing.
         let ready: bool = sqlx::query_scalar(
             "SELECT to_regclass('public.knowledge_migration_events') IS NOT NULL",
