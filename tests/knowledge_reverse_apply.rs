@@ -496,3 +496,186 @@ async fn receipts_commit_atomically_and_verify_retries_without_reapplying_rows()
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test]
+async fn durable_journal_resumes_missing_local_receipt_and_rejects_changed_evidence() {
+    use ygg::knowledge::rollback::{self, Journal, RecoveryPaths};
+    let f = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let note = Uuid::new_v4();
+        sqlx::query("INSERT INTO memories(memory_id,text,user_id) VALUES($1,'before','alice')")
+            .bind(note)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let source = inventory::assess(&f.pool, None).await.unwrap().source;
+        let mappings = Mappings {
+            database_id: source.database_id,
+            corpus_id: Uuid::new_v4(),
+            repos: BTreeMap::new(),
+            users: BTreeMap::from([("alice".into(), "owner".into())]),
+        };
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced',generation=2,corpus_id=$1")
+            .bind(mappings.corpus_id)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let paths = RecoveryPaths {
+            corpus: root.join("bundle"),
+            policy: root.join("policy"),
+            corpus_archive: root.join("archive"),
+            policy_archive: root.join("policy-archive"),
+        };
+        let manifest = export::stage(&f.pool, &mappings, &paths.corpus)
+            .await
+            .unwrap();
+        let store = KnowledgeStore::open(&paths.corpus, false).unwrap();
+        let old = store.snapshot().documents.remove(0);
+        let mut doc = old.document;
+        doc.body = "acknowledged OKF edit".into();
+        store
+            .put(&doc, ExpectedRevision::Digest(&old.revision))
+            .unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='okf',generation=3")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced',generation=4")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let policy = KnowledgeStore::open(&paths.policy, true).unwrap();
+        let recovery = store
+            .backup_pair_retained(&policy, &paths.corpus_archive, &paths.policy_archive)
+            .unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        let candidate = reverse::capture_recovery_on(&mut tx, &manifest, &recovery, 4)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        let prepare = |destination: &std::path::Path, generation| {
+            Journal::prepare(
+                destination,
+                serde_json::from_value(serde_json::to_value(&manifest).unwrap()).unwrap(),
+                serde_json::from_value(serde_json::to_value(&candidate).unwrap()).unwrap(),
+                &recovery,
+                paths.clone(),
+                generation,
+                None,
+            )
+        };
+        for parent in [
+            &paths.corpus,
+            &paths.policy,
+            &paths.corpus_archive,
+            &paths.policy_archive,
+        ] {
+            let nested = parent.join("journal");
+            assert!(prepare(&nested, 4).is_err());
+            assert!(!nested.exists());
+        }
+        let directory = root.join("journal");
+        let journal = prepare(&directory, 4).unwrap();
+        let operation = journal.operation();
+        // This must return promptly while the original journal owns its lease.
+        assert!(prepare(&directory, 4).is_err());
+        drop(journal);
+        assert_eq!(prepare(&directory, 4).unwrap().operation(), operation);
+        let original_intent = std::fs::read(directory.join("rollback-intent.json")).unwrap();
+        assert!(prepare(&directory, 5).is_err());
+        assert_eq!(
+            std::fs::read(directory.join("rollback-intent.json")).unwrap(),
+            original_intent
+        );
+        drop(recovery);
+        assert!(!rollback::inspect(&directory).unwrap().local_apply_recorded);
+        // No database or user configuration is available to the status subprocess.
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ygg"))
+            .env_clear()
+            .env("HOME", root.join("no-home"))
+            .env("DATABASE_URL", "invalid://offline")
+            .args(["knowledge", "rollback-status"])
+            .arg(&directory)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["operation"], operation.to_string());
+        assert_eq!(status["local_apply_recorded"], false);
+        let journal = Journal::open(&directory).unwrap();
+        assert_eq!(
+            journal.apply(&f.pool, None).await.unwrap(),
+            reverse::ApplyOutcome::Applied
+        );
+        drop(journal);
+        assert!(rollback::inspect(&directory).unwrap().local_apply_recorded);
+        // Model process loss after SQL commit but before the local receipt write.
+        std::fs::remove_file(directory.join("rollback-applied.json")).unwrap();
+        let journal = Journal::open(&directory).unwrap();
+        assert_eq!(journal.operation(), operation);
+        assert_eq!(
+            journal.apply(&f.pool, None).await.unwrap(),
+            reverse::ApplyOutcome::PreviouslyApplied
+        );
+        drop(journal);
+        assert!(rollback::inspect(&directory).unwrap().local_apply_recorded);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM knowledge_reverse_receipts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT backend FROM knowledge_storage")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            "fenced"
+        );
+        // Preserve an independent filesystem edit; never regenerate the saved archives.
+        std::fs::write(paths.policy.join("external-change"), "new policy").unwrap();
+        let journal = Journal::open(&directory).unwrap();
+        assert!(journal.apply(&f.pool, None).await.is_err());
+        drop(journal);
+        std::fs::remove_file(paths.policy.join("external-change")).unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT text FROM memories WHERE memory_id=$1")
+                .bind(note)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            "acknowledged OKF edit"
+        );
+        let journal = Journal::open(&directory).unwrap();
+        std::fs::write(directory.join("rollback-intent.json"), "{}").unwrap();
+        assert!(journal.apply(&f.pool, None).await.is_err());
+        drop(journal);
+        std::fs::write(directory.join("rollback-intent.json"), original_intent).unwrap();
+        let journal = Journal::open(&directory).unwrap();
+        let moved = root.join("moved-journal");
+        std::fs::rename(&directory, &moved).unwrap();
+        assert!(journal.apply(&f.pool, None).await.is_err());
+        drop(journal);
+        std::fs::rename(&moved, &directory).unwrap();
+        std::fs::write(
+            paths.corpus_archive.join("corpus/unknown-file"),
+            "corrupt archive",
+        )
+        .unwrap();
+        assert!(Journal::open(&directory).is_err());
+    })
+    .catch_unwind()
+    .await;
+    f.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

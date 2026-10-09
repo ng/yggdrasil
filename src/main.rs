@@ -48,6 +48,12 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Inspect retained rollback evidence offline; local markers are not SQL proof
+    RollbackStatus {
+        journal: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect an uncertain local publication without fetching the remote
     Pending {
         #[arg(long)]
@@ -1376,6 +1382,9 @@ async fn main() -> anyhow::Result<()> {
                 json,
             } => {
                 ygg::cli::knowledge_cmd::sync(confirm_pending, json)?;
+            }
+            KnowledgeAction::RollbackStatus { journal, json } => {
+                ygg::cli::knowledge_cmd::rollback_status(&journal, json)?;
             }
             KnowledgeAction::Migrate {
                 dry_run: _,

@@ -125,3 +125,20 @@ pub fn recover(commit: &str, retry: bool, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn rollback_status(journal: &Path, json: bool) -> Result<()> {
+    let status = crate::knowledge::rollback::inspect(journal)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!(
+            "Rollback {}: {} notes, {} learnings; fenced generation {}",
+            status.operation, status.notes, status.learnings, status.fenced_generation
+        );
+        println!(
+            "Local apply record: {}. Database outcome must be verified when resuming.",
+            status.local_apply_recorded
+        );
+    }
+    Ok(())
+}

@@ -527,7 +527,27 @@ both row changes and receipt. Receipts cannot be updated, deleted or truncated;
 runtime credentials cannot insert them even with an accidental table grant.
 The returned outcome remains provisional until commit. Receipts prove the SQL
 apply, not filesystem quiescence, schema parity or configuration activation; the
-durable local journal and complete resume/activation workflow remain required.
+complete resume/activation workflow remains required.
+
+`rollback::Journal::prepare` durably saves the operation UUID, complete candidate,
+original export, fenced generation, recovery revisions and exact source directory
+identities before SQL application. Identical preparation reuses the UUID; a
+different request cannot overwrite it. Journal and archives must remain separate
+from both source directories. Preparation refuses a busy journal without waiting
+while holding source leases. Resume holds the journal lease, reacquires local
+selection and source leases, verifies retained archives and current source bytes,
+recaptures authoritative usage and shared Git evidence, and applies the saved
+operation. A missing local apply record after SQL commit is safe to retry: the
+database receipt verifies the existing rows without importing them again.
+
+`ygg knowledge rollback-status JOURNAL --json` inspects this saved intent offline.
+Its `local_apply_recorded` field is only a local hint; resume must verify the
+database receipt and current rows. Changed sources, archives, directory identities
+or journal bytes fail without replacing recovery evidence. Quiesce external
+editors and remote hosts before preparation/resume. This component requires the
+exact fenced SQL generation, preserves local selection, and does not activate a
+backend or certify fleet compatibility. Full migration/resume CLI orchestration,
+schema parity checks and backend activation remain pending.
 
 ## Corpus backup component
 

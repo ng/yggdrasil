@@ -40,6 +40,36 @@ pub struct PairedBackup {
 }
 
 impl PairedBackup {
+    pub(crate) fn verify_paths(&self, corpus: &Path, policy: &Path) -> Result<()> {
+        for (root, path) in [(&self.corpus_root, corpus), (&self.policy_root, policy)] {
+            let expected = root.metadata()?;
+            let actual = std::fs::symlink_metadata(path)?;
+            ensure!(
+                actual.is_dir() && actual.dev() == expected.dev() && actual.ino() == expected.ino(),
+                "recovery source path changed"
+            );
+        }
+        self.verify_sources()
+    }
+
+    pub(crate) fn require_outside_sources(&self, destination: &Path) -> Result<()> {
+        let a = self.corpus_root.metadata()?;
+        let b = self.policy_root.metadata()?;
+        for ancestor in destination.ancestors() {
+            let metadata = match std::fs::metadata(ancestor) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let identity = (metadata.dev(), metadata.ino());
+            ensure!(
+                identity != (a.dev(), a.ino()) && identity != (b.dev(), b.ino()),
+                "rollback journal must be outside corpus and policy"
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_corpus_root(&self, source: &KnowledgeStore, path: &Path) -> Result<()> {
         let expected = self.corpus_root.metadata()?;
         for actual in [source.root.metadata()?, std::fs::symlink_metadata(path)?] {
@@ -268,6 +298,43 @@ fn publish(parent: &File, stage: &str, name: &str) -> Result<()> {
 }
 
 impl KnowledgeStore {
+    fn pair_leases(&self, other: &Self) -> Result<Vec<File>> {
+        let a = self.root.metadata()?;
+        let b = other.root.metadata()?;
+        let a = (a.dev(), a.ino());
+        let b = (b.dev(), b.ino());
+        ensure!(a != b, "bundle and policy must be separate directories");
+        let (first, second) = if a < b { (self, other) } else { (other, self) };
+        let mut leases = Vec::new();
+        leases.extend(first.shared_backup_lease()?);
+        leases.extend(second.shared_backup_lease()?);
+        leases.push(first.operation_lock(".export.lock")?);
+        leases.push(first.lock()?);
+        leases.push(second.operation_lock(".export.lock")?);
+        leases.push(second.lock()?);
+        Ok(leases)
+    }
+
+    /// Reacquire recovery leases and verify existing immutable archives against
+    /// both current source trees. Never recopy or replace recovery evidence.
+    pub fn resume_pair_retained(
+        &self,
+        other: &Self,
+        archive: &Path,
+        policy_archive: &Path,
+    ) -> Result<PairedBackup> {
+        let leases = self.pair_leases(other)?;
+        let saved = PairedBackup {
+            corpus: KnowledgeBackup::verify(archive)?,
+            policy: KnowledgeBackup::verify(policy_archive)?,
+            corpus_root: self.root.try_clone()?,
+            policy_root: other.root.try_clone()?,
+            _leases: leases,
+        };
+        saved.verify_sources()?;
+        Ok(saved)
+    }
+
     /// Snapshot exact bytes, unknown files, empty directories and policy/identity
     /// data. Never overwrite a destination. Retain incomplete private staging on
     /// failure. Cooperative writers/exporters are excluded; external editors must
@@ -347,14 +414,7 @@ impl KnowledgeStore {
             !targets[0].starts_with(&targets[1]) && !targets[1].starts_with(&targets[0]),
             "paired backup destinations must be separate"
         );
-        let (first, second) = if a < b { (self, other) } else { (other, self) };
-        let mut leases = Vec::new();
-        leases.extend(first.shared_backup_lease()?);
-        leases.extend(second.shared_backup_lease()?);
-        leases.push(first.operation_lock(".export.lock")?);
-        leases.push(first.lock()?);
-        leases.push(second.operation_lock(".export.lock")?);
-        leases.push(second.lock()?);
+        let leases = self.pair_leases(other)?;
         let saved = PairedBackup {
             corpus: self.backup_under_leases(destination, &|_| {})?,
             policy: other.backup_under_leases(other_destination, &|_| {})?,

@@ -231,6 +231,17 @@ fn names_limited(dir: &File, limit: usize) -> Result<Vec<String>> {
 }
 
 impl KnowledgeStore {
+    pub(super) fn verify_root_path(&self, path: &Path) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let expected = self.root.metadata()?;
+        let actual = std::fs::symlink_metadata(path)?;
+        ensure!(
+            actual.is_dir() && actual.dev() == expected.dev() && actual.ino() == expected.ino(),
+            "knowledge directory path changed"
+        );
+        Ok(())
+    }
+
     /// Creating a corpus is explicit. Opening an absent corpus never creates it.
     pub fn open(path: &Path, create: bool) -> Result<Self> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -284,6 +295,18 @@ impl KnowledgeStore {
 
     fn lock(&self) -> Result<File> {
         self.operation_lock(".writer.lock")
+    }
+
+    /// Preparation already holds source leases, so it must never wait for a
+    /// journal owner that may be acquiring those same source leases.
+    pub(super) fn try_export_lease(&self) -> Result<File> {
+        let file = lock_file(&self.root, ".export.lock")?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "knowledge lock is not a regular file"
+        );
+        file.try_lock_exclusive()?;
+        Ok(file)
     }
 
     pub(super) fn operation_lock(&self, name: &str) -> Result<File> {
