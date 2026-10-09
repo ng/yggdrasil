@@ -282,3 +282,35 @@ pub async fn refresh_usage(json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+/// Explicit inspection uses the selected private/shared corpus without SQL.
+pub fn browse(path: Option<&str>, json: bool) -> Result<()> {
+    let context = crate::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
+        .ok_or_else(|| anyhow::anyhow!("no selected OKF corpus"))?;
+    let report = context.service.browse_documents(path)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        if let Some(commit) = &report.shared_commit {
+            eprintln!(
+                "Shared revision {commit} (current: {})",
+                report.shared_current.unwrap_or(false)
+            );
+        }
+        for doc in &report.documents {
+            if let Some(text) = &doc.text {
+                print!("{text}");
+            } else {
+                println!("{}\t{}\t{}", doc.path, doc.document_type, doc.revision);
+            }
+        }
+        for diagnostic in &report.diagnostics {
+            eprintln!("knowledge browse: {diagnostic}");
+        }
+    }
+    ensure!(
+        report.diagnostics.is_empty(),
+        "knowledge browse is incomplete; review diagnostics"
+    );
+    Ok(())
+}

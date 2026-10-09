@@ -13,6 +13,8 @@ use anyhow::{Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+mod browse;
+pub use browse::{BrowseDocument, BrowseReport};
 mod backup;
 pub use backup::{BackupEntry, KnowledgeBackup, PairedBackup};
 mod index;

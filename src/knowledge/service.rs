@@ -85,6 +85,11 @@ impl KnowledgeService {
         self.store.sync(confirm_pending)
     }
 
+    /// Explicit corpus inspection never grants activation or returns candidates.
+    pub fn browse_documents(&self, path: Option<&str>) -> Result<super::store::BrowseReport> {
+        self.store.browse(path)
+    }
+
     fn policy(&self) -> Result<Identities> {
         Ok(self.registry.read()?.0)
     }

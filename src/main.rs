@@ -48,6 +48,13 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Inspect OKF documents without granting instruction eligibility
+    Browse {
+        /// Visible bundle-relative Markdown path; omit to list documents
+        path: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Refresh last-known local usage counters from the selected database
     RefreshUsage {
         #[arg(long)]
@@ -1410,6 +1417,9 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Knowledge { action } => match action {
+            KnowledgeAction::Browse { path, json } => {
+                ygg::cli::knowledge_cmd::browse(path.as_deref(), json)?
+            }
             KnowledgeAction::RefreshUsage { json } => {
                 ygg::cli::knowledge_cmd::refresh_usage(json).await?
             }

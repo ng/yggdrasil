@@ -820,3 +820,28 @@ async fn native_config_change_after_backup_cannot_fence_or_activate() {
     ygg::db::deployment_backup::verify(&f.journal.join("source-backup")).unwrap();
     f.pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN; starts disposable native PostgreSQL"]
+async fn native_generic_document_refuses_rollback_before_selection_changes() {
+    let server = Server::new();
+    let f = Fixture::new(&server).await;
+    success(f.migrate(&server, false).await);
+    let path = std::path::Path::new(&f.env["YGG_KNOWLEDGE_DIR"]).join("decision.md");
+    let text = "---\ntype: Design Decision\n---\nGeneric knowledge must survive rollback.\n";
+    std::fs::write(&path, text).unwrap();
+    let output = f.rollback(&server).await;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("SQL cannot represent"));
+    assert_eq!(f.marker().await, (3, "okf".into()));
+    let binding: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(&f.env["YGG_KNOWLEDGE_POLICY_DIR"]).join("runtime.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(binding["phase"], "okf");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    f.pool.close().await;
+}

@@ -130,10 +130,31 @@ revision/destination conflicts, activation invalidation and independent edits
 made after interruption. This is a single-document move protocol, not a general
 multi-document transaction or the migration cutover protocol.
 
+## Explicit document browsing
+
+`ygg knowledge browse --json` lists valid, visible Markdown documents throughout
+the selected private or shared corpus, including generic OKF types without a
+Yggdrasil profile. `ygg knowledge browse decisions/example.md` prints the exact
+source text; add `--json` for its path, type, exact-byte SHA-256 and source text.
+Unknown metadata and body bytes are retained. These commands require no database.
+Browsing does not grant activation or add documents to note/rule candidates.
+Backups retain generic documents, but SQL rollback refuses a corpus containing
+documents outside the representable note/rule snapshot rather than omitting them.
+Shared results identify the confirmed Git commit and whether it is current; after
+refresh failure, a retained confirmed revision remains explicitly browseable.
+
+Paths are relative to the corpus and cannot contain hidden components, traversal,
+backslashes or control characters. Reads reject symlinks, hard links and special
+files. Listings retain valid documents alongside diagnostics and exit nonzero if
+incomplete. Non-Markdown files and hidden control/cache directories are excluded.
+Traversal is bounded to 32 path components, 100,000 directory entries, 1 MiB per
+document and 64 MiB of document reads. Explicit reads return only one document;
+listings retain metadata without document bodies. External edits may occur between
+files: the listing is an inspection, not a transactional corpus snapshot.
+
 ## Remaining engine work
 
-Generic OKF bundle browsing, command integration of the legacy adapters and the
-SQL-relative hook latency gate remain unfinished. Explicit browsing snapshots scan the Yggdrasil
+The SQL-relative hook latency gate remains unfinished. Explicit browsing snapshots scan the Yggdrasil
 layout directly; rule/prime candidate lookup uses the disposable index below. Approval must still be revalidated immediately
 before injection; never treat a previously read document as current authority.
 Shared Git transport, migration and CLI integration build on this

@@ -72,6 +72,7 @@ impl View {
 pub(super) fn recovery_snapshot(root: &Path, snapshot: RemoteSnapshot) -> Result<Snapshot> {
     let view = View::create(root, snapshot)?;
     let current = view.store.snapshot();
+    view.store.require_representable_snapshot(&current)?;
     ensure!(
         current.diagnostics.is_empty(),
         "incomplete shared recovery corpus: {:?}",
@@ -142,6 +143,18 @@ impl Backend {
     }
     pub fn find(&self, id: Uuid) -> Result<Option<RevisionedDocument>> {
         self.read(|s| s.find(id))
+    }
+    pub fn browse(&self, path: Option<&str>) -> Result<super::store::BrowseReport> {
+        match self {
+            Self::Private(store) => store.browse(path),
+            Self::Shared(shared) => {
+                let view = shared.current.read().unwrap();
+                let mut report = view.store.browse(path)?;
+                report.shared_commit = Some(view.snapshot.commit.clone());
+                report.shared_current = Some(view.snapshot.fresh(Utc::now()));
+                Ok(report)
+            }
+        }
     }
     pub fn snapshot(&self) -> Snapshot {
         self.read(KnowledgeStore::snapshot)

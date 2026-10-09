@@ -216,6 +216,7 @@ impl PairedBackup {
             root: self.corpus_root.try_clone()?,
         };
         let snapshot = source.snapshot_under_lease();
+        source.require_representable_snapshot(&snapshot)?;
         ensure!(
             snapshot.diagnostics.is_empty(),
             "incomplete recovery corpus: {:?}",

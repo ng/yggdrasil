@@ -934,11 +934,20 @@ mod tests {
         .unwrap();
         let key = super::super::store::Key::from_document(&doc).unwrap();
         transport
-            .change(&[Change {
-                path: key.relative_path().to_str().unwrap().into(),
-                expected: None,
-                replacement: Some(doc.serialize().unwrap().into_bytes()),
-            }])
+            .change(&[
+                // The transport fixture starts with arbitrary Markdown. SQL
+                // recovery now requires every visible document to be modeled.
+                Change {
+                    path: "rule.md".into(),
+                    expected: Some(digest(b"original\n")),
+                    replacement: None,
+                },
+                Change {
+                    path: key.relative_path().to_str().unwrap().into(),
+                    expected: None,
+                    replacement: Some(doc.serialize().unwrap().into_bytes()),
+                },
+            ])
             .unwrap();
         let confirmed = transport.refresh().unwrap();
         let source = KnowledgeStore::open(&root, false).unwrap();
@@ -973,7 +982,13 @@ mod tests {
         let other = SharedGit::open(&temp.path().join("other"), config.clone()).unwrap();
         assert!(other.recovery_snapshot(&saved).is_err());
         other
-            .change(&[edit(b"remote changed\n", b"original\n")])
+            .change(&[Change {
+                path: key.relative_path().to_str().unwrap().into(),
+                expected: Some(digest(doc.serialize().unwrap().as_bytes())),
+                replacement: Some(
+                    format!("{}\nremote changed\n", doc.serialize().unwrap()).into_bytes(),
+                ),
+            }])
             .unwrap();
         assert!(
             transport
