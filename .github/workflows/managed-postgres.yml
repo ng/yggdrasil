@@ -60,3 +60,5 @@ jobs:
           fi
       - name: Test release-mode installer, migrations and lifecycle
         run: cargo test --release --test managed_packages --test managed_runtime --test managed_supervisor -- --include-ignored --test-threads=1
+      - name: Test killed bootstrap recovery
+        run: cargo test --release --lib db::runtime::bootstrap_tests -- --include-ignored --test-threads=1

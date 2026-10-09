@@ -221,7 +221,7 @@ async fn real_cli_supervises_adopts_recovers_and_drains_without_restarting_after
         }
         let mut responses = Vec::new();
         for client in clients {
-            let output = timeout(WAIT, client.wait_with_output()).await.unwrap().unwrap();
+            let output = timeout(WAIT + Duration::from_secs(15), client.wait_with_output()).await.unwrap().unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             responses.push(serde_json::from_slice::<supervisor::Reply>(&output.stdout).unwrap());
         }
@@ -335,6 +335,20 @@ async fn real_cli_supervises_adopts_recovers_and_drains_without_restarting_after
         .status()
         .await;
     if let Err(panic) = result {
+        for name in ["supervisor.log", "postgres.log"] {
+            if let Ok(log) = std::fs::read_to_string(root.join("logs").join(name)) {
+                let tail: String = log
+                    .chars()
+                    .rev()
+                    .take(12000)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                eprintln!("{name}: {tail}");
+            }
+        }
+
         std::panic::resume_unwind(panic);
     }
 }

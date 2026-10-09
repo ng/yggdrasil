@@ -59,20 +59,23 @@ pub async fn run(data_dir: &Path, archive: Option<&Path>, migrations: bool) -> R
     .await
     .context("another initialization is still running; retry later")??;
     let root = data_dir.join("postgres");
-    let cluster = if root.try_exists()? {
-        ManagedCluster::open(&root).context("existing managed initialization is incomplete or invalid; retained for recovery, not overwritten")?
-    } else {
-        let base = data_dir.join("binaries");
-        let bin = match archive {
-            Some(archive) => {
-                let archive = archive.to_owned();
-                tokio::task::spawn_blocking(move || package::install_offline(&base, &archive))
-                    .await??
-            }
-            None => package::install_download(&base).await?,
+    let cluster =
+        if root.join("cluster.json").try_exists()? || root.join(".bootstrap.json").try_exists()? {
+            ManagedCluster::resume_initialization(&root)
+                .await
+                .context("managed bootstrap recovery failed; existing files retained")?
+        } else {
+            let base = data_dir.join("binaries");
+            let bin = match archive {
+                Some(archive) => {
+                    let archive = archive.to_owned();
+                    tokio::task::spawn_blocking(move || package::install_offline(&base, &archive))
+                        .await??
+                }
+                None => package::install_download(&base).await?,
+            };
+            ManagedCluster::initialize(&root, &bin, 16).await?
         };
-        ManagedCluster::initialize(&root, &bin, 16).await?
-    };
     supervisor::start(&cluster, &std::env::current_exe()?, Duration::from_secs(30)).await?;
     if migrations {
         provision::migrate(&cluster).await?;

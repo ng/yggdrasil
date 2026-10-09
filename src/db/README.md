@@ -10,10 +10,17 @@ using an operator-selected native distribution. It checks the requested binary
 major, initializes UTF-8 PostgreSQL, disables TCP, configures a private Unix socket,
 and durably saves the PostgreSQL system identifier, independent cluster UUID,
 major version, binary path and version string. It refuses nonempty roots and never
-deletes an interrupted initialization. This is not an installer: release archive
-verification and atomic extraction live in `package`; interrupted-bootstrap
-recovery remains a release gate: interrupted roots are retained and reported,
-never erased or overwritten on retry.
+deletes an interrupted initialization. Release archive verification and atomic
+extraction live in `package`. Bootstrap writes an immutable intent with the cluster
+UUID, binary identity and canonical root before running initdb. Every attempt uses
+its own directory, so a surviving initdb child cannot write into a retry's data.
+Only a receipt written after successful initdb and durable configuration can
+publish that attempt as `data`; publication and the final manifest use exclusive
+rename and directory fsync. Rerunning `ygg init` resumes completed receipts and
+retains unfinished attempts. Unexpected preexisting data, changed versions or
+identity mismatches fail without replacement. Legacy interrupted roots lacking
+an intent are not automatically adopted. Native unit tests kill subprocesses at
+six durable boundaries; the CI matrix runs these on all planned platforms.
 
 `open` and `status` do not initialize or start PostgreSQL. `try_owner` obtains a
 nonblocking OS lease in the canonical cluster root. The returned `Owner` retains

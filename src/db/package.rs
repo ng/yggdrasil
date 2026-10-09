@@ -336,7 +336,7 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, Member>> {
     Ok(map)
 }
 
-fn publish(stage: &Path, destination: &Path) -> Result<()> {
+pub(super) fn publish(stage: &Path, destination: &Path) -> Result<()> {
     let stage = std::ffi::CString::new(stage.as_os_str().as_bytes())?;
     let destination = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
     #[cfg(target_os = "macos")]

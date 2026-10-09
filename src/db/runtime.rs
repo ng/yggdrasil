@@ -130,9 +130,40 @@ async fn output(cmd: &mut Command, duration: Duration) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapReady {
+    manifest: Manifest,
+    attempt: Uuid,
+}
+
+fn publish_metadata(root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
+    let temp = root.join(format!(".bootstrap-tmp-{}", Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
+    file.write_all(&serde_json::to_vec(value)?)?;
+    file.sync_all()?;
+    super::package::publish(&temp, &root.join(name))?;
+    File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+fn bootstrap_checkpoint(_root: &Path, _phase: &str) {
+    #[cfg(test)]
+    if std::env::var("YGG_BOOTSTRAP_TEST_PHASE").as_deref() == Ok(_phase) {
+        fs::write(_root.join("test-checkpoint"), _phase).unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+}
+
 impl ManagedCluster {
     /// Explicit bootstrap only. Never invoked by status, hooks or open. Interrupted
-    /// initialization is retained for inspection; it is never silently reset.
+    /// attempts are retained; only a successful durable receipt can publish data.
     pub async fn initialize(root: &Path, bin: &Path, major: u32) -> Result<Self> {
         ensure!(
             root.is_absolute() && bin.is_absolute(),
@@ -142,9 +173,23 @@ impl ManagedCluster {
         let root = root.canonicalize()?;
         let _lease = lease(&root)?.context("managed cluster is owned by another process")?;
         ensure!(
-            fs::read_dir(&root)?.all(|entry| entry.is_ok_and(|e| e.file_name() == ".owner.lock")),
-            "managed root is not empty; refusing initialization"
+            !root.join("cluster.json").try_exists()?,
+            "managed cluster already initialized"
         );
+        let intent_path = root.join(".bootstrap.json");
+        if !intent_path.try_exists()? {
+            ensure!(
+                fs::read_dir(&root)?.all(|entry| entry.is_ok_and(|e| {
+                    let name = e.file_name();
+                    name == ".owner.lock"
+                        || name
+                            .to_str()
+                            .and_then(|n| n.strip_prefix(".bootstrap-tmp-"))
+                            .is_some_and(|id| Uuid::parse_str(id).is_ok())
+                })),
+                "managed root is not empty; refusing initialization"
+            );
+        }
         let bin = bin.canonicalize()?;
         let binary_version = output(
             command(&bin.join("postgres")).arg("--version"),
@@ -160,6 +205,39 @@ impl ManagedCluster {
                 == Some(major),
             "selected PostgreSQL binary major differs from requested major"
         );
+        let intent = if intent_path.try_exists()? {
+            let intent: Manifest = serde_json::from_str(&read(&intent_path)?)?;
+            ensure!(
+                intent.version == 1
+                    && intent.root == root
+                    && intent.bin == bin
+                    && intent.major == major
+                    && intent.binary_version == binary_version
+                    && intent.system_id.is_empty(),
+                "bootstrap identity or selected binary changed"
+            );
+            intent
+        } else {
+            let intent = Manifest {
+                version: 1,
+                root: root.clone(),
+                cluster_id: Uuid::new_v4(),
+                system_id: String::new(),
+                major,
+                binary_version: binary_version.clone(),
+                bin: bin.clone(),
+            };
+            publish_metadata(&root, ".bootstrap.json", &intent)?;
+            intent
+        };
+        bootstrap_checkpoint(&root, "intent");
+        if root.join(".bootstrap-ready.json").try_exists()? {
+            return Self::finish_bootstrap(&root, &intent).await;
+        }
+        ensure!(
+            !root.join("data").try_exists()?,
+            "data exists without completed bootstrap receipt; refusing replacement"
+        );
         let socket = root.join("runtime");
         // Portable sockaddr_un budget, including /.s.PGSQL.5432 and NUL.
         ensure!(
@@ -168,7 +246,13 @@ impl ManagedCluster {
         );
         private_dir(&socket, true)?;
         private_dir(&root.join("logs"), true)?;
-        let data = root.join("data");
+        // Never reuse an unfinished attempt: an initdb child may have survived
+        // the caller. Its writes stay confined to its unique retained directory.
+        let attempt = Uuid::new_v4();
+        let data = root.join(format!(".bootstrap-data-{attempt}"));
+        private_dir(&data, true)?;
+        File::open(&root)?.sync_all()?;
+        bootstrap_checkpoint(&root, "attempt");
         output(
             command(&bin.join("initdb")).arg("-D").arg(&data).args([
                 "--username",
@@ -181,6 +265,7 @@ impl ManagedCluster {
             Duration::from_secs(60),
         )
         .await?;
+        bootstrap_checkpoint(&root, "initdb");
         private_dir(&data, false)?;
         let control = output(
             command(&bin.join("pg_controldata")).arg(&data),
@@ -214,22 +299,90 @@ impl ManagedCluster {
         let manifest = Manifest {
             version: 1,
             root: root.clone(),
-            cluster_id: Uuid::new_v4(),
+            cluster_id: intent.cluster_id,
             system_id,
             major,
             binary_version,
             bin,
         };
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(root.join(".cluster.tmp"))?;
-        file.write_all(&serde_json::to_vec(&manifest)?)?;
-        file.sync_all()?;
-        fs::rename(root.join(".cluster.tmp"), root.join("cluster.json"))?;
-        File::open(&root)?.sync_all()?;
-        Ok(Self { root, manifest })
+        publish_metadata(
+            &root,
+            ".bootstrap-ready.json",
+            &BootstrapReady { manifest, attempt },
+        )?;
+        bootstrap_checkpoint(&root, "ready");
+        Self::finish_bootstrap(&root, &intent).await
+    }
+
+    async fn finish_bootstrap(root: &Path, intent: &Manifest) -> Result<Self> {
+        let ready: BootstrapReady =
+            serde_json::from_str(&read(&root.join(".bootstrap-ready.json"))?)?;
+        let manifest = ready.manifest;
+        ensure!(
+            manifest.version == intent.version
+                && manifest.root == intent.root
+                && manifest.cluster_id == intent.cluster_id
+                && manifest.bin == intent.bin
+                && manifest.major == intent.major
+                && manifest.binary_version == intent.binary_version,
+            "bootstrap receipt differs from intent"
+        );
+        let stage = root.join(format!(".bootstrap-data-{}", ready.attempt));
+        let data = root.join("data");
+        ensure!(
+            !(stage.try_exists()? && data.try_exists()?),
+            "both bootstrap stage and published data exist; refusing replacement"
+        );
+        let source = if data.try_exists()? { &data } else { &stage };
+        private_dir(source, false)?;
+        ensure!(
+            !source.join("postmaster.pid").try_exists()?,
+            "bootstrap data has a server PID file; refusing recovery"
+        );
+        ensure!(
+            read(&source.join("PG_VERSION"))?.trim().parse::<u32>()? == manifest.major,
+            "bootstrap data major changed"
+        );
+        let control = output(
+            command(&manifest.bin.join("pg_controldata")).arg(source),
+            Duration::from_secs(5),
+        )
+        .await?;
+        ensure!(
+            control
+                .lines()
+                .find_map(|line| line.strip_prefix("Database system identifier:"))
+                .map(str::trim)
+                == Some(manifest.system_id.as_str())
+                && manifest.system_id.parse::<u64>().is_ok(),
+            "bootstrap data identity changed"
+        );
+        if source == &stage {
+            super::package::publish(&stage, &data)?;
+            File::open(root)?.sync_all()?;
+        }
+        bootstrap_checkpoint(root, "data");
+        publish_metadata(root, "cluster.json", &manifest)?;
+        bootstrap_checkpoint(root, "manifest");
+        Self::open(root)
+    }
+
+    /// Resume only a durable bootstrap intent, never infer authority from an
+    /// arbitrary existing data directory. Complete clusters remain unchanged.
+    pub async fn resume_initialization(root: &Path) -> Result<Self> {
+        if root.join("cluster.json").try_exists()? {
+            return Self::open(root);
+        }
+        private_dir(root, false)?;
+        let intent: Manifest = serde_json::from_str(&read(&root.join(".bootstrap.json"))?)?;
+        ensure!(
+            intent.version == 1
+                && intent.root == root.canonicalize()?
+                && intent.bin.is_absolute()
+                && intent.system_id.is_empty(),
+            "invalid bootstrap intent"
+        );
+        Self::initialize(root, &intent.bin, intent.major).await
     }
 
     /// Inspect existing metadata only. Does not create directories or start a server.
@@ -471,5 +624,120 @@ impl Owner {
             child.wait().await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_worker() {
+        let Ok(root) = std::env::var("YGG_BOOTSTRAP_TEST_ROOT") else {
+            return;
+        };
+        let bin = std::env::var("YGG_TEST_PG_BIN").unwrap();
+        let major = std::env::var("YGG_TEST_PG_MAJOR").unwrap().parse().unwrap();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(ManagedCluster::initialize(
+                Path::new(&root),
+                Path::new(&bin),
+                major,
+            ))
+            .unwrap();
+    }
+
+    struct Worker(std::process::Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires YGG_TEST_PG_BIN and YGG_TEST_PG_MAJOR"]
+    fn bootstrap_crash_recovery() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for phase in ["intent", "attempt", "initdb", "ready", "data", "manifest"] {
+            let temp = tempfile::Builder::new()
+                .prefix("ybr-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let root = temp.path().canonicalize().unwrap().join("cluster");
+            let mut child = Worker(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "db::runtime::bootstrap_tests::bootstrap_worker",
+                        "--nocapture",
+                    ])
+                    .env("YGG_BOOTSTRAP_TEST_ROOT", &root)
+                    .env("YGG_BOOTSTRAP_TEST_PHASE", phase)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap(),
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !root.join("test-checkpoint").exists() {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "worker exited before {phase}"
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker stalled before {phase}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            let intent: Manifest =
+                serde_json::from_str(&read(&root.join(".bootstrap.json")).unwrap()).unwrap();
+            let ready = fs::read(root.join(".bootstrap-ready.json")).ok();
+            let retained: Vec<_> = fs::read_dir(&root)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".bootstrap-data-")
+                })
+                .collect();
+            let cluster = runtime
+                .block_on(ManagedCluster::resume_initialization(&root))
+                .unwrap();
+            assert_eq!(cluster.id(), intent.cluster_id, "{phase}");
+            assert_eq!(runtime.block_on(cluster.status()).unwrap(), Status::Stopped);
+            if let Some(ready) = ready {
+                let before: BootstrapReady = serde_json::from_slice(&ready).unwrap();
+                assert_eq!(before.manifest.system_id, cluster.manifest.system_id);
+                assert_eq!(fs::read(root.join(".bootstrap-ready.json")).unwrap(), ready);
+            } else {
+                for attempt in retained {
+                    assert!(attempt.is_dir(), "unfinished attempt must be retained");
+                    // A surviving initdb cannot write into the newly selected data.
+                    fs::write(attempt.join("late-child-write"), "retained").unwrap();
+                    assert!(!root.join("data/late-child-write").exists());
+                }
+            }
+            // A completed receipt cannot authorize replacement of changed data.
+            if phase == "data" {
+                fs::rename(root.join("cluster.json"), root.join("cluster.saved")).unwrap();
+                fs::write(root.join("data/PG_VERSION"), "999\n").unwrap();
+                assert!(
+                    runtime
+                        .block_on(ManagedCluster::resume_initialization(&root))
+                        .is_err()
+                );
+                assert_eq!(
+                    fs::read_to_string(root.join("data/PG_VERSION")).unwrap(),
+                    "999\n"
+                );
+            }
+        }
     }
 }
