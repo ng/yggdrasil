@@ -300,6 +300,20 @@ impl PrivateJournal {
     /// after SQL commit leaves the fence/intent available for the same retry.
     /// Shared transport and multi-host coordination require their own workflow.
     pub async fn activate(&self, pool: &sqlx::PgPool) -> Result<Outcome> {
+        self.activate_inner(pool, None).await
+    }
+    pub async fn activate_verified(
+        &self,
+        pool: &sqlx::PgPool,
+        backup: &super::source_backup::SourceBackup,
+    ) -> Result<Outcome> {
+        self.activate_inner(pool, Some(backup)).await
+    }
+    async fn activate_inner(
+        &self,
+        pool: &sqlx::PgPool,
+        backup: Option<&super::source_backup::SourceBackup>,
+    ) -> Result<Outcome> {
         self.revalidate()?;
         let request = &self.intent.request;
         let policy = KnowledgeStore::open(&request.paths.policy, false)?;
@@ -320,6 +334,9 @@ impl PrivateJournal {
                     == Outcome::PreviouslyActivated,
                 "local activation requires the prior SQL outcome"
             );
+            if let Some(backup) = backup {
+                backup.verify_on(&mut tx).await?;
+            }
             self.revalidate()?;
             tx.commit().await?;
             return Ok(Outcome::PreviouslyActivated);
@@ -341,6 +358,9 @@ impl PrivateJournal {
         let outcome =
             forward::activate_on(&mut tx, self.intent.operation, &request.manifest).await?;
         request.frozen(&recovery)?;
+        if let Some(backup) = backup {
+            backup.verify_on(&mut tx).await?;
+        }
         self.revalidate()?;
         tx.commit()
             .await

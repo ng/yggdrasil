@@ -403,8 +403,8 @@ report unresolved. UUIDs, nullable fields, pending/approval state, arbitrary JSO
 tags and usage totals are checked via the same legacy adapters.
 
 JSON output remains on stdout even when row verification fails; exit status is
-nonzero for unresolved reports. `--dry-run` is required because publication is
-not implemented yet. `rows_verified: true` only proves this snapshot's rows passed
+nonzero for unresolved reports. Choose `--dry-run` for assessment or an explicit
+`--plan` and `--journal` for execution. `rows_verified: true` only proves this snapshot's rows passed
 conversion; it does not establish fleet upgrade, frozen writes, backups, semantic
 scope-fixture parity, filesystem publication or rollback readiness. A later fenced
 export must reread and validate its own manifest rather than trusting this report.
@@ -932,3 +932,53 @@ journal, and omit transient views/command files/locks. Restored caches preserve
 confirmed bytes for offline browsing. Deployment moves still need the planned
 validated rebinding of the runtime's canonical bundle path. Automatic Git/cache
 retention cleanup and a supported cutover/configuration publisher remain unfinished.
+
+
+## Private single-host migration command
+
+`ygg knowledge migrate --plan /absolute/plan.json --journal /absolute/operation`
+executes or resumes a private migration. External PostgreSQL also requires
+`--pg-bin /absolute/compatible-postgres/bin` when creating the initial backup.
+`--json` prints the resulting operation ID, source/corpus IDs, generation, state
+and retained journal path. Missing mode arguments remain an error.
+
+The version-1 plan contains `transport: "private"`, `source_generation`, the
+`mappings` object shown above, explicit `identities` (the identity.json format),
+`agents` (agent names to UUIDs), `execution_host`,
+`all_participating_hosts_listed: true`, and one `hosts` entry. That entry contains
+`name`, `protocol: 1`, and explicit true declarations for
+`knowledge_writers_stopped`, `external_editors_stopped`, `schema_changes_stopped`,
+and `session_preserving_endpoint`. These are operator assertions about the whole
+deployment, including offline clients; live session inspection cannot prove them.
+The command rejects shared transports and multiple hosts. It does not discover
+participants, stop writers, configure admission rules, or infer identity/trust.
+
+Before fencing, the command checks ownership, the compatible SQL generation,
+installed legacy write/marker guards, live registered clients and complete row
+conversion. It captures a consistent PostgreSQL dump plus existing configured
+knowledge/policy files, seals the backup manifest digest, and compares recorded
+schema, legacy knowledge rows and migration checksums at cutover. The schema
+comparison uses backup catalog evidence; it does not certify arbitrary external
+DDL or replace the schema-quiescence declaration. An immutable SQL event records
+which operation owns the fence. The command then exports/publishes the frozen
+rows, installs the exact explicit policy and fenced binding, retains a paired
+recovery archive, and completes the private activation journal. Existing target
+files must match the export exactly; independently edited files are never replaced.
+
+Retry with the same plan, paths and journal. Completed SQL activation uses its
+receipt and frozen source evidence without restoring old OKF documents, preserving
+acknowledged post-cutover edits. Interrupted paired captures verify every retained
+archive and create only missing archives. The native regression test kills the
+actual CLI while blocked at local selection after fencing/publication, then
+resumes it using the original dump. This is one tested interruption boundary,
+not exhaustive power-loss or disk-full qualification.
+
+`--abort` supports only this operation's original pre-activation fence. It checks
+retained source evidence, records the next SQL generation, and clears only its
+exact prepared fenced binding while holding local selection and database leases.
+Retry after an acknowledged abort preserves later SQL writes. All backup, stage,
+unselected export and policy evidence remains for inspection. Once OKF is active,
+abort is refused: rollback must import the current bundle, including later edits
+and deletions. The current-bundle reverse-import primitives exist, but their full
+operator activation/deselection workflow, shared/fleet execution, rollout and
+release gates remain unfinished.

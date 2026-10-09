@@ -539,6 +539,16 @@ impl KnowledgeStore {
         self.update_control_locked(name, update, self.lock()?)
     }
 
+    pub(crate) fn remove_control(&self, name: &str, expected: &str) -> Result<()> {
+        let _lease = self.lock()?;
+        if let Some(current) = self.read_control(name)? {
+            ensure!(current == expected, "control changed; refusing removal");
+            unlink(&self.root, name)?;
+        }
+        self.root.sync_all()?;
+        Ok(())
+    }
+
     /// Optional state cannot hold up a hook indefinitely behind a paused process.
     /// Callers retain eligible knowledge and tolerate unavailable cache updates.
     pub(super) fn update_optional_control<T>(

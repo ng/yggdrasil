@@ -236,3 +236,35 @@ pub async fn initialize_target(
     }
     Ok(())
 }
+
+/// Explicit maintenance commands use a small operator pool. Managed credentials
+/// remain inside the database layer; this neither starts nor initializes a server.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub async fn maintenance_pool(
+    config: &crate::config::database::DeploymentConfig,
+) -> anyhow::Result<PgPool> {
+    use crate::config::database::DatabaseTarget;
+    let options = match &config.database {
+        DatabaseTarget::External { url } => {
+            let selected = config.owner_url.as_ref().map(|u| u.as_str()).unwrap_or(url);
+            external::validate_owner_target(url, selected)?;
+            external::options(selected)?
+        }
+        DatabaseTarget::ManagedLocal { data_dir } => {
+            runtime::ManagedCluster::open(&data_dir.join("postgres"))?
+                .admin_options()
+                .database("ygg")
+        }
+    };
+    PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .after_connect(|connection, _| Box::pin(crate::knowledge::clients::register(connection)))
+        .connect_with(options)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "maintenance connection failed; verify operator credentials and endpoint"
+            )
+        })
+}

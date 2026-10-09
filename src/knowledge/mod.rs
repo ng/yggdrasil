@@ -47,3 +47,9 @@ pub mod forward;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod cutover;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod source_backup;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod migration;

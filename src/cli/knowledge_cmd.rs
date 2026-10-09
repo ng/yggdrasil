@@ -187,3 +187,39 @@ pub async fn clients(json: bool) -> Result<()> {
     );
     Ok(())
 }
+
+pub async fn migrate(
+    plan: &Path,
+    journal: &Path,
+    pg_bin: Option<&Path>,
+    abort: bool,
+    json: bool,
+) -> Result<()> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(plan)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 1024 * 1024,
+        "migration plan exceeds 1 MiB limit"
+    );
+    let plan = serde_json::from_slice(&bytes)?;
+    let config = crate::config::database::DeploymentConfig::load(std::env::vars().collect())?;
+    let journal = crate::knowledge::migration::Journal::prepare(journal, plan, &config)?;
+    let report = if abort {
+        journal.abort(&config).await?
+    } else {
+        journal.execute(&config, pg_bin).await?
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Knowledge {} at generation {}. Retained operation: {}",
+            report.state,
+            report.generation,
+            report.journal.display()
+        );
+    }
+    Ok(())
+}

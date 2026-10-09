@@ -520,6 +520,27 @@ impl KnowledgeStore {
         destination: &Path,
         other_destination: &Path,
     ) -> Result<PairedBackup> {
+        self.capture_pair(other, destination, other_destination, false)
+    }
+
+    /// Complete an interrupted pair without replacing either published archive.
+    /// Every retained archive must still match its corresponding source exactly.
+    pub(crate) fn complete_pair_retained(
+        &self,
+        other: &Self,
+        destination: &Path,
+        other_destination: &Path,
+    ) -> Result<PairedBackup> {
+        self.capture_pair(other, destination, other_destination, true)
+    }
+
+    fn capture_pair(
+        &self,
+        other: &Self,
+        destination: &Path,
+        other_destination: &Path,
+        resume: bool,
+    ) -> Result<PairedBackup> {
         let a = self.root.metadata()?;
         let b = other.root.metadata()?;
         let a = (a.dev(), a.ino());
@@ -552,9 +573,16 @@ impl KnowledgeStore {
             "paired backup destinations must be separate"
         );
         let leases = self.pair_leases(other)?;
+        let capture = |source: &Self, path: &Path| -> Result<KnowledgeBackup> {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) if resume => KnowledgeBackup::verify(path),
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => source.backup_under_leases(path, &|_| {}),
+            }
+        };
         let saved = PairedBackup {
-            corpus: self.backup_under_leases(destination, &|_| {})?,
-            policy: other.backup_under_leases(other_destination, &|_| {})?,
+            corpus: capture(self, destination)?,
+            policy: capture(other, other_destination)?,
             corpus_root: self.root.try_clone()?,
             policy_root: other.root.try_clone()?,
             _leases: leases,
@@ -734,6 +762,38 @@ impl KnowledgeBackup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_partial_pair_preserves_archives_and_refuses_changed_sources() {
+        for changed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let corpus_path = temp.path().join("corpus");
+            let policy_path = temp.path().join("policy");
+            let corpus = KnowledgeStore::open(&corpus_path, true).unwrap();
+            let policy = KnowledgeStore::open(&policy_path, true).unwrap();
+            std::fs::write(corpus_path.join("retained"), "original bytes").unwrap();
+            std::fs::write(policy_path.join("identity"), "explicit policy").unwrap();
+            let a = temp.path().join("a");
+            let b = temp.path().join("b");
+            let original = corpus.backup(&a).unwrap();
+            if changed {
+                std::fs::write(corpus_path.join("retained"), "independent edit").unwrap();
+            }
+            let result = corpus.complete_pair_retained(&policy, &a, &b);
+            assert_eq!(result.is_err(), changed);
+            drop(result);
+            assert_eq!(
+                KnowledgeBackup::verify(&a).unwrap().revision,
+                original.revision
+            );
+            if !changed {
+                let pair = corpus.complete_pair_retained(&policy, &a, &b).unwrap();
+                pair.verify_sources().unwrap();
+                assert!(corpus.try_export_lease().is_err());
+                assert!(policy.try_export_lease().is_err());
+            }
+        }
+    }
 
     #[test]
     fn changed_source_refuses_publication_and_holds_writer_and_export_leases() {

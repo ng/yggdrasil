@@ -66,6 +66,23 @@ pub(crate) async fn evidence(
                 .collect::<String>(),
         );
     }
+    let schema = schema_evidence(connection).await?;
+    Ok((
+        Evidence {
+            version: 1,
+            table_sha256,
+            schema,
+        },
+        table_rows,
+    ))
+}
+
+/// Catalog definitions recorded by backups. Ownership/ACL rebinding remains a
+/// separate deployment concern; compare on the same source before knowledge cutover.
+pub(crate) async fn schema_evidence(connection: &mut PgConnection) -> Result<Vec<String>> {
+    sqlx::query("SET LOCAL search_path = pg_catalog")
+        .execute(&mut *connection)
+        .await?;
     // Catalog identities exclude OIDs, role ownership and ACLs, which must be
     // rebound to the destination owner/runtime roles. Definitions are deparsed
     // with a fixed search_path. Unknown version differences fail comparison.
@@ -85,13 +102,38 @@ objects AS (
 )
 SELECT definition FROM objects ORDER BY definition COLLATE "C"
 "#).fetch_all(&mut *connection).await?;
+    Ok(schema)
+}
+
+/// Same canonical, length-framed row digest as the source backup. Call within a
+/// transaction that pins or fences the requested table and uses UTC formatting.
+pub(crate) async fn table_evidence(
+    connection: &mut PgConnection,
+    schema: &str,
+    table: &str,
+) -> Result<(i64, String)> {
+    sqlx::query("SET LOCAL timezone = 'UTC'")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET LOCAL extra_float_digits = 3")
+        .execute(&mut *connection)
+        .await?;
+    let name = format!("{}.{}", identifier(schema), identifier(table));
+    let query = format!("SELECT to_jsonb(t)::text COLLATE \"C\" FROM {name} AS t ORDER BY 1");
+    let mut rows = sqlx::query_scalar::<_, String>(&query).fetch(connection);
+    let mut hash = Sha256::new();
+    let mut count = 0;
+    while let Some(row) = rows.try_next().await? {
+        hash.update((row.len() as u64).to_be_bytes());
+        hash.update(row.as_bytes());
+        count += 1;
+    }
     Ok((
-        Evidence {
-            version: 1,
-            table_sha256,
-            schema,
-        },
-        table_rows,
+        count,
+        hash.finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
     ))
 }
 

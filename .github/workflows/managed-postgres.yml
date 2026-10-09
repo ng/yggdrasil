@@ -15,6 +15,9 @@ on:
       - 'src/main.rs'
       - 'migrations/**'
       - 'tests/managed_*.rs'
+      - 'tests/knowledge_migration.rs'
+      - 'src/knowledge/**'
+      - 'src/cli/knowledge_cmd.rs'
 
 permissions:
   contents: read
@@ -60,7 +63,7 @@ jobs:
             ldd "$YGG_TEST_PG_BIN/../lib/uuid-ossp.so"
           fi
       - name: Test release-mode installer, migrations and lifecycle
-        run: cargo test --release --test managed_packages --test managed_runtime --test managed_supervisor --test external_tls -- --include-ignored --test-threads=1
+        run: cargo test --release --test managed_packages --test managed_runtime --test managed_supervisor --test external_tls --test knowledge_migration -- --include-ignored --test-threads=1
       - name: Test killed bootstrap recovery
         run: cargo test --release --lib db::runtime::bootstrap_tests -- --include-ignored --test-threads=1
       - name: Test killed deployment configuration publication

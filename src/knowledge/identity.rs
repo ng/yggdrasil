@@ -168,7 +168,7 @@ pub struct Identities {
 }
 
 impl Identities {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.version == 1,
             "unsupported identity configuration version"

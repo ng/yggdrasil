@@ -88,14 +88,25 @@ enum KnowledgeAction {
         #[arg(long)]
         json: bool,
     },
-    /// Inventory a consistent source snapshot and verify explicit mappings
+    /// Assess SQL knowledge or execute/resume an explicit private migration plan
     Migrate {
-        /// Assess only; required because publication/cutover is not available
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "plan", conflicts_with = "plan")]
         dry_run: bool,
         /// JSON database/corpus IDs, legacy repo mapping and explicit user mapping
-        #[arg(long)]
+        #[arg(long, requires = "dry_run")]
         mapping_file: Option<std::path::PathBuf>,
+        /// Explicit identity policy, mappings and host maintenance declarations
+        #[arg(long, requires = "journal")]
+        plan: Option<std::path::PathBuf>,
+        /// Durable operation directory; reuse with the same plan after interruption
+        #[arg(long, requires = "plan")]
+        journal: Option<std::path::PathBuf>,
+        /// Compatible PostgreSQL tools for an external database backup
+        #[arg(long, requires = "plan")]
+        pg_bin: Option<std::path::PathBuf>,
+        /// Abort this operation before activation; retains backup and export evidence
+        #[arg(long, requires = "plan")]
+        abort: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1408,9 +1419,24 @@ async fn main() -> anyhow::Result<()> {
             KnowledgeAction::Migrate {
                 dry_run: _,
                 mapping_file,
+                plan,
+                journal,
+                pg_bin,
+                abort,
                 json,
             } => {
-                ygg::cli::knowledge_cmd::dry_run(mapping_file.as_deref(), json).await?;
+                if let Some(plan) = plan {
+                    ygg::cli::knowledge_cmd::migrate(
+                        &plan,
+                        journal.as_deref().expect("clap requires journal"),
+                        pg_bin.as_deref(),
+                        abort,
+                        json,
+                    )
+                    .await?;
+                } else {
+                    ygg::cli::knowledge_cmd::dry_run(mapping_file.as_deref(), json).await?;
+                }
             }
         },
         Commands::Run { action } => {
