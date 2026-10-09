@@ -31,6 +31,16 @@ newlines, empty context, timestamps, scope tags, activation and approval evidenc
 migrated database and calls the existing repositories. `tests/remember.rs` retains
 the broader note regression suite.
 
+`tests/knowledge_scope_parity.rs` loads the same rows into connection-local SQL
+tables and an actual private OKF store using explicit owner and portable repository
+mappings. It compares complete ordered legacy JSON from both retrieval paths for
+every fixture case, with cold and warm OKF indexes. Coverage includes note lists,
+prime's five-note limit, rule browsing and automatic retrieval, pending lists,
+repository/global/empty-repository scope, file wildcards and escaping, rule IDs,
+agent/kind tags, specificity and recency. This validates representative retrieval
+contracts; it does not certify a participating fleet or an arbitrary deployment's
+identity mappings and quiescence.
+
 - Note lists are newest-first; current repo includes global, null repo without
   `all` means global only. Prime requests five notes.
 - A null learning repo filter searches all repos. Non-null searches repo + global.
