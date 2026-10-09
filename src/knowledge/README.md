@@ -162,6 +162,42 @@ warm-hook p95 target. The SQL hook baseline, actual CLI/hook overhead, rendering
 telemetry, concurrent writes and shared-remote latency require separate runs.
 Do not compare debug-build timings or run this concurrently with other tests.
 
+The SQL-relative edit-hook qualification uses the actual release CLI:
+
+```sh
+DATABASE_URL=postgres://.../isolated_test_database \
+YGG_HOOK_BENCH_REPORT=/absolute/path/hook-latency.json \
+cargo test --release --test okf_hook_performance sql_relative_edit_hook_p95 -- --ignored --nocapture --test-threads=1
+```
+
+It creates and drops its own migrated database and private 10,000-document corpus
+(8,000 notes and 2,000 rules). Twenty agents modify distinct file paths; every
+request uses a new session and must emit the same 20 ordered rules in both modes.
+Each mode warms all clients, then measures five synchronized rounds (100 samples).
+Timing includes CLI startup, selection/revalidation, output, coordination and
+telemetry. The SQL phase precedes OKF selection; this fixture selection is not a
+migration rehearsal. The JSON report retains every sample and computes OKF p95
+minus SQL p95. The test fails when added p95 exceeds 50 ms, and preserves the report
+at the optional path even on a threshold failure. Child deadlines and fixture
+cleanup apply on failures. Run it without other local tests/builds; it does not
+qualify shared-remote latency, cold database startup, task-claim correctness,
+concurrent document mutation or every possible scope distribution.
+
+Measured on 2026-10-09, release build, macOS arm64, 10 logical CPUs,
+PostgreSQL 18.3 (Homebrew), 100 samples per mode:
+
+| Receipt locking | SQL p95 | OKF p95 | Added p95 | 50 ms gate |
+| --- | ---: | ---: | ---: | --- |
+| Global writer lease | 251.04 ms | 1,781.85 ms | 1,530.81 ms | Failed |
+| Session lease + shared compatibility lease | 251.06 ms | 1,568.37 ms | 1,317.31 ms | Failed |
+
+Raw samples: [before session locks](../../docs/performance/okf-hooks-2026-10-09-before-session-locks.json)
+and [with session locks](../../docs/performance/okf-hooks-2026-10-09-session-locks.json).
+Both runs verified identical rule output and all 2,400 usage observations per mode
+(including warmup). These are diagnostic runs on one host, not a cross-platform
+latency guarantee. Independent session leases remove one contention source, but
+the release's SQL-relative latency requirement remains **unmet**.
+
 Initial scan-only measurement (2026-10-08, engine at `cbed794`, release build,
 macOS arm64, 10 logical CPUs, 24 GiB RAM):
 
@@ -823,8 +859,11 @@ and the exact session ID, avoiding path traversal and lossy identifier collision
 The directory is opened relative to the held policy descriptor without following
 symlinks. Waiting for a paused cache writer is bounded to two seconds, after which
 the hook uses the same duplicates-possible fallback as a cache write failure.
-Cooperative writers serialize claims, revalidate eligibility under the
-receipt lease, and durably publish the last emitted approval digest per UUID.
+An exclusive lease per receipt serializes claims for the same session while
+unrelated sessions revalidate concurrently. A shared legacy writer lease keeps
+compatibility with older global-lock publishers; both acquisitions share the same
+two-second wait budget. Writers revalidate eligibility under the receipt lease and
+durably publish the last emitted approval digest per UUID.
 Receipts are bounded to 10,000 rules and 1 MiB per session; raw session IDs are
 limited to 4096 bytes and are not retained. Changed, reapproved content can fire
 again in the same session. Display-only changes do not reset deduplication.

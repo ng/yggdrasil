@@ -559,7 +559,49 @@ impl KnowledgeStore {
         self.update_control_locked(name, update, self.bounded_lock(".writer.lock")?)
     }
 
+    /// Independent session receipts do not serialize corpus revalidation. Keep
+    /// a shared legacy writer lease so older global-lock publishers still exclude
+    /// us, and an exclusive receipt lease so one session cannot double-claim.
+    pub(super) fn update_session_receipt<T>(
+        &self,
+        identity: &str,
+        update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
+    ) -> Result<T> {
+        ensure!(
+            identity.len() == 64 && identity.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid session receipt identity"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let _legacy = self.bounded_lock_until(".writer.lock", false, deadline)?;
+        let _receipt =
+            self.bounded_lock_until(&format!(".session-{identity}.lock"), true, deadline)?;
+        let name = format!("{identity}.json");
+        let current = self.read_control(&name)?;
+        let (text, result) = update(current.as_deref())?;
+        ensure!(
+            text.len() <= MAX_DOCUMENT_BYTES,
+            "session receipt exceeds byte limit"
+        );
+        if current.as_deref() != Some(&text) {
+            Self::replace_at(&self.root, &name, &text)?;
+        }
+        Ok(result)
+    }
+
     pub(super) fn bounded_lock(&self, name: &str) -> Result<File> {
+        self.bounded_lock_until(
+            name,
+            true,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+    }
+
+    fn bounded_lock_until(
+        &self,
+        name: &str,
+        exclusive: bool,
+        deadline: std::time::Instant,
+    ) -> Result<File> {
         ensure!(
             !name.contains('/') && !name.contains('\\') && name != "..",
             "invalid lock filename"
@@ -574,13 +616,17 @@ impl KnowledgeStore {
                 && metadata.mode() & 0o077 == 0,
             "invalid optional-state writer lease"
         );
-        let began = std::time::Instant::now();
         loop {
-            match file.try_lock_exclusive() {
+            let acquired = if exclusive {
+                file.try_lock_exclusive()
+            } else {
+                FileExt::try_lock_shared(&file)
+            };
+            match acquired {
                 Ok(()) => break,
                 Err(error)
                     if error.kind() == std::io::ErrorKind::WouldBlock
-                        && began.elapsed() < std::time::Duration::from_secs(2) =>
+                        && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(5))
                 }
@@ -816,5 +862,84 @@ impl KnowledgeStore {
             "document UUID already exists in another scope or type"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod session_receipt_tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn unrelated_sessions_do_not_wait_for_another_sessions_revalidation() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = KnowledgeStore::open(&temp.path().join("sessions"), true).unwrap();
+        let second = KnowledgeStore::open(&temp.path().join("sessions"), false).unwrap();
+        let (entered, ready) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                first.update_session_receipt(&"1".repeat(64), |_| {
+                    entered.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(("first".into(), ()))
+                })
+            });
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            let result =
+                second.update_session_receipt(&"2".repeat(64), |_| Ok(("second".into(), ())));
+            release.send(()).unwrap();
+            worker.join().unwrap().unwrap();
+            result.unwrap();
+        });
+    }
+
+    #[test]
+    fn same_session_updates_read_the_prior_committed_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = KnowledgeStore::open(&temp.path().join("sessions"), true).unwrap();
+        let second = KnowledgeStore::open(&temp.path().join("sessions"), false).unwrap();
+        let (entered, ready) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                first.update_session_receipt(&"1".repeat(64), |_| {
+                    entered.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(("first".into(), ()))
+                })
+            });
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            let next = scope.spawn(move || {
+                second.update_session_receipt(&"1".repeat(64), |prior| {
+                    assert_eq!(prior, Some("first"));
+                    Ok(("second".into(), ()))
+                })
+            });
+            release.send(()).unwrap();
+            worker.join().unwrap().unwrap();
+            next.join().unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn session_updates_respect_legacy_global_writer_leases() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = KnowledgeStore::open(&temp.path().join("sessions"), true).unwrap();
+        let second = KnowledgeStore::open(&temp.path().join("sessions"), false).unwrap();
+        let lease = first.bounded_lock(".writer.lock").unwrap();
+        let (entered, ready) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                second.update_session_receipt(&"1".repeat(64), |_| {
+                    entered.send(()).unwrap();
+                    Ok(("receipt".into(), ()))
+                })
+            });
+            assert!(ready.recv_timeout(Duration::from_millis(50)).is_err());
+            drop(lease);
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            worker.join().unwrap().unwrap();
+        });
     }
 }

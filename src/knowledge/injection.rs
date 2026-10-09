@@ -94,7 +94,7 @@ pub fn for_edit(
             session,
         ))?);
         let store = context.session_store()?;
-        store.update_optional_control(&format!("{identity}.json"), |prior| {
+        store.update_session_receipt(&identity, |prior| {
             let mut seen = match prior.map(serde_json::from_str::<Seen>).transpose() {
                 Ok(Some(seen))
                     if seen.version == 1
