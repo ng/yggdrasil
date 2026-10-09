@@ -102,6 +102,28 @@ async fn claim(f: &Fixture, root: &Path, repo: Uuid, paths: bool) -> String {
     text
 }
 
+fn edit_hook(f: &Fixture, root: &Path, session: &str) -> String {
+    use std::{io::Write, process::Stdio};
+    let mut child = okf::app(root, &root.join("repo"))
+        .env("DATABASE_URL", &f.url)
+        .args(["hook", "pre-tool-use"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(serde_json::to_string(&serde_json::json!({
+        "session_id": session, "tool_name": "Edit", "tool_input": {"file_path": "src/one.rs"}
+    })).unwrap().as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 #[tokio::test]
 async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
     let f = Fixture::new().await;
@@ -129,7 +151,9 @@ async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
         binding.generation = 3;
         okf::select(root, &binding);
         let service = KnowledgeService::new(KnowledgeStore::open(&root.join("bundle"), false).unwrap(), registry, "portable-user".into()).unwrap();
+        let mut documents = BTreeMap::new();
         for (text, repo, file, rule, agent, kind, creation) in [
+            ("HOOK_A_FILE", Some(portable_a), Some("src/*.rs"), None, None, None, Creation::ManualActive),
             ("CHECKOUT_A_ONLY", Some(portable_a), None, None, None, None, Creation::ManualActive),
             ("TASK_B_GENERAL", Some(portable_b), None, None, None, None, Creation::ManualActive),
             ("GLOBAL_GENERAL", None, None, None, None, None, Creation::ManualActive),
@@ -141,8 +165,9 @@ async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
         ] {
             let scope_tags = [("agent", agent), ("kind", kind)].into_iter()
                 .filter_map(|(k,v)| v.map(|v| (k.to_owned(), serde_json::json!(v)))).collect();
-            service.create_rule(RuleInput { repo, text: text.into(), file_glob: file.map(str::to_owned),
+            let created = service.create_rule(RuleInput { repo, text: text.into(), file_glob: file.map(str::to_owned),
                 rule_id: rule.map(str::to_owned), scope_tags, ..Default::default() }, creation, chrono::Utc::now()).unwrap();
+            documents.insert(text, created.key.id);
         }
         sqlx::query("INSERT INTO learnings(text, user_id) VALUES ('SQL_SENTINEL', 'legacy-user')")
             .execute(&f.pool).await.unwrap();
@@ -161,6 +186,38 @@ async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
         for excluded in ["CHECKOUT_A_ONLY", "WRONG_AGENT", "WRONG_KIND", "PENDING_RULE", "SQL_SENTINEL"] {
             assert!(!text.contains(excluded), "{text}");
         }
+        let usage = ygg::knowledge::telemetry::Telemetry::new(&f.pool);
+        for expected in ["TASK_B_GENERAL", "GLOBAL_GENERAL", "MATCH_B_FILES", "RULE_ID_ONLY"] {
+            let total = usage.get(binding.mappings.corpus_id, documents[expected]).await.unwrap().unwrap();
+            assert_eq!(total.applied_count, 1);
+        }
+        assert!(usage.get(binding.mappings.corpus_id, documents["PENDING_RULE"]).await.unwrap().is_none());
+        let listed = okf::json(okf::learn(root).args(["list", "--all", "--json"]).output().unwrap());
+        let matched = listed["results"].as_array().unwrap().iter().find(|r| r["text"] == "MATCH_B_FILES").unwrap();
+        assert_eq!(matched["applied_count"], 1);
+        assert!(edit_hook(&f, root, "usage-session").contains("HOOK_A_FILE"));
+        assert!(!edit_hook(&f, root, "usage-session").contains("HOOK_A_FILE"));
+        assert_eq!(usage.get(binding.mappings.corpus_id, documents["HOOK_A_FILE"]).await.unwrap().unwrap().applied_count, 1);
+        assert!(edit_hook(&f, root, "usage-session-two").contains("HOOK_A_FILE"));
+        assert_eq!(usage.get(binding.mappings.corpus_id, documents["HOOK_A_FILE"]).await.unwrap().unwrap().applied_count, 2);
+        // A stalled telemetry writer cannot hide output or undo a claim. The
+        // timeout rolls back the whole observation batch and leaves its cache.
+        let mut stalled = f.pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE knowledge_usage IN ACCESS EXCLUSIVE MODE").execute(&mut *stalled).await.unwrap();
+        let began = std::time::Instant::now();
+        assert!(claim(&f, root, b, true).await.contains("MATCH_B_FILES"));
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
+        stalled.rollback().await.unwrap();
+        assert_eq!(usage.get(binding.mappings.corpus_id, documents["MATCH_B_FILES"]).await.unwrap().unwrap().applied_count, 1);
+        // Cache publication failure also cannot roll back committed telemetry.
+        std::fs::remove_file(root.join("policy/usage-snapshot.json")).unwrap();
+        let outside = root.join("outside-cache");
+        std::fs::write(&outside, "untouched").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("policy/usage-snapshot.json")).unwrap();
+        assert!(claim(&f, root, b, true).await.contains("MATCH_B_FILES"));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "untouched");
+        assert_eq!(usage.get(binding.mappings.corpus_id, documents["MATCH_B_FILES"]).await.unwrap().unwrap().applied_count, 2);
+        std::fs::remove_file(root.join("policy/usage-snapshot.json")).unwrap();
         let text = claim(&f, root, b, false).await;
         assert!(text.contains("TASK_B_GENERAL") && text.contains("GLOBAL_GENERAL"));
         assert!(!text.contains("MATCH_B_FILES") && !text.contains("RULE_ID_ONLY"));

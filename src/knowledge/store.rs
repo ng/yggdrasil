@@ -117,6 +117,36 @@ fn child(dir: &File, name: &str, flags: i32, mode: u32) -> std::io::Result<File>
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// Open a persistent lock inode without replacing another participant's lease.
+/// Separate existing opens from exclusive creation: concurrent O_CREAT opens
+/// can transiently fail with ENOENT on macOS during first publication.
+fn lock_file(dir: &File, name: &str) -> std::io::Result<File> {
+    for _ in 0..8 {
+        match child(dir, name, libc::O_RDWR, 0) {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match child(
+            dir,
+            name,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        ) {
+            Ok(file) => return Ok(file),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "knowledge lock changed during creation",
+    ))
+}
+
 fn directory(dir: &File, name: &str, create: bool) -> std::io::Result<File> {
     if create {
         let name_c = CString::new(name)?;
@@ -260,7 +290,7 @@ impl KnowledgeStore {
             !name.contains('/') && !name.contains('\\') && name != "..",
             "invalid lock filename"
         );
-        let file = child(&self.root, name, libc::O_RDWR | libc::O_CREAT, 0o600)?;
+        let file = lock_file(&self.root, name)?;
         ensure!(
             file.metadata()?.is_file(),
             "knowledge lock is not a regular file"
@@ -272,12 +302,7 @@ impl KnowledgeStore {
     /// Runtime readers hold a shared lease; cutover/rollback takes the exclusive
     /// lease before changing selection. Separate from document writer locks.
     pub(super) fn selection_lease(&self, exclusive: bool) -> Result<File> {
-        let file = child(
-            &self.root,
-            ".selection.lock",
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?;
+        let file = lock_file(&self.root, ".selection.lock")?;
         use std::os::unix::fs::MetadataExt;
         let metadata = file.metadata()?;
         ensure!(
@@ -490,19 +515,14 @@ impl KnowledgeStore {
         self.update_control_locked(name, update, self.lock()?)
     }
 
-    /// Optional session state cannot hold up a hook indefinitely behind a paused
-    /// process. The caller falls back to freshly validated, possibly repeated rules.
-    pub(super) fn update_session_control<T>(
+    /// Optional state cannot hold up a hook indefinitely behind a paused process.
+    /// Callers retain eligible knowledge and tolerate unavailable cache updates.
+    pub(super) fn update_optional_control<T>(
         &self,
         name: &str,
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
     ) -> Result<T> {
-        let file = child(
-            &self.root,
-            ".writer.lock",
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?;
+        let file = lock_file(&self.root, ".writer.lock")?;
         use std::os::unix::fs::MetadataExt;
         let metadata = file.metadata()?;
         ensure!(
@@ -510,7 +530,7 @@ impl KnowledgeStore {
                 && metadata.nlink() == 1
                 && metadata.uid() == unsafe { libc::geteuid() }
                 && metadata.mode() & 0o077 == 0,
-            "invalid session writer lease"
+            "invalid optional-state writer lease"
         );
         let began = std::time::Instant::now();
         loop {

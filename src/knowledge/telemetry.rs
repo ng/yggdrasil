@@ -3,7 +3,7 @@
 use super::legacy::Usage;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, FromRow, PartialEq)]
@@ -91,37 +91,92 @@ impl<'a> Telemetry<'a> {
         at: DateTime<Utc>,
     ) -> Result<bool> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("INSERT INTO knowledge_usage (corpus_id, document_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(corpus).bind(document).execute(&mut *transaction).await?;
-        let inserted = sqlx::query(
-            r#"
+        let inserted = record_on(&mut transaction, corpus, document, application, at).await?;
+        transaction.commit().await?;
+        Ok(inserted)
+    }
+}
+
+/// One emitted rule, with a stable ID reused if its database transaction is retried.
+/// These receipts are operational metadata; they never authorize a document.
+#[derive(Clone)]
+pub struct Application {
+    pub document: Uuid,
+    pub application: Uuid,
+    pub at: DateTime<Utc>,
+    pub imported: bool,
+}
+
+async fn record_on(
+    connection: &mut PgConnection,
+    corpus: Uuid,
+    document: Uuid,
+    application: Uuid,
+    at: DateTime<Utc>,
+) -> Result<bool> {
+    sqlx::query("INSERT INTO knowledge_usage (corpus_id, document_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(corpus).bind(document).execute(&mut *connection).await?;
+    let inserted = sqlx::query(
+        r#"
             INSERT INTO knowledge_applications (corpus_id, document_id, application_id, applied_at)
             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING
         "#,
-        )
-        .bind(corpus)
-        .bind(document)
-        .bind(application)
-        .bind(at)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected()
-            == 1;
-        if inserted {
-            sqlx::query(
-                r#"
+    )
+    .bind(corpus)
+    .bind(document)
+    .bind(application)
+    .bind(at)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected()
+        == 1;
+    if inserted {
+        sqlx::query(
+            r#"
                 UPDATE knowledge_usage SET observed_count = observed_count + 1,
                     observed_last_applied_at = GREATEST(observed_last_applied_at, $3)
                 WHERE corpus_id = $1 AND document_id = $2
             "#,
-            )
-            .bind(corpus)
-            .bind(document)
-            .bind(at)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        transaction.commit().await?;
-        Ok(inserted)
+        )
+        .bind(corpus)
+        .bind(document)
+        .bind(at)
+        .execute(&mut *connection)
+        .await?;
     }
+    Ok(inserted)
+}
+
+/// The caller holds the selected storage-generation transaction. All increments
+/// commit together; returning totals does not mean the transaction committed.
+pub async fn record_batch(
+    connection: &mut PgConnection,
+    corpus: Uuid,
+    applications: &[Application],
+) -> Result<Vec<Totals>> {
+    let mut totals = Vec::new();
+    // Consistent row-lock ordering prevents overlapping batches from deadlocking
+    // when two claims mention the same rules in different file orders.
+    let mut ordered: Vec<_> = applications.iter().collect();
+    ordered.sort_by_key(|a| (a.document, a.application));
+    for application in ordered {
+        record_on(
+            connection,
+            corpus,
+            application.document,
+            application.application,
+            application.at,
+        )
+        .await?;
+        let total = sqlx::query_as::<_, Totals>(
+            "SELECT corpus_id, document_id, COALESCE(imported_count, 0)::bigint + observed_count AS applied_count, \
+             GREATEST(imported_last_applied_at, observed_last_applied_at) AS last_applied_at, \
+             imported_count IS NOT NULL AS baseline_imported FROM knowledge_usage WHERE corpus_id=$1 AND document_id=$2"
+        ).bind(corpus).bind(application.document).fetch_one(&mut *connection).await?;
+        // A migration baseline cannot be inferred from post-cutover observations.
+        if !application.imported || total.baseline_imported {
+            totals.push(total);
+        }
+    }
+    Ok(totals)
 }

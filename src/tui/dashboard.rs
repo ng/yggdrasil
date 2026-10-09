@@ -64,11 +64,10 @@ pub struct DashboardView {
     /// Live session count per agent, refreshed with the rest of the state.
     pub live_sessions_by_agent: HashMap<Uuid, i64>,
 
-    /// Corpus totals for the system-pulse DB line. Refreshed every tick —
+    /// Coordination totals for the system-pulse DB line. Refreshed every tick —
     /// cheap COUNTs on indexed tables.
     pub db_tasks_open: i64,
     pub db_tasks_total: i64,
-    pub db_learnings: i64,
     pub db_locks_active: i64,
 
     /// Inline rename buffer on the agents panel. When `Some`, typed keys
@@ -220,7 +219,6 @@ impl DashboardView {
             live_sessions_by_agent: HashMap::new(),
             db_tasks_open: 0,
             db_tasks_total: 0,
-            db_learnings: 0,
             db_locks_active: 0,
             rename: None,
             msg: None,
@@ -579,7 +577,7 @@ impl DashboardView {
         self.cache_total_24h = ch24 + cc24;
         self.redactions_24h = r24;
 
-        // Coordination totals stay independent of the guarded knowledge read.
+        // Coordination totals do not query knowledge content.
         // All target tables are indexed. locks_active
         // excludes expired rows since a held lock is ttl-bound, not just a
         // row existence.
@@ -592,22 +590,8 @@ impl DashboardView {
         .fetch_one(pool)
         .await
         .unwrap_or((0, 0, 0));
-        // Keep coordination totals available when legacy knowledge is fenced or
-        // has moved to OKF. The compatibility read still holds its own lease.
-        let learnings = async {
-            let mut transaction =
-                crate::knowledge::guard::legacy_transaction(pool, false, None).await?;
-            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM learnings")
-                .fetch_one(&mut *transaction)
-                .await?;
-            transaction.commit().await?;
-            Ok::<_, sqlx::Error>(count)
-        }
-        .await
-        .unwrap_or(0);
         self.db_tasks_open = tasks_open;
         self.db_tasks_total = tasks_total;
-        self.db_learnings = learnings;
         self.db_locks_active = locks_active;
 
         // Prompts per hour sparkline, 24h — global across agents.

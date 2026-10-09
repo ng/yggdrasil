@@ -314,3 +314,122 @@ async fn wide_totals_remain_lossless_and_legacy_conversion_never_wraps() {
     assert!(actual.legacy_usage().is_err());
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn emitted_batches_are_idempotent_and_do_not_invent_imported_baselines() {
+    use ygg::knowledge::telemetry::{Application, record_batch};
+    let f = Fixture::new().await;
+    let corpus = Uuid::new_v4();
+    let applications: Vec<_> = [false, true]
+        .into_iter()
+        .map(|imported| Application {
+            document: Uuid::new_v4(),
+            application: Uuid::new_v4(),
+            at: Utc::now(),
+            imported,
+        })
+        .collect();
+    for _ in 0..2 {
+        let mut transaction = f.pool.begin().await.unwrap();
+        let cache = record_batch(&mut transaction, corpus, &applications)
+            .await
+            .unwrap();
+        assert_eq!(
+            cache.len(),
+            1,
+            "unseeded imported observations cannot stand in for total usage"
+        );
+        assert_eq!(cache[0].applied_count, 1);
+        transaction.commit().await.unwrap();
+    }
+    let repo = Telemetry::new(&f.pool);
+    repo.seed(&Usage {
+        corpus_id: corpus,
+        document_id: applications[1].document,
+        applied_count: 42,
+        last_applied_at: None,
+    })
+    .await
+    .unwrap();
+    let mut transaction = f.pool.begin().await.unwrap();
+    let cache = record_batch(&mut transaction, corpus, &applications)
+        .await
+        .unwrap();
+    assert_eq!(cache.len(), 2);
+    assert_eq!(
+        cache
+            .iter()
+            .find(|t| t.document_id == applications[1].document)
+            .unwrap()
+            .applied_count,
+        43
+    );
+    transaction.commit().await.unwrap();
+    let pending: Vec<_> = applications
+        .iter()
+        .cloned()
+        .map(|mut a| {
+            a.application = Uuid::new_v4();
+            a
+        })
+        .collect();
+    let mut transaction = f.pool.begin().await.unwrap();
+    record_batch(&mut transaction, corpus, &pending)
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        repo.get(corpus, applications[0].document)
+            .await
+            .unwrap()
+            .unwrap()
+            .applied_count,
+        1
+    );
+    assert_eq!(
+        repo.get(corpus, applications[1].document)
+            .await
+            .unwrap()
+            .unwrap()
+            .applied_count,
+        43
+    );
+    let mut workers = Vec::new();
+    for index in 0..20 {
+        let pool = f.pool.clone();
+        let mut batch = applications.clone();
+        for a in &mut batch {
+            a.application = Uuid::new_v4();
+        }
+        if index % 2 == 0 {
+            batch.reverse();
+        }
+        workers.push(tokio::spawn(async move {
+            let mut transaction = pool.begin().await.unwrap();
+            record_batch(&mut transaction, corpus, &batch)
+                .await
+                .unwrap();
+            transaction.commit().await.unwrap();
+        }));
+    }
+    for worker in workers {
+        worker.await.unwrap();
+    }
+    assert_eq!(
+        repo.get(corpus, applications[0].document)
+            .await
+            .unwrap()
+            .unwrap()
+            .applied_count,
+        21
+    );
+    assert_eq!(
+        repo.get(corpus, applications[1].document)
+            .await
+            .unwrap()
+            .unwrap()
+            .applied_count,
+        63
+    );
+    f.cleanup().await;
+}

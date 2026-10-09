@@ -210,6 +210,53 @@ impl Context {
         }
         Ok(baseline)
     }
+    /// Merge committed operational totals without overwriting a newer concurrent
+    /// publisher. This disposable cache is bounded separately from migration baselines.
+    pub fn cache_usage(&self, totals: &[super::telemetry::Totals]) -> Result<()> {
+        self.policy
+            .update_optional_control("usage-snapshot.json", |prior| {
+                let mut cached = prior
+                    .and_then(|text| serde_json::from_str::<UsageSnapshot>(text).ok())
+                    .filter(|s| {
+                        s.version == 1
+                            && s.corpus_id == self.mappings.corpus_id
+                            && s.totals.len() <= 10_000
+                            && s.totals
+                                .iter()
+                                .all(|(id, u)| *id == u.document_id && u.corpus_id == s.corpus_id)
+                    })
+                    .unwrap_or_else(|| UsageSnapshot {
+                        version: 1,
+                        corpus_id: self.mappings.corpus_id,
+                        totals: BTreeMap::new(),
+                    });
+                for total in totals {
+                    ensure!(
+                        total.corpus_id == cached.corpus_id,
+                        "usage publisher corpus mismatch"
+                    );
+                    let usage = match total.legacy_usage() {
+                        Ok(usage) => usage,
+                        Err(_) => {
+                            eprintln!("knowledge: usage total exceeds legacy counter range");
+                            continue;
+                        }
+                    };
+                    let regressed = cached.totals.get(&usage.document_id).is_some_and(|old| {
+                        usage.applied_count < old.applied_count
+                            || usage.last_applied_at < old.last_applied_at
+                    });
+                    if !regressed {
+                        cached.totals.insert(usage.document_id, usage);
+                    }
+                }
+                ensure!(
+                    cached.totals.len() <= 10_000,
+                    "usage cache exceeds 10000 documents"
+                );
+                Ok((serde_json::to_string(&cached)?, ()))
+            })
+    }
     pub fn repo(&self, cwd: &Path) -> Result<Uuid> {
         self.registry.resolve(&GitIdentity::discover(cwd)?)?
             .ok_or_else(|| anyhow!("repository has no explicit knowledge binding; use --global only for intentional global scope"))
@@ -221,13 +268,7 @@ impl Context {
         pool: &sqlx::PgPool,
         legacy_repo: Uuid,
     ) -> Result<(Uuid, sqlx::Transaction<'static, sqlx::Postgres>)> {
-        let transaction = super::guard::selected_transaction(
-            pool,
-            self.mappings.database_id,
-            self.mappings.corpus_id,
-            self.generation,
-        )
-        .await?;
+        let transaction = self.storage_lease(pool).await?;
         let repo = self
             .registry
             .from_legacy(self.mappings.database_id, legacy_repo)?;
@@ -236,6 +277,19 @@ impl Context {
             "task repository has no matching selection binding"
         );
         Ok((repo, transaction))
+    }
+    /// Optional connected observations must target this exact selected generation.
+    pub async fn storage_lease(
+        &self,
+        pool: &sqlx::PgPool,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        super::guard::selected_transaction(
+            pool,
+            self.mappings.database_id,
+            self.mappings.corpus_id,
+            self.generation,
+        )
+        .await
     }
     pub fn agent(&self, name: &str) -> Option<Uuid> {
         self.agents.get(name).copied()

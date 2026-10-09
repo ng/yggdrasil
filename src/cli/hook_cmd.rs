@@ -210,6 +210,7 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let mut legacy_knowledge = true;
+    let mut observed = None;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if matches!(tool, "Edit" | "Write" | "NotebookEdit") && !file.is_empty() {
         match crate::knowledge::runtime::Context::from_environment(std::env::vars().collect()) {
@@ -225,7 +226,10 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
                     &context.default_agent_name,
                     session,
                 ) {
-                    Ok(lines) => print_edit_context(&lines),
+                    Ok(emission) => {
+                        print_edit_context(&emission.lines);
+                        observed = Some((context, emission.applications));
+                    }
                     Err(error) => eprintln!("knowledge: edit-time rules unavailable: {error}"),
                 }
             }
@@ -238,11 +242,28 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
     }
     // Knowledge is emitted independently. Coordination can still acquire shared
     // locks while healthy, but a failed query cannot indefinitely delay the hook.
-    let _ = tokio::time::timeout(
+    if let Ok(Ok(Some(pool))) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         pre_tool_coordination(agent_name, payload, legacy_knowledge),
     )
-    .await;
+    .await
+    {
+        if let Some((context, applications)) =
+            observed.filter(|(_, applications)| !applications.is_empty())
+        {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                context.storage_lease(&pool),
+            )
+            .await
+            {
+                Ok(Ok(lease)) => {
+                    crate::knowledge::usage::after_emission(&context, lease, &applications).await
+                }
+                _ => eprintln!("knowledge: optional usage telemetry unavailable"),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -250,7 +271,7 @@ async fn pre_tool_coordination(
     agent_name: &str,
     payload: &serde_json::Value,
     legacy_knowledge: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<sqlx::PgPool>> {
     let tool_name = payload
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -268,11 +289,11 @@ async fn pre_tool_coordination(
     // Best-effort DB connection — if unavailable, exit silently.
     let config = match AppConfig::from_env() {
         Ok(c) => c,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(None),
     };
     let pool = match crate::db::connect(&config.database).await {
         Ok(p) => p,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(None),
     };
 
     // Record tool use for dashboard visibility (silent, ignore errors).
@@ -287,13 +308,13 @@ async fn pre_tool_coordination(
     match tool_name {
         "Edit" | "Write" | "NotebookEdit" => {
             if file_path.is_empty() {
-                return Ok(());
+                return Ok(Some(pool));
             }
 
             let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
             let agent = match agent_repo.get_by_name(agent_name).await {
                 Ok(Some(a)) => a,
-                _ => return Ok(()),
+                _ => return Ok(Some(pool)),
             };
 
             let lock_mgr = LockManager::new(&pool, config.lock_ttl_secs, crate::db::user_id());
@@ -325,7 +346,7 @@ async fn pre_tool_coordination(
         _ => {}
     }
 
-    Ok(())
+    Ok(Some(pool))
 }
 
 // ── PreCompact ──────────────────────────────────────────────────────────────

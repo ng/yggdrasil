@@ -109,9 +109,7 @@ fn render(context: &Context, snapshot: Snapshot, pending: bool, json: bool) -> R
         })
         .collect::<Result<Vec<Learning>>>()?;
     if !rows.is_empty() {
-        eprintln!(
-            "knowledge: usage totals are last-known local values; live telemetry refresh is unavailable"
-        );
+        eprintln!("knowledge: usage totals are last-known local values");
     }
     if json {
         println!(
@@ -214,7 +212,7 @@ pub fn surface_for_edit(
     file: &str,
     agent: &str,
     session: &str,
-) -> Result<Vec<String>> {
+) -> Result<Emission> {
     format_documents(crate::knowledge::injection::for_edit(
         context, file, agent, session,
     )?)
@@ -226,16 +224,31 @@ pub fn surface_for_files(
     files: &[String],
     agent: &str,
     kind: &str,
-) -> Result<Vec<String>> {
+) -> Result<Emission> {
     format_documents(crate::knowledge::injection::for_task(
         context, repo, files, agent, kind,
     )?)
 }
 
+pub struct Emission {
+    pub lines: Vec<String>,
+    pub applications: Vec<crate::knowledge::telemetry::Application>,
+}
+
 fn format_documents(
     documents: Vec<crate::knowledge::store::RevisionedDocument>,
-) -> Result<Vec<String>> {
-    documents
+) -> Result<Emission> {
+    let applications = documents
+        .iter()
+        .map(|doc| crate::knowledge::telemetry::Application {
+            document: doc.key.id,
+            application: Uuid::new_v4(),
+            at: chrono::Utc::now(),
+            // Malformed provenance cannot justify caching a fabricated zero baseline.
+            imported: legacy::is_imported(&doc.document).unwrap_or(true),
+        })
+        .collect();
+    let lines = documents
         .into_iter()
         .map(|doc| {
             let p = doc
@@ -253,5 +266,9 @@ fn format_documents(
                 super::short(&doc.document.body, 200)
             ))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Emission {
+        lines,
+        applications,
+    })
 }

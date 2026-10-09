@@ -277,14 +277,17 @@ pub async fn print_for_claim(
     let result = async {
         match Context::from_environment(std::env::vars().collect())? {
             Some(context) => {
-                let (repo, _lease) = tokio::time::timeout(
+                let (repo, lease) = tokio::time::timeout(
                     std::time::Duration::from_secs(3),
                     context.task_scope(pool, repo),
                 )
                 .await??;
-                for line in local::surface_for_files(&context, repo, files, agent, kind)? {
+                let emission = local::surface_for_files(&context, repo, files, agent, kind)?;
+                for line in &emission.lines {
                     println!("{line}");
                 }
+                crate::knowledge::usage::after_emission(&context, lease, &emission.applications)
+                    .await;
             }
             None => {
                 for line in

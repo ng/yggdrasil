@@ -22,3 +22,6 @@ pub mod runtime;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod injection;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod usage;

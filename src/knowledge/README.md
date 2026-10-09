@@ -504,8 +504,9 @@ and bounded to 64 MiB. A corrupt optional cache falls back to migration baseline
 a cache that predates the baseline cannot reduce its count or last-applied time.
 Imported rules without any recorded totals produce a repair diagnostic rather
 than fabricated zero counts. New rules begin at zero. CLI listing labels these
-values as last-known on stderr while preserving the JSON schema. The live
-telemetry refresh/cache publisher still needs integration. Neither usage file is part of a rule's activation digest.
+values as last-known on stderr while preserving the JSON schema. Successful connected rule emissions refresh the optional cache as described below;
+explicit offline browsing does not query PostgreSQL. Neither usage file is part of
+a rule's activation digest.
 
 ### Prime during coordination outages
 
@@ -523,8 +524,8 @@ Healthy coordination still supplies agent/task/lock state. Handoff reads have a
 separate half-second bound and an unavailable indicator; no local handoff copy is
 invented. Degraded output states that coordination and handoff were not loaded,
 without echoing database credentials or claiming that shared locks work offline.
-SessionStart and PreCompact inherit this path. Optional live telemetry and TUI
-integration remain open.
+SessionStart and PreCompact inherit this path. The dashboard no longer queries
+an unused SQL learning count; database-health views inspect relation metadata only.
 
 ### Edit-time injection and session receipts
 
@@ -555,8 +556,7 @@ cache cannot be used or written, the hook freshly revalidates eligible rules and
 emits them with a duplicates-possible diagnostic. Missing session IDs skip
 deduplication. These disposable receipts are excluded from backups, contain no
 exclusive knowledge or activation evidence, and may be removed explicitly when
-sessions are no longer active. Automatic cache retention cleanup and live
-telemetry recording remain unfinished, as does TUI integration.
+sessions are no longer active. Automatic session-cache retention cleanup remains unfinished.
 
 ### Connected task-claim injection
 
@@ -576,4 +576,36 @@ reader/transition-trigger lock inversion. File order, file/rule predicates,
 agent/kind matching and within-call UUID deduplication retain the SQL behavior;
 when no paths are mentioned, only rules without file or rule scope are included.
 Current document bytes, activation, trust and freshness are revalidated before
-formatting. Local claim injection does not yet record optional usage telemetry.
+formatting. Optional usage recording follows output, as described below.
+
+### Optional connected usage observations
+
+After printing selected rules, task claims and healthy edit hooks record one
+application UUID per emitted document. Hook session suppression produces no new
+application. The connection must match the selected database, corpus, generation
+and client protocol. Task claims reuse their selection transaction; hooks acquire
+a separate verified lease only after local output and coordination. They do not
+write counters to frozen SQL learning rows or to authoritative documents.
+
+Batches use consistent document lock ordering and commit all increments together.
+Application IDs make a retry of the same batch idempotent. The CLI itself does not
+retry ambiguous commits, spool offline events or promise exact delivery counts:
+a crash/outage after output can leave an unrecorded observation. Database recording
+is bounded to 500 ms, with an additional 500 ms acquisition bound for hooks.
+Counter failures never undo claims, suppress rules or block knowledge writes.
+
+Only committed totals update `usage-snapshot.json`, after the database lease ends.
+The publisher serializes with a two-second writer-lock bound, prevents concurrent
+count/time regression, rejects wrong corpus identity and recovers malformed cache
+state. Publication is capped at 10,000 documents and 1 MiB; oversized or unavailable
+cache state leaves database observations intact. Values outside the legacy i32
+contract are diagnosed rather than clamped. Imported documents cannot cache an
+observed-only total until their migration baseline has been seeded. Baselines
+remain separate, authoritative migration metadata; they are never guessed from
+current counters. Broader cross-client refresh and automatic cache retention are
+still separate work.
+
+Persistent lock files are opened by existing inode or exclusive creation, with a
+bounded retry if another creator wins. This avoids a reproduced concurrent first
+creation failure on macOS without replacing a held lock. The usage-cache fixture
+races twenty independent contexts over five fresh directories.
