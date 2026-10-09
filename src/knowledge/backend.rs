@@ -65,6 +65,20 @@ impl View {
         Ok(view)
     }
 }
+
+/// Parse exact remote blobs using the same inventory as ordinary shared reads.
+/// The temporary view is disposable and never becomes authoritative evidence.
+pub(super) fn recovery_snapshot(root: &Path, snapshot: RemoteSnapshot) -> Result<Snapshot> {
+    let view = View::create(root, snapshot)?;
+    let current = view.store.snapshot();
+    ensure!(
+        current.diagnostics.is_empty(),
+        "incomplete shared recovery corpus: {:?}",
+        current.diagnostics
+    );
+    Ok(current)
+}
+
 impl Backend {
     pub fn shared(root: &Path, transport: SharedGit, refresh: bool) -> Result<Self> {
         let cached = if !refresh {

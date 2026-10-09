@@ -65,6 +65,11 @@ pub struct Change {
 pub struct Receipt {
     pub commit: String,
 }
+
+pub struct RecoverySnapshot {
+    pub commit: String,
+    pub current: super::store::Snapshot,
+}
 #[derive(Serialize)]
 pub struct PendingInfo {
     pub commit: String,
@@ -481,6 +486,72 @@ impl SharedGit {
             confirmed_at: state.confirmed_at,
         })
     }
+
+    /// Recheck the exact remote branch without fetching or changing saved local
+    /// objects. The retained paired backup supplies our local transport lease;
+    /// remote writers still require fleet quiescence through the final commit.
+    pub fn verify_recovery(
+        &self,
+        recovery: &super::store::PairedBackup,
+        expected_commit: &str,
+    ) -> Result<()> {
+        recovery.verify_corpus_root(&self.control, &self.root)?;
+        oid(expected_commit.as_bytes())?;
+        ensure!(
+            self.pending()?.is_none(),
+            "resolve pending shared publication before rollback"
+        );
+        let state: State = serde_json::from_str(
+            &self
+                .control
+                .read_control("snapshot.json")?
+                .ok_or_else(|| anyhow!("no confirmed shared snapshot"))?,
+        )?;
+        ensure!(
+            !state.blocked && state.commit == expected_commit,
+            "recovery commit differs from confirmed shared state"
+        );
+        let reference = format!("refs/heads/{}", self.config.branch);
+        let output = self.checked(
+            &[
+                "ls-remote",
+                "--refs",
+                "--exit-code",
+                "--",
+                &self.config.remote,
+                &reference,
+            ],
+            &[],
+            None,
+        )?;
+        let fields: Vec<_> = std::str::from_utf8(&output)?.split_whitespace().collect();
+        ensure!(
+            fields.len() == 2
+                && fields[1] == reference
+                && oid(fields[0].as_bytes())? == expected_commit,
+            "remote branch changed since recovery capture"
+        );
+        recovery.verify_corpus_root(&self.control, &self.root)
+    }
+
+    /// Refresh before taking the paired backup. Afterward this reads only its
+    /// confirmed objects, never a materialized cache or an unconfirmed draft.
+    pub fn recovery_snapshot(
+        &self,
+        recovery: &super::store::PairedBackup,
+    ) -> Result<RecoverySnapshot> {
+        recovery.verify_corpus_root(&self.control, &self.root)?;
+        let snapshot = self.cached()?;
+        ensure!(
+            snapshot.is_current,
+            "shared recovery snapshot is not current"
+        );
+        self.verify_recovery(recovery, &snapshot.commit)?;
+        let commit = snapshot.commit.clone();
+        let current = super::backend::recovery_snapshot(&self.root, snapshot)?;
+        self.verify_recovery(recovery, &commit)?;
+        Ok(RecoverySnapshot { commit, current })
+    }
     pub(crate) fn invalidate_cached(&self, snapshot: &Snapshot) -> Result<()> {
         let _lease = self.control.bounded_lock(".shared.lock")?;
         self.control.update_control("snapshot.json", |prior| {
@@ -852,6 +923,99 @@ mod tests {
             replacement: Some(text.to_vec()),
         }
     }
+    #[test]
+    fn recovery_pins_confirmed_objects_and_rejects_remote_changes_outage_and_drafts() {
+        let (temp, config) = fixture();
+        let root = temp.path().join("recovery-cache");
+        let transport = SharedGit::open(&root, config.clone()).unwrap();
+        let doc = super::super::document::Document::parse(include_str!(
+            "../../tests/fixtures/knowledge/rule.md"
+        ))
+        .unwrap();
+        let key = super::super::store::Key::from_document(&doc).unwrap();
+        transport
+            .change(&[Change {
+                path: key.relative_path().to_str().unwrap().into(),
+                expected: None,
+                replacement: Some(doc.serialize().unwrap().into_bytes()),
+            }])
+            .unwrap();
+        let confirmed = transport.refresh().unwrap();
+        let source = KnowledgeStore::open(&root, false).unwrap();
+        let policy = KnowledgeStore::open(&temp.path().join("policy"), true).unwrap();
+        let saved = source
+            .backup_pair_retained(
+                &policy,
+                &temp.path().join("archive"),
+                &temp.path().join("policy-archive"),
+            )
+            .unwrap();
+        let recovered = transport.recovery_snapshot(&saved).unwrap();
+        assert_eq!(recovered.commit, confirmed.commit);
+        assert_eq!(recovered.current.documents.len(), 1);
+        assert_eq!(
+            recovered.current.documents[0].revision,
+            digest(&confirmed.files[key.relative_path().to_str().unwrap()])
+        );
+        saved.verify_sources().unwrap();
+        // No fetch updates the saved refs/objects if another host changes the tip.
+        let moved = temp.path().join("moved-cache");
+        std::fs::rename(&root, &moved).unwrap();
+        assert!(
+            transport
+                .verify_recovery(&saved, &recovered.commit)
+                .is_err()
+        );
+        std::fs::rename(&moved, &root).unwrap();
+        transport
+            .verify_recovery(&saved, &recovered.commit)
+            .unwrap();
+        let other = SharedGit::open(&temp.path().join("other"), config.clone()).unwrap();
+        assert!(other.recovery_snapshot(&saved).is_err());
+        other
+            .change(&[edit(b"remote changed\n", b"original\n")])
+            .unwrap();
+        assert!(
+            transport
+                .verify_recovery(&saved, &recovered.commit)
+                .is_err()
+        );
+        assert!(transport.recovery_snapshot(&saved).is_err());
+        saved.verify_sources().unwrap();
+        let remote = PathBuf::from(&config.remote);
+        std::fs::rename(&remote, temp.path().join("offline.git")).unwrap();
+        assert!(
+            transport
+                .verify_recovery(&saved, &recovered.commit)
+                .is_err()
+        );
+        std::fs::rename(temp.path().join("offline.git"), &remote).unwrap();
+        drop(saved);
+        transport.refresh().unwrap();
+        let now = transport.cached().unwrap().commit;
+        transport
+            .control
+            .update_control("pending.json", |_| {
+                Ok((
+                    serde_json::to_string(&Pending {
+                        commit: now.clone(),
+                        base: now.clone(),
+                    })?,
+                    (),
+                ))
+            })
+            .unwrap();
+        let saved = source
+            .backup_pair_retained(
+                &policy,
+                &temp.path().join("draft-archive"),
+                &temp.path().join("draft-policy"),
+            )
+            .unwrap();
+        assert!(transport.recovery_snapshot(&saved).is_err());
+        saved.verify_sources().unwrap();
+    }
+
     #[test]
     fn two_hosts_reject_conflicts_retry_disjoint_changes_and_confirm_remote_reachability() {
         let (temp, config) = fixture();

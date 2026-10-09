@@ -285,6 +285,31 @@ pub async fn capture_recovery_on(
     Ok(candidate)
 }
 
+#[derive(Serialize)]
+pub struct SharedCandidate {
+    pub commit: String,
+    pub candidate: Candidate,
+}
+
+/// Capture shared rollback from a retained transport/policy backup and a freshly
+/// verified authoritative commit. Keep the recovery and selection leases through
+/// apply/commit, quiesce every remote writer, and recheck the remote before commit.
+pub async fn capture_shared_recovery_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    original: &Manifest,
+    transport: &super::shared::SharedGit,
+    recovery: &super::store::PairedBackup,
+    fenced_generation: i64,
+) -> Result<SharedCandidate> {
+    let snapshot = transport.recovery_snapshot(recovery)?;
+    let candidate = capture_on(transaction, original, &snapshot.current, fenced_generation).await?;
+    transport.verify_recovery(recovery, &snapshot.commit)?;
+    Ok(SharedCandidate {
+        commit: snapshot.commit,
+        candidate,
+    })
+}
+
 /// Low-level fenced SQL apply. The owning migration workflow must retain the
 /// current bundle/usage evidence and its filesystem leases, then commit this
 /// transaction only after all rollback checks pass. This never selects SQL.

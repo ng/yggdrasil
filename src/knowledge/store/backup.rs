@@ -40,6 +40,17 @@ pub struct PairedBackup {
 }
 
 impl PairedBackup {
+    pub(crate) fn verify_corpus_root(&self, source: &KnowledgeStore, path: &Path) -> Result<()> {
+        let expected = self.corpus_root.metadata()?;
+        for actual in [source.root.metadata()?, std::fs::symlink_metadata(path)?] {
+            ensure!(
+                actual.is_dir() && actual.dev() == expected.dev() && actual.ino() == expected.ino(),
+                "recovery backup belongs to a different corpus root"
+            );
+        }
+        self.verify_sources()
+    }
+
     pub fn corpus(&self) -> &KnowledgeBackup {
         &self.corpus
     }

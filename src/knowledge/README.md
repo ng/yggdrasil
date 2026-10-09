@@ -476,9 +476,19 @@ the leases. Independent editors still require explicit quiescence.
 `reverse::capture_recovery_on` parses the guarded private corpus, captures database
 usage and rechecks both inventories before returning the candidate. Hold the
 selection lease before capture and retain the backup guard through apply/commit.
-Shared cache roots are rejected here: shared rollback must pin and validate its
-authoritative Git tree separately. Neither helper publishes configuration or
-handles an uncertain database commit; those remain orchestrator responsibilities.
+Shared cache roots are rejected by the private helper. Shared rollback uses
+`SharedGit::recovery_snapshot` and `reverse::capture_shared_recovery_on`: refresh
+before capturing the transport/policy backup, then retain its leases while reading
+the saved confirmed Git objects. Recovery checks the root identity, requires no
+pending draft, rejects blocked/superseded local state and verifies the exact branch
+tip with a live read-only remote request. It never fetches into the saved object
+store or falls back during remote failure. Parsing uses the ordinary shared-read
+inventory over the exact commit blobs; disposable views are not recovery evidence.
+The shared candidate includes its commit ID. Recheck `verify_recovery` before
+committing SQL and keep all remote writers quiesced: a local lease and repeated
+remote checks cannot prevent another host from publishing after the check.
+Neither helper publishes configuration or handles an uncertain database commit;
+those remain orchestrator responsibilities.
 
 `reverse::apply_on` and the owner-only `ygg_knowledge_reverse_import` function
 provide the SQL apply layer. The function takes an exclusive generation lease,

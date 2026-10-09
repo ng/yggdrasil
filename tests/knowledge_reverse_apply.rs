@@ -242,6 +242,38 @@ async fn capture_uses_frozen_database_totals_and_rejects_missing_or_conflicting_
         tx.commit().await.unwrap();
         drop(recovery);
         assert_eq!(sqlx::query_scalar::<_,i32>("SELECT applied_count FROM learnings WHERE learning_id=$1").bind(rule).fetch_one(&f.pool).await.unwrap(), 7);
+        // The same rollback rows can be captured from a pinned authoritative Git tree.
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git").arg("-C").arg(cwd)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(args).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(temp.path(), &["init", "-b", "knowledge", seed.to_str().unwrap()]);
+        git(&seed, &["commit", "--allow-empty", "-m", "initial"]);
+        git(&seed, &["push", remote.to_str().unwrap(), "HEAD:refs/heads/knowledge"]);
+        let shared_root = temp.path().join("shared");
+        let transport = ygg::knowledge::shared::SharedGit::open(&shared_root, ygg::knowledge::shared::Config {
+            version: 1, remote: remote.to_str().unwrap().into(), branch: "knowledge".into()
+        }).unwrap();
+        let changes: Vec<_> = snapshot.documents.iter().map(|d| ygg::knowledge::shared::Change {
+            path: d.key.relative_path().to_str().unwrap().into(), expected: None,
+            replacement: Some(d.document.serialize().unwrap().into_bytes())
+        }).collect();
+        let published = transport.change(&changes).unwrap();
+        let shared = KnowledgeStore::open(&shared_root, false).unwrap();
+        let saved = shared.backup_pair_retained(&policy, &temp.path().join("shared-archive"), &temp.path().join("shared-policy")).unwrap();
+        let mut tx = f.pool.begin().await.unwrap();
+        let captured = reverse::capture_shared_recovery_on(&mut tx, &manifest, &transport, &saved, 4).await.unwrap();
+        assert_eq!(captured.commit, published.commit);
+        assert_eq!(serde_json::to_value(&captured.candidate).unwrap(), serde_json::to_value(&candidate).unwrap());
+        reverse::apply_on(&mut tx, &captured.candidate, 4).await.unwrap();
+        transport.verify_recovery(&saved, &captured.commit).unwrap();
+        tx.rollback().await.unwrap();
+        drop(saved);
         // Table locks are released on commit, and overflow is rejected instead of clamped.
         sqlx::query("UPDATE knowledge_usage SET observed_count=2147483647 WHERE corpus_id=$1 AND document_id=$2").bind(mappings.corpus_id).bind(rule).execute(&f.pool).await.unwrap();
         let mut tx = f.pool.begin().await.unwrap();
