@@ -255,3 +255,30 @@ pub async fn rollback(
     }
     Ok(())
 }
+
+pub async fn refresh_usage(json: bool) -> Result<()> {
+    let context = crate::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
+        .ok_or_else(|| anyhow::anyhow!("usage refresh requires selected OKF storage"))?;
+    let config = crate::config::AppConfig::from_env()?;
+    let report = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let pool = crate::db::connect(&config.database).await?;
+        let result = crate::knowledge::usage::refresh(&context, &pool).await;
+        pool.close().await;
+        result
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("usage refresh timed out"))??;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Observed usage for {} of {} rules; {} absent, {} missing imported baselines, {} outside legacy counter range. Local totals never regress.",
+            report.observed,
+            report.requested,
+            report.missing,
+            report.missing_baseline,
+            report.unrepresentable
+        );
+    }
+    Ok(())
+}

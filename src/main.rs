@@ -48,6 +48,11 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Refresh last-known local usage counters from the selected database
+    RefreshUsage {
+        #[arg(long)]
+        json: bool,
+    },
     /// Audit live database client compatibility; offline hosts remain unverified
     Clients {
         #[arg(long)]
@@ -1405,6 +1410,9 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Knowledge { action } => match action {
+            KnowledgeAction::RefreshUsage { json } => {
+                ygg::cli::knowledge_cmd::refresh_usage(json).await?
+            }
             KnowledgeAction::Pending { json } => ygg::cli::knowledge_cmd::pending(json)?,
             KnowledgeAction::Recover {
                 commit,

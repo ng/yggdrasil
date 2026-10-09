@@ -777,6 +777,17 @@ values as last-known on stderr while preserving the JSON schema. Successful conn
 explicit offline browsing does not query PostgreSQL. Neither usage file is part of
 a rule's activation digest.
 
+`ygg knowledge refresh-usage [--json]` explicitly fetches other clients' committed
+usage for the current user's active and pending local rules. It verifies database,
+corpus and storage generation under a shared migration lease, queries at most
+10,000 document IDs, then releases SQL before merging the private optional cache.
+The connection/query attempt is limited to five seconds. Missing SQL rows,
+incomplete imported baselines and counters outside the legacy integer range are
+reported separately and retain their prior local values. Concurrent or older
+observations cannot lower cached totals. This command does not record applications,
+change documents/approval, repair missing migration baselines, or spool offline
+usage. Ordinary listing and hook retrieval keep their existing offline behavior.
+
 ### Prime during coordination outages
 
 `prime` resolves local knowledge selection independently of coordination. With a
