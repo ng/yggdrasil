@@ -213,3 +213,26 @@ preserving connections. Observing one successful probe does not certify a
 transaction-pooling endpoint as compatible. Integration tests terminate the
 actual lock backend, verify work cancellation and daemon exit while other pooled
 connections remain healthy, then acquire replacement authority.
+
+## External TLS
+
+External remote TCP connections default to `sslmode=verify-full`: SQLx verifies
+both the certificate chain and the requested hostname. Explicit weaker modes
+(including `require` and `verify-ca`) are rejected for remote hosts. Unix sockets,
+`localhost` and loopback IP endpoints retain their configured modes for local
+PostgreSQL compatibility; select `verify-full` explicitly when TLS is required
+on a local tunnel or proxy. The effective SQLx host/socket, including URL query
+overrides, determines which policy applies.
+
+A private CA can be configured through `sslrootcert` in the database URL or
+`PGSSLROOTCERT` in the user environment. For example:
+
+```text
+postgres://user@db.example.com/ygg?sslmode=verify-full&sslrootcert=/absolute/ca.pem
+```
+
+Unknown URL parameters and parse errors are rejected without echoing values,
+before SQLx can log ignored parameters. Keep credentials in user-owned config or
+environment. A native test creates a disposable CA/server certificate, verifies
+an encrypted session, rejects an unrelated CA and hostname mismatch, and refuses
+a server that does not offer TLS. The native release matrix runs this test.

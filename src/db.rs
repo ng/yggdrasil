@@ -15,6 +15,7 @@ pub mod runtime;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod supervisor;
 
+pub mod external;
 pub mod singleton;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 32;
@@ -57,7 +58,7 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .unwrap_or(DEFAULT_MAX_CONNECTIONS);
     PgPoolOptions::new()
         .max_connections(max_connections)
-        .connect(database_url)
+        .connect_with(external::options(database_url)?)
         .await
 }
 
