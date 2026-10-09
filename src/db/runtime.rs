@@ -117,10 +117,34 @@ fn command(executable: &Path) -> Command {
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .kill_on_drop(true);
+    #[cfg(test)]
+    if executable.file_name().is_some_and(|n| n == "initdb")
+        && std::env::var("YGG_BOOTSTRAP_TEST_PHASE").as_deref() == Ok("orphan")
+    {
+        // The orphan must be able to finish after its parent's pipes disappear.
+        let root = std::env::var("YGG_BOOTSTRAP_TEST_ROOT").unwrap();
+        let log = File::create(Path::new(&root).join("orphan-initdb.log")).unwrap();
+        cmd.stdout(log.try_clone().unwrap()).stderr(log);
+    }
     cmd
 }
 
 async fn output(cmd: &mut Command, duration: Duration) -> Result<String> {
+    #[cfg(test)]
+    if Path::new(cmd.as_std().get_program())
+        .file_name()
+        .is_some_and(|n| n == "initdb")
+        && std::env::var("YGG_BOOTSTRAP_TEST_PHASE").as_deref() == Ok("orphan")
+    {
+        // Command::output replaces explicit stdio with pipes. Preserve the
+        // orphan fixture's files, which must survive the bootstrap parent's death.
+        let mut child = cmd.spawn()?;
+        ensure!(
+            timeout(duration, child.wait()).await??.success(),
+            "fixture initdb failed"
+        );
+        return Ok(String::new());
+    }
     let output = timeout(duration, cmd.output())
         .await
         .context("managed command timed out")??;
@@ -710,6 +734,147 @@ mod bootstrap_tests {
         fn drop(&mut self) {
             let _ = self.0.kill();
             let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires YGG_TEST_PG_BIN and YGG_TEST_PG_MAJOR"]
+    fn bootstrap_live_initdb_orphan() {
+        let temp = tempfile::Builder::new()
+            .prefix("ybo-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = temp.path().canonicalize().unwrap().join("cluster");
+        let mut worker = Worker(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "db::runtime::bootstrap_tests::bootstrap_worker",
+                    "--nocapture",
+                ])
+                .env("YGG_BOOTSTRAP_TEST_ROOT", &root)
+                .env("YGG_BOOTSTRAP_TEST_PHASE", "orphan")
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let (attempt, pid) = loop {
+            assert!(
+                worker.0.try_wait().unwrap().is_none(),
+                "bootstrap finished before orphan capture"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "initdb never reached data creation"
+            );
+            let attempt = fs::read_dir(&root).ok().and_then(|entries| {
+                entries.filter_map(Result::ok).map(|e| e.path()).find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".bootstrap-data-")
+                        && p.join("PG_VERSION").exists()
+                })
+            });
+            if let Some(attempt) = attempt {
+                // Both supported Unix families provide these POSIX ps columns.
+                let ps = std::process::Command::new("/bin/ps")
+                    .args(["-axo", "pid=,ppid=,comm="])
+                    .output()
+                    .unwrap();
+                assert!(ps.status.success());
+                let pid = String::from_utf8(ps.stdout)
+                    .unwrap()
+                    .lines()
+                    .find_map(|line| {
+                        let mut fields = line.split_whitespace();
+                        let pid = fields.next()?.parse::<i32>().ok()?;
+                        let parent = fields.next()?.parse::<u32>().ok()?;
+                        let executable = fields.next()?;
+                        (parent == worker.0.id() && Path::new(executable).file_name()? == "initdb")
+                            .then_some(pid)
+                    });
+                if let Some(pid) = pid {
+                    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+                    break (attempt, pid);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        // On failure, only signal the captured child while it is still stopped.
+        // After continuation it may exit, so never signal a potentially reused PID.
+        struct StoppedOrphan(Option<i32>);
+        impl Drop for StoppedOrphan {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        let mut orphan = StoppedOrphan(Some(pid));
+        // Confirm SIGSTOP was delivered before killing the parent.
+        loop {
+            let ps = std::process::Command::new("/bin/ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&ps.stdout).contains('T') {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "initdb did not stop");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker.0.kill().unwrap();
+        worker.0.wait().unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "real initdb did not survive parent"
+        );
+        let intent: Manifest =
+            serde_json::from_str(&read(&root.join(".bootstrap.json")).unwrap()).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let cluster = runtime
+            .block_on(ManagedCluster::resume_initialization(&root))
+            .unwrap();
+        assert_eq!(cluster.id(), intent.cluster_id);
+        assert!(attempt.exists());
+        let published = fs::read(root.join("data/global/pg_control")).unwrap();
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+        orphan.0 = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let log = fs::read_to_string(root.join("orphan-initdb.log")).unwrap();
+            if log.contains("Success. You can now start the database server") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "orphan initdb did not finish: {log}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            attempt.join("global/pg_control").exists(),
+            "orphan must finish its abandoned cluster"
+        );
+        assert_eq!(
+            fs::read(root.join("data/global/pg_control")).unwrap(),
+            published,
+            "late orphan writes changed published cluster"
+        );
+        assert_ne!(
+            fs::read(attempt.join("global/pg_control")).unwrap(),
+            published
+        );
+        assert_eq!(ManagedCluster::open(&root).unwrap().id(), intent.cluster_id);
+        assert_eq!(runtime.block_on(cluster.status()).unwrap(), Status::Stopped);
+        if cluster.manifest.socket_dir.is_some() {
+            fs::remove_dir_all(cluster.socket_dir()).unwrap();
         }
     }
 

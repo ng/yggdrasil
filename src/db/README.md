@@ -525,3 +525,12 @@ loses its endpoint, it remains unverified: Yggdrasil neither starts a competitor
 signals an unverified PID. Restore the original endpoint directory if it was moved,
 or resolve the server state explicitly before restarting. Ordinary stop keeps the
 small endpoint identity directory so subsequent starts reuse the same binding.
+
+Native bootstrap fault coverage also pauses a real `initdb` after it creates
+`PG_VERSION`, kills only its bootstrap parent, and resumes initialization while
+the orphan remains alive. Recovery publishes a separate attempt with the original
+cluster UUID. The test then resumes the orphan, waits for its successful
+completion in the retained abandoned directory, and verifies that the published
+cluster's control file is unchanged. Test-only output redirection lets the orphan
+finish without depending on pipes owned by the killed parent. The native matrix
+runs this fixture alongside the six publication-boundary crash tests.
