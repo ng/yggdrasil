@@ -43,6 +43,24 @@ fn backup_preserves_exact_bytes_unknown_files_empty_dirs_and_separate_identity()
         0o600
     );
 
+    let recovered = temp.path().join("recovered");
+    assert_eq!(
+        KnowledgeBackup::restore(&target, &recovered).unwrap(),
+        snapshot
+    );
+    assert_eq!(
+        std::fs::read(recovered.join("opaque")).unwrap(),
+        [0, 255, 0, 3]
+    );
+    assert!(recovered.join("empty").is_dir());
+    assert_eq!(
+        std::fs::read(recovered.join(written.key.relative_path())).unwrap(),
+        std::fs::read(source.join(written.key.relative_path())).unwrap()
+    );
+    assert!(KnowledgeBackup::restore(&target, &recovered).is_err());
+    assert!(KnowledgeBackup::restore(&target, &target.join("corpus/nested")).is_err());
+    assert_eq!(KnowledgeBackup::verify(&target).unwrap(), snapshot);
+
     let policy = temp.path().join("policy");
     let registry = IdentityRegistry::open(&policy, true).unwrap();
     let original = registry.initialize(true).unwrap();

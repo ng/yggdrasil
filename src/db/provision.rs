@@ -48,7 +48,7 @@ pub fn runtime_options(cluster: &ManagedCluster) -> PgConnectOptions {
 /// Explicit init/migrate operation, resumable after each committed step. A
 /// dedicated session lock serializes provisioning without weakening the lifetime
 /// process-owner lease. Unexpected roles/databases are rejected, never adopted.
-pub async fn migrate(cluster: &ManagedCluster) -> Result<()> {
+async fn prepare(cluster: &ManagedCluster) -> Result<(PgConnection, PgConnection)> {
     cluster
         .wait_ready(std::time::Duration::from_secs(10))
         .await?;
@@ -125,7 +125,37 @@ pub async fn migrate(cluster: &ManagedCluster) -> Result<()> {
     sqlx::query("REVOKE CREATE ON SCHEMA public FROM PUBLIC, ygg_runtime")
         .execute(&mut owner)
         .await?;
+    Ok((admin, owner))
+}
+
+pub async fn migrate(cluster: &ManagedCluster) -> Result<()> {
+    let (admin, mut owner) = prepare(cluster).await?;
     sqlx::migrate!("./migrations").run(&mut owner).await?;
+    grant_runtime(&mut owner).await?;
+    owner.close().await?;
+    admin.close().await?;
+    Ok(())
+}
+
+/// Restore orchestration calls this only for a newly initialized destination.
+/// Hold the provisioning lease through restore/validation/runtime grants.
+pub(crate) async fn restore(
+    cluster: &ManagedCluster,
+    archive: &mut std::fs::File,
+    expected: &super::backup::DatabaseSnapshot,
+) -> Result<()> {
+    let (admin, owner) = prepare(cluster).await?;
+    owner.close().await?;
+    let options = cluster.admin_options().username(OWNER).database(DATABASE);
+    super::restore::database(cluster.bin(), &options, archive, expected).await?;
+    let mut owner = PgConnection::connect_with(&options).await?;
+    grant_runtime(&mut owner).await?;
+    owner.close().await?;
+    admin.close().await?;
+    Ok(())
+}
+
+async fn grant_runtime(owner: &mut PgConnection) -> Result<()> {
     let mut tx = owner.begin().await?;
     for table in TABLES {
         sqlx::query(&format!(
@@ -150,7 +180,5 @@ pub async fn migrate(cluster: &ManagedCluster) -> Result<()> {
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    owner.close().await?;
-    admin.close().await?;
     Ok(())
 }

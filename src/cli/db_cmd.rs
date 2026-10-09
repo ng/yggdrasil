@@ -151,3 +151,27 @@ pub fn verify_backup(path: &std::path::Path, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+/// Explicit recovery uses the selected target only; it never rewrites user config.
+pub async fn restore(
+    path: &std::path::Path,
+    destination: &std::path::Path,
+    pg_bin: Option<&std::path::Path>,
+    postgres_archive: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let config = DeploymentConfig::load(std::env::vars().collect())?;
+    let receipt =
+        crate::db::deployment_restore::run(&config, path, destination, pg_bin, postgres_archive)
+            .await
+            .context("restore incomplete on failure; inspect retained target before retrying")?;
+    if json {
+        println!("{}", serde_json::to_string(&receipt)?);
+    } else {
+        println!(
+            "Restore validated. Files: {}. Configuration unchanged; keep writers stopped until the deployment switch.",
+            destination.display()
+        );
+    }
+    Ok(())
+}

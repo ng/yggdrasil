@@ -323,7 +323,7 @@ The pinned-package test exports while another transaction commits a new row,
 restores into a disposable empty database and compares every inventoried table
 count, the original UUID and database identity, and a restored check constraint.
 TLS tests exercise native `pg_dump` as well as SQLx. The combined backup command below includes bundle/policy snapshots and publishes
-a manifest. Validated restore and deployment moves remain to be implemented.
+a manifest. Validated restore is described below; automated deployment switching remains unfinished.
 Roles and tablespaces are cluster objects outside this single-database dump;
 restoration must explicitly provision target roles and validate grants.
 
@@ -366,5 +366,66 @@ checks without loading database configuration or contacting a server. It checks
 the exact component inventory, custom archive header, hashes, knowledge revisions
 and corpus binding. It does not establish provenance, validate every SQL object,
 or replace a restore rehearsal. The whole stage is verified and synced before
-exclusive publication. Restore, upgrade and deployment-switch commands remain
-unfinished; no existing database or active configuration is changed by backup.
+exclusive publication. No existing database or active configuration is changed by
+backup. Restore is described below; upgrade and deployment-switch commands remain
+unfinished.
+
+### Validated restore
+
+Create a fresh combined backup before recovery: older manifests without content
+and schema evidence can still be integrity-checked, but `restore` refuses them.
+Backups now record SHA-256 over sorted, length-framed JSONB table rows, alongside
+counts and catalog definitions for relations, columns, constraints, indexes,
+triggers, enum labels, user routines, views, extensions and database encoding/locale.
+Restore compares these
+inside a repeatable-read transaction, including database/storage identity and
+migration checksums. Ownership and ACLs are intentionally rebound rather than
+compared. This is validation of these recorded objects, not a general-purpose
+PostgreSQL catalog equivalence proof; sequence values and arbitrary additional
+provider objects are not independently fingerprinted.
+
+Use only a trusted backup: PostgreSQL archives contain executable SQL, and restored
+policy retains the backup's trust/approval configuration. Keep source and target
+writers stopped throughout a deployment move. External targets must already exist,
+contain no user objects or additional extensions, and have no other connected
+sessions. Use matching database encoding and locale; managed destinations use UTF-8
+and the pinned initializer’s C locale. Supply an owner credential with the required schema/extension privileges;
+external runtime grants remain the operator's responsibility.
+
+```sh
+# DATABASE_URL and YGG_DATABASE_OWNER_URL select the empty target, not the source.
+YGG_DB_MODE=external ygg db restore /private/backups/pre-move \
+  --destination /private/recovery/external \
+  --pg-bin /absolute/postgresql/bin --json
+
+# Recover into an absent data directory using the pinned offline package.
+# Unset DATABASE_URL and YGG_DATABASE_OWNER_URL when selecting managed mode.
+YGG_DB_MODE=managed YGG_DATA_DIR=/private/recovery/new-managed \
+  ygg db restore /private/backups/pre-move \
+  --destination /private/recovery/files \
+  --postgres-archive /private/packages/postgresql.tar.gz --json
+```
+
+The destination directory must be absent under an existing owned parent that is
+not writable by other users. It receives `knowledge/`, `policy/` (when present)
+and `restore.json`. Preserve the restored policy registry: the database identity,
+corpus identity, document UUIDs and existing mappings remain the same. No source
+server connection is made. Existing destinations and managed data directories are
+never replaced. Managed restore provisions fresh owner/runtime roles, restores as
+the limited owner, applies the usual runtime grants, and stops the new target.
+It does not run schema migrations or binary upgrades as part of restoring data.
+
+Native restore uses one transaction, refuses a PostgreSQL major downgrade, checks
+the archive checksum through its open descriptor, and compares the restored state
+before publishing the filesystem receipt. Cancellation kills the native client;
+a disconnected PostgreSQL backend may take time to finish its current statement
+and roll back. An error or lost response is not permission to retry a possibly
+committed operation: retain and inspect the target and private staging directory.
+Validation failure never cleans the target or overwrites the source. The database
+commit and filesystem publication are separate boundaries, so a crash can leave a
+complete target without a published receipt.
+
+`restore.json` always reports `configuration_switched: false`. Keep writers stopped
+until an explicit, reviewed configuration switch selects both the target database
+and restored corpus/policy paths. Automated resumable deployment switching, upgrade
+commands and complete recovery rehearsal gates remain under implementation.

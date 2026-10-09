@@ -210,7 +210,17 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         // Dump and restore use only this disposable cluster. A held table lock
         // delays inventory after its MVCC snapshot starts, so a later committed
         // row must be absent from both the manifest count and restored archive.
-        sqlx::query("CREATE TABLE backup_probe (id uuid PRIMARY KEY, body text NOT NULL CHECK (body <> ''))").execute(&pool).await.unwrap();
+        // Keep real coordination identities and an acknowledged running claim
+        // in the snapshot, including the task/run cycle and idempotency key.
+        let claim_agent: uuid::Uuid = sqlx::query_scalar("INSERT INTO agents(agent_name) VALUES ('restore-owner') RETURNING agent_id").fetch_one(&pool).await.unwrap();
+        let claim_repo: uuid::Uuid = sqlx::query_scalar("INSERT INTO repos(name, task_prefix) VALUES ('restore-repo', 'restore') RETURNING repo_id").fetch_one(&pool).await.unwrap();
+        let claim_task: uuid::Uuid = sqlx::query_scalar("INSERT INTO tasks(repo_id, seq, title, status, assignee) VALUES ($1, 1, 'claimed task', 'in_progress', $2) RETURNING task_id").bind(claim_repo).bind(claim_agent).fetch_one(&pool).await.unwrap();
+        let claim_run: uuid::Uuid = sqlx::query_scalar("INSERT INTO task_runs(task_id, attempt, idempotency_key, state, agent_id, claimed_at) VALUES ($1, 1, 'restore-acknowledged-claim', 'running', $2, now()) RETURNING run_id").bind(claim_task).bind(claim_agent).fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE tasks SET current_attempt_id=$1 WHERE task_id=$2").bind(claim_run).bind(claim_task).execute(&pool).await.unwrap();
+        sqlx::query("CREATE FUNCTION restore_pause() RETURNS int LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(COALESCE(NULLIF(current_setting('ygg.restore_delay', true), ''), '0')::double precision); RETURN 42; END $$").execute(&pool).await.unwrap();
+        sqlx::query("CREATE MATERIALIZED VIEW restore_pause_view AS SELECT restore_pause() AS value").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE backup_probe (id uuid PRIMARY KEY, discarded text, body text NOT NULL CHECK (body <> ''))").execute(&pool).await.unwrap();
+        sqlx::query("ALTER TABLE backup_probe DROP COLUMN discarded").execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE zz_backup_barrier (id int)").execute(&pool).await.unwrap();
         let preserved_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO backup_probe VALUES ($1, 'before snapshot')").bind(preserved_id).execute(&pool).await.unwrap();
@@ -237,22 +247,69 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         assert_eq!(receipt.table_rows["\"public\".\"backup_probe\""], 1);
         assert_eq!(receipt.sha256.len(), 64);
         assert_eq!(receipt.bytes, std::fs::metadata(&archive).unwrap().len());
+        // Cancel an actual pg_restore while post-data refresh sleeps. Earlier
+        // table/COPY work must roll back with its single transaction.
+        sqlx::query("CREATE DATABASE ygg_cancel_restore").execute(&pool).await.unwrap();
+        for lose_lease in [false, true] {
+        let cancel_options = source_options.clone().database("ygg_cancel_restore").options([("ygg.restore_delay", "5")]);
+        let cancel_bin = bin.clone();
+        let cancel_receipt = receipt.clone();
+        let mut cancel_archive = std::fs::File::open(&archive).unwrap();
+        let restoring = tokio::spawn(async move { ygg::db::restore::database(&cancel_bin, &cancel_options, &mut cancel_archive, &cancel_receipt).await });
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let sleeping: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname='ygg_cancel_restore' AND application_name='ygg-restore' AND wait_event='PgSleep')").fetch_one(&pool).await.unwrap();
+                if sleeping { break; }
+                assert!(!restoring.is_finished(), "restore ended before cancellation checkpoint");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        if lose_lease {
+            sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='ygg_cancel_restore' AND application_name <> 'ygg-restore'").execute(&pool).await.unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(5), restoring).await.unwrap().unwrap().unwrap_err();
+            assert!(error.to_string().contains("lease"), "{error:#}");
+        } else {
+            restoring.abort();
+            assert!(restoring.await.unwrap_err().is_cancelled());
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname='ygg_cancel_restore')").fetch_one(&pool).await.unwrap();
+                if !active { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        let cancelled = PgPoolOptions::new().max_connections(1).connect_with(source_options.clone().database("ygg_cancel_restore")).await.unwrap();
+        let objects: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'").fetch_one(&cancelled).await.unwrap();
+        assert_eq!(objects, 0, "interrupted restore left partial objects");
+        cancelled.close().await;
+        }
         sqlx::query("CREATE DATABASE \"ygg_backup=restore λ\"").execute(&pool).await.unwrap();
         let restored_options = source_options.clone().database("ygg_backup=restore λ");
-        let mut restore = tokio::process::Command::new(bin.join("pg_restore"));
-        ygg::db::backup::NativeConnection::from_options(&restored_options).unwrap().apply(&mut restore);
-        let restored = restore.args(["--dbname", "dbname='ygg_backup=restore λ'", "--no-owner", "--no-acl", "--exit-on-error", "--single-transaction"]).arg(&archive).output().await.unwrap();
-        assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+        ygg::db::restore::database(&bin, &restored_options, &mut std::fs::File::open(&archive).unwrap(), &receipt).await.unwrap();
+        assert!(ygg::db::restore::database(&bin, &restored_options, &mut std::fs::File::open(&archive).unwrap(), &receipt).await.unwrap_err().to_string().contains("must be empty"));
         let restored_pool = PgPoolOptions::new().max_connections(1).connect_with(restored_options.clone()).await.unwrap();
         let id: uuid::Uuid = sqlx::query_scalar("SELECT database_id FROM knowledge_storage").fetch_one(&restored_pool).await.unwrap();
         assert_eq!(id, receipt.database_id);
         let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as("SELECT id, body FROM backup_probe").fetch_all(&restored_pool).await.unwrap();
         assert_eq!(rows, vec![(preserved_id, "before snapshot".into())]);
+        let claim: (uuid::Uuid, uuid::Uuid, String, String) = sqlx::query_as("SELECT t.assignee, t.current_attempt_id, r.state::text, r.idempotency_key FROM tasks t JOIN task_runs r ON r.run_id=t.current_attempt_id WHERE t.task_id=$1").bind(claim_task).fetch_one(&restored_pool).await.unwrap();
+        assert_eq!(claim, (claim_agent, claim_run, "running".into(), "restore-acknowledged-claim".into()));
+        assert!(sqlx::query("INSERT INTO task_runs(task_id, attempt, idempotency_key) VALUES ($1, 2, 'restore-acknowledged-claim')").bind(claim_task).execute(&restored_pool).await.is_err());
+
         assert!(sqlx::query("INSERT INTO backup_probe VALUES ($1, '')").bind(uuid::Uuid::new_v4()).execute(&restored_pool).await.is_err());
         for (table, expected) in &receipt.table_rows {
             let actual: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}")).fetch_one(&restored_pool).await.unwrap();
             assert_eq!(actual, *expected, "{table}");
         }
+        // Counts alone cannot detect an edited UUID/body or a removed constraint.
+        sqlx::query("UPDATE backup_probe SET body='changed'").execute(&restored_pool).await.unwrap();
+        assert!(ygg::db::restore::validate(&restored_options, &receipt).await.unwrap_err().to_string().contains("content or schema"));
+        sqlx::query("UPDATE backup_probe SET body='before snapshot'").execute(&restored_pool).await.unwrap();
+        sqlx::query("ALTER TABLE backup_probe DROP CONSTRAINT backup_probe_body_check").execute(&restored_pool).await.unwrap();
+        assert!(ygg::db::restore::validate(&restored_options, &receipt).await.unwrap_err().to_string().contains("content or schema"));
+        sqlx::query("ALTER TABLE backup_probe ADD CONSTRAINT backup_probe_body_check CHECK(body <> '')").execute(&restored_pool).await.unwrap();
+        ygg::db::restore::validate(&restored_options, &receipt).await.unwrap();
         restored_pool.close().await;
         let mut second_output = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(temp.path().join("roundtrip.dump")).unwrap();
         let roundtrip = ygg::db::backup::dump(&bin, &restored_options, &mut second_output).await.unwrap();
@@ -275,7 +332,7 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
                 .env("YGG_DB_MODE", "external").env("YGG_KNOWLEDGE_DIR", &bundle_path)
                 .env("YGG_CONFIG_DIR", temp.path().join("backup-config"))
                 .env("YGG_DATA_DIR", temp.path().join("backup-data"))
-                .args(["db", "backup"]).arg(&destination).arg("--pg-bin").arg(&bin).arg("--json");
+                .args(["db", "backup"]).arg(destination).arg("--pg-bin").arg(&bin).arg("--json");
             cmd
         };
         assert!(!backup_command(&destination).output().await.unwrap().status.success());
@@ -288,6 +345,55 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         assert!(!backup_command(&destination).arg("--policy-dir").arg(&policy_path).output().await.unwrap().status.success());
         assert_eq!(ygg::db::deployment_backup::verify(&destination).unwrap(), combined);
         assert!(!temp.path().join("backup-data").exists());
+        // Restore combined backup through the real CLI into an empty external
+        // target. The configured runtime cannot perform DDL; owner is explicit.
+        sqlx::query("CREATE DATABASE ygg_combined_restore OWNER ygg_owner").execute(&pool).await.unwrap();
+        let restored_files = temp.path().join("restored-files");
+        let restore_command = || {
+            let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+            cmd.env("DATABASE_URL", format!("postgres://ygg_runtime@localhost/ygg_combined_restore?host={}", root.join("runtime").display()))
+                .env("YGG_DATABASE_OWNER_URL", format!("postgres://ygg_owner@localhost/ygg_combined_restore?host={}", root.join("runtime").display()))
+                .env("YGG_DB_MODE", "external").env("YGG_CONFIG_DIR", temp.path().join("restore-config"))
+                .env("YGG_DATA_DIR", temp.path().join("external-restore-data"))
+                .args(["db", "restore"]).arg(&destination).arg("--destination").arg(&restored_files).arg("--pg-bin").arg(&bin).arg("--json");
+            cmd
+        };
+        let restored = restore_command().output().await.unwrap();
+        assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+        let restored_receipt: serde_json::Value = serde_json::from_slice(&restored.stdout).unwrap();
+        assert_eq!(restored_receipt["configuration_switched"], false);
+        assert_eq!(restored_receipt["database_id"], combined.database.database_id.to_string());
+        assert_eq!(std::fs::read(restored_files.join("knowledge").join(saved.key.relative_path())).unwrap(), std::fs::read(destination.join("knowledge/corpus").join(saved.key.relative_path())).unwrap());
+        assert_eq!(ygg::knowledge::identity::IdentityRegistry::open(&restored_files.join("policy"), false).unwrap().read().unwrap().0.corpus_id, corpus);
+        assert!(!restore_command().output().await.unwrap().status.success());
+        assert!(!temp.path().join("external-restore-data").exists());
+        assert!(!temp.path().join("restore-config").exists());
+
+        // External -> new managed recovery uses pinned tools, rebinds ownership,
+        // grants only runtime CRUD, and leaves the target stopped for switching.
+        let managed_data = temp.path().join("restored-managed");
+        let managed_files = temp.path().join("restored-managed-files");
+        let mut managed_restore = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+        let restored = managed_restore.env_remove("DATABASE_URL").env_remove("YGG_DATABASE_OWNER_URL")
+            .env("YGG_DB_MODE", "managed").env("YGG_DATA_DIR", &managed_data)
+            .env("YGG_CONFIG_DIR", temp.path().join("restore-config"))
+            .args(["db", "restore"]).arg(&destination).arg("--destination").arg(&managed_files)
+            .arg("--postgres-archive").arg(std::env::var("YGG_TEST_PG_ARCHIVE").unwrap()).arg("--json")
+            .output().await.unwrap();
+        assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+        let recovered = ManagedCluster::open(&managed_data.join("postgres")).unwrap();
+        assert!(matches!(recovered.status().await.unwrap(), ygg::db::runtime::Status::Stopped));
+        let mut recovered_owner = recovered.try_owner().unwrap().unwrap();
+        recovered_owner.start_or_adopt(Duration::from_secs(30)).await.unwrap();
+        let runtime_options = ygg::db::provision::runtime_options(&recovered);
+        let recovered_pool = PgPoolOptions::new().max_connections(1).connect_with(runtime_options.clone()).await.unwrap();
+        let id: uuid::Uuid = sqlx::query_scalar("SELECT database_id FROM knowledge_storage").fetch_one(&recovered_pool).await.unwrap();
+        assert_eq!(id, combined.database.database_id);
+        assert!(sqlx::query("CREATE TABLE must_fail(id int)").execute(&recovered_pool).await.is_err());
+        assert!(sqlx::query("UPDATE knowledge_storage SET generation=generation+1").execute(&recovered_pool).await.is_err());
+        recovered_pool.close().await;
+        recovered_owner.stop(Duration::from_secs(30)).await.unwrap();
+        drop(recovered_owner);
         // Force a storage-generation change after the database snapshot but
         // before the paired filesystem snapshot. No combined backup may publish.
         let policy_lease = std::fs::OpenOptions::new().read(true).write(true).open(policy_path.join(".writer.lock")).unwrap();

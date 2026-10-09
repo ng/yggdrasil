@@ -422,8 +422,9 @@ empty directories. Identity/policy lives in a separate `IdentityRegistry` direct
 a deployment backup must snapshot that directory as well as its document bundle,
 and record both returned revisions alongside its consistent PostgreSQL dump.
 This library component alone is not a complete Yggdrasil deployment backup.
-`db backup` pairs bundle and policy snapshots with a database dump; validated
-restore and upgrade orchestration remain pending.
+`db backup` pairs bundle and policy snapshots with a database dump. `db restore`
+restores exact corpus/policy bytes into a new destination and validates the database;
+configuration switching and upgrades remain pending.
 
 The snapshot holds the export and writer leases, completes pending scope-move
 recovery, copies through held directory descriptors, and rereads source hashes

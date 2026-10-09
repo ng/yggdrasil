@@ -281,6 +281,50 @@ impl KnowledgeStore {
 }
 
 impl KnowledgeBackup {
+    /// Restore exact bytes into an absent directory. Never changes trust or
+    /// overwrites an existing corpus. Caller authorizes the backed-up policy.
+    pub fn restore(path: &Path, destination: &Path) -> Result<Self> {
+        let expected = Self::verify(path)?;
+        ensure!(
+            destination.is_absolute(),
+            "absolute restore destination required"
+        );
+        let parent_path = destination
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("restore parent required"))?
+            .canonicalize()?;
+        ensure!(
+            !parent_path.starts_with(path.canonicalize()?),
+            "restore destination cannot be inside backup"
+        );
+        let name = destination
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid restore name"))?;
+        let parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&parent_path)?;
+        let metadata = parent.metadata()?;
+        ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o022 == 0,
+            "restore parent must be owned and not writable by others"
+        );
+        let source = KnowledgeStore::open(path, false)?;
+        let corpus = directory(&source.root, "corpus", false)?;
+        let stage_name = format!(".knowledge-restore-{}", Uuid::new_v4());
+        let stage = directory(&parent, &stage_name, true)?;
+        let mut entries = BTreeMap::new();
+        inventory(&corpus, Some(&stage), "", 0, false, &mut entries, &mut 0)?;
+        ensure!(
+            entries == expected.entries,
+            "knowledge backup changed during restore"
+        );
+        stage.sync_all()?;
+        publish(&parent, &stage_name, name)?;
+        Ok(expected)
+    }
+
     /// Validate a trusted backup against its exact inventory. This checksum is
     /// integrity evidence, not a signature or authorization to trust imported rules.
     pub fn verify(path: &Path) -> Result<Self> {

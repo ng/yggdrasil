@@ -140,6 +140,8 @@ pub struct DatabaseSnapshot {
     pub table_rows: BTreeMap<String, i64>,
     pub bytes: u64,
     pub sha256: String,
+    #[serde(default)]
+    pub validation: Option<super::restore::Evidence>,
 }
 
 async fn bounded(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> Result<Vec<u8>> {
@@ -154,14 +156,14 @@ async fn bounded(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> Result<Vec
 
 /// All tool diagnostics stay out of errors, since servers can echo credentials.
 /// Treat warnings as failure rather than certifying a potentially partial dump.
-async fn run(mut command: Command, capture_stdout: bool) -> Result<Vec<u8>> {
+pub(crate) async fn run(mut command: Command, capture_stdout: bool) -> Result<Vec<u8>> {
     command.stderr(Stdio::piped()).kill_on_drop(true);
     if capture_stdout {
         command.stdout(Stdio::piped());
     }
     let mut child = command
         .spawn()
-        .map_err(|_| anyhow::anyhow!("cannot launch PostgreSQL backup tool"))?;
+        .map_err(|_| anyhow::anyhow!("cannot launch PostgreSQL native tool"))?;
     let mut stderr = child.stderr.take().unwrap();
     let mut stdout = child.stdout.take();
     let work = async {
@@ -177,17 +179,15 @@ async fn run(mut command: Command, capture_stdout: bool) -> Result<Vec<u8>> {
         )?;
         ensure!(
             status.success() && err.is_empty(),
-            "PostgreSQL backup tool failed or reported warnings; artifact is incomplete"
+            "PostgreSQL native tool failed or reported warnings; operation is not verified"
         );
         Ok(out)
     };
     tokio::time::timeout(Duration::from_secs(1800), work)
         .await
-        .map_err(|_| anyhow::anyhow!("PostgreSQL backup tool timed out; artifact is incomplete"))?
-}
-
-fn quote_identifier(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+        .map_err(|_| {
+            anyhow::anyhow!("PostgreSQL native tool timed out; operation is not verified")
+        })?
 }
 
 /// Writes a custom-format archive through an already-open private file. Caller
@@ -200,7 +200,7 @@ pub async fn dump(
 ) -> Result<DatabaseSnapshot> {
     tokio::time::timeout(Duration::from_secs(1800), dump_inner(bin, options, output))
         .await
-        .map_err(|_| anyhow::anyhow!("database snapshot timed out; artifact is incomplete"))?
+        .map_err(|_| anyhow::anyhow!("database snapshot timed out; operation is not verified"))?
 }
 
 async fn dump_inner(
@@ -257,15 +257,7 @@ async fn dump_inner(
     )
     .fetch_all(&mut connection)
     .await?;
-    let tables: Vec<(String, String)> = sqlx::query_as("SELECT schemaname::text, tablename::text FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') AND schemaname !~ '^pg_toast' ORDER BY schemaname, tablename").fetch_all(&mut connection).await?;
-    let mut table_rows = BTreeMap::new();
-    for (schema, table) in tables {
-        let name = format!("{}.{}", quote_identifier(&schema), quote_identifier(&table));
-        let count = sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {name}"))
-            .fetch_one(&mut connection)
-            .await?;
-        table_rows.insert(name, count);
-    }
+    let (validation, table_rows) = super::restore::evidence(&mut connection).await?;
     let snapshot: String = sqlx::query_scalar("SELECT pg_export_snapshot()")
         .fetch_one(&mut connection)
         .await?;
@@ -301,6 +293,7 @@ async fn dump_inner(
         tool_version: version.trim().into(),
         migrations,
         table_rows,
+        validation: Some(validation),
         bytes,
         sha256: hash
             .finalize()

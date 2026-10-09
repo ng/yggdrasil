@@ -17,6 +17,7 @@ fn fixture(root: &std::path::Path) {
         created_at: chrono::Utc::now(),
         knowledge: None,
         database: DatabaseSnapshot {
+            validation: None,
             database_id: uuid::Uuid::new_v4(),
             generation: 1,
             backend: "sql".into(),
@@ -102,4 +103,32 @@ async fn verify_cli_never_loads_database_configuration() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
+}
+
+#[tokio::test]
+async fn restore_without_evidence_refuses_before_creating_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let backup = temp.path().join("backup");
+    std::fs::create_dir(&backup).unwrap();
+    fixture(&backup);
+    let data = temp.path().join("new-managed");
+    let destination = temp.path().join("restored");
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"))
+        .env("YGG_DB_MODE", "managed")
+        .env_remove("DATABASE_URL")
+        .env_remove("YGG_DATABASE_OWNER_URL")
+        .env("YGG_CONFIG_DIR", temp.path().join("config"))
+        .env("YGG_DATA_DIR", &data)
+        .args(["db", "restore"])
+        .arg(&backup)
+        .arg("--destination")
+        .arg(&destination)
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lacks supported restore evidence"));
+    assert!(!data.exists());
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
 }

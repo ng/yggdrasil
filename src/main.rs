@@ -64,6 +64,19 @@ enum KnowledgeAction {
 #[derive(Subcommand)]
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 enum DbAction {
+    /// Restore a trusted backup into an empty external database or new managed data directory
+    Restore {
+        path: std::path::PathBuf,
+        /// New directory for restored knowledge, policy and validation receipt
+        #[arg(long)]
+        destination: std::path::PathBuf,
+        #[arg(long)]
+        pg_bin: Option<std::path::PathBuf>,
+        #[arg(long)]
+        postgres_archive: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Back up database and configured knowledge into a new private directory
     Backup {
         destination: std::path::PathBuf,
@@ -1259,6 +1272,22 @@ async fn main() -> anyhow::Result<()> {
                     json,
                 )
                 .await?
+            }
+            DbAction::Restore {
+                path,
+                destination,
+                pg_bin,
+                postgres_archive,
+                json,
+            } => {
+                ygg::cli::db_cmd::restore(
+                    &path,
+                    &destination,
+                    pg_bin.as_deref(),
+                    postgres_archive.as_deref(),
+                    json,
+                )
+                .await?;
             }
             DbAction::VerifyBackup { path, json } => ygg::cli::db_cmd::verify_backup(&path, json)?,
             DbAction::Diagnose { json } => ygg::cli::db_cmd::diagnose(json).await?,
