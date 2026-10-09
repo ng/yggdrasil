@@ -212,10 +212,27 @@ async fn native_tls_checks_ca_hostname_and_refuses_plaintext() {
             .unwrap();
     assert!(encrypted);
     connection.close().await.unwrap();
+    async fn native_dump(bin: &Path, database_url: &str) -> bool {
+        let mut command = tokio::process::Command::new(bin.join("pg_dump"));
+        ygg::db::backup::NativeConnection::from_options(&options(database_url).unwrap())
+            .unwrap()
+            .apply(&mut command);
+        command
+            .args(["--schema-only", "--no-password"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        tokio::time::timeout(Duration::from_secs(10), command.status())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    }
+    assert!(native_dump(&bin, &url("localhost", "ca.pem")).await);
     for (bad, reason) in [
         (url("localhost", "wrong.pem"), "UnknownIssuer"),
         (url("127.0.0.1", "ca.pem"), "NotValidForName"),
     ] {
+        assert!(!native_dump(&bin, &bad).await);
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             PgConnection::connect_with(&options(&bad).unwrap()),
@@ -251,6 +268,7 @@ async fn native_tls_checks_ca_hostname_and_refuses_plaintext() {
         .await
         .expect_err("TLS must not downgrade");
     assert!(matches!(&error, sqlx::Error::Tls(_)), "{error:?}");
+    assert!(!native_dump(&bin, &url("localhost", "ca.pem")).await);
 }
 
 #[test]

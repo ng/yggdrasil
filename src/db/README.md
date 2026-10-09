@@ -294,3 +294,39 @@ cargo test --test database_diagnostics -- --include-ignored --test-threads=1
 The PostgreSQL 16/18 CI jobs run this test with the distribution PgBouncer package.
 See [PgBouncer's pooling configuration](https://www.pgbouncer.org/config) for the
 session and transaction guarantees.
+
+## PostgreSQL backup component
+
+`backup::dump` writes a consistent custom-format archive through an already-open,
+empty private regular file. It records database identity, storage generation and
+backend, corpus binding, applied migrations, table row counts, tool/server versions,
+archive size and SHA-256. Inventory and `pg_dump --snapshot` use the same exported
+repeatable-read snapshot; its transaction remains open until the tool exits.
+The explicitly supplied binary directory must be absolute, and `pg_dump` cannot
+be older than the source server. This operation never starts/migrates a server or
+changes configuration. Run it against a direct/session-preserving endpoint with
+an operator-selected credential that can read the entire database.
+
+Native client settings are derived from effective SQLx options, including decoded
+identity, socket, TLS mode and certificate paths. Credentials travel only in the
+child environment, not arguments or debug output. Inherited `PG*` overrides and
+later pgpass lookup cannot redirect the connection. Verified native TLS requires
+an explicit `sslrootcert` file: PostgreSQL 16 libpq and SQLx do not share default
+trust stores. This is checked before launching a tool; there is no weaker-mode
+fallback. GSS encryption is disabled so
+it cannot supersede the selected TLS policy. Native tool diagnostics are bounded
+and redacted; any warning or unsuccessful exit leaves the artifact uncertified.
+The operation has a 30-minute limit and kills its child on cancellation. Callers
+must retain incomplete staging privately and publish only on success.
+
+The pinned-package test exports while another transaction commits a new row,
+restores into a disposable empty database and compares every inventoried table
+count, the original UUID and database identity, and a restored check constraint.
+TLS tests exercise native `pg_dump` as well as SQLx. The snapshot component is not
+yet a complete deployment backup: bundle/policy snapshots, a combined manifest,
+operator CLI, validated restore/publication and deployment moves remain to be wired.
+Roles and tablespaces are cluster objects outside this single-database dump;
+restoration must explicitly provision target roles and validate grants.
+
+See [PostgreSQL pg_dump](https://www.postgresql.org/docs/18/app-pgdump.html) for
+exported snapshots and archive semantics.

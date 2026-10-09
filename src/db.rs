@@ -15,6 +15,8 @@ pub mod runtime;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod supervisor;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod backup;
 pub mod diagnostics;
 pub mod external;
 pub mod singleton;

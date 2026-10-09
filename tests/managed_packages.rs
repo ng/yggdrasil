@@ -207,6 +207,57 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         );
         assert!(!temp.path().join("role-data").exists());
 
+        // Dump and restore use only this disposable cluster. A held table lock
+        // delays inventory after its MVCC snapshot starts, so a later committed
+        // row must be absent from both the manifest count and restored archive.
+        sqlx::query("CREATE TABLE backup_probe (id uuid PRIMARY KEY, body text NOT NULL CHECK (body <> ''))").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE zz_backup_barrier (id int)").execute(&pool).await.unwrap();
+        let preserved_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO backup_probe VALUES ($1, 'before snapshot')").bind(preserved_id).execute(&pool).await.unwrap();
+        let mut barrier = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE zz_backup_barrier IN ACCESS EXCLUSIVE MODE").execute(&mut *barrier).await.unwrap();
+        let source_options = PgConnectOptions::new().host(root.join("runtime").to_str().unwrap()).port(5432).username("ygg_bootstrap").database("postgres").application_name("ygg-backup-snapshot-test");
+        use std::os::unix::fs::OpenOptionsExt;
+        let archive = temp.path().join("snapshot.dump");
+        let mut output = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&archive).unwrap();
+        let dump_bin = bin.clone();
+        let dump_options = source_options.clone();
+        let dumping = tokio::spawn(async move { ygg::db::backup::dump(&dump_bin, &dump_options, &mut output).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'ygg-backup-snapshot-test' AND backend_xmin IS NOT NULL AND wait_event_type = 'Lock')").fetch_one(&pool).await.unwrap();
+                if active { break; }
+                assert!(!dumping.is_finished(), "dump exited before snapshot barrier");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.unwrap();
+        sqlx::query("INSERT INTO backup_probe VALUES (gen_random_uuid(), 'after snapshot')").execute(&pool).await.unwrap();
+        barrier.commit().await.unwrap();
+        let receipt = dumping.await.unwrap().unwrap();
+        assert_eq!(receipt.table_rows["\"public\".\"backup_probe\""], 1);
+        assert_eq!(receipt.sha256.len(), 64);
+        assert_eq!(receipt.bytes, std::fs::metadata(&archive).unwrap().len());
+        sqlx::query("CREATE DATABASE \"ygg_backup=restore λ\"").execute(&pool).await.unwrap();
+        let restored_options = source_options.clone().database("ygg_backup=restore λ");
+        let mut restore = tokio::process::Command::new(bin.join("pg_restore"));
+        ygg::db::backup::NativeConnection::from_options(&restored_options).unwrap().apply(&mut restore);
+        let restored = restore.args(["--dbname", "dbname='ygg_backup=restore λ'", "--no-owner", "--no-acl", "--exit-on-error", "--single-transaction"]).arg(&archive).output().await.unwrap();
+        assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+        let restored_pool = PgPoolOptions::new().max_connections(1).connect_with(restored_options.clone()).await.unwrap();
+        let id: uuid::Uuid = sqlx::query_scalar("SELECT database_id FROM knowledge_storage").fetch_one(&restored_pool).await.unwrap();
+        assert_eq!(id, receipt.database_id);
+        let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as("SELECT id, body FROM backup_probe").fetch_all(&restored_pool).await.unwrap();
+        assert_eq!(rows, vec![(preserved_id, "before snapshot".into())]);
+        assert!(sqlx::query("INSERT INTO backup_probe VALUES ($1, '')").bind(uuid::Uuid::new_v4()).execute(&restored_pool).await.is_err());
+        for (table, expected) in &receipt.table_rows {
+            let actual: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}")).fetch_one(&restored_pool).await.unwrap();
+            assert_eq!(actual, *expected, "{table}");
+        }
+        restored_pool.close().await;
+        let mut second_output = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(temp.path().join("roundtrip.dump")).unwrap();
+        let roundtrip = ygg::db::backup::dump(&bin, &restored_options, &mut second_output).await.unwrap();
+        assert_eq!(roundtrip.database_id, receipt.database_id);
+        assert_eq!(roundtrip.table_rows, receipt.table_rows);
         let runtime = PgPoolOptions::new()
             .max_connections(2)
             .connect_with(ygg::db::provision::runtime_options(&cluster))
