@@ -53,3 +53,9 @@ pub mod source_backup;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod migration;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod recovery_event;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod reverse_migration;

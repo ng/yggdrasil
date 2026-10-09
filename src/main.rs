@@ -60,6 +60,18 @@ enum KnowledgeAction {
         #[arg(long)]
         json: bool,
     },
+    /// Restore current private OKF documents to SQL and deselect local OKF
+    Rollback {
+        #[arg(long)]
+        plan: std::path::PathBuf,
+        #[arg(long)]
+        journal: std::path::PathBuf,
+        /// Compatible PostgreSQL tools for external source backup
+        #[arg(long)]
+        pg_bin: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect retained rollback evidence offline; local markers are not SQL proof
     RollbackStatus {
         journal: std::path::PathBuf,
@@ -1405,6 +1417,14 @@ async fn main() -> anyhow::Result<()> {
                 json,
             } => {
                 ygg::cli::knowledge_cmd::sync(confirm_pending, json)?;
+            }
+            KnowledgeAction::Rollback {
+                plan,
+                journal,
+                pg_bin,
+                json,
+            } => {
+                ygg::cli::knowledge_cmd::rollback(&plan, &journal, pg_bin.as_deref(), json).await?;
             }
             KnowledgeAction::RollbackStatus { journal, json } => {
                 ygg::cli::knowledge_cmd::rollback_status(&journal, json)?;

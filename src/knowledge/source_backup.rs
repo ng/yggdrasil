@@ -13,6 +13,22 @@ pub struct SourceBackup {
 }
 impl SourceBackup {
     pub fn open(path: &Path, database: Uuid, generation: i64) -> Result<Self> {
+        Self::open_source(path, database, generation, None)
+    }
+    pub(crate) fn open_okf(
+        path: &Path,
+        database: Uuid,
+        generation: i64,
+        corpus: Uuid,
+    ) -> Result<Self> {
+        Self::open_source(path, database, generation, Some(corpus))
+    }
+    fn open_source(
+        path: &Path,
+        database: Uuid,
+        generation: i64,
+        corpus: Option<Uuid>,
+    ) -> Result<Self> {
         ensure!(path.is_absolute(), "absolute source backup path required");
         let path = path.canonicalize()?;
         let manifest = deployment_backup::verify(&path)?;
@@ -20,9 +36,13 @@ impl SourceBackup {
             manifest.database.database_id == database
                 && manifest.database.generation == generation
                 && generation > 0
-                && manifest.database.backend == "sql"
-                && manifest.database.corpus_id.is_none(),
-            "source backup must be the expected SQL database generation"
+                && manifest.database.backend == if corpus.is_some() { "okf" } else { "sql" }
+                && manifest.database.corpus_id == corpus
+                && corpus.is_none_or(|id| manifest
+                    .knowledge
+                    .as_ref()
+                    .is_some_and(|k| k.corpus_id == id)),
+            "source backup must be the expected database generation and corpus"
         );
         let evidence = manifest
             .database
@@ -55,6 +75,13 @@ impl SourceBackup {
     /// Coordination/telemetry rows may change; legacy knowledge and migration
     /// checksums must remain exactly the rows captured by the consistent dump.
     pub async fn verify_on(&self, connection: &mut PgConnection) -> Result<()> {
+        self.verify_schema_on(connection).await?;
+        self.verify_tables(connection, &["memories", "learnings"])
+            .await
+    }
+    /// Reverse activation changes legacy rows; retain the backup's schema and
+    /// migration-version checks without mistaking restored/current rows for drift.
+    pub(crate) async fn verify_schema_on(&self, connection: &mut PgConnection) -> Result<()> {
         self.verify()?;
         verify_guards(connection).await?;
         sqlx::query("LOCK TABLE public.memories, public.learnings, public._sqlx_migrations IN ACCESS SHARE MODE").execute(&mut *connection).await?;
@@ -71,7 +98,11 @@ impl SourceBackup {
             restore::schema_evidence(connection).await? == expected.schema,
             "database schema changed since source backup"
         );
-        for table in ["memories", "learnings", "_sqlx_migrations"] {
+        self.verify_tables(connection, &["_sqlx_migrations"]).await
+    }
+    async fn verify_tables(&self, connection: &mut PgConnection, tables: &[&str]) -> Result<()> {
+        let expected = self.manifest.database.validation.as_ref().unwrap();
+        for table in tables {
             let key = format!("\"public\".\"{table}\"");
             let (count, hash) = restore::table_evidence(connection, "public", table).await?;
             ensure!(

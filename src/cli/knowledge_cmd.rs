@@ -223,3 +223,33 @@ pub async fn migrate(
     }
     Ok(())
 }
+
+pub async fn rollback(
+    plan: &Path,
+    journal: &Path,
+    pg_bin: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(plan)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 1024 * 1024,
+        "rollback plan exceeds 1 MiB limit"
+    );
+    let plan = serde_json::from_slice(&bytes)?;
+    let config = crate::config::database::DeploymentConfig::load(std::env::vars().collect())?;
+    let journal = crate::knowledge::reverse_migration::Journal::prepare(journal, plan, &config)?;
+    let report = journal.execute(&config, pg_bin).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Knowledge restored to SQL at generation {}. Retained recovery: {}",
+            report.generation,
+            report.journal.display()
+        );
+    }
+    Ok(())
+}

@@ -406,3 +406,156 @@ impl Journal {
         Ok(outcome)
     }
 }
+
+impl Journal {
+    /// Complete a private rollback atomically in SQL, then remove its exact local
+    /// fence. A committed retry verifies ownership without replaying old rows over
+    /// subsequent acknowledged SQL writes. Shared transport needs its coordinator.
+    pub(crate) async fn complete_private(
+        &self,
+        pool: &sqlx::PgPool,
+        backup: &super::source_backup::SourceBackup,
+    ) -> Result<ApplyOutcome> {
+        use super::{
+            recovery_event::{Event, owner_transaction},
+            runtime::SELECTION_FILE,
+        };
+        self.revalidate()?;
+        let r = &self.intent.request;
+        ensure!(
+            r.evidence.shared_commit.is_none(),
+            "private completion cannot activate shared recovery"
+        );
+        ensure!(
+            r.fenced_generation < i64::MAX,
+            "recovery generation overflow"
+        );
+        let saved_policy = KnowledgeStore::open(&r.paths.policy_archive.join("corpus"), false)?;
+        let fenced = saved_policy
+            .read_control(SELECTION_FILE)?
+            .context("recovery archive lacks local fence")?;
+        let binding: super::runtime::Binding = serde_json::from_str(&fenced)?;
+        ensure!(
+            binding.version == 1
+                && binding.minimum_client > 0
+                && binding.minimum_client <= super::guard::CLIENT_PROTOCOL
+                && binding.phase == super::runtime::Phase::Fenced
+                && binding.generation == r.fenced_generation - 1
+                && binding.bundle == r.paths.corpus
+                && serde_json::to_value(&binding.mappings)? == r.original.mappings,
+            "archived selection differs from rollback source"
+        );
+        let policy = KnowledgeStore::open(&r.paths.policy, false)?;
+        let _selection = policy.selection_lease(true)?;
+        ensure!(
+            identity(&r.paths.policy)? == r.policy_identity
+                && identity(&r.paths.corpus)? == r.corpus_identity,
+            "rollback source roots changed"
+        );
+        ensure!(
+            policy.read_control("shared.json")?.is_none(),
+            "shared recovery requires shared coordinator"
+        );
+        let current = policy.read_control(SELECTION_FILE)?;
+        ensure!(
+            current.is_none() || current.as_deref() == Some(fenced.as_str()),
+            "local selection independently changed"
+        );
+        let corpus = KnowledgeStore::open(&r.paths.corpus, false)?;
+        let recovery = if current.is_some() {
+            Some(corpus.resume_pair_retained(
+                &policy,
+                &r.paths.corpus_archive,
+                &r.paths.policy_archive,
+            )?)
+        } else {
+            None
+        };
+        let event = Event {
+            operation: self.intent.operation,
+            step: "sql",
+            request: digest(format!("{}\n{}", self.bytes, backup.digest()).as_bytes()),
+            database: r.original.database_id,
+            corpus: r.original.corpus_id,
+            generation: r.fenced_generation + 1,
+        };
+        let mut tx = owner_transaction(pool).await?;
+        let marker:(Uuid,i64,i32,String,Option<Uuid>)=sqlx::query_as("SELECT database_id,generation,minimum_client,backend,corpus_id FROM public.knowledge_storage WHERE singleton FOR UPDATE").fetch_one(&mut *tx).await?;
+        ensure!(
+            marker.0 == event.database && marker.2 > 0 && marker.2 <= super::guard::CLIENT_PROTOCOL,
+            "incompatible recovery database/protocol"
+        );
+        let outcome = if event.recorded(&mut tx).await? {
+            ensure!(
+                marker.1 == event.generation && marker.3 == "sql" && marker.4.is_none(),
+                "recorded SQL activation is no longer current"
+            );
+            // Legacy rows may now contain legitimate new SQL writes.
+            backup.verify_schema_on(&mut tx).await?;
+            ApplyOutcome::PreviouslyApplied
+        } else {
+            ensure!(
+                marker.1 == r.fenced_generation
+                    && marker.3 == "fenced"
+                    && marker.4 == Some(event.corpus),
+                "SQL activation requires original reverse fence"
+            );
+            ensure!(
+                super::clients::audit(&mut tx).await?.live_blockers == 0,
+                "incompatible live clients block SQL activation"
+            );
+            let recovery = recovery
+                .as_ref()
+                .context("local fence missing before SQL activation")?;
+            r.verify_roots(recovery)?;
+            let current =
+                reverse::capture_recovery_on(&mut tx, &r.original, recovery, r.fenced_generation)
+                    .await?;
+            ensure!(
+                serde_json::to_value(&current)? == serde_json::to_value(&r.candidate)?,
+                "current rollback candidate differs from journal"
+            );
+            let result = reverse::apply_once_on(
+                &mut tx,
+                self.intent.operation,
+                &r.candidate,
+                &r.evidence,
+                r.fenced_generation,
+            )
+            .await?;
+            backup.verify_schema_on(&mut tx).await?;
+            r.verify_roots(recovery)?;
+            sqlx::query("UPDATE public.knowledge_storage SET backend='sql',generation=$1,corpus_id=NULL WHERE singleton").bind(event.generation).execute(&mut *tx).await?;
+            event.record(&mut tx).await?;
+            result
+        };
+        self.revalidate()?;
+        tx.commit()
+            .await
+            .context("reverse activation outcome uncertain; resume same recovery journal")?;
+        drop(recovery);
+        // Renew the generation lease after the commit boundary before filesystem
+        // deselection. Do not row-lock after taking a shared advisory lease.
+        let mut selected = pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *selected)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(1497843531,1)")
+            .execute(&mut *selected)
+            .await?;
+        let marker:(Uuid,i64,String,Option<Uuid>)=sqlx::query_as("SELECT database_id,generation,backend,corpus_id FROM public.knowledge_storage WHERE singleton").fetch_one(&mut *selected).await?;
+        ensure!(
+            marker == (event.database, event.generation, "sql".into(), None),
+            "SQL generation changed before local deselection"
+        );
+        self.revalidate()?;
+        policy.verify_root_path(&r.paths.policy)?;
+        ensure!(
+            identity(&r.paths.policy)? == r.policy_identity,
+            "policy root changed before deselection"
+        );
+        policy.remove_control(SELECTION_FILE, &fenced)?;
+        selected.commit().await?;
+        Ok(outcome)
+    }
+}

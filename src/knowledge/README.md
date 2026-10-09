@@ -645,8 +645,9 @@ database receipt and current rows. Changed sources, archives, directory identiti
 or journal bytes fail without replacing recovery evidence. Quiesce external
 editors and remote hosts before preparation/resume. This component requires the
 exact fenced SQL generation, preserves local selection, and does not activate a
-backend or certify fleet compatibility. Full migration/resume CLI orchestration,
-schema parity checks and backend activation remain pending.
+backend or certify fleet compatibility. The private rollback command below adds
+source backup/schema checks, final SQL activation and local deselection. Shared
+and fleet orchestration remain pending.
 
 ## Corpus backup component
 
@@ -979,6 +980,48 @@ exact prepared fenced binding while holding local selection and database leases.
 Retry after an acknowledged abort preserves later SQL writes. All backup, stage,
 unselected export and policy evidence remains for inspection. Once OKF is active,
 abort is refused: rollback must import the current bundle, including later edits
-and deletions. The current-bundle reverse-import primitives exist, but their full
-operator activation/deselection workflow, shared/fleet execution, rollout and
-release gates remain unfinished.
+and deletions. The private rollback command below completes reverse import and
+local activation. Shared/fleet execution, rollout and release gates remain unfinished.
+
+## Private current-bundle rollback command
+
+`ygg knowledge rollback --plan /absolute/rollback.json --journal /absolute/recovery`
+restores the current private OKF corpus to SQL. Use `--pg-bin` for an external
+source backup and `--json` for the operation report. The journal must be separate
+from the corpus, policy, and original export. The version-1 plan contains
+`transport: "private"`, `source_generation` (the currently selected OKF generation),
+`original_export` (the original retained staging export, for example the forward
+journal's `stage` directory), `execution_host`,
+`all_participating_hosts_listed: true`, and the same single-host maintenance
+assertions used by the forward plan. It uses the saved original mappings and
+requires the current local binding to match them. It does not infer identities,
+stop hosts/editors, or certify fleet admission.
+
+The operation saves its request before changes and captures a consistent database
+plus current corpus/policy backup. Before permanently fencing either store, it
+holds the source leases and validates current document conversion, committed usage,
+SQL field types and constraints inside a transaction that is rolled back. Unknown
+metadata, unsupported SQL columns and unrepresentable values leave OKF selected.
+The retained backup is not overwritten; after correcting source files, prepare a
+fresh journal to capture the corrected state.
+
+After successful preflight, the command drains/fences local OKF operations,
+records ownership of the next SQL fence, retains a fresh paired recovery archive,
+and saves the complete reverse candidate. The current documents determine edits,
+deletions, new rows, approvals and pending state; the old frozen SQL rows never
+serve as the rollback payload. Reverse import, its immutable receipt, final SQL
+generation and activation event commit together. Local deselection then occurs
+under the local selection lease and a renewed SQL generation lease. Until that
+unlink, the local CLI remains fenced.
+
+Retry with the same plan and journal. A committed activation event proves which
+operation selected SQL; retry finishes deselection without replaying the saved
+candidate over later SQL writes. A later generation or changed selection refuses
+recovery. All source dumps, original exports, current corpus/policy archives and
+journals remain retained. The opt-in native fixture kills the actual CLI after
+SQL activation commits while its renewal lease is blocked, then verifies that
+resumption preserves a SQL edit accepted in the gap and creates no second import
+receipt. Round-trip fixtures also cover current note edits/deletions, approval
+changes, pending rules and imported usage totals. These private single-host
+checks do not replace shared/fleet recovery, representative scope-result parity,
+full deployment-move rehearsal, disk-full qualification or the 14-day dogfood gate.

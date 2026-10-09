@@ -14,7 +14,7 @@ use uuid::Uuid;
 const PLAN: &str = ".export-plan.json";
 const COMPLETE: &str = ".export-complete.json";
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub key: Key,
@@ -22,7 +22,7 @@ pub struct Entry {
     pub document_digest: String,
     pub usage: Option<Usage>,
 }
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version: u32,
