@@ -64,6 +64,19 @@ enum KnowledgeAction {
 #[derive(Subcommand)]
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 enum DbAction {
+    /// Validate a restored deployment and atomically select its complete configuration
+    Switch {
+        backup: std::path::PathBuf,
+        #[arg(long)]
+        restore_dir: std::path::PathBuf,
+        #[arg(long)]
+        target_config: std::path::PathBuf,
+        /// Resume an existing switch journal after interruption
+        #[arg(long)]
+        resume: Option<uuid::Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore a trusted backup into an empty external database or new managed data directory
     Restore {
         path: std::path::PathBuf,
@@ -1288,6 +1301,16 @@ async fn main() -> anyhow::Result<()> {
                     json,
                 )
                 .await?;
+            }
+            DbAction::Switch {
+                backup,
+                restore_dir,
+                target_config,
+                resume,
+                json,
+            } => {
+                ygg::cli::db_cmd::switch(&backup, &restore_dir, &target_config, resume, json)
+                    .await?;
             }
             DbAction::VerifyBackup { path, json } => ygg::cli::db_cmd::verify_backup(&path, json)?,
             DbAction::Diagnose { json } => ygg::cli::db_cmd::diagnose(json).await?,

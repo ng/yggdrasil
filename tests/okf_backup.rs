@@ -60,6 +60,12 @@ fn backup_preserves_exact_bytes_unknown_files_empty_dirs_and_separate_identity()
     assert!(KnowledgeBackup::restore(&target, &recovered).is_err());
     assert!(KnowledgeBackup::restore(&target, &target.join("corpus/nested")).is_err());
     assert_eq!(KnowledgeBackup::verify(&target).unwrap(), snapshot);
+    assert_eq!(
+        KnowledgeBackup::verify_restored(&target, &recovered).unwrap(),
+        snapshot
+    );
+    std::fs::write(recovered.join("opaque"), "independent edit").unwrap();
+    assert!(KnowledgeBackup::verify_restored(&target, &recovered).is_err());
 
     let policy = temp.path().join("policy");
     let registry = IdentityRegistry::open(&policy, true).unwrap();

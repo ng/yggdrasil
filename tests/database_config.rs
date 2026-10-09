@@ -166,3 +166,35 @@ fn external_owner_is_separate_redacted_and_environment_overrides_config() {
         .is_err()
     );
 }
+
+#[test]
+fn policy_path_is_separate_profile_scoped_and_explicitly_overridable() {
+    let default = resolve("data_dir='/data'", &[("YGG_PROFILE", "work")]).unwrap();
+    assert_eq!(
+        default.knowledge_policy_dir.to_str(),
+        Some("/data/profiles/work/knowledge-policy")
+    );
+    let configured = resolve(
+        "knowledge_dir='/corpus'\nknowledge_policy_dir='/policy'",
+        &[("DATABASE_URL", "postgres://host/db")],
+    )
+    .unwrap();
+    assert_eq!(configured.knowledge_policy_dir.to_str(), Some("/policy"));
+    let overridden = resolve(
+        "knowledge_policy_dir='/policy'",
+        &[("YGG_KNOWLEDGE_POLICY_DIR", "/other-policy")],
+    )
+    .unwrap();
+    assert_eq!(
+        overridden.knowledge_policy_dir.to_str(),
+        Some("/other-policy")
+    );
+    assert!(resolve("", &[("YGG_KNOWLEDGE_POLICY_DIR", "relative")]).is_err());
+    assert!(
+        resolve(
+            "knowledge_dir='/corpus'\nknowledge_policy_dir='/corpus/policy'",
+            &[]
+        )
+        .is_err()
+    );
+}

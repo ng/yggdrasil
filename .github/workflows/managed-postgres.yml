@@ -10,7 +10,7 @@ on:
       - 'src/db.rs'
       - 'src/db/**'
       - 'src/cli/db_cmd.rs'
-      - 'src/config/database.rs'
+      - 'src/config/**'
       - 'src/main.rs'
       - 'migrations/**'
       - 'tests/managed_*.rs'
@@ -62,3 +62,5 @@ jobs:
         run: cargo test --release --test managed_packages --test managed_runtime --test managed_supervisor --test external_tls -- --include-ignored --test-threads=1
       - name: Test killed bootstrap recovery
         run: cargo test --release --lib db::runtime::bootstrap_tests -- --include-ignored --test-threads=1
+      - name: Test killed deployment configuration publication
+        run: cargo test --release --lib config::switch::tests -- --test-threads=1

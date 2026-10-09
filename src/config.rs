@@ -1,4 +1,6 @@
 pub mod database;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod switch;
 
 use std::env;
 

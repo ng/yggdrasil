@@ -74,7 +74,7 @@ the same hook boundary; see [docs/codex-integration.md](docs/codex-integration.m
 - **Stop** -> `ygg run capture-outcome` + `ygg stop-check` -- records task-run outcome, blocks premature worker exit
 - **PreToolUse** -> `ygg lock` / `ygg agent-tool` -- enforces resource leases, records tool usage
 
-There is no long-running daemon other than the optional `ygg watcher` (heartbeats, lock expiry) and the `ygg scheduler`. Everything else runs as one-shot CLI invocations.
+Managed database installations also run `ygg db serve` to keep PostgreSQL alive between CLI invocations. The optional `ygg watcher` handles heartbeats and lock expiry; `ygg scheduler` dispatches work. External PostgreSQL remains operator-managed.
 
 ## Why Yggdrasil Exists
 
@@ -93,11 +93,11 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 
 | Command     | Purpose                                                                 |
 |-------------|-------------------------------------------------------------------------|
-| `init`      | Bootstrap: Postgres check, migrations, hooks.                          |
+| `init`      | Initialize managed Postgres or check external access, migrate, install hooks.                          |
 | `up`        | Launch the tmux dashboard (default when run bare).                     |
 | `dashboard` | Launch the TUI dashboard directly.                                      |
 | `status`    | Quick text output of agent + system state; `--format codex` emits one line. |
-| `db`        | Database lifecycle, diagnostics, combined backup, validated restore and offline verification; [operator guide](src/db/README.md#combined-operator-backups). |
+| `db`        | Database lifecycle, diagnostics, combined backup, validated restore, deployment switching and offline verification; [operator guide](src/db/README.md#combined-operator-backups). |
 | `migrate`   | Run database migrations.                                                |
 | `spawn`     | Spawn a new agent in a tmux window, registered in the DB.               |
 | `task`      | Task tracking: `create / list / ready / claim / close / dep / show / dupes`. |

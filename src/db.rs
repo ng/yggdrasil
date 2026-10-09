@@ -21,6 +21,8 @@ pub mod backup;
 pub mod deployment_backup;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod deployment_restore;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod deployment_switch;
 pub mod diagnostics;
 pub mod external;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

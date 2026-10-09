@@ -132,3 +132,28 @@ async fn restore_without_evidence_refuses_before_creating_target() {
     assert!(!destination.exists());
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
 }
+
+#[tokio::test]
+async fn configured_policy_cannot_be_silently_omitted_without_a_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let policy = temp.path().join("policy");
+    std::fs::create_dir(&policy).unwrap();
+    let destination = temp.path().join("backup");
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"))
+        .env("YGG_CONFIG_DIR", temp.path().join("config"))
+        .env("YGG_DATA_DIR", temp.path().join("data"))
+        .env("YGG_DB_MODE", "external")
+        .env("DATABASE_URL", "postgres://unused@localhost:1/unused")
+        .env_remove("YGG_DATABASE_OWNER_URL")
+        .env("YGG_KNOWLEDGE_DIR", temp.path().join("absent-bundle"))
+        .env("YGG_KNOWLEDGE_POLICY_DIR", &policy)
+        .args(["db", "backup"])
+        .arg(&destination)
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to omit policy"));
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+}

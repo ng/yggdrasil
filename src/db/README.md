@@ -348,11 +348,14 @@ credential must read all database contents. Remote verified TLS also requires an
 explicit CA file as described above.
 
 The bundle path comes from deployment configuration (`YGG_KNOWLEDGE_DIR` or
-`knowledge_dir`). If it exists, `--policy-dir` must identify its separate initialized
-identity registry; neither directory may overlap the other or the backup destination.
+`knowledge_dir`). Its separate policy path comes from `YGG_KNOWLEDGE_POLICY_DIR`
+or `knowledge_policy_dir`, defaulting to `knowledge-policy` under the profile data
+directory. `--policy-dir` overrides that selection for one backup. An existing
+bundle requires an initialized policy registry; neither directory may overlap the
+other or the backup destination.
 If both are absent, only a database still using SQL knowledge can be backed up.
 A file-backed or fenced database cannot publish a database-only backup. No policy
-path is guessed, and no source files are deleted.
+registry is initialized implicitly, and no source files are deleted.
 
 Bundle and policy snapshots hold both stores' writer/export leases in a stable
 order. Database and filesystem revisions are recorded separately; this is not a
@@ -427,5 +430,70 @@ complete target without a published receipt.
 
 `restore.json` always reports `configuration_switched: false`. Keep writers stopped
 until an explicit, reviewed configuration switch selects both the target database
-and restored corpus/policy paths. Automated resumable deployment switching, upgrade
-commands and complete recovery rehearsal gates remain under implementation.
+and restored corpus/policy paths. The explicit switch command below selects those paths together. Upgrade commands
+and complete recovery rehearsal gates remain under implementation.
+
+### Select a restored deployment
+
+`ygg db switch BACKUP --restore-dir RESTORED --target-config PROPOSED.toml`
+validates a completed restore and atomically replaces the selected user
+`config.toml`. Keep source and target writers stopped from backup capture through
+this switch. This command selects one user's deployment; it does not quiesce other
+clients, change the SQL/OKF storage generation, or migrate a fleet. Restart all
+participating clients with the selected configuration before resuming writes.
+The original database and original corpus are retained for rollback.
+
+Prepare a private (`0600`) TOML file with explicit `data_dir`, `knowledge_dir`,
+`knowledge_policy_dir` and database mode. For example, after a managed restore:
+
+```toml
+data_dir = '/private/recovery/new-managed'
+knowledge_dir = '/private/recovery/files/knowledge'
+knowledge_policy_dir = '/private/recovery/files/policy'
+
+[database]
+mode = 'managed'
+```
+
+For external mode use `mode = 'external'`, `url` for runtime access and optionally
+`owner_url` for validation. Store credentials only in the private configuration
+file. Corpus and policy paths must select the restored directories together.
+For a SQL-only backup with no files, select absent corpus/policy paths instead;
+the switch cannot attach an unrelated existing corpus. Managed targets may be
+started for validation, but binaries are never installed or upgraded. A successful
+managed switch leaves the selected target running. External lifecycle is unmanaged.
+
+The current config directory must exist and be owned/private (`0700`). Conflicting
+environment or legacy user `.env` settings cause refusal rather than a switch that
+future commands would silently ignore. The proposed configuration is checked with
+the same resolver used by normal commands. The command rechecks database contents,
+recorded schema and identity, runtime CRUD/marker permissions, exact corpus/policy
+bytes, the backup, and the proposed configuration before publication. It does not
+change corpus trust, UUIDs or existing database identity mappings.
+
+Each attempt retains a private `deployment-switch-UUID/` journal in the config
+directory with exact `previous.toml` (if one existed), `next.toml`, immutable intent,
+validation evidence and a completion receipt. It returns the operation UUID; an
+error after journal creation also names it. A killed process may leave an operation
+whose UUID is available from that directory name. Resume with the same inputs:
+
+```sh
+ygg db switch /private/backups/pre-move \
+  --restore-dir /private/recovery/files \
+  --target-config /private/recovery/proposed.toml \
+  --resume OPERATION_UUID --json
+```
+
+A pending operation revalidates before publishing. A journal proving publication
+finishes its receipt without restoring or replaying database mutations, even if
+ordinary writes have since occurred. A changed current config, proposed file or
+backup refuses recovery rather than overwriting independent edits. An interrupted
+attempt without a durable `intent.json` cannot have published a config; retain it
+and start a fresh attempt. Configuration publication uses an OS lease, descriptor
+relative file access, private temporary files, fsync and atomic rename. External
+editors must remain quiesced; the expected-content check is not a filesystem lock
+against an uncooperative editor racing the final rename.
+
+The previous config is a recovery artifact, not an automatic rollback command.
+After new writes, switching back to the frozen source can lose those changes;
+validated reverse import/recovery remains a separate required operation.

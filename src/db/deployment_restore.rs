@@ -5,7 +5,7 @@ use crate::{
     knowledge::store::KnowledgeBackup,
 };
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
     io::Write,
@@ -15,7 +15,8 @@ use std::{
 };
 use uuid::Uuid;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Receipt {
     pub version: u32,
     pub restored_at: chrono::DateTime<chrono::Utc>,

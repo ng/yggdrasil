@@ -227,7 +227,7 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         let mut barrier = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE zz_backup_barrier IN ACCESS EXCLUSIVE MODE").execute(&mut *barrier).await.unwrap();
         let source_options = PgConnectOptions::new().host(root.join("runtime").to_str().unwrap()).port(5432).username("ygg_bootstrap").database("postgres").application_name("ygg-backup-snapshot-test");
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, DirBuilderExt, PermissionsExt};
         let archive = temp.path().join("snapshot.dump");
         let mut output = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&archive).unwrap();
         let dump_bin = bin.clone();
@@ -337,7 +337,7 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         };
         assert!(!backup_command(&destination).output().await.unwrap().status.success());
         assert!(!destination.exists());
-        let backed_up = backup_command(&destination).arg("--policy-dir").arg(&policy_path).output().await.unwrap();
+        let backed_up = backup_command(&destination).env("YGG_KNOWLEDGE_POLICY_DIR", &policy_path).output().await.unwrap();
         assert!(backed_up.status.success(), "{}", String::from_utf8_lossy(&backed_up.stderr));
         let combined: ygg::db::deployment_backup::Manifest = serde_json::from_slice(&backed_up.stdout).unwrap();
         assert_eq!(combined.knowledge.as_ref().unwrap().corpus_id, corpus);
@@ -394,6 +394,81 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
         recovered_pool.close().await;
         recovered_owner.stop(Duration::from_secs(30)).await.unwrap();
         drop(recovered_owner);
+        // Select each restored deployment through the actual command. Configuration
+        // publication cannot be shadowed by legacy environment defaults.
+        let switch_config = temp.path().join("switch-config");
+        std::fs::DirBuilder::new().mode(0o700).create(&switch_config).unwrap();
+        let original_config = b"data_dir='/retained-original'\n";
+        std::fs::write(switch_config.join("config.toml"), original_config).unwrap();
+        let proposed = temp.path().join("proposed.toml");
+        let write_proposed = |managed: bool| {
+            let files = if managed { &managed_files } else { &restored_files };
+            let data = if managed { managed_data.clone() } else { temp.path().join("selected-external-data") };
+            let mut config = toml::Table::new();
+            config.insert("data_dir".into(), toml::Value::String(data.to_str().unwrap().into()));
+            config.insert("knowledge_dir".into(), toml::Value::String(files.join("knowledge").to_str().unwrap().into()));
+            config.insert("knowledge_policy_dir".into(), toml::Value::String(files.join("policy").to_str().unwrap().into()));
+            let mut db = toml::Table::new();
+            db.insert("mode".into(), toml::Value::String(if managed { "managed" } else { "external" }.into()));
+            if !managed {
+                db.insert("url".into(), toml::Value::String(format!("postgres://ygg_runtime@localhost/ygg_combined_restore?host={}", root.join("runtime").display())));
+                db.insert("owner_url".into(), toml::Value::String(format!("postgres://ygg_owner@localhost/ygg_combined_restore?host={}", root.join("runtime").display())));
+            }
+            config.insert("database".into(), toml::Value::Table(db));
+            std::fs::write(&proposed, toml::to_string(&config).unwrap()).unwrap();
+            std::fs::set_permissions(&proposed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let switch_command = |files: &std::path::Path| {
+            let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_ygg"));
+            for name in ["DATABASE_URL", "YGG_DATABASE_OWNER_URL", "YGG_DB_MODE", "YGG_DATA_DIR", "YGG_PROFILE", "YGG_KNOWLEDGE_DIR", "YGG_KNOWLEDGE_POLICY_DIR"] { cmd.env_remove(name); }
+            cmd.env("YGG_CONFIG_DIR", &switch_config).args(["db", "switch"]).arg(&destination)
+                .arg("--restore-dir").arg(files).arg("--target-config").arg(&proposed).arg("--json");
+            cmd
+        };
+        write_proposed(false);
+        std::fs::write(switch_config.join(".env"), "DATABASE_URL=postgres://private-secret@localhost/wrong\n").unwrap();
+        let refused = switch_command(&restored_files).output().await.unwrap();
+        assert!(!refused.status.success());
+        assert!(!String::from_utf8_lossy(&refused.stderr).contains("private-secret"));
+        assert_eq!(std::fs::read(switch_config.join("config.toml")).unwrap(), original_config);
+        std::fs::remove_file(switch_config.join(".env")).unwrap();
+        // Restored external runtime has no ACLs until the operator grants them.
+        let refused = switch_command(&restored_files).output().await.unwrap();
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("runtime"));
+        assert_eq!(std::fs::read(switch_config.join("config.toml")).unwrap(), original_config);
+        let grants = PgPoolOptions::new().max_connections(1).connect_with(source_options.clone().database("ygg_combined_restore")).await.unwrap();
+        sqlx::query("GRANT USAGE ON SCHEMA public TO ygg_runtime").execute(&grants).await.unwrap();
+        sqlx::query("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ygg_runtime").execute(&grants).await.unwrap();
+        sqlx::query("REVOKE ALL ON public.knowledge_storage, public._sqlx_migrations FROM ygg_runtime").execute(&grants).await.unwrap();
+        sqlx::query("GRANT SELECT ON public.knowledge_storage, public._sqlx_migrations TO ygg_runtime").execute(&grants).await.unwrap();
+        grants.close().await;
+        let selected = switch_command(&restored_files).output().await.unwrap();
+        assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
+        assert_eq!(std::fs::read(switch_config.join("config.toml")).unwrap(), std::fs::read(&proposed).unwrap());
+        write_proposed(true);
+        std::fs::write(managed_files.join("knowledge/unexpected"), b"independent edit").unwrap();
+        assert!(!switch_command(&managed_files).output().await.unwrap().status.success());
+        std::fs::remove_file(managed_files.join("knowledge/unexpected")).unwrap();
+        let selected = switch_command(&managed_files).output().await.unwrap();
+        assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
+        let outcome: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+        assert_eq!(outcome["already_applied"], false);
+        assert_eq!(std::fs::read(switch_config.join("config.toml")).unwrap(), std::fs::read(&proposed).unwrap());
+        assert!(matches!(recovered.status().await.unwrap(), ygg::db::runtime::Status::Ready{..}));
+        let application = ygg::config::database::DeploymentConfig::load(std::collections::BTreeMap::from([("YGG_CONFIG_DIR".into(), switch_config.to_str().unwrap().into())])).unwrap();
+        assert_eq!(application.knowledge_policy_dir, managed_files.join("policy"));
+        assert!(matches!(application.database, ygg::config::database::DatabaseTarget::ManagedLocal{data_dir} if data_dir==managed_data));
+        // A confirmed switch can resume after new writes without replaying the
+        // restore or trying to certify those later writes as part of the backup.
+        let active = PgPoolOptions::new().max_connections(1).connect_with(runtime_options).await.unwrap();
+        sqlx::query("UPDATE tasks SET title='after activation' WHERE task_id=$1").bind(claim_task).execute(&active).await.unwrap();
+        active.close().await;
+        ygg::db::restore::validate(&source_options, &combined.database).await.unwrap();
+        let resumed = switch_command(&managed_files).arg("--resume").arg(outcome["operation"].as_str().unwrap()).output().await.unwrap();
+        assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&resumed.stdout).unwrap()["already_applied"], true);
+        ygg::db::supervisor::stop(&recovered, Duration::from_secs(30)).await.unwrap();
         // Force a storage-generation change after the database snapshot but
         // before the paired filesystem snapshot. No combined backup may publish.
         let policy_lease = std::fs::OpenOptions::new().read(true).write(true).open(policy_path.join(".writer.lock")).unwrap();

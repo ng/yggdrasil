@@ -281,6 +281,20 @@ impl KnowledgeStore {
 }
 
 impl KnowledgeBackup {
+    /// Compare a restored live directory with the backup; disposable root cache
+    /// and leases are excluded just as during capture. Never writes either tree.
+    pub fn verify_restored(path: &Path, restored: &Path) -> Result<Self> {
+        let expected = Self::verify(path)?;
+        let restored = KnowledgeStore::open(restored, false)?;
+        let mut entries = BTreeMap::new();
+        inventory(&restored.root, None, "", 0, true, &mut entries, &mut 0)?;
+        ensure!(
+            entries == expected.entries,
+            "restored knowledge or policy differs from backup"
+        );
+        Ok(expected)
+    }
+
     /// Restore exact bytes into an absent directory. Never changes trust or
     /// overwrites an existing corpus. Caller authorizes the backed-up policy.
     pub fn restore(path: &Path, destination: &Path) -> Result<Self> {

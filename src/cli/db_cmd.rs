@@ -175,3 +175,29 @@ pub async fn restore(
     }
     Ok(())
 }
+
+pub async fn switch(
+    backup: &std::path::Path,
+    restored: &std::path::Path,
+    target_config: &std::path::Path,
+    resume: Option<Uuid>,
+    json: bool,
+) -> Result<()> {
+    let outcome = crate::db::deployment_switch::run(
+        backup,
+        restored,
+        target_config,
+        std::env::vars().collect(),
+        resume,
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string(&outcome)?);
+    } else {
+        println!(
+            "Deployment configuration selected; switch {}. Restart participating clients with this configuration.",
+            outcome.operation
+        );
+    }
+    Ok(())
+}

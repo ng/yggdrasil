@@ -47,6 +47,7 @@ pub struct UserSettings {
     pub database: DatabaseSettings,
     pub data_dir: Option<PathBuf>,
     pub knowledge_dir: Option<PathBuf>,
+    pub knowledge_policy_dir: Option<PathBuf>,
     pub profile: Option<String>,
 }
 
@@ -74,6 +75,7 @@ pub struct DeploymentConfig {
     pub owner_url: Option<MigrationOwnerUrl>,
     pub data_dir: PathBuf,
     pub knowledge_dir: PathBuf,
+    pub knowledge_policy_dir: PathBuf,
 }
 
 fn error(message: &str) -> YggError {
@@ -186,6 +188,18 @@ impl DeploymentConfig {
                 .unwrap_or_else(|| data_dir.join("knowledge")),
             "knowledge directory",
         )?;
+        let knowledge_policy_dir = absolute(
+            env.get("YGG_KNOWLEDGE_POLICY_DIR")
+                .map(PathBuf::from)
+                .or_else(|| settings.knowledge_policy_dir.clone())
+                .unwrap_or_else(|| data_dir.join("knowledge-policy")),
+            "knowledge policy directory",
+        )?;
+        if knowledge_dir.starts_with(&knowledge_policy_dir)
+            || knowledge_policy_dir.starts_with(&knowledge_dir)
+        {
+            return Err(error("knowledge and policy directories must not overlap"));
+        }
         let database = match url {
             Some(url) => DatabaseTarget::External { url: url.clone() },
             None => DatabaseTarget::ManagedLocal {
@@ -208,12 +222,13 @@ impl DeploymentConfig {
             database,
             data_dir,
             knowledge_dir,
+            knowledge_policy_dir,
         })
     }
 }
 
 /// Merge only user-level defaults without changing the process environment.
-pub(super) fn user_environment(mut env: Environment) -> Result<Environment, YggError> {
+pub(crate) fn user_environment(mut env: Environment) -> Result<Environment, YggError> {
     let dir = config_dir(&env)?;
     match dotenvy::from_path_iter(dir.join(".env")) {
         Ok(entries) => {

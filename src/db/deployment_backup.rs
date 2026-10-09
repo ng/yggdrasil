@@ -198,7 +198,7 @@ pub async fn create(
     let knowledge = match std::fs::symlink_metadata(&config.knowledge_dir) {
         Ok(_) => {
             let bundle = KnowledgeStore::open(&config.knowledge_dir, false)?;
-            let policy_path = policy_dir.ok_or_else(|| anyhow::anyhow!("existing knowledge requires --policy-dir for its separate identity/policy configuration"))?;
+            let policy_path = policy_dir.unwrap_or(&config.knowledge_policy_dir);
             let policy = KnowledgeStore::open(policy_path, false)?;
             let a = config.knowledge_dir.canonicalize()?;
             let b = policy_path.canonicalize()?;
@@ -216,6 +216,11 @@ pub async fn create(
             ensure!(
                 policy_dir.is_none(),
                 "policy supplied but knowledge directory is absent"
+            );
+            ensure!(
+                std::fs::symlink_metadata(&config.knowledge_policy_dir)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+                "policy exists or is inaccessible but knowledge directory is absent; refusing to omit policy from backup"
             );
             None
         }

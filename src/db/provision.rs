@@ -9,7 +9,7 @@ use super::runtime::ManagedCluster;
 const OWNER: &str = "ygg_owner";
 const RUNTIME: &str = "ygg_runtime";
 const DATABASE: &str = "ygg";
-const TABLES: &[&str] = &[
+pub(crate) const TABLES: &[&str] = &[
     "locks",
     "agents",
     "agent_stats",

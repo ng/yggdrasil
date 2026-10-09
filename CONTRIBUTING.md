@@ -28,6 +28,14 @@ ygg up                            # tmux dashboard
 - **Deployment/OKF contracts**: `cargo test --test database_config --test okf_documents` needs no database. `cargo test --test knowledge_contracts` compares legacy retrieval and JSON fixtures against the migrated database. These fixtures live in `tests/fixtures/knowledge/`; do not run database tests against a user installation.
 - **Bench tests** use a fake `claude` binary at `benches/fixtures/fake-claude.sh` so they run in CI without API tokens. Real `ygg bench` runs invoke the real `claude` CLI; set `YGG_BENCH_CLAUDE_BIN` to override.
 
+Deployment publication fault tests run without PostgreSQL:
+`cargo test --lib config::switch::tests`. With `YGG_TEST_PG_ARCHIVE` set to the
+verified native pinned archive, `cargo test --test managed_packages -- --include-ignored --test-threads=1`
+uses disposable clusters to verify backup/restore, preserved claims and explicit
+external/managed config selection. It must never target an operator database or
+rewrite the developer's configuration. Config proposals and recovery journals in
+these tests belong exclusively to their temporary directories.
+
 ## ADRs
 
 Non-obvious architectural choices land as Architecture Decision Records under `docs/adr/`. New ADRs:
