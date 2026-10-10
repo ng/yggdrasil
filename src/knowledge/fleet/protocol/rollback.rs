@@ -40,6 +40,7 @@ impl Request {
             activation_sha256: None,
             rollback_request: Some(rollback.bytes().to_owned()),
             sql_return: None,
+            cancellation: None,
         })?)
     }
     pub fn new_rollback_deselect(
@@ -55,7 +56,10 @@ impl Request {
     }
     pub(super) fn rollback(&self) -> Result<RollbackPlan> {
         ensure!(
-            matches!(self.action(), Action::FenceOkf | Action::DeselectOkf),
+            matches!(
+                self.action(),
+                Action::FenceOkf | Action::DeselectOkf | Action::CancelRollback
+            ),
             "not a rollback fence request"
         );
         RollbackPlan::parse(
@@ -66,7 +70,7 @@ impl Request {
                 .context("rollback request missing")?,
         )
     }
-    fn validate_fence(&self, rollback: &RollbackPlan, fence: &LocalFence) -> Result<()> {
+    pub(super) fn validate_fence(&self, rollback: &RollbackPlan, fence: &LocalFence) -> Result<()> {
         let mut binding = rollback.expected_binding(&self.plan, self.participant())?;
         let original =
             crate::knowledge::document::digest(serde_json::to_string(&binding)?.as_bytes());
@@ -258,6 +262,61 @@ mod tests {
         let mut missing: Value = serde_json::from_slice(&deselect.bytes().unwrap()).unwrap();
         missing.as_object_mut().unwrap().remove("sql_return");
         assert!(Request::parse(&serde_json::to_vec(&missing).unwrap()).is_err());
+        let cancellation = crate::knowledge::fleet::rollback::CancellationReceipt {
+            operation: rollback.operation(),
+            request_sha256: rollback.sha256().to_owned(),
+            database_id: binding.mappings.database_id,
+            source_generation: binding.generation,
+        };
+        let cancel = Request::new_rollback_cancel(
+            &plan,
+            participant,
+            &rollback,
+            &cancellation,
+            Some(&fence),
+        )
+        .unwrap();
+        let result = crate::knowledge::fence::LocalCancellation {
+            coordinator: fence.coordinator.unwrap(),
+            request_sha256: rollback.sha256().to_owned(),
+            database_id: fence.database_id,
+            corpus_id: fence.corpus_id,
+            source_generation: fence.source_generation,
+            policy: fence.policy.clone(),
+            original_sha256: fence.original_sha256.clone(),
+            fence: Some(fence.clone()),
+        };
+        let cancelled = cancel.respond_cancelled(result.clone()).unwrap();
+        assert_eq!(
+            cancel.accept_cancelled(&cancelled).unwrap().result(),
+            &result
+        );
+        assert!(
+            Request::new_rollback_cancel(
+                &plan,
+                participant,
+                &rollback,
+                &cancellation,
+                Some(&fence)
+            )
+            .unwrap()
+            .accept_cancelled(&cancelled)
+            .is_err()
+        );
+        let mut changed: Value = serde_json::from_slice(&cancelled).unwrap();
+        changed["result"]["fence"] = Value::Null;
+        assert!(
+            cancel
+                .accept_cancelled(&serde_json::to_vec(&changed).unwrap())
+                .is_err()
+        );
+        let mut changed: Value = serde_json::from_slice(&cancelled).unwrap();
+        changed["cancellation"]["receipt"]["request_sha256"] = json!("0".repeat(64));
+        assert!(
+            cancel
+                .accept_cancelled(&serde_json::to_vec(&changed).unwrap())
+                .is_err()
+        );
         let response = request.respond_rollback(fence.clone()).unwrap();
         assert_eq!(request.accept_rollback(&response).unwrap().fence(), &fence);
         assert!(

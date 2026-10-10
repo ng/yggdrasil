@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::{os::unix::fs::MetadataExt, path::PathBuf};
 use uuid::Uuid;
 
+mod cancel;
+pub use cancel::LocalCancellation;
 mod sql;
 pub use sql::{
     SqlFinalization, SqlPreparation, SqlReadiness, abort_sql_backed, cancel_sql, cancel_sql_backed,
@@ -115,7 +117,7 @@ impl Intent {
 /// Drain compatible local operations, persist retry input, then atomically fence
 /// the saved selection. A retry accepts only the exact original or fenced bytes.
 /// Generation remains the last selected OKF generation, not a claimed SQL fence.
-/// There is deliberately no unfence operation: activation needs the full workflow.
+/// This entry point cannot undo a fence; restoration requires verified fleet cancellation.
 pub fn local(config: &KnowledgeConfig, generation: i64) -> Result<LocalFence> {
     local_bound(config, generation, None)
 }

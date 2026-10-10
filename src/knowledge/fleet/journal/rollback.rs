@@ -172,3 +172,87 @@ impl Journal {
         Ok(receipt)
     }
 }
+
+impl Journal {
+    /// Restore every host after the SQL cancellation barrier. This retains the
+    /// complete census locally; it does not yet release the SQL reservation.
+    pub async fn restore_rollback_hosts(
+        &self,
+        reverse: &RollbackPlan,
+        pool: &sqlx::PgPool,
+        identity: Option<&Path>,
+    ) -> Result<String> {
+        self.verify()?;
+        reverse.expected_binding(&self.plan, self.plan.plan().participants[0].id)?;
+        let receipt = reverse.begin_cancellation(pool).await?;
+        let prefix = format!("rollback-{}", reverse.operation());
+        self.store
+            .retain_artifact(&format!("{prefix}-request.json"), reverse.bytes(), false)?;
+        self.store.retain_artifact(
+            &format!("{prefix}-cancellation.json"),
+            &serde_json::to_string(&receipt)?,
+            false,
+        )?;
+        let mut completed = Vec::new();
+        let mut failures = Vec::new();
+        for host in &self.plan.plan().participants {
+            let name = format!("{prefix}-cancel-host-{}.json", host.id);
+            let prior: Option<crate::knowledge::fence::LocalCancellation> = self
+                .store
+                .read_artifact(&name)?
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let known: Option<crate::knowledge::fence::LocalFence> = self
+                .store
+                .read_artifact(&format!("{prefix}-host-{}.json", host.id))?
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let known = known.or_else(|| prior.as_ref().and_then(|r| r.fence.clone()));
+            let response = match protocol::call_rollback_cancel(
+                self,
+                reverse,
+                host.id,
+                &receipt,
+                known.as_ref(),
+                identity,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    failures.push(format!("{}: {error:#}", host.name));
+                    continue;
+                }
+            };
+            self.verify()?;
+            let bytes = serde_json::to_string(response.result())?;
+            self.store.retain_artifact(&name, &bytes, false)?;
+            completed.push((name, bytes));
+        }
+        ensure!(
+            failures.is_empty(),
+            "rollback cancelled; hosts still require restoration: {}",
+            failures.join("; ")
+        );
+        let mut tx = crate::knowledge::recovery_event::owner_transaction(pool).await?;
+        reverse.cancellation_on(&mut tx, &receipt).await?;
+        self.verify()?;
+        let mut records = Vec::new();
+        for (name, bytes) in &completed {
+            ensure!(
+                self.store.read_artifact(name)?.as_deref() == Some(bytes.as_str()),
+                "host cancellation evidence changed"
+            );
+            records.push(serde_json::from_str::<serde_json::Value>(bytes)?);
+        }
+        let hosts = serde_json::to_string(
+            &serde_json::json!({"version":1,"rollback_sha256":reverse.sha256(),"participants":records}),
+        )?;
+        self.store
+            .retain_artifact(&format!("{prefix}-restored.json"), &hosts, false)?;
+        tx.commit().await?;
+        Ok(crate::knowledge::document::digest(hosts.as_bytes()))
+    }
+}

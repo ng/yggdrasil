@@ -302,7 +302,8 @@ impl Journal {
             super::protocol::Action::ReadySql
             | super::protocol::Action::FinalizeSql
             | super::protocol::Action::FenceOkf
-            | super::protocol::Action::DeselectOkf => {
+            | super::protocol::Action::DeselectOkf
+            | super::protocol::Action::CancelRollback => {
                 anyhow::bail!("readiness requires publication-bound dispatch")
             }
             super::protocol::Action::CancelSql => "cancelled",

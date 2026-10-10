@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
-// Version 9 additionally checks cancellation before every rollback host fence.
+// Version 10 additionally restores cancelled rollback hosts from retained evidence.
 // Older hosts must fail before the coordinator fences SQL.
-const RPC_VERSION: u32 = 9;
+const RPC_VERSION: u32 = 10;
+mod cancel;
+pub use cancel::{AuthenticatedCancellation, call_rollback_cancel};
 mod rollback;
 pub use rollback::{
     AuthenticatedDeselection, AuthenticatedRollbackFence, call_rollback_deselect,
@@ -31,6 +33,7 @@ pub enum Action {
     FinalizeSql,
     FenceOkf,
     DeselectOkf,
+    CancelRollback,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +54,8 @@ struct Envelope {
     rollback_request: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sql_return: Option<super::journal::SqlReturnReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cancellation: Option<cancel::CancellationRequest>,
 }
 pub struct Request {
     envelope: Envelope,
@@ -143,6 +148,7 @@ impl Request {
             activation_sha256,
             rollback_request: None,
             sql_return: None,
+            cancellation: None,
         })?;
         Self::parse(&bytes)
     }
@@ -153,8 +159,10 @@ impl Request {
         );
         let envelope: Envelope = serde_json::from_slice(bytes)?;
         ensure!(
-            matches!(envelope.action, Action::FenceOkf | Action::DeselectOkf)
-                || bytes.len() <= MAX_FORWARD_REQUEST,
+            matches!(
+                envelope.action,
+                Action::FenceOkf | Action::DeselectOkf | Action::CancelRollback
+            ) || bytes.len() <= MAX_FORWARD_REQUEST,
             "forward participant request exceeds 8 MiB"
         );
         let plan = ValidatedPlan::parse(&envelope.plan)?;
@@ -180,16 +188,25 @@ impl Request {
             "finalization requires activation digest only"
         );
         ensure!(
-            matches!(envelope.action, Action::FenceOkf | Action::DeselectOkf)
-                == envelope.rollback_request.is_some(),
+            matches!(
+                envelope.action,
+                Action::FenceOkf | Action::DeselectOkf | Action::CancelRollback
+            ) == envelope.rollback_request.is_some(),
             "rollback fence requires a dedicated rollback request only"
         );
         ensure!(
             (envelope.action == Action::DeselectOkf) == envelope.sql_return.is_some(),
             "deselection requires SQL return receipt only"
         );
+        ensure!(
+            (envelope.action == Action::CancelRollback) == envelope.cancellation.is_some(),
+            "rollback cancellation requires dedicated receipt only"
+        );
         if let Some(reverse) = &envelope.rollback_request {
             let reverse = super::rollback::RollbackPlan::parse(&plan, reverse)?;
+            if let Some(cancel) = &envelope.cancellation {
+                reverse.validate_cancellation(&cancel.receipt)?;
+            }
             if let Some(receipt) = &envelope.sql_return {
                 reverse.validate_return(&plan, receipt)?;
             }
@@ -206,7 +223,16 @@ impl Request {
         if let Some(publication) = &envelope.publication {
             publication.validate_plan(&plan)?;
         }
-        Ok(Self { envelope, plan })
+        let request = Self { envelope, plan };
+        if let Some(fence) = request
+            .envelope
+            .cancellation
+            .as_ref()
+            .and_then(|c| c.known_fence.as_ref())
+        {
+            request.validate_fence(&request.rollback()?, fence)?;
+        }
+        Ok(request)
     }
     pub fn plan(&self) -> &ValidatedPlan {
         &self.plan
@@ -320,6 +346,21 @@ impl Request {
             participant: host.id,
         };
         let result = match self.action() {
+            Action::CancelRollback => {
+                let cancellation = self.envelope.cancellation.as_ref().unwrap();
+                return self.respond_cancelled(
+                    self.rollback()?
+                        .cancel_host(
+                            &self.plan,
+                            config,
+                            self.participant(),
+                            &cancellation.receipt,
+                            cancellation.known_fence.as_ref(),
+                            pool,
+                        )
+                        .await?,
+                );
+            }
             Action::DeselectOkf => {
                 return self.respond_rollback(
                     self.rollback()?
@@ -669,7 +710,7 @@ mod tests {
     fn rejects_preparation_only_protocol_before_execution() {
         let request = request();
         let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
-        for version in [1, 2, 3, 4, 5, 6, 7, 8] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
             legacy["version"] = json!(version);
             assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
         }

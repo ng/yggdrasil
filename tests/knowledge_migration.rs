@@ -2698,19 +2698,28 @@ async fn fleet_fence_fixture(finalize_steps: Option<usize>) {
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; two-host post-activation recovery"]
 async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
-    partial_fleet_finalization_fixture(false, false).await;
+    partial_fleet_finalization_fixture(false, false, false).await;
 }
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; complete reverse fence and resume"]
 async fn native_fleet_reverse_fence_resumes_without_recreating_host_evidence() {
-    partial_fleet_finalization_fixture(true, false).await;
+    partial_fleet_finalization_fixture(true, false, false).await;
 }
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; atomic current-data SQL return"]
 async fn native_fleet_sql_return_is_atomic_and_retry_preserves_later_writes() {
-    partial_fleet_finalization_fixture(true, true).await;
+    partial_fleet_finalization_fixture(true, true, false).await;
 }
-async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: bool) {
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; cancel mixed fenced and unfenced hosts"]
+async fn native_fleet_cancellation_restores_mixed_hosts_without_fabricating_fences() {
+    partial_fleet_finalization_fixture(false, false, true).await;
+}
+async fn partial_fleet_finalization_fixture(
+    complete_reverse: bool,
+    return_sql: bool,
+    cancel_early: bool,
+) {
     use ygg::knowledge::{
         document::digest,
         fleet::{journal::Journal, plan::ValidatedPlan},
@@ -3171,6 +3180,73 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: 
         winner.operation()
     );
     assert_eq!(first_fence.fence().source_generation, 3);
+    if cancel_early {
+        let receipt = ygg::knowledge::fleet::rollback::CancellationReceipt {
+            operation: winner.operation(),
+            request_sha256: winner.sha256().to_owned(),
+            database_id: first.plan.mappings.database_id,
+            source_generation: 3,
+        };
+        assert!(
+            ygg::knowledge::fleet::protocol::call_rollback_cancel(
+                &journal,
+                winner,
+                participants[0],
+                &receipt,
+                Some(first_fence.fence()),
+                Some(&ssh2.identity)
+            )
+            .await
+            .is_err()
+        );
+        let restored = journal
+            .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap();
+        for (index, host) in participants.iter().enumerate() {
+            let value: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(first.journal.join(format!(
+                    "rollback-{}-cancel-host-{host}.json",
+                    winner.operation()
+                )))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(value["fence"].is_null(), index == 1);
+        }
+        assert_eq!(
+            journal
+                .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .unwrap(),
+            restored
+        );
+        for fixture in [&first, &second] {
+            success(
+                fixture
+                    .command()
+                    .args([
+                        "remember",
+                        "write after mixed cancellation",
+                        "--global",
+                        "--json",
+                    ])
+                    .output()
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert!(!local_intent.exists());
+        assert!(
+            !config2
+                .knowledge_policy_dir
+                .join("local-fence-3.json")
+                .exists()
+        );
+        assert!(loser.register(&first.pool).await.is_err());
+        first.pool.close().await;
+        return;
+    }
     assert_eq!(
         call_rollback_fence(&journal, winner, participants[0], Some(&ssh2.identity))
             .await
@@ -3322,6 +3398,151 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: 
         );
         tx.rollback().await.unwrap();
         assert_eq!(first.marker().await, (3, "okf".into()));
+        let prefix = format!("rollback-{}", winner.operation());
+        let authorized = std::fs::read(ssh1.identity.with_extension("pub")).unwrap();
+        std::fs::write(ssh1.identity.with_extension("pub"), b"").unwrap();
+        assert!(
+            journal
+                .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        assert!(local_intent.exists());
+        assert!(
+            !config2
+                .knowledge_policy_dir
+                .join("local-fence-3.json")
+                .exists()
+        );
+        success(
+            second
+                .command()
+                .args([
+                    "remember",
+                    "write during rollback cancellation",
+                    "--global",
+                    "--json",
+                ])
+                .output()
+                .await
+                .unwrap(),
+        );
+        std::fs::write(ssh1.identity.with_extension("pub"), authorized).unwrap();
+        // Known host evidence may not be replaced with a never-fenced acknowledgement.
+        let original_intent = std::fs::read(&local_intent).unwrap();
+        std::fs::remove_file(&local_intent).unwrap();
+        assert!(
+            journal
+                .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        let cancel_intent = config.knowledge_policy_dir.join(format!(
+            "local-rollback-cancel-{}-intent.json",
+            winner.operation()
+        ));
+        assert!(!cancel_intent.exists());
+        std::fs::write(&local_intent, &original_intent).unwrap();
+        let fenced_runtime = std::fs::read(&runtime).unwrap();
+        std::fs::write(&runtime, b"independent selection").unwrap();
+        assert!(
+            journal
+                .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&runtime).unwrap(), b"independent selection");
+        std::fs::write(&runtime, &fenced_runtime).unwrap();
+        let restored = journal
+            .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap();
+        success(
+            first
+                .command()
+                .args([
+                    "remember",
+                    "write after rollback cancellation",
+                    "--global",
+                    "--json",
+                ])
+                .output()
+                .await
+                .unwrap(),
+        );
+        let remote_after = git(&remote, &["rev-parse", "refs/heads/knowledge"]);
+        let done = config.knowledge_policy_dir.join(format!(
+            "local-rollback-cancel-{}-done.json",
+            winner.operation()
+        ));
+        // Reconstruct each persisted interruption boundary using only fixture files.
+        for phase in 0..3 {
+            if phase == 0 {
+                std::fs::write(&runtime, &fenced_runtime).unwrap();
+            }
+            if phase <= 1 {
+                std::fs::write(&local_intent, &original_intent).unwrap();
+            }
+            std::fs::remove_file(&done).unwrap();
+            assert_eq!(
+                journal
+                    .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                    .await
+                    .unwrap(),
+                restored
+            );
+            assert!(!local_intent.exists());
+        }
+        let retained_intent = std::fs::read(&cancel_intent).unwrap();
+        std::fs::remove_file(&cancel_intent).unwrap();
+        assert!(
+            journal
+                .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        assert!(!cancel_intent.exists());
+        std::fs::write(&cancel_intent, retained_intent).unwrap();
+        std::fs::write(&local_intent, b"another operation").unwrap();
+        assert!(
+            journal
+                .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&local_intent).unwrap(), b"another operation");
+        std::fs::remove_file(&local_intent).unwrap();
+        std::fs::remove_file(first.journal.join(format!("{prefix}-restored.json"))).unwrap();
+        drop(journal);
+        let journal = Journal::resume(&first.journal, &hash).unwrap();
+        assert_eq!(
+            journal
+                .restore_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .unwrap(),
+            restored
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/knowledge"]),
+            remote_after
+        );
+        for (id, host_config) in participants.iter().zip([&config, &config2]) {
+            assert!(
+                call_rollback_fence(&journal, winner, *id, Some(&ssh2.identity))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                !host_config
+                    .knowledge_policy_dir
+                    .join("local-fence-3.json")
+                    .exists()
+            );
+        }
+        assert!(
+            loser.register(&first.pool).await.is_err(),
+            "local acknowledgements alone released SQL reservation"
+        );
         first.pool.close().await;
         return;
     }

@@ -119,7 +119,9 @@ The public shared migration CLI stays disabled pending reverse cancellation and
 remaining orchestration/qualification gates.
 Reverse cancellation now has an immutable SQL barrier that drains admitted host
 operations and rejects delayed fences. It only starts at the original OKF
-generation; host restoration and complete-census reservation release remain.
+generation. Authenticated host restoration now preserves original fence evidence,
+restores only the exact original selection, and records a local complete-host census.
+The SQL completion seal and reservation release still remain.
 
 ### Faults, performance and packaging
 
