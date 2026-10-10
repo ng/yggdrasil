@@ -11,11 +11,31 @@ use std::{
 use super::{package, provision, runtime::ManagedCluster, supervisor};
 
 pub async fn run(data_dir: &Path, archive: Option<&Path>, migrations: bool) -> Result<()> {
+    run_selected(data_dir, archive, migrations, None).await
+}
+
+pub(crate) async fn run_for_major(
+    data_dir: &Path,
+    archive: Option<&Path>,
+    migrations: bool,
+    major: u32,
+) -> Result<()> {
+    run_selected(data_dir, archive, migrations, Some(major)).await
+}
+
+async fn run_selected(
+    data_dir: &Path,
+    archive: Option<&Path>,
+    migrations: bool,
+    requested_major: Option<u32>,
+) -> Result<()> {
+    let major = requested_major.unwrap_or(16);
+    package::release_for_major(major)?;
     ensure!(data_dir.is_absolute(), "absolute data directory required");
     // Reject unsupported targets and invalid offline bytes before creating state.
     let target = package::current_target()?;
     if let Some(archive) = archive {
-        package::verify_archive(archive, target)?;
+        package::verify_archive_for_major(archive, target, major)?;
     }
     fs::DirBuilder::new()
         .recursive(true)
@@ -69,13 +89,19 @@ pub async fn run(data_dir: &Path, archive: Option<&Path>, migrations: bool) -> R
             let bin = match archive {
                 Some(archive) => {
                     let archive = archive.to_owned();
-                    tokio::task::spawn_blocking(move || package::install_offline(&base, &archive))
-                        .await??
+                    tokio::task::spawn_blocking(move || {
+                        package::install_offline_for_major(&base, &archive, major)
+                    })
+                    .await??
                 }
-                None => package::install_download(&base).await?,
+                None => package::install_download_for_major(&base, major).await?,
             };
-            ManagedCluster::initialize(&root, &bin, 16).await?
+            ManagedCluster::initialize(&root, &bin, major).await?
         };
+    ensure!(
+        requested_major.is_none_or(|m| cluster.manifest().major == m),
+        "existing cluster major differs; restore into a new data directory"
+    );
     supervisor::start(&cluster, &std::env::current_exe()?, Duration::from_secs(30)).await?;
     if migrations {
         provision::migrate(&cluster).await?;

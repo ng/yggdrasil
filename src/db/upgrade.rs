@@ -397,7 +397,7 @@ pub async fn patch(config: &DeploymentConfig, request: Request<'_>) -> Result<Re
             "upgrade pending; inspect journal and supply --resume OPERATION"
         );
         let source = ManagedCluster::open(&root)?;
-        let pinned = package::release()?.postgres_version;
+        let pinned = package::release_for_major(source.manifest().major)?.postgres_version;
         let target_version = version(&format!("postgres (PostgreSQL) {pinned}"))?;
         let source_version = version(&source.manifest().binary_version)?;
         ensure!(
@@ -418,8 +418,18 @@ pub async fn patch(config: &DeploymentConfig, request: Request<'_>) -> Result<Re
             "new upgrade requires an unused backup destination"
         );
         let bin = match archive {
-            Some(path) => package::install_offline(&data_dir.join("binaries"), path)?,
-            None => package::install_download(&data_dir.join("binaries")).await?,
+            Some(path) => package::install_offline_for_major(
+                &data_dir.join("binaries"),
+                path,
+                source.manifest().major,
+            )?,
+            None => {
+                package::install_download_for_major(
+                    &data_dir.join("binaries"),
+                    source.manifest().major,
+                )
+                .await?
+            }
         };
         let target = source.patch_manifest(&bin).await?;
         ensure!(
@@ -505,8 +515,18 @@ async fn execute(
         return Ok(journal.receipt()); // Never compare old rows after completion.
     }
     let bin = match archive {
-        Some(path) => package::install_offline(&config.data_dir.join("binaries"), path)?,
-        None => package::install_download(&config.data_dir.join("binaries")).await?,
+        Some(path) => package::install_offline_for_major(
+            &config.data_dir.join("binaries"),
+            path,
+            journal.target.major,
+        )?,
+        None => {
+            package::install_download_for_major(
+                &config.data_dir.join("binaries"),
+                journal.target.major,
+            )
+            .await?
+        }
     };
     ensure!(
         bin.canonicalize()? == journal.target.bin,

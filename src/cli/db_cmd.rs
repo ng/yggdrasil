@@ -207,13 +207,20 @@ pub async fn restore(
     destination: &std::path::Path,
     pg_bin: Option<&std::path::Path>,
     postgres_archive: Option<&std::path::Path>,
+    postgres_major: Option<u32>,
     json: bool,
 ) -> Result<()> {
     let config = DeploymentConfig::load(std::env::vars().collect())?;
-    let receipt =
-        crate::db::deployment_restore::run(&config, path, destination, pg_bin, postgres_archive)
-            .await
-            .context("restore incomplete on failure; inspect retained target before retrying")?;
+    let receipt = crate::db::deployment_restore::run_with_major(
+        &config,
+        path,
+        destination,
+        pg_bin,
+        postgres_archive,
+        postgres_major,
+    )
+    .await
+    .context("restore incomplete on failure; inspect retained target before retrying")?;
     if json {
         println!("{}", serde_json::to_string(&receipt)?);
     } else {

@@ -47,7 +47,21 @@ pub struct Package {
 }
 
 pub fn release() -> Result<Release> {
-    let release: Release = serde_json::from_str(include_str!("packages.json"))?;
+    release_for_major(16)
+}
+
+/// Explicit major selection; ordinary installation continues to use PG16.
+pub fn release_for_major(major: u32) -> Result<Release> {
+    let bytes = match major {
+        16 => include_str!("packages.json"),
+        18 => include_str!("packages-18.json"),
+        _ => anyhow::bail!("managed PostgreSQL major must be 16 or 18"),
+    };
+    let release: Release = serde_json::from_str(bytes)?;
+    ensure!(
+        release.postgres_version.split('.').next() == Some(major.to_string().as_str()),
+        "package manifest major differs from selection"
+    );
     ensure!(release.schema == 1, "unsupported package manifest");
     Ok(release)
 }
@@ -64,7 +78,11 @@ pub fn current_target() -> Result<&'static str> {
 }
 
 pub fn package(target: &str) -> Result<Package> {
-    release()?
+    package_for_major(target, 16)
+}
+
+pub fn package_for_major(target: &str, major: u32) -> Result<Package> {
+    release_for_major(major)?
         .packages
         .into_iter()
         .find(|p| p.target == target)
@@ -105,7 +123,11 @@ fn archive_bytes(archive: &Path, package: &Package) -> Result<Vec<u8>> {
 
 /// Audit another advertised target without executing its binaries.
 pub fn verify_archive(archive: &Path, target: &str) -> Result<()> {
-    archive_bytes(archive, &package(target)?)?;
+    verify_archive_for_major(archive, target, 16)
+}
+
+pub fn verify_archive_for_major(archive: &Path, target: &str, major: u32) -> Result<()> {
+    archive_bytes(archive, &package_for_major(target, major)?)?;
     Ok(())
 }
 
@@ -454,14 +476,22 @@ fn install(base: &Path, package: &Package, bytes: &[u8]) -> Result<PathBuf> {
 
 /// Install the exact native pinned archive. No network or subprocess execution.
 pub fn install_offline(base: &Path, archive: &Path) -> Result<PathBuf> {
-    let package = package(current_target()?)?;
+    install_offline_for_major(base, archive, 16)
+}
+
+pub fn install_offline_for_major(base: &Path, archive: &Path, major: u32) -> Result<PathBuf> {
+    let package = package_for_major(current_target()?, major)?;
     let bytes = archive_bytes(archive, &package)?;
     install(base, &package, &bytes)
 }
 
 /// Explicit online installation only; curl is not required for offline packages.
 pub async fn install_download(base: &Path) -> Result<PathBuf> {
-    let package = package(current_target()?)?;
+    install_download_for_major(base, 16).await
+}
+
+pub async fn install_download_for_major(base: &Path, major: u32) -> Result<PathBuf> {
+    let package = package_for_major(current_target()?, major)?;
     let mut child = Command::new("curl")
         .args([
             "-q",
@@ -503,6 +533,30 @@ pub async fn install_download(base: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_major_catalog_keeps_default_and_rejects_unsupported_majors() {
+        assert_eq!(release().unwrap().postgres_version, "16.15");
+        assert_eq!(release_for_major(18).unwrap().postgres_version, "18.6");
+        for target in [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+        ] {
+            assert_eq!(
+                package(target).unwrap(),
+                package_for_major(target, 16).unwrap()
+            );
+            assert_ne!(
+                package_for_major(target, 16).unwrap(),
+                package_for_major(target, 18).unwrap()
+            );
+        }
+        for major in [0, 15, 17, 19] {
+            assert!(release_for_major(major).is_err());
+            assert!(package_for_major("x86_64-unknown-linux-gnu", major).is_err());
+        }
+    }
 
     fn fixture(path: &str, link: Option<&str>, hard: bool) -> Vec<u8> {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

@@ -146,9 +146,14 @@ async fn output(cmd: &mut Command, duration: Duration) -> Result<String> {
         );
         return Ok(String::new());
     }
+    let program = Path::new(cmd.as_std().get_program())
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     let output = timeout(duration, cmd.output())
         .await
-        .context("managed command timed out")??;
+        .with_context(|| format!("managed {program} command timed out"))??;
     ensure!(
         output.status.success(),
         "managed command failed: {}",
@@ -712,9 +717,12 @@ impl Owner {
                 == self.cluster.manifest.major,
             "cluster major changed; explicit upgrade required"
         );
+        // The outer startup timeout bounds all work together. Cold native
+        // admission can exceed five seconds; probes must share the caller's
+        // budget rather than impose a shorter, hidden startup deadline.
         let version = output(
             command(&self.cluster.manifest.bin.join("postgres")).arg("--version"),
-            Duration::from_secs(5),
+            duration,
         )
         .await?;
         ensure!(
@@ -724,7 +732,7 @@ impl Owner {
         let control = output(
             command(&self.cluster.manifest.bin.join("pg_controldata"))
                 .arg(self.cluster.root.join("data")),
-            Duration::from_secs(5),
+            duration,
         )
         .await?;
         ensure!(

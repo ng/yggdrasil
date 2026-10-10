@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "postgres_version": "18.6",
+  "distribution_version": "18.6.0",
+  "source_commit": "2954f800589f74265f136cdb490b87749e209e7c",
+  "source_url": "https://github.com/theseus-rs/postgresql-binaries",
+  "release_url": "https://github.com/theseus-rs/postgresql-binaries/releases/tag/18.6.0",
+  "packages": [
+    {
+      "target": "aarch64-apple-darwin",
+      "url": "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.6.0/postgresql-18.6.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "a257bcdb8aa3301a13d6a5bcec48f8c9517045b7cbae71e50788b2615539e95b",
+      "bytes": 13081312,
+      "root": "postgresql-18.6.0-aarch64-apple-darwin"
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "url": "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.6.0/postgresql-18.6.0-x86_64-apple-darwin.tar.gz",
+      "sha256": "f8918fbe747e0d79bda58ad8f8afcf23ac384b847ff3af18856f0825ba54b031",
+      "bytes": 13435995,
+      "root": "postgresql-18.6.0-x86_64-apple-darwin"
+    },
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "url": "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.6.0/postgresql-18.6.0-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "bb3d09f876b2383e25a8c9ce09e32d185a03656a23d074f5195542b1b1b3ca61",
+      "bytes": 12184736,
+      "root": "postgresql-18.6.0-x86_64-unknown-linux-gnu"
+    }
+  ]
+}

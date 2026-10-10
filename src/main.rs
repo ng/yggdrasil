@@ -183,6 +183,9 @@ enum DbAction {
         pg_bin: Option<std::path::PathBuf>,
         #[arg(long)]
         postgres_archive: Option<std::path::PathBuf>,
+        /// Explicit target major for a new managed restore (16 or 18)
+        #[arg(long)]
+        postgres_major: Option<u32>,
         #[arg(long)]
         json: bool,
     },
@@ -1386,6 +1389,7 @@ async fn main() -> anyhow::Result<()> {
                 destination,
                 pg_bin,
                 postgres_archive,
+                postgres_major,
                 json,
             } => {
                 ygg::cli::db_cmd::restore(
@@ -1393,6 +1397,7 @@ async fn main() -> anyhow::Result<()> {
                     &destination,
                     pg_bin.as_deref(),
                     postgres_archive.as_deref(),
+                    postgres_major,
                     json,
                 )
                 .await?;

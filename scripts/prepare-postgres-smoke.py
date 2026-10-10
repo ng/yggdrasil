@@ -21,7 +21,12 @@ def main():
     parser.add_argument("--target", required=True, choices=[p["target"] for p in manifest["packages"]])
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--upgrade-source", action="store_true", help="prepare pinned 16.14 upgrade fixture")
+    parser.add_argument("--major", type=int, choices=[16, 18], default=16)
     args = parser.parse_args()
+    if args.upgrade_source and args.major != 16:
+        parser.error("--upgrade-source is a PostgreSQL 16 fixture")
+    if args.major == 18:
+        manifest = json.loads((Path(__file__).resolve().parents[1] / "src/db/packages-18.json").read_text())
     package = next(p for p in manifest["packages"] if p["target"] == args.target)
     if args.upgrade_source:
         # Test-only previous patch; never changes the product installation pin.
@@ -53,7 +58,9 @@ def main():
         source.extractall(destination, filter="data")
     binary = destination / package["root"] / "bin"
     env = f"YGG_TEST_PG_ARCHIVE={archive}\nYGG_TEST_PG_BIN={binary}\nYGG_TEST_PG_MAJOR=16\n"
-    if args.upgrade_source:
+    if args.major == 18:
+        env = f"YGG_TEST_PG18_ARCHIVE={archive}\nYGG_TEST_PG18_BIN={binary}\n"
+    elif args.upgrade_source:
         env = f"YGG_TEST_PG_OLD_BIN={binary}\n"
     if "GITHUB_ENV" in os.environ:
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:

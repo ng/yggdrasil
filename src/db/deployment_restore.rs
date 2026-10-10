@@ -49,6 +49,18 @@ pub async fn run(
     pg_bin: Option<&Path>,
     postgres_archive: Option<&Path>,
 ) -> Result<Receipt> {
+    run_with_major(config, source, destination, pg_bin, postgres_archive, None).await
+}
+
+pub async fn run_with_major(
+    config: &DeploymentConfig,
+    source: &Path,
+    destination: &Path,
+    pg_bin: Option<&Path>,
+    postgres_archive: Option<&Path>,
+    postgres_major: Option<u32>,
+) -> Result<Receipt> {
+    let major = postgres_major.unwrap_or(16);
     let manifest = deployment_backup::verify(source)?;
     ensure!(
         manifest
@@ -84,6 +96,7 @@ pub async fn run(
     // Resolve credentials and reject invalid combinations before any creation.
     let external = match &config.database {
         DatabaseTarget::External { url } => {
+            ensure!(postgres_major.is_none(), "--postgres-major is managed-only");
             ensure!(
                 postgres_archive.is_none(),
                 "--postgres-archive is managed-only"
@@ -101,10 +114,18 @@ pub async fn run(
             Some((bin, options))
         }
         DatabaseTarget::ManagedLocal { data_dir } => {
+            super::package::release_for_major(major)?;
+            if let Some(archive) = postgres_archive {
+                super::package::verify_archive_for_major(
+                    archive,
+                    super::package::current_target()?,
+                    major,
+                )?;
+            }
             ensure!(pg_bin.is_none(), "managed restore uses its pinned tools");
             ensure!(
-                manifest.database.server_major <= 16,
-                "managed PostgreSQL 16 cannot restore a newer major"
+                manifest.database.server_major <= major as i32,
+                "selected managed PostgreSQL cannot restore a newer major"
             );
             ensure!(
                 !data_dir
@@ -174,7 +195,7 @@ pub async fn run(
             // Reserve the new target exclusively; a racing initializer must not
             // cause us to adopt an already existing deployment.
             std::fs::DirBuilder::new().mode(0o700).create(data_dir)?;
-            super::initialize::run(data_dir, postgres_archive, false).await?;
+            super::initialize::run_for_major(data_dir, postgres_archive, false, major).await?;
             let cluster = ManagedCluster::open(&data_dir.join("postgres"))?;
             let restored =
                 super::provision::restore(&cluster, &mut archive, &manifest.database).await;

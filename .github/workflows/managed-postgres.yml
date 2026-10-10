@@ -67,7 +67,7 @@ jobs:
             ldd "$YGG_TEST_PG_BIN/../lib/uuid-ossp.so"
           fi
       - name: Test release-mode installer, migrations and lifecycle
-        run: cargo test --release --test managed_packages --test managed_runtime --test managed_supervisor --test external_tls --test knowledge_migration -- --include-ignored --test-threads=1
+        run: cargo test --release --test managed_packages --test managed_runtime --test managed_probe_deadline --test managed_supervisor --test external_tls --test knowledge_migration -- --include-ignored --test-threads=1
       - name: Prepare previous patch and test explicit upgrade recovery
         shell: bash
         run: |
@@ -79,6 +79,10 @@ jobs:
           export YGG_TEST_YGG_BIN="$PWD/target/release/ygg"
           cargo test --release --test managed_upgrade -- --include-ignored --nocapture --test-threads=1
           cargo test --release --lib db::upgrade::tests::patch_publication_crashes_resume_without_losing_rows -- --include-ignored --nocapture --test-threads=1
+      - name: Prepare explicit PostgreSQL 18 restore target
+        run: python3 scripts/prepare-postgres-smoke.py --major 18 --target '${{ matrix.target }}' --directory "$RUNNER_TEMP/pg-major-target"
+      - name: Test managed restore into a new major-version directory
+        run: cargo test --release --test managed_major_restore -- --include-ignored --nocapture --test-threads=1
       - name: Test killed bootstrap recovery
         run: cargo test --release --lib db::runtime::bootstrap_tests -- --include-ignored --test-threads=1
       - name: Test knowledge writes on an actually full filesystem
