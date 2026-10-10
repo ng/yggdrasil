@@ -6,6 +6,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uuid::Uuid;
+mod cancel;
+pub use cancel::CancellationReceipt;
 mod deselect;
 mod transition;
 
@@ -109,6 +111,7 @@ impl RollbackPlan {
     /// a reservation. The supplied commit remains a declaration until capture.
     pub async fn register(&self, pool: &sqlx::PgPool) -> Result<()> {
         let mut tx = Registration::transaction(pool).await?;
+        self.not_cancelled_on(&mut tx).await?;
         let activation = forward_transition::saved_activation(&self.forward, &mut tx)
             .await?
             .context("rollback requires committed fleet activation")?;
@@ -251,6 +254,13 @@ impl RollbackPlan {
 
 impl RollbackPlan {
     async fn registered_on(&self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+        self.registered_identity_on(tx).await?;
+        self.not_cancelled_on(tx).await
+    }
+    async fn registered_identity_on(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<()> {
         let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_fleet_rollbacks r JOIN public.knowledge_fleet_operations o ON o.operation_id=r.forward_operation_id JOIN public.knowledge_fleet_activations a ON a.operation_id=o.operation_id JOIN public.knowledge_forward_receipts f ON f.operation_id=o.operation_id WHERE r.operation_id=$1 AND r.forward_operation_id=$2 AND r.database_id=$3 AND r.source_generation=$4 AND r.request_sha256=$5 AND r.request_json=$6 AND o.request_sha256=$7 AND a.ready_sha256=$8 AND a.generation=$4 AND f.database_id=$3 AND f.corpus_id=$9 AND f.active_generation=$4 AND f.fenced_generation=$4-1 AND f.manifest_sha256=(a.ready_json::jsonb->'publication'->>'manifest_sha256'))")
             .bind(self.operation()).bind(self.forward.operation).bind(self.forward.database_id)
             .bind(self.request.source_generation).bind(&self.sha256).bind(&self.bytes)

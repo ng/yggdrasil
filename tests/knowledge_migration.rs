@@ -3231,6 +3231,97 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: 
             .unwrap_err();
         assert!(format!("{rejected:#}").contains("remote changed from rollback request"));
         assert_eq!(first.marker().await, (3, "okf".into()));
+        // The cancellation barrier waits for already admitted host operations.
+        let mut lease_connection = sqlx::PgConnection::connect_with(&first.pool.connect_options())
+            .await
+            .unwrap();
+        let mut observer = sqlx::PgConnection::connect_with(&first.pool.connect_options())
+            .await
+            .unwrap();
+        let mut held = lease_connection.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(1497843531,1)")
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let cancellation = {
+            let pending = winner.begin_cancellation(&first.pool);
+            tokio::pin!(pending);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                tokio::select! {
+                    result = &mut pending => panic!("cancellation passed an admitted host: {result:?}"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+                }
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1497843531 AND objid=1 AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))")
+                    .fetch_one(&mut observer).await.unwrap();
+                if waiting {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "cancellation did not reach generation lease"
+                );
+            }
+            held.commit().await.unwrap();
+            pending.await.unwrap()
+        };
+        lease_connection.close().await.unwrap();
+        observer.close().await.unwrap();
+        assert_eq!(cancellation.operation, winner.operation());
+        assert_eq!(cancellation.request_sha256, winner.sha256());
+        assert_eq!(
+            winner.begin_cancellation(&first.pool).await.unwrap(),
+            cancellation
+        );
+        assert_eq!(first.marker().await, (3, "okf".into()));
+        assert!(winner.register(&first.pool).await.is_err());
+        assert!(
+            loser.register(&first.pool).await.is_err(),
+            "reservation released before host recovery"
+        );
+        let changed = ygg::knowledge::fleet::rollback::RollbackPlan::parse(
+            journal.plan().unwrap(),
+            &format!("{}\n", winner.bytes()),
+        )
+        .unwrap();
+        assert!(changed.begin_cancellation(&first.pool).await.is_err());
+        for (id, host_config) in participants.iter().zip([&config, &config2]) {
+            let path = host_config.knowledge_policy_dir.join("runtime.json");
+            let saved = std::fs::read(&path).unwrap();
+            assert!(
+                call_rollback_fence(&journal, winner, *id, Some(&ssh2.identity))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+        }
+        for mutation in [
+            "UPDATE knowledge_fleet_rollback_cancellations SET request_sha256=request_sha256",
+            "DELETE FROM knowledge_fleet_rollback_cancellations",
+            "TRUNCATE knowledge_fleet_rollback_cancellations",
+        ] {
+            assert!(sqlx::query(mutation).execute(&first.pool).await.is_err());
+        }
+        // The SQL receipt guard also refuses a cancelled reverse request.
+        let hosts = std::fs::read_to_string(
+            first
+                .journal
+                .join(format!("rollback-{}-hosts.json", winner.operation())),
+        )
+        .unwrap();
+        let mut tx = first.pool.begin().await.unwrap();
+        sqlx::query("UPDATE knowledge_storage SET generation=4,backend='fenced' WHERE singleton")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let failure = sqlx::query("INSERT INTO knowledge_fleet_rollback_fences(operation_id,generation,hosts_sha256,hosts_json,remote_commit) VALUES($1,4,$2,$3,$4)")
+            .bind(winner.operation()).bind(digest(hosts.as_bytes())).bind(&hosts).bind(winner.expected_remote_commit()).execute(&mut *tx).await.unwrap_err();
+        assert!(
+            failure.to_string().contains("rollback operation cancelled"),
+            "{failure}"
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(first.marker().await, (3, "okf".into()));
         first.pool.close().await;
         return;
     }
@@ -3321,6 +3412,13 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: 
     lease_connection.close().await.unwrap();
     observer.close().await.unwrap();
     assert_eq!(fenced.generation, 4);
+    assert!(winner.begin_cancellation(&first.pool).await.is_err());
+    let cancellations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM knowledge_fleet_rollback_cancellations")
+            .fetch_one(&first.pool)
+            .await
+            .unwrap();
+    assert_eq!(cancellations, 0);
     assert_eq!(fenced.remote_commit, winner.expected_remote_commit());
     assert_eq!(first.marker().await, (4, "fenced".into()));
     let stored: (String, String) = sqlx::query_as(

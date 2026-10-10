@@ -117,6 +117,9 @@ It retains local intent before removal and per-host coordinator evidence afterwa
 Retries preserve independently changed selections and refuse missing evidence.
 The public shared migration CLI stays disabled pending reverse cancellation and
 remaining orchestration/qualification gates.
+Reverse cancellation now has an immutable SQL barrier that drains admitted host
+operations and rejects delayed fences. It only starts at the original OKF
+generation; host restoration and complete-census reservation release remain.
 
 ### Faults, performance and packaging
 
