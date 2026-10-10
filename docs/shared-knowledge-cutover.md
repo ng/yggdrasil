@@ -621,3 +621,18 @@ device numbers match, and requires mount-boundary refusal without data changes.
 The existing native CI `okf_disk_full` invocation includes it. Its Linux result and
 other filesystem-specific rename restrictions still require qualification before
 enabling fleet activation.
+
+
+The activation-receipt schema `knowledge_fleet_activations` is an additional
+foundation for finalization. It retains the exact readiness JSON and verifies its
+SHA-256 in PostgreSQL. Insert requires the matching active marker, registered
+operation, un-aborted owned fence, publication identity, and complete participant
+set. Each host record must match the source identities and publication and include
+swap/backup evidence hashes. Receipts are immutable and require the migration
+owner even if a runtime role has been granted INSERT.
+
+The native fixture checks these constraints using actual authenticated readiness
+and rolls back both marker and receipt after every attempt. This is schema and
+transaction qualification, not a committed fleet activation: coordinator activation
+and authenticated host finalization remain to be wired before the public command
+can be enabled.

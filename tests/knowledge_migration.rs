@@ -2155,6 +2155,136 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         "retry must not recreate missing sealed evidence"
     );
     std::fs::write(&swap_path, &swap_bytes).unwrap();
+    // Exercise the database activation receipt against actual authenticated
+    // readiness. Roll back each transaction: this fixture continues through
+    // pre-activation abort and must not expose an active host prematurely.
+    let activation_json = std::fs::read_to_string(f.journal.join("fleet-ready.json")).unwrap();
+    let prepared_sha = ygg::knowledge::document::digest(
+        &std::fs::read(f.journal.join("fleet-prepared.json")).unwrap(),
+    );
+    let source_sha = &journal.plan().unwrap().plan().source_backup.manifest_sha256;
+    let operation = journal.plan().unwrap().plan().operation;
+    for case in 0..9 {
+        let mut payload: serde_json::Value = serde_json::from_str(&activation_json).unwrap();
+        match case {
+            3 => payload["participants"] = serde_json::json!([]),
+            4 => {
+                payload["participants"][0]["readiness"]["publication"]["commit"] =
+                    serde_json::json!("f".repeat(40))
+            }
+            5 => {
+                payload["participants"][0]["readiness"]["swap_sha256"] =
+                    serde_json::json!("invalid")
+            }
+            7 => {
+                let duplicate = payload["participants"][0].clone();
+                payload["participants"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(duplicate);
+            }
+            _ => {}
+        }
+        let bytes = serde_json::to_string(&payload).unwrap();
+        let ready_sha = if case == 1 {
+            "0".repeat(64)
+        } else {
+            ygg::knowledge::document::digest(bytes.as_bytes())
+        };
+        let evidence_sha = if case == 2 {
+            "0".repeat(64)
+        } else {
+            prepared_sha.clone()
+        };
+        let mut tx = f.pool.begin().await.unwrap();
+        if case != 0 {
+            sqlx::query("UPDATE knowledge_storage SET backend='okf',generation=generation+1 WHERE singleton").execute(&mut *tx).await.unwrap();
+        }
+        let result = sqlx::query("INSERT INTO knowledge_fleet_activations(operation_id,generation,prepared_sha256,backup_sha256,ready_sha256,ready_json) VALUES($1,$2,$3,$4,$5,$6)")
+            .bind(operation).bind(if case == 6 { 4_i64 } else { 3_i64 }).bind(&evidence_sha).bind(source_sha).bind(&ready_sha).bind(&bytes)
+            .execute(&mut *tx).await;
+        if case == 8 {
+            result.unwrap();
+            let saved: String = sqlx::query_scalar(
+                "SELECT ready_sha256 FROM knowledge_fleet_activations WHERE operation_id=$1",
+            )
+            .bind(operation)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            assert_eq!(saved, ready_sha);
+            sqlx::query("SAVEPOINT runtime_activation")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let role = format!("activation_runtime_{}", Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE ROLE {role}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(&format!(
+                "GRANT INSERT ON knowledge_fleet_activations TO {role}"
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query(&format!("SET LOCAL ROLE {role}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let denied = sqlx::query("INSERT INTO knowledge_fleet_activations(operation_id,generation,prepared_sha256,backup_sha256,ready_sha256,ready_json) VALUES($1,3,$2,$3,$4,$5)")
+                .bind(operation).bind(&prepared_sha).bind(source_sha).bind(&ready_sha).bind(&bytes).execute(&mut *tx).await.unwrap_err();
+            assert_eq!(
+                denied
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("42501")
+            );
+            sqlx::query("ROLLBACK TO SAVEPOINT runtime_activation")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("RELEASE SAVEPOINT runtime_activation")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            for mutation in [
+                "UPDATE knowledge_fleet_activations SET ready_sha256=ready_sha256",
+                "DELETE FROM knowledge_fleet_activations",
+                "TRUNCATE knowledge_fleet_activations",
+            ] {
+                sqlx::query("SAVEPOINT immutable_activation")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                assert!(sqlx::query(mutation).execute(&mut *tx).await.is_err());
+                sqlx::query("ROLLBACK TO SAVEPOINT immutable_activation")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("RELEASE SAVEPOINT immutable_activation")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+        } else {
+            assert!(result.is_err(), "activation mutation {case} must fail");
+        }
+        tx.rollback().await.unwrap();
+    }
+    let activation_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM knowledge_fleet_activations")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(activation_count, 0);
+    let marker: (String, i64) =
+        sqlx::query_as("SELECT backend,generation FROM knowledge_storage WHERE singleton")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(marker, ("fenced".into(), 2));
 
     assert_eq!(
         ygg::knowledge::store::KnowledgeBackup::verify_restored(&candidate_backup, &candidate)
