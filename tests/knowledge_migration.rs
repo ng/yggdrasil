@@ -2694,3 +2694,264 @@ async fn fleet_fence_fixture(finalize_steps: Option<usize>) {
     );
     f.pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; two-host post-activation recovery"]
+async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
+    use ygg::knowledge::{
+        document::digest,
+        fleet::{journal::Journal, plan::ValidatedPlan},
+        store::KnowledgeStore,
+    };
+    let server = Server::new();
+    let mut first = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(first.env.clone()).unwrap();
+    KnowledgeStore::open(&config.knowledge_dir, true).unwrap();
+    let identities =
+        ygg::knowledge::identity::IdentityRegistry::open(&config.knowledge_policy_dir, true)
+            .unwrap()
+            .initialize(true)
+            .unwrap();
+    first.plan.mappings.corpus_id = identities.corpus_id;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut env = first.env.clone();
+    for (key, name) in [
+        ("YGG_CONFIG_DIR", "config"),
+        ("YGG_DATA_DIR", "data"),
+        ("YGG_KNOWLEDGE_DIR", "corpus"),
+        ("YGG_KNOWLEDGE_POLICY_DIR", "policy"),
+    ] {
+        env.insert(key.into(), root.join(name).display().to_string());
+    }
+    let second = Fixture {
+        pool: first.pool.clone(),
+        temp,
+        env,
+        plan: serde_json::from_value(serde_json::to_value(&first.plan).unwrap()).unwrap(),
+        journal: root.join("journal"),
+    };
+    let config2 = ygg::config::database::DeploymentConfig::load(second.env.clone()).unwrap();
+    KnowledgeStore::open(&config2.knowledge_dir, true).unwrap();
+    KnowledgeStore::open(&config2.knowledge_policy_dir, true).unwrap();
+    std::fs::write(
+        config2.knowledge_policy_dir.join("identity.json"),
+        serde_json::to_vec(&identities).unwrap(),
+    )
+    .unwrap();
+    let mut backups = Vec::new();
+    for (fixture, config) in [(&first, &config), (&second, &config2)] {
+        let path = fixture.temp.path().canonicalize().unwrap().join("backup");
+        let manifest = ygg::db::deployment_backup::create(config, &path, Some(&server.bin), None)
+            .await
+            .unwrap();
+        backups.push(serde_json::json!({"path":path,"manifest_sha256":digest(&serde_json::to_vec(&manifest).unwrap())}));
+    }
+    let ssh1 = ParticipantSsh::new(&first).await;
+    let ssh2 = ParticipantSsh::new(&second).await;
+    let participants = [Uuid::new_v4(), Uuid::new_v4()];
+    let hosts = [(&config, &ssh1), (&config2, &ssh2)].into_iter().enumerate().map(|(i,(config,ssh))| serde_json::json!({
+        "id":participants[i],"name":format!("host-{i}"),"protocol":1,"endpoint":&ssh.endpoint,
+        "corpus":config.knowledge_dir.canonicalize().unwrap(),"policy":config.knowledge_policy_dir.canonicalize().unwrap(),
+        "identities":&identities,"backup":&backups[i],"knowledge_writers_stopped":true,"external_editors_stopped":true
+    })).collect::<Vec<_>>();
+    fn git(root: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+    let seed = first.temp.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    git(&seed, &["init", "-b", "knowledge"]);
+    std::fs::write(seed.join("README.txt"), "retained remote metadata\n").unwrap();
+    git(&seed, &["add", "README.txt"]);
+    git(&seed, &["commit", "-m", "initial"]);
+    let remote = first.temp.path().join("remote.git");
+    git(
+        first.temp.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &seed,
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/knowledge",
+        ],
+    );
+    let base = git(&seed, &["rev-parse", "HEAD"]);
+
+    let client_key = std::fs::read(ssh2.identity.with_extension("pub")).unwrap();
+    let rejected_key = std::fs::read(ssh1.identity.with_extension("pub")).unwrap();
+    std::fs::write(ssh1.identity.with_extension("pub"), &client_key).unwrap();
+    let plan = ValidatedPlan::parse(&serde_json::json!({
+        "version":1,"operation":Uuid::new_v4(),"source_generation":1,"mappings":&first.plan.mappings,"agents":[],
+        "shared":{"version":1,"remote":remote,"branch":"knowledge"},"expected_remote_commit":base,
+        "source_backup":backups[0],"all_participating_hosts_listed":true,"schema_changes_stopped":true,
+        "session_preserving_endpoint":true,"remote_writers_stopped":true,"participants":hosts
+    }).to_string()).unwrap();
+    let hash = plan.registration().request_sha256.clone();
+    let journal = Journal::prepare(&first.journal, plan).unwrap();
+    let active = journal
+        .activate_hosts(&config, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap();
+    assert_eq!(first.marker().await, (3, "okf".into()));
+    // Make the FIRST host unreachable so the coordinator must continue to host 2.
+    std::fs::write(ssh1.identity.with_extension("pub"), rejected_key).unwrap();
+    let error = journal
+        .finalize_hosts(&config, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("hosts still require finalization"));
+    assert!(!first.journal.join("fleet-finalized.json").exists());
+    assert!(
+        !first
+            .journal
+            .join(format!("finalized-{}.json", participants[0]))
+            .exists()
+    );
+    let second_receipt = first
+        .journal
+        .join(format!("finalized-{}.json", participants[1]));
+    let acknowledged = std::fs::read(&second_receipt).unwrap();
+    for (cfg, phase) in [
+        (&config, ygg::knowledge::runtime::Phase::Fenced),
+        (&config2, ygg::knowledge::runtime::Phase::Okf),
+    ] {
+        let binding: ygg::knowledge::runtime::Binding = serde_json::from_slice(
+            &std::fs::read(cfg.knowledge_policy_dir.join("runtime.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(binding.phase == phase);
+    }
+    let refused = first
+        .command()
+        .args([
+            "remember",
+            "unselected host must not write",
+            "--global",
+            "--json",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(!refused.status.success());
+    success(
+        second
+            .command()
+            .args([
+                "remember",
+                "write during partial fleet finalization",
+                "--global",
+                "--json",
+            ])
+            .output()
+            .await
+            .unwrap(),
+    );
+    let shared = ygg::knowledge::shared::SharedGit::open(
+        &config2.knowledge_dir,
+        journal.plan().unwrap().plan().shared.clone(),
+    )
+    .unwrap();
+    let advanced = shared.refresh().unwrap();
+    assert_ne!(advanced.commit, active.publication.commit);
+    drop(shared);
+    drop(journal);
+    // Repair only disposable SSH authorization and resume the exact journal.
+    std::fs::write(ssh1.identity.with_extension("pub"), client_key).unwrap();
+    let journal = Journal::resume(&first.journal, &hash).unwrap();
+    assert_eq!(
+        journal
+            .finalize_hosts(&config, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap(),
+        active
+    );
+    assert_eq!(std::fs::read(&second_receipt).unwrap(), acknowledged);
+    assert!(first.journal.join("fleet-finalized.json").exists());
+    assert!(
+        first
+            .journal
+            .join(format!("finalized-{}.json", participants[0]))
+            .exists()
+    );
+    let shared = ygg::knowledge::shared::SharedGit::open(
+        &config.knowledge_dir,
+        journal.plan().unwrap().plan().shared.clone(),
+    )
+    .unwrap();
+    let current = shared.refresh().unwrap();
+    assert_eq!(current.commit, advanced.commit);
+    assert_eq!(current.files, advanced.files);
+    assert!(current.files.values().any(|bytes| {
+        String::from_utf8_lossy(bytes).contains("write during partial fleet finalization")
+    }));
+    drop(shared);
+    success(
+        first
+            .command()
+            .args([
+                "remember",
+                "write after fleet recovery",
+                "--global",
+                "--json",
+            ])
+            .output()
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        journal
+            .finalize_hosts(&config, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap(),
+        active
+    );
+    let shared = ygg::knowledge::shared::SharedGit::open(
+        &config2.knowledge_dir,
+        journal.plan().unwrap().plan().shared.clone(),
+    )
+    .unwrap();
+    let current = shared.refresh().unwrap();
+    for text in [
+        "write during partial fleet finalization",
+        "write after fleet recovery",
+    ] {
+        assert!(
+            current
+                .files
+                .values()
+                .any(|bytes| String::from_utf8_lossy(bytes).contains(text))
+        );
+    }
+    assert!(
+        !current
+            .files
+            .values()
+            .any(|bytes| String::from_utf8_lossy(bytes).contains("unselected host must not write"))
+    );
+    assert!(
+        sqlx::query("UPDATE memories SET text='forbidden'")
+            .execute(&first.pool)
+            .await
+            .is_err()
+    );
+    first.pool.close().await;
+}

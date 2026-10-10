@@ -677,4 +677,10 @@ hosts fenced while later retries reconcile them. The native fixture exercises re
 SSH finalization from all three directory states, lost local activation completion,
 partial transport publication, changed candidate refusal, telemetry seeding, CLI
 writes after selection, and repeated coordinator finalization preserving those writes.
-Multi-host partial activation and current-state rollback still need qualification.
+The two-host native fixture additionally rejects SSH authentication for the first
+host after activation and verifies that the second still finalizes. The first stays
+fenced, no fleet completion seal is written, and the second can publish knowledge.
+After repairing only that disposable host's authorization, a resumed coordinator
+finalizes both hosts without changing the successful receipt or resetting the
+advanced Git snapshot. Both hosts' subsequent writes survive repeated finalization.
+Broader multi-host crash/power-loss cases and current-state rollback remain open.
