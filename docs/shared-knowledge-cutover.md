@@ -69,8 +69,9 @@ transactions hold the shared advisory lock until their work finishes.
 
 Preparation can fail before the SQL fence exists. Provide a distinct pre-fence
 abort event under the database migration lock: verify the source SQL generation,
-record cancellation for this operation, and prevent a delayed coordinator from
-fencing after cancellation. Each host may remove only its exact prepared fence
+advance the SQL generation and record cancellation for this operation atomically.
+A delayed coordinator must fail its saved source-generation check, including older
+coordinators that do not understand cancellation receipts. Each host may remove only its exact prepared fence
 after checking that event and current SQL generation under a shared database
 lease. A timeout or absence of a database event does not authorize local unfencing.
 After a committed SQL fence, use the recorded return generation and conditional
@@ -78,9 +79,9 @@ host restoration described below. Neither abort path may restore a stale entire
 policy snapshot over later independent changes.
 
 The private `migration::Journal::prepare_policy` provides related byte/identity
-checks, but runs after database fencing and export. Its `abort` requires a committed
-fence, so calling it independently for fleet preparation leaves the pre-fence abort
-case unsolved. Extract common validated operations only while preserving private
+checks, but runs after database fencing and export. The private pre-fence cancellation implemented below does not restore prepared
+fleet selections, so calling private preparation independently on each host leaves
+the fleet recovery case unsolved. Extract common validated operations only while preserving private
 journal compatibility; do not sequentially invoke private migrations for each host.
 
 Required additional fixture: begin with two hosts having no `runtime.json`, hold a
@@ -214,3 +215,16 @@ migration execution remains rejected pending the complete coordinator workflow.
 Latest integrated validation at `53c52d2`: full serial suite passed with 596 tests,
 29 opt-in cases ignored, and 93 result groups. This includes the advertised-OID
 guard and coordinator-bound local fence regression; check, clippy and fmt passed.
+
+## Private pre-fence cancellation
+
+`knowledge migrate --abort` can now cancel a prepared private journal before a
+source backup or SQL fence exists. Under the migration advisory lock it advances
+the SQL generation once and records an immutable intent-bound cancellation in
+`knowledge_migration_cancellations`. SQL remains authoritative, existing writes
+are drained, and knowledge rows and local policy are preserved. Repeated aborts
+verify the receipt and current return generation without replaying data. A delayed
+execution of the old plan fails its generation check, including older coordinators.
+The post-fence abort path retains its existing backup validation. This implements
+the database cancellation boundary; fleet host preparation/restoration is still
+unimplemented and shared/fleet execution remains rejected.

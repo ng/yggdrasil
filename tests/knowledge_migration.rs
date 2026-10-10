@@ -845,3 +845,80 @@ async fn native_generic_document_refuses_rollback_before_selection_changes() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     f.pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN; starts disposable native PostgreSQL"]
+async fn native_prefence_abort_drains_sql_and_cancels_delayed_execution() {
+    let server = Server::new();
+    let f = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
+    let plan_copy = serde_json::from_value(serde_json::to_value(&f.plan).unwrap()).unwrap();
+    let journal =
+        ygg::knowledge::migration::Journal::prepare(&f.journal, plan_copy, &config).unwrap();
+    let mut writer = ygg::knowledge::guard::legacy_transaction(&f.pool, true, Some(1))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET text='in-flight SQL write'")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let report = {
+        let cancellation = journal.abort(&config);
+        tokio::pin!(cancellation);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut cancellation)
+                .await
+                .is_err()
+        );
+        let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND classid=1497843531 AND objid=1 AND NOT granted")
+            .fetch_one(&mut *writer).await.unwrap();
+        assert!(
+            waiting > 0,
+            "cancellation did not wait for the legacy writer lease"
+        );
+        writer.commit().await.unwrap();
+        cancellation.await.unwrap()
+    };
+    assert_eq!(report.state, "cancelled");
+    assert_eq!(report.generation, 2);
+    assert_eq!(f.marker().await, (2, "sql".into()));
+    assert!(!f.journal.join("source-backup").exists());
+    assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
+    drop(journal);
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "in-flight SQL write");
+    sqlx::query("UPDATE memories SET text='later SQL write'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let repeated = success(f.migrate(&server, true).await);
+    let repeated: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["state"], "cancelled");
+    assert_eq!(repeated["operation"], report.operation.to_string());
+    // A fresh process cannot resume the cancelled source generation, even if it
+    // relies only on the marker check rather than knowing cancellation receipts.
+    assert!(!f.migrate(&server, false).await.status.success());
+    assert!(!f.journal.join("source-backup").exists());
+    assert_eq!(f.marker().await, (2, "sql".into()));
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "later SQL write");
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM knowledge_migration_cancellations")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(receipts, 1);
+    assert!(
+        sqlx::query("DELETE FROM knowledge_migration_cancellations")
+            .execute(&f.pool)
+            .await
+            .is_err()
+    );
+    f.pool.close().await;
+}

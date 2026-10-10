@@ -515,10 +515,72 @@ impl Journal {
             journal: self.intent.directory.clone(),
         }
     }
+    /// Cancel an unfenced journal without requiring a backup that may not exist.
+    /// Advancing SQL generation also rejects delayed older coordinators that do
+    /// not know about cancellation receipts. No knowledge rows or local files move.
+    async fn cancel_before_fence(&self, config: &DeploymentConfig) -> Result<Option<Report>> {
+        let policy = if exists(&self.intent.policy)? {
+            Some(KnowledgeStore::open(&self.intent.policy, false)?)
+        } else {
+            None
+        };
+        let _selection = policy
+            .as_ref()
+            .map(|p| p.selection_lease(true))
+            .transpose()?;
+        let pool = db::maintenance_pool(config).await?;
+        let result = async {
+            let mut tx = self.transaction(&pool).await?;
+            let fenced: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM public.knowledge_migration_events WHERE operation_id=$1 AND step='fenced')",
+            ).bind(self.intent.operation).fetch_one(&mut *tx).await?;
+            if fenced {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+            let p = &self.intent.plan;
+            let marker = Self::marker(&mut tx).await?;
+            let prior: Option<(String, Uuid, i64, i64)> = sqlx::query_as(
+                "SELECT request_sha256,database_id,source_generation,target_generation FROM public.knowledge_migration_cancellations WHERE operation_id=$1",
+            ).bind(self.intent.operation).fetch_optional(&mut *tx).await?;
+            let target = p.source_generation + 1;
+            let request = digest(self.bytes.as_bytes());
+            if let Some(ref prior) = prior {
+                ensure!(*prior == (request.clone(), p.mappings.database_id, p.source_generation, target),
+                    "cancellation receipt conflicts with saved intent");
+            }
+            ensure!(marker.0 == p.mappings.database_id
+                && marker.1 == if prior.is_some() { target } else { p.source_generation }
+                && marker.2 > 0 && marker.2 <= CLIENT_PROTOCOL
+                && marker.3 == "sql" && marker.4.is_none(),
+                "cancellation requires the planned SQL generation or its recorded return generation");
+            if let Some(policy) = &policy {
+                policy.verify_root_path(&self.intent.policy)?;
+                ensure!(policy.read_control(SELECTION_FILE)?.is_none(),
+                    "pre-fence cancellation cannot replace an independent local selection");
+            }
+            self.check(config)?;
+            if prior.is_none() {
+                sqlx::query("UPDATE public.knowledge_storage SET generation=$1 WHERE singleton")
+                    .bind(target).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO public.knowledge_migration_cancellations(operation_id,request_sha256,database_id,source_generation,target_generation) VALUES($1,$2,$3,$4,$5)")
+                    .bind(self.intent.operation).bind(request).bind(p.mappings.database_id)
+                    .bind(p.source_generation).bind(target).execute(&mut *tx).await?;
+            }
+            tx.commit().await.context("cancellation outcome uncertain; retry abort with the same journal")?;
+            Ok(Some(self.report("cancelled", target)))
+        }.await;
+        pool.close().await;
+        result
+    }
+
     /// Pre-activation abort only. Once OKF was selected, reverse import of current
     /// documents is mandatory; this operation can never revive stale SQL rows.
     pub async fn abort(&self, config: &DeploymentConfig) -> Result<Report> {
         self.check(config)?;
+        if let Some(report) = self.cancel_before_fence(config).await? {
+            return Ok(report);
+        }
         let backup = self.backup(config, None, false).await?;
         let policy = if exists(&self.intent.policy)? {
             Some(KnowledgeStore::open(&self.intent.policy, false)?)
