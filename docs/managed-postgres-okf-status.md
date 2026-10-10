@@ -20,7 +20,7 @@ to repository evidence and explicitly identifies missing implementation or proof
 | M0: contracts | ADR 0019; `tests/database_config.rs`, `knowledge_contracts.rs`, `okf_documents.rs`, and `fixtures/knowledge/`; pinned OKF specification and deterministic profile/digest fixtures. | Keep contracts and operator examples aligned with subsequent changes. |
 | M1: managed runtime | `src/db/runtime.rs`, `supervisor.rs`, `package.rs`; native installer/lifecycle fixtures, 20-process startup race, surviving-server adoption, killed bootstrap recovery and committed-row preservation. Native candidate bundles pass on three platforms; clean Ubuntu 24.04 runtime qualification is recorded below. | Public released-artifact qualification and macOS quarantine/signing path. |
 | M2: integration | `src/config/database.rs`, `src/db.rs`, init and `db` commands; common connection resolver, existing URL preservation, no fallback on external failure, no hook download/init/upgrade. | Clean-machine operator qualification using the final released artifacts. Default knowledge rollout remains M7. |
-| M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; wrong-CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch preserving database/knowledge IDs and task claims. Patch 16.14→16.15 and major 16→18 native recovery fixtures pass on all three platforms at `9ad3fd7`. Both external↔managed move directions pass locally at `6d49d51`, with Linux and Apple Silicon native CI passing. | Intel qualification of the new cross-mode fixtures remains pending. Published-artifact and actual deployment/credential recovery evidence remain distinct from local fixture results. |
+| M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; wrong-CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch preserving database/knowledge IDs and task claims. Patch 16.14→16.15 and major 16→18 native recovery fixtures pass on all three platforms at `9ad3fd7`. Both external↔managed move directions pass locally and on all three native platforms at `6d49d51`. | Published-artifact and actual deployment/credential recovery evidence remain distinct from local fixture results. |
 | M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation, offline fixtures and real-disk-full tests on all three native platforms. | Two uninstrumented local repeats at `ba7aff6` pass the SQL-relative latency threshold (−61.51 ms and 4.86 ms added p95); the stricter SQL→OKF→SQL fixture passes twice at 17.61 ms and 16.01 ms worst added p95, meeting the local measured target. Historical variance, including the prior 108.57 ms failure, remains documented; these runs do not establish a universal latency bound. See `docs/performance/okf-latency-investigation.md`. Broader filesystem fault qualification remains open. |
 | M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures; bounded complete-snapshot publication with exact remote-base checks. | Shared remote credential/provider and resource/latency qualification; deployed shared cutover and rollback rehearsal. Component fixtures do not prove a deployed fleet. |
 | M6: cutover/dogfood | Database generation/write guards, client registration and lossless export; private and public fleet forward/abort/current-state rollback commands, immutable journals, backup evidence, apply-once receipts, reverse cancellation and descendant reconciliation. All 23 native migration tests pass, including three real two-host CLI flows. | Establish compatibility and writer quiescence for the actual deployment, perform its inventory and rollback rehearsal, then record the required dogfood window. Fixture declarations alone do not demonstrate a deployed fleet. |
@@ -181,9 +181,9 @@ timeouts are not test failures or reasons to restart a running job.
 
 ## Next release work
 
-1. Finish Intel CI qualification of the newly added public fleet CLI and
-   external↔managed move tests; preceding patch/major upgrade fixtures already
-   passed all three native platforms at `9ad3fd7`.
+1. Qualify the updated lifecycle timing smoke on all three native platforms; the
+   public fleet CLI and external↔managed move tests already passed all three
+   platforms at `6d49d51` (run `38053885160`).
 2. Produce and smoke-test the final released artifacts on every advertised target,
    including positive macOS signing/quarantine evidence. Candidate CI bundles do
    not satisfy published-artifact qualification.
@@ -324,3 +324,36 @@ p95, universal latency or published-artifact qualification. The smoke now emits
 success only after teardown succeeds; all nine bundle regression tests pass,
 including refusal to report success when final shutdown fails. Shared-remote
 latency still requires its separate measurement.
+
+### Separate shared-transport measurement
+
+`tests/okf_shared_performance.rs` runs an opt-in benchmark through the release CLI
+with two isolated profiles, an unavailable database, and a private loopback SSH
+server. Ephemeral client keys, a pinned host key and a forced-command allowlist
+restrict transport to the fixture's bare Git repository. Two warm-up write/read
+pairs precede 20 measured pairs. Every read must contain the exact note acknowledged
+by the writer; all 22 pairs passed in the first local run (20.92 seconds total).
+
+| Operation | p50 | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| Shared publication | 687.52 ms | 727.22 ms | 727.36 ms |
+| Independent profile fetch and list | 181.12 ms | 213.99 ms | 218.95 ms |
+
+[Raw samples and candidate provenance](performance/shared-ssh-latency-2026-10-10.json)
+record the exact binary digest from native run `38053885160`. Measurements include
+CLI/Git/SSH startup and fixture JSON decoding. This small growing corpus and
+sequential loopback workload does not model WAN latency, simultaneous writers or
+a hosted provider. These numbers are separate from database lifecycle and local
+warm-hook latency; the 50 ms local-hook threshold does not apply here.
+
+To repeat with a verified release binary and a new report path:
+
+```sh
+YGG_TEST_YGG_BIN=/absolute/path/to/release/ygg \
+YGG_SHARED_PERF_REPORT=/absolute/path/to/new-report.json \
+cargo test --test okf_shared_performance -- --ignored --test-threads=1
+```
+
+Native run `38053885160` has now completed successfully on Intel macOS as well as
+Apple Silicon and Linux. This supersedes earlier pending-Intel notes for
+`6d49d51`; it does not qualify later smoke-script changes or a public release.
