@@ -69,6 +69,12 @@ enum KnowledgeAction {
     FenceLocal {
         #[arg(long)]
         expected_generation: i64,
+        /// Bind preparation to this coordinator operation (requires participant)
+        #[arg(long, requires = "participant")]
+        migration_operation: Option<uuid::Uuid>,
+        /// Explicit participant ID from the coordinator's host census
+        #[arg(long, requires = "migration_operation")]
+        participant: Option<uuid::Uuid>,
         #[arg(long)]
         json: bool,
     },
@@ -1495,10 +1501,21 @@ async fn main() -> anyhow::Result<()> {
             }
             KnowledgeAction::FenceLocal {
                 expected_generation,
+                migration_operation,
+                participant,
                 json,
-            } => {
-                ygg::cli::knowledge_cmd::fence_local(expected_generation, json)?;
-            }
+            } => match (migration_operation, participant) {
+                (Some(operation), Some(participant)) => {
+                    ygg::cli::knowledge_cmd::fence_local_for_migration(
+                        expected_generation,
+                        operation,
+                        participant,
+                        json,
+                    )?
+                }
+                (None, None) => ygg::cli::knowledge_cmd::fence_local(expected_generation, json)?,
+                _ => anyhow::bail!("migration operation and participant must be supplied together"),
+            },
             KnowledgeAction::Clients { json } => ygg::cli::knowledge_cmd::clients(json).await?,
             KnowledgeAction::Migrate {
                 dry_run: _,

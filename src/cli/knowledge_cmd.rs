@@ -146,6 +146,22 @@ pub fn rollback_status(journal: &Path, json: bool) -> Result<()> {
 pub fn fence_local(generation: i64, json: bool) -> Result<()> {
     let (config, _) = crate::config::database::KnowledgeConfig::load(std::env::vars().collect())?;
     let report = crate::knowledge::fence::local(&config, generation)?;
+    print_local_fence(report, json)
+}
+
+pub fn fence_local_for_migration(
+    generation: i64,
+    operation: uuid::Uuid,
+    participant: uuid::Uuid,
+    json: bool,
+) -> Result<()> {
+    let (config, _) = crate::config::database::KnowledgeConfig::load(std::env::vars().collect())?;
+    let report =
+        crate::knowledge::fence::local_for_migration(&config, generation, operation, participant)?;
+    print_local_fence(report, json)
+}
+
+fn print_local_fence(report: crate::knowledge::fence::LocalFence, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -153,6 +169,12 @@ pub fn fence_local(generation: i64, json: bool) -> Result<()> {
             "Local OKF commands fenced at source generation {} (operation {}).",
             report.source_generation, report.operation
         );
+        if let Some(binding) = report.coordinator {
+            println!(
+                "Migration {}, participant {}.",
+                binding.migration_operation, binding.participant
+            );
+        }
         println!("Database state and other hosts still require migration verification.");
     }
     Ok(())

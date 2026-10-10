@@ -12,11 +12,31 @@ use serde::{Deserialize, Serialize};
 use std::{os::unix::fs::MetadataExt, path::PathBuf};
 use uuid::Uuid;
 
+/// Request identity only; authenticated transport and a complete participant
+/// census remain the coordinator's responsibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinatorBinding {
+    pub migration_operation: Uuid,
+    pub participant: Uuid,
+}
+impl CoordinatorBinding {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.migration_operation.is_nil() && !self.participant.is_nil(),
+            "non-nil migration operation and participant IDs required"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
     version: u32,
     operation: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coordinator: Option<CoordinatorBinding>,
     policy: PathBuf,
     policy_identity: (u64, u64),
     bundle_identity: (u64, u64),
@@ -27,6 +47,8 @@ struct Intent {
 #[derive(Debug, Serialize)]
 pub struct LocalFence {
     pub operation: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator: Option<CoordinatorBinding>,
     pub database_id: Uuid,
     pub corpus_id: Uuid,
     /// Last selected OKF generation; the database has NOT advanced here.
@@ -44,7 +66,14 @@ fn identity(path: &std::path::Path) -> Result<(u64, u64)> {
 
 impl Intent {
     fn validate(&self, config: &KnowledgeConfig, generation: i64) -> Result<Binding> {
-        ensure!(self.version == 1, "unsupported local fence journal");
+        ensure!(
+            self.version == if self.coordinator.is_some() { 2 } else { 1 }
+                && !self.operation.is_nil(),
+            "unsupported local fence journal"
+        );
+        if let Some(binding) = self.coordinator {
+            binding.validate()?;
+        }
         ensure!(
             config.knowledge_policy_dir.canonicalize()? == self.policy
                 && identity(&self.policy)? == self.policy_identity,
@@ -80,6 +109,36 @@ impl Intent {
 /// Generation remains the last selected OKF generation, not a claimed SQL fence.
 /// There is deliberately no unfence operation: activation needs the full workflow.
 pub fn local(config: &KnowledgeConfig, generation: i64) -> Result<LocalFence> {
+    local_bound(config, generation, None)
+}
+
+/// Persist a local fence bound to the coordinator's operation and participant.
+/// Retrying another request cannot adopt an existing fence or rewrite its owner.
+/// This does not authenticate the participant or transition the database.
+pub fn local_for_migration(
+    config: &KnowledgeConfig,
+    generation: i64,
+    migration_operation: Uuid,
+    participant: Uuid,
+) -> Result<LocalFence> {
+    local_bound(
+        config,
+        generation,
+        Some(CoordinatorBinding {
+            migration_operation,
+            participant,
+        }),
+    )
+}
+
+fn local_bound(
+    config: &KnowledgeConfig,
+    generation: i64,
+    coordinator: Option<CoordinatorBinding>,
+) -> Result<LocalFence> {
+    if let Some(binding) = coordinator {
+        binding.validate()?;
+    }
     ensure!(generation > 0, "positive expected generation required");
     let policy = KnowledgeStore::open(&config.knowledge_policy_dir, false)?;
     let path = config.knowledge_policy_dir.canonicalize()?;
@@ -89,6 +148,10 @@ pub fn local(config: &KnowledgeConfig, generation: i64) -> Result<LocalFence> {
     let intent = if let Some(saved) = policy.read_artifact(&name)? {
         let intent: Intent = serde_json::from_str(&saved)?;
         intent.validate(config, generation)?;
+        ensure!(
+            intent.coordinator == coordinator,
+            "local fence belongs to another migration operation or participant"
+        );
         intent
     } else {
         let original = policy
@@ -98,8 +161,9 @@ pub fn local(config: &KnowledgeConfig, generation: i64) -> Result<LocalFence> {
         let bundle_identity = identity(&binding.bundle)?;
         binding.phase = Phase::Fenced;
         let intent = Intent {
-            version: 1,
+            version: if coordinator.is_some() { 2 } else { 1 },
             operation: Uuid::new_v4(),
+            coordinator,
             policy: path.clone(),
             policy_identity: identity(&path)?,
             bundle_identity,
@@ -134,6 +198,7 @@ pub fn local(config: &KnowledgeConfig, generation: i64) -> Result<LocalFence> {
     );
     Ok(LocalFence {
         operation: intent.operation,
+        coordinator: intent.coordinator,
         database_id: binding.mappings.database_id,
         corpus_id: binding.mappings.corpus_id,
         source_generation: generation,

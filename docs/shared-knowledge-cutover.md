@@ -146,3 +146,17 @@ all **13 shared-transport tests** passed on that correction (one subprocess help
 ignored). Current-source `cargo check --all-targets`, `cargo clippy --all-targets`,
 `cargo fmt --check` and `git diff --check` passed. The full-suite result predates
 the rewind guard and is not represented as an exact-final-source full-suite run.
+
+## Implemented local request binding
+
+`knowledge fence-local --expected-generation N --migration-operation UUID
+--participant UUID --json` binds the durable local fence to both coordinator
+request IDs. Both IDs must be present and non-nil. Retries must supply the same
+pair; an unbound request cannot adopt a bound fence. Version 1 unbound journals
+remain supported; bound journals use version 2. Exact selection bytes and
+directory identities retain the existing crash-replay checks.
+
+This drains selected OKF operations only. Legacy SQL clients without a local OKF
+selection do not hold this lease. The receipt does not prove SQL writer drainage,
+authenticate a host, establish a complete census, or authorize activation. Shared
+migration execution remains rejected pending the complete coordinator workflow.

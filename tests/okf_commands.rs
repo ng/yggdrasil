@@ -456,6 +456,100 @@ fn local_fence_is_offline_resumable_and_preserves_conflicting_selection() {
 }
 
 #[test]
+fn coordinated_local_fence_binds_retries_to_operation_and_participant() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let (mut binding, _, _) = fixture(root);
+    select(root, &binding);
+    let selection = root.join("policy/runtime.json");
+    let journal_path = root.join("policy/local-fence-2.json");
+    let original = std::fs::read(&selection).unwrap();
+    let operation = Uuid::new_v4().to_string();
+    let participant = Uuid::new_v4().to_string();
+    let fence = |extra: &[&str]| {
+        app(root, root)
+            .args([
+                "knowledge",
+                "fence-local",
+                "--expected-generation",
+                "2",
+                "--json",
+            ])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let nil = Uuid::nil().to_string();
+    for args in [
+        vec!["--migration-operation", operation.as_str()],
+        vec!["--participant", participant.as_str()],
+        vec![
+            "--migration-operation",
+            nil.as_str(),
+            "--participant",
+            participant.as_str(),
+        ],
+        vec![
+            "--migration-operation",
+            operation.as_str(),
+            "--participant",
+            nil.as_str(),
+        ],
+    ] {
+        assert!(!fence(&args).status.success());
+        assert_eq!(std::fs::read(&selection).unwrap(), original);
+        assert!(!journal_path.exists());
+    }
+    let args = [
+        "--migration-operation",
+        operation.as_str(),
+        "--participant",
+        participant.as_str(),
+    ];
+    let first = json(fence(&args));
+    assert_eq!(first["coordinator"]["migration_operation"], operation);
+    assert_eq!(first["coordinator"]["participant"], participant);
+    let journal = std::fs::read(&journal_path).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&journal).unwrap()["version"],
+        2
+    );
+    let fenced = std::fs::read(&selection).unwrap();
+    assert_eq!(json(fence(&args)), first);
+    let other = Uuid::new_v4().to_string();
+    for wrong in [
+        vec![],
+        vec![
+            "--migration-operation",
+            other.as_str(),
+            "--participant",
+            participant.as_str(),
+        ],
+        vec![
+            "--migration-operation",
+            operation.as_str(),
+            "--participant",
+            other.as_str(),
+        ],
+    ] {
+        assert!(!fence(&wrong).status.success());
+        assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+    }
+    // Replay the state left by a crash after the durable intent was written.
+    std::fs::write(&selection, &original).unwrap();
+    assert_eq!(json(fence(&args)), first);
+    assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+    assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+    binding.agents.insert("independent".into(), Uuid::new_v4());
+    select(root, &binding);
+    let edited = std::fs::read(&selection).unwrap();
+    assert!(!fence(&args).status.success());
+    assert_eq!(std::fs::read(&selection).unwrap(), edited);
+    assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+}
+
+#[test]
 fn local_fence_drains_existing_selection_readers_before_publication() {
     use fs2::FileExt;
     use std::{os::unix::fs::OpenOptionsExt, sync::mpsc, time::Duration};
