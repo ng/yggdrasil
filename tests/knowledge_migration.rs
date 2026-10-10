@@ -199,6 +199,26 @@ impl Fixture {
             .current_dir(self.temp.path());
         c
     }
+    async fn participant(&self, bytes: &[u8]) -> Output {
+        use tokio::io::AsyncWriteExt;
+        let mut child = self
+            .command()
+            .args(["knowledge", "fleet-participant"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(bytes).await.unwrap();
+        input.shutdown().await.unwrap();
+        drop(input);
+        tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap()
+    }
     async fn migrate(&self, server: &Server, abort: bool) -> Output {
         let plan = self.temp.path().join("plan.json");
         std::fs::write(&plan, serde_json::to_vec(&self.plan).unwrap()).unwrap();
@@ -1346,7 +1366,8 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
     .unwrap();
     let request = Request::new(&fleet, coordinator.participant, Action::PrepareSql).unwrap();
     let response: serde_json::Value =
-        serde_json::from_slice(&request.execute(&config, &f.pool).await.unwrap()).unwrap();
+        serde_json::from_slice(&success(f.participant(&request.bytes().unwrap()).await).stdout)
+            .unwrap();
     let retry: ygg::knowledge::fence::SqlPreparation =
         serde_json::from_value(response["preparation"].clone()).unwrap();
     assert_eq!(first.intent_sha256, retry.intent_sha256);
@@ -1391,7 +1412,7 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
     assert!(cancel.execute(&config, &f.pool).await.is_err());
     assert_eq!(std::fs::read(&runtime).unwrap(), fenced);
     fleet.registration().cancel(&f.pool).await.unwrap();
-    cancel.execute(&config, &f.pool).await.unwrap();
+    success(f.participant(&cancel.bytes().unwrap()).await);
     assert!(!runtime.exists());
     assert!(
         config
@@ -1403,8 +1424,13 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
         .execute(&f.pool)
         .await
         .unwrap();
-    cancel.execute(&config, &f.pool).await.unwrap();
-    assert!(request.execute(&config, &f.pool).await.is_err());
+    success(f.participant(&cancel.bytes().unwrap()).await);
+    let rejected = f.participant(&request.bytes().unwrap()).await;
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    let invalid = f.participant(b"{}").await;
+    assert!(!invalid.status.success());
+    assert!(invalid.stdout.is_empty());
     let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
         .fetch_one(&f.pool)
         .await

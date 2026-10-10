@@ -48,6 +48,9 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Internal bounded participant protocol; no fleet activation capability
+    #[command(hide = true)]
+    FleetParticipant,
     /// Inspect OKF documents without granting instruction eligibility
     Browse {
         /// Visible bundle-relative Markdown path; omit to list documents
@@ -1469,6 +1472,9 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Knowledge { action } => match action {
+            KnowledgeAction::FleetParticipant => {
+                ygg::cli::knowledge_cmd::fleet_participant().await?
+            }
             KnowledgeAction::Browse { path, json } => {
                 ygg::cli::knowledge_cmd::browse(path.as_deref(), json)?
             }

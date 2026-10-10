@@ -357,7 +357,7 @@ A disposable, unprivileged loopback OpenSSH probe on macOS (2026-10-10) accepted
 the matching temporary host/client keys and rejected both a wrong pinned host key
 and a wrong client key (exit 255, no remote-command output). No system SSH
 configuration or operator keys were changed; the test daemon was stopped. This
-establishes local test feasibility only. The participant command and two-host migration integration remain to be implemented. OpenSSH's [configuration manual](https://man.openbsd.org/ssh_config.5)
+establishes local test feasibility only. Two-host migration integration remains to be implemented. OpenSSH's [configuration manual](https://man.openbsd.org/ssh_config.5)
 defines the host-key alias and strict-checking behavior used by this design.
 
 
@@ -372,8 +372,7 @@ A real disposable loopback `sshd` test covers correct authentication, wrong host
 and client keys, excess response bytes and timeout. Run it explicitly with
 `cargo test --lib knowledge::fleet::transport::tests::authenticated_exchange_rejects_wrong_keys_and_bounds_output -- --ignored --exact`
 on a machine with OpenSSH client/server tools. The fixture uses temporary keys and
-a forced echo command; it verifies transport only, not participant behavior. The
-participant CLI is not implemented or enabled, and callers must still validate
+a forced echo command; it verifies transport only, not participant behavior. Callers must still validate
 operation/plan/participant/action/nonce and retained host evidence before using any
 response. Shared migration remains unavailable.
 
@@ -392,8 +391,7 @@ These checks do not compare hashes against live host files or prove that backups
 remain valid. The participant command must perform those checks under the host
 lease; complete-set revalidation and database transitions remain outstanding.
 Protocol tests reject replay, changed envelope fields, tampered plan bytes and
-wrong host/source evidence. This remains a library API with shared CLI execution
-disabled.
+wrong host/source evidence. Shared migration execution remains disabled.
 
 
 `fence::prepare_sql_backed` now verifies a participant's pinned combined backup
@@ -419,5 +417,15 @@ configuration onto the host.
 the exact preparation controls and operation-bound cancellation tombstone. It
 requires the immutable database cancellation event and current return generation
 before restoring absent local selection. Repeated cancellation neither reapplies
-SQL rows nor erases independent files. This is still a library handler: the SSH
-participant CLI and complete coordinator workflow are not enabled.
+SQL rows nor erases independent files. The complete coordinator workflow remains unavailable.
+
+
+The hidden `ygg knowledge fleet-participant` command now exposes preparation and
+cancellation through bounded JSON stdin/stdout. It reads at most 8 MiB with a
+30-second input deadline, validates the request before loading deployment state,
+and uses the maintenance connection without starting or initializing PostgreSQL.
+Only a successful checked response goes to stdout; failures use stderr and a
+nonzero exit status. The native migration fixture exercises retry and cancellation
+through independent CLI processes, including rejection without a response after
+cancellation. This component command does not export, publish, activate or roll
+back a shared corpus. The operator-facing shared migration rejection remains.
