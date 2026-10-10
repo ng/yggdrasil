@@ -189,6 +189,10 @@ fn actual_disk_full_preserves_acknowledged_documents_and_allows_retry() {
     let filler = filesystem.fill();
     let mut edited = acknowledged.document.clone();
     let mut update_failed = false;
+    // Keep old inodes allocated after atomic replacement. Otherwise APFS may
+    // recycle the preceding document's blocks forever even though appending to
+    // the filler keeps returning ENOSPC (observed on Intel macOS CI).
+    let mut retained_revisions = Vec::new();
     // ENOSPC from the filler does not promise that a later operation will also
     // fail: the filesystem may make space available between operations. Any
     // successful publication is acknowledged state, never a failed-write case.
@@ -196,6 +200,7 @@ fn actual_disk_full_preserves_acknowledged_documents_and_allows_retry() {
         if attempt > 0 {
             filesystem.fill();
         }
+        retained_revisions.push(File::open(root.join(acknowledged.key.relative_path())).unwrap());
         edited.body = format!("attempt {attempt}\n")
             + &"full filesystem must not replace acknowledged bytes\n".repeat(10_000);
         match store.put(&edited, ExpectedRevision::Digest(&acknowledged.revision)) {
@@ -261,6 +266,7 @@ fn actual_disk_full_preserves_acknowledged_documents_and_allows_retry() {
         "failed writes left staging files"
     );
 
+    drop(retained_revisions);
     fs::remove_file(filler).unwrap();
     File::open(&filesystem.mount).unwrap().sync_all().unwrap();
     let replacement = store
