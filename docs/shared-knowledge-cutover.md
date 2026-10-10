@@ -501,3 +501,14 @@ a missing local fence, changed preparation evidence, interrupted host recovery,
 and preservation of SQL writes made after abort. It uses real SSH and disposable
 PostgreSQL; multi-host activation and current-state rollback still need their own
 end-to-end and crash-boundary qualification.
+
+
+`Journal::stage_hosts` now connects the existing parity-checked exporter to the
+owned fleet fence. It recontacts prepared hosts, stages beneath the retained
+coordinator journal, and checks the exact manifest, mappings, source backup and
+preparation seal under the exclusive SQL generation lease before retaining
+`fleet-export.json`. A changed source/fence or independently edited staged document
+blocks completion; retry never overwrites such edits. Aborted operations cannot
+resume export, and their private staging evidence remains available. This is not
+Git publication or activation authority: subsequent phases must revalidate the
+current stage, host bindings and exact remote base before publishing.

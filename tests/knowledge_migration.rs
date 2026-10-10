@@ -1992,6 +1992,37 @@ async fn native_fleet_owned_fence_resume_and_abort() {
             .unwrap(),
         2
     );
+    let exported = journal
+        .stage_hosts(&config, &f.pool, Some(&ssh.identity))
+        .await
+        .unwrap();
+    assert_eq!(exported.generation, 2);
+    assert!(!exported.entries.is_empty());
+    assert!(f.journal.join("fleet-export.json").exists());
+    assert_eq!(
+        journal
+            .stage_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        exported
+    );
+    let staged_document = f
+        .journal
+        .join("stage")
+        .join(exported.entries[0].key.relative_path());
+    let original_document = std::fs::read(&staged_document).unwrap();
+    std::fs::write(&staged_document, b"independent stage edit").unwrap();
+    assert!(
+        journal
+            .stage_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(&staged_document).unwrap(),
+        b"independent stage edit"
+    );
+    std::fs::write(&staged_document, original_document).unwrap();
     let original_runtime = std::fs::read(&runtime).unwrap();
     std::fs::remove_file(&runtime).unwrap();
     assert!(
@@ -2065,6 +2096,16 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         )
         .await
         .is_err()
+    );
+    assert!(
+        journal
+            .stage_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        ygg::knowledge::export::verify(&f.journal.join("stage")).unwrap(),
+        exported
     );
     let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
         .fetch_one(&f.pool)

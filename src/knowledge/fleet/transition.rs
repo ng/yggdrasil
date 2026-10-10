@@ -124,3 +124,29 @@ pub(super) async fn abort(
         .context("fleet abort outcome uncertain; resume abort with the same journal")?;
     Ok(registration.source_generation + 2)
 }
+
+/// Run a local phase only while this operation's exact fleet fence is current.
+/// The callback must not acquire another database connection or contact hosts.
+pub(super) async fn with_fenced_source<T>(
+    registration: &Registration,
+    pool: &PgPool,
+    backup: &SourceBackup,
+    prepared_sha256: &str,
+    phase: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut tx = Registration::transaction(pool).await?;
+    registered(registration, &mut tx).await?;
+    let evidence = (prepared_sha256.to_owned(), backup.digest().to_owned());
+    ensure!(
+        event(registration, &mut tx, "fenced").await? == Some(evidence)
+            && event(registration, &mut tx, "aborted").await?.is_none(),
+        "local phase requires this operation's un-aborted fleet fence"
+    );
+    verify_fenced(registration, &Registration::marker(&mut tx).await?)?;
+    backup.verify_on(&mut tx).await?;
+    let result = phase()?;
+    tx.commit()
+        .await
+        .context("fleet phase outcome uncertain; resume the same journal")?;
+    Ok(result)
+}

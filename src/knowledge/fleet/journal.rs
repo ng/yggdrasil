@@ -188,6 +188,55 @@ impl Journal {
         })
         .await
     }
+    /// Produce a private complete export for this fleet fence. The returned
+    /// manifest and retained receipt do not authorize Git publication/activation.
+    pub async fn stage_hosts(
+        &self,
+        config: &crate::config::database::DeploymentConfig,
+        pool: &sqlx::PgPool,
+        ssh_identity: Option<&Path>,
+    ) -> Result<crate::knowledge::export::Manifest> {
+        use crate::knowledge::{document::digest, export};
+        self.fence_hosts(config, pool, ssh_identity).await?;
+        let backup = self.source_backup(config)?;
+        let plan = self.plan()?.plan();
+        let prepared = self
+            .store
+            .read_artifact("fleet-prepared.json")?
+            .context("complete fleet preparation evidence missing")?;
+        let prepared_sha256 = digest(prepared.as_bytes());
+        let staging = self.intent.directory.join("stage");
+        let manifest = export::stage(pool, &plan.mappings, &staging).await?;
+        super::transition::with_fenced_source(
+            self.plan.registration(),
+            pool,
+            &backup,
+            &prepared_sha256,
+            || {
+                self.verify_prepared(&prepared_sha256)?;
+                ensure!(
+                    export::verify(&staging)? == manifest
+                        && manifest.database_id == plan.mappings.database_id
+                        && manifest.generation == plan.source_generation + 1
+                        && manifest.corpus_id == plan.mappings.corpus_id
+                        && manifest.mappings == serde_json::to_value(&plan.mappings)?,
+                    "staged export differs from the owned fleet source"
+                );
+                let bytes = serde_json::to_string(&serde_json::json!({
+                    "version":1, "operation":plan.operation,
+                    "request_sha256":self.intent.request_sha256,
+                    "prepared_sha256":prepared_sha256,
+                    "source_backup_sha256":backup.digest(),
+                    "manifest":&manifest,
+                }))?;
+                self.store
+                    .retain_artifact("fleet-export.json", &bytes, false)?;
+                self.verify_prepared(&prepared_sha256)?;
+                Ok(manifest)
+            },
+        )
+        .await
+    }
     /// Return only this operation's still-fenced SQL source to generation +2,
     /// then reconcile hosts. After activation, use current-state rollback instead.
     pub async fn abort_hosts(
