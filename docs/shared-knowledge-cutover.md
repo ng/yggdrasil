@@ -256,3 +256,14 @@ tombstoned request, so delayed preparation cannot re-fence a cancelled host. Cha
 selections, receipts, policy or database generations refuse without overwriting them.
 These primitives still require coordinator authentication, census and workflow;
 they do not expose an operator CLI or enable shared/fleet migration execution.
+
+`fence::prepare_sql_at_source` supplies the connected preparation path: acquire the
+local selection lease first, then hold the database shared generation lease while
+verifying the expected compatible SQL source and absence of a coordinator
+cancellation receipt through local fence publication. A host that never received
+local cancellation cannot prepare an old request after database cancellation, even
+if its request generation is edited to match the new SQL generation. Failure does
+not publish a new fence intent or runtime selection. The offline `prepare_sql` is
+a lower-level primitive and cannot provide this database check; coordinator work
+must use the connected path. Request authentication, plan validation, complete
+census and activation remain the coordinator's responsibility.

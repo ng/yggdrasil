@@ -927,7 +927,7 @@ async fn native_prefence_abort_drains_sql_and_cancels_delayed_execution() {
 #[ignore = "requires YGG_TEST_PG_BIN; starts disposable native PostgreSQL"]
 async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_replay() {
     use ygg::knowledge::{
-        fence::{CoordinatorBinding, cancel_sql, prepare_sql},
+        fence::{CoordinatorBinding, cancel_sql, prepare_sql, prepare_sql_at_source},
         runtime::{Binding, Phase},
         store::KnowledgeStore,
     };
@@ -966,7 +966,9 @@ async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_
         mappings: serde_json::from_value(serde_json::to_value(&f.plan.mappings).unwrap()).unwrap(),
         agents: BTreeMap::new(),
     };
-    prepare_sql(&host, &binding, coordinator).unwrap();
+    prepare_sql_at_source(&host, &binding, coordinator, &f.pool)
+        .await
+        .unwrap();
     let selection = policy.join("runtime.json");
     let fenced = std::fs::read(&selection).unwrap();
     assert!(
@@ -977,6 +979,52 @@ async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_
     assert_eq!(std::fs::read(&selection).unwrap(), fenced);
     assert!(!policy.join("sql-fence-1-cancelled.json").exists());
     success(f.migrate(&server, true).await);
+    // A participant without the local cancellation tombstone must still reject
+    // a delayed request by consulting the current source and coordinator receipt.
+    assert!(
+        prepare_sql_at_source(&host, &binding, coordinator, &f.pool)
+            .await
+            .is_err()
+    );
+    assert!(!policy.join("sql-fence-1-cancelled.json").exists());
+    assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+    let other_temp = tempfile::tempdir().unwrap();
+    let other_root = other_temp.path().canonicalize().unwrap();
+    let other_corpus = other_root.join("corpus");
+    let other_policy = other_root.join("policy");
+    KnowledgeStore::open(&other_corpus, true).unwrap();
+    KnowledgeStore::open(&other_policy, true).unwrap();
+    let (other_host, _) = ygg::config::database::KnowledgeConfig::load(BTreeMap::from([
+        ("HOME".into(), other_root.display().to_string()),
+        (
+            "YGG_KNOWLEDGE_DIR".into(),
+            other_corpus.display().to_string(),
+        ),
+        (
+            "YGG_KNOWLEDGE_POLICY_DIR".into(),
+            other_policy.display().to_string(),
+        ),
+    ]))
+    .unwrap();
+    let mut other_binding: Binding =
+        serde_json::from_value(serde_json::to_value(&binding).unwrap()).unwrap();
+    other_binding.bundle = other_corpus;
+    assert!(
+        prepare_sql_at_source(&other_host, &other_binding, coordinator, &f.pool)
+            .await
+            .is_err()
+    );
+    // Editing the generation to match cannot reuse a cancelled operation UUID.
+    other_binding.generation = 2;
+    assert!(
+        prepare_sql_at_source(&other_host, &other_binding, coordinator, &f.pool)
+            .await
+            .is_err()
+    );
+    assert!(!other_policy.join("runtime.json").exists());
+    assert!(!other_policy.join("sql-fence-1.json").exists());
+    assert!(!other_policy.join("sql-fence-2.json").exists());
+
     assert!(
         cancel_sql(&host, &binding, coordinator, &"0".repeat(64), &f.pool)
             .await

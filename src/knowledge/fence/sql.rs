@@ -144,6 +144,56 @@ pub fn prepare_sql(
     coordinator: CoordinatorBinding,
 ) -> Result<SqlPreparation> {
     let host = Host::open(config, binding, coordinator)?;
+    publish_preparation(&host, config, binding)
+}
+
+/// Prepare against the current SQL source while holding its shared generation
+/// lease. Acquire local selection first to preserve local-to-database lock order.
+/// The caller still authenticates the request and validates the coordinator plan;
+/// this verifies database state, not a complete host census or request authority.
+pub async fn prepare_sql_at_source(
+    config: &KnowledgeConfig,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    pool: &sqlx::PgPool,
+) -> Result<SqlPreparation> {
+    let host = Host::open(config, binding, coordinator)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(1497843531,1)")
+        .execute(&mut *tx)
+        .await?;
+    let marker: (uuid::Uuid, i64, i32, String, Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT database_id,generation,minimum_client,backend,corpus_id FROM public.knowledge_storage WHERE singleton"
+    ).fetch_one(&mut *tx).await?;
+    ensure!(
+        marker.0 == binding.mappings.database_id
+            && marker.1 == binding.generation
+            && marker.2 > 0
+            && marker.2 <= CLIENT_PROTOCOL
+            && marker.3 == "sql"
+            && marker.4.is_none(),
+        "SQL preparation source generation is not current"
+    );
+    let cancelled: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM public.knowledge_migration_cancellations WHERE operation_id=$1)"
+    ).bind(coordinator.migration_operation).fetch_one(&mut *tx).await?;
+    ensure!(
+        !cancelled,
+        "coordinator operation was cancelled; prepare a new request"
+    );
+    let report = publish_preparation(&host, config, binding)?;
+    tx.commit().await?;
+    Ok(report)
+}
+
+fn publish_preparation(
+    host: &Host,
+    config: &KnowledgeConfig,
+    binding: &Binding,
+) -> Result<SqlPreparation> {
     ensure!(
         host.policy
             .read_artifact(&host.cancellation_name())?
