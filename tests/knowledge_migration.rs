@@ -1255,3 +1255,135 @@ async fn native_fleet_registration_serializes_coordinators_and_preserves_cancell
     contender.close().await;
     f.pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN; starts disposable native PostgreSQL"]
+async fn native_backed_participant_retries_only_its_own_policy_additions() {
+    use ygg::knowledge::{
+        document::digest,
+        fence::{CoordinatorBinding, prepare_sql_backed},
+        fleet::Registration,
+        runtime::{Binding, Phase},
+        store::KnowledgeStore,
+    };
+    let server = Server::new();
+    let mut f = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
+    KnowledgeStore::open(&config.knowledge_dir, true).unwrap();
+    let registry =
+        ygg::knowledge::identity::IdentityRegistry::open(&config.knowledge_policy_dir, true)
+            .unwrap();
+    let identity = registry.initialize(true).unwrap();
+    f.plan.mappings.corpus_id = identity.corpus_id;
+    let backup_path = f
+        .temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("participant-backup");
+    let manifest =
+        ygg::db::deployment_backup::create(&config, &backup_path, Some(&server.bin), None)
+            .await
+            .unwrap();
+    let backup_hash = digest(&serde_json::to_vec(&manifest).unwrap());
+    let coordinator = CoordinatorBinding {
+        migration_operation: Uuid::new_v4(),
+        participant: Uuid::new_v4(),
+    };
+    let request_hash = digest(b"complete backed fixture plan");
+    Registration {
+        version: 1,
+        operation: coordinator.migration_operation,
+        request_sha256: request_hash.clone(),
+        database_id: f.plan.mappings.database_id,
+        source_generation: 1,
+        corpus_id: identity.corpus_id,
+        participants: vec![coordinator.participant],
+    }
+    .register(&f.pool)
+    .await
+    .unwrap();
+    let binding = Binding {
+        version: 1,
+        minimum_client: 1,
+        generation: 1,
+        phase: Phase::Fenced,
+        bundle: config.knowledge_dir.canonicalize().unwrap(),
+        mappings: serde_json::from_value(serde_json::to_value(&f.plan.mappings).unwrap()).unwrap(),
+        agents: BTreeMap::new(),
+    };
+    assert!(
+        prepare_sql_backed(
+            &config,
+            &binding,
+            coordinator,
+            &request_hash,
+            &backup_path,
+            &"0".repeat(64),
+            &f.pool
+        )
+        .await
+        .is_err()
+    );
+    assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
+    let first = prepare_sql_backed(
+        &config,
+        &binding,
+        coordinator,
+        &request_hash,
+        &backup_path,
+        &backup_hash,
+        &f.pool,
+    )
+    .await
+    .unwrap();
+    let retry = prepare_sql_backed(
+        &config,
+        &binding,
+        coordinator,
+        &request_hash,
+        &backup_path,
+        &backup_hash,
+        &f.pool,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.intent_sha256, retry.intent_sha256);
+    let runtime = config.knowledge_policy_dir.join("runtime.json");
+    let fenced = std::fs::read(&runtime).unwrap();
+    let unrelated = config.knowledge_policy_dir.join("independent.json");
+    std::fs::write(&unrelated, b"independent policy").unwrap();
+    assert!(
+        prepare_sql_backed(
+            &config,
+            &binding,
+            coordinator,
+            &request_hash,
+            &backup_path,
+            &backup_hash,
+            &f.pool
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"independent policy");
+    assert_eq!(std::fs::read(&runtime).unwrap(), fenced);
+    std::fs::remove_file(&unrelated).unwrap();
+    std::fs::write(&runtime, b"{}").unwrap();
+    assert!(
+        prepare_sql_backed(
+            &config,
+            &binding,
+            coordinator,
+            &request_hash,
+            &backup_path,
+            &backup_hash,
+            &f.pool
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&runtime).unwrap(), b"{}");
+    assert_eq!(f.marker().await, (1, "sql".into()));
+    f.pool.close().await;
+}

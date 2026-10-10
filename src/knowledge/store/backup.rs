@@ -680,6 +680,45 @@ impl KnowledgeBackup {
         Ok(expected)
     }
 
+    /// Compare a SQL participant's policy while allowing only exact newly
+    /// created control files. Existing archived files can never be exempted.
+    pub(crate) fn verify_restored_with_new_controls(
+        path: &Path,
+        restored: &Path,
+        additions: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let expected = Self::verify(path)?;
+        let restored = KnowledgeStore::open(restored, false)?;
+        let mut entries = BTreeMap::new();
+        inventory(&restored.root, None, "", 0, true, &mut entries, &mut 0)?;
+        for (name, bytes) in additions {
+            ensure!(
+                !name.is_empty()
+                    && name != "."
+                    && name != ".."
+                    && !name.contains('/')
+                    && !name.contains('\\')
+                    && !expected.entries.contains_key(name),
+                "new control cannot replace an archived policy entry"
+            );
+            if let Some(actual) = entries.remove(name) {
+                ensure!(
+                    actual
+                        == BackupEntry::File {
+                            bytes: bytes.len() as u64,
+                            sha256: crate::knowledge::document::digest(bytes.as_bytes()),
+                        },
+                    "new participant control differs from expected bytes"
+                );
+            }
+        }
+        ensure!(
+            entries == expected.entries,
+            "participant policy differs from backup"
+        );
+        Ok(())
+    }
+
     /// Permit only the independently derived runtime binding bytes to differ.
     pub(crate) fn verify_restored_rebased_selection(
         path: &Path,

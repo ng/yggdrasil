@@ -160,6 +160,83 @@ pub async fn prepare_sql_at_source(
     pool: &sqlx::PgPool,
 ) -> Result<SqlPreparation> {
     let host = Host::open(config, binding, coordinator)?;
+    prepare_at_source(
+        &host,
+        config,
+        binding,
+        coordinator,
+        request_sha256,
+        pool,
+        || Ok(()),
+    )
+    .await
+}
+
+/// Participant preparation with verified host-local deployment/corpus/policy
+/// backup. Hold the local selection lease across verification and publication.
+pub async fn prepare_sql_backed(
+    config: &crate::config::database::DeploymentConfig,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    request_sha256: &str,
+    backup_path: &std::path::Path,
+    backup_sha256: &str,
+    pool: &sqlx::PgPool,
+) -> Result<SqlPreparation> {
+    use crate::db::deployment_backup;
+    use crate::knowledge::store::KnowledgeBackup;
+    let local = KnowledgeConfig {
+        data_dir: config.data_dir.clone(),
+        knowledge_dir: config.knowledge_dir.clone(),
+        knowledge_policy_dir: config.knowledge_policy_dir.clone(),
+    };
+    let host = Host::open(&local, binding, coordinator)?;
+    let verify_backup = || -> Result<()> {
+        let manifest = deployment_backup::verify(backup_path)?;
+        ensure!(
+            digest(&serde_json::to_vec(&manifest)?) == backup_sha256
+                && manifest.database.database_id == binding.mappings.database_id
+                && manifest.database.generation == binding.generation
+                && manifest.database.backend == "sql"
+                && manifest.database.corpus_id.is_none()
+                && manifest.knowledge.is_some(),
+            "participant backup differs from planned SQL source"
+        );
+        deployment_backup::read_configuration(backup_path, &manifest)?
+            .ok_or_else(|| anyhow::anyhow!("participant backup lacks configuration evidence"))?
+            .verify_selection(config)?;
+        KnowledgeBackup::verify_restored(&backup_path.join("knowledge"), &local.knowledge_dir)?;
+        KnowledgeBackup::verify_restored_with_new_controls(
+            &backup_path.join("policy"),
+            &local.knowledge_policy_dir,
+            &std::collections::BTreeMap::from([
+                (host.name.clone(), host.bytes.clone()),
+                (SELECTION_FILE.to_owned(), host.desired.fenced.clone()),
+            ]),
+        )?;
+        Ok(())
+    };
+    prepare_at_source(
+        &host,
+        &local,
+        binding,
+        coordinator,
+        request_sha256,
+        pool,
+        verify_backup,
+    )
+    .await
+}
+
+async fn prepare_at_source(
+    host: &Host,
+    config: &KnowledgeConfig,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    request_sha256: &str,
+    pool: &sqlx::PgPool,
+    verify: impl Fn() -> Result<()>,
+) -> Result<SqlPreparation> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
@@ -194,7 +271,9 @@ pub async fn prepare_sql_at_source(
         registered,
         "participant and source must match the registered coordinator plan"
     );
-    let report = publish_preparation(&host, config, binding)?;
+    verify()?;
+    let report = publish_preparation(host, config, binding)?;
+    verify()?;
     tx.commit().await?;
     Ok(report)
 }

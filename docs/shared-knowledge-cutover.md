@@ -394,3 +394,15 @@ lease; complete-set revalidation and database transitions remain outstanding.
 Protocol tests reject replay, changed envelope fields, tampered plan bytes and
 wrong host/source evidence. This remains a library API with shared CLI execution
 disabled.
+
+
+`fence::prepare_sql_backed` now verifies a participant's pinned combined backup
+before and after local fence publication, while holding its exclusive local
+selection lease and the database's shared generation lease. It verifies the
+backup database/generation, captured deployment selection, corpus contents and
+policy contents. Only exact newly created preparation-intent and fenced-runtime
+bytes may differ from the original policy archive; archived entries cannot be
+exempted or replaced. This permits an interrupted preparation to retry against
+its original backup while rejecting unrelated policy/corpus/configuration edits.
+A verification failure never removes a published fence. Participant dispatch and
+the complete fleet state machine remain outstanding.
