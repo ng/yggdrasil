@@ -357,7 +357,23 @@ A disposable, unprivileged loopback OpenSSH probe on macOS (2026-10-10) accepted
 the matching temporary host/client keys and rejected both a wrong pinned host key
 and a wrong client key (exit 255, no remote-command output). No system SSH
 configuration or operator keys were changed; the test daemon was stopped. This
-establishes local test feasibility only. The production transport, participant
-command, nonce/bounds/fault tests and two-host migration integration remain to be
-implemented. OpenSSH's [configuration manual](https://man.openbsd.org/ssh_config.5)
+establishes local test feasibility only. The participant command, nonce validation and two-host migration integration remain
+to be implemented. OpenSSH's [configuration manual](https://man.openbsd.org/ssh_config.5)
 defines the host-key alias and strict-checking behavior used by this design.
+
+
+`fleet::transport::exchange` now implements the bounded SSH byte exchange. Plans
+require each participant's endpoint/account/public host key. A fresh private
+known-hosts file isolates the pinned key for each invocation; the fixed remote
+command is `ygg knowledge fleet-participant`. Requests travel on stdin (8 MiB
+maximum), with stdout limited to 1 MiB, stderr to 64 KiB and an overall 60-second
+deadline. Errors retain uncertain-outcome semantics; there is no automatic retry.
+
+A real disposable loopback `sshd` test covers correct authentication, wrong host
+and client keys, excess response bytes and timeout. Run it explicitly with
+`cargo test --lib knowledge::fleet::transport::tests::authenticated_exchange_rejects_wrong_keys_and_bounds_output -- --ignored --exact`
+on a machine with OpenSSH client/server tools. The fixture uses temporary keys and
+a forced echo command; it verifies transport only, not participant behavior. The
+participant CLI is not implemented or enabled, and callers must still validate
+operation/plan/participant/action/nonce and retained host evidence before using any
+response. Shared migration remains unavailable.

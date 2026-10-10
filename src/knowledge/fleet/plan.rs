@@ -29,6 +29,7 @@ pub struct Participant {
     pub id: Uuid,
     pub name: String,
     pub protocol: i32,
+    pub endpoint: super::transport::Endpoint,
     pub corpus: PathBuf,
     pub policy: PathBuf,
     pub identities: Identities,
@@ -151,6 +152,7 @@ impl ValidatedPlan {
         );
         let mut names = BTreeSet::new();
         for host in &plan.participants {
+            host.endpoint.validate()?;
             ensure!(
                 !host.name.trim().is_empty()
                     && host.name.len() <= 128
@@ -226,6 +228,7 @@ pub(super) mod tests {
             "all_participating_hosts_listed":true,"schema_changes_stopped":true,
             "session_preserving_endpoint":true,"remote_writers_stopped":true,
             "participants":[{"id":Uuid::new_v4(),"name":"remote-host","protocol":CLIENT_PROTOCOL,
+                "endpoint":{"host":"example.test","port":22,"account":"operator","host_key":"ssh-ed25519 AAAA"},
                 "corpus":"/nonexistent/remote/corpus","policy":"/nonexistent/remote/policy",
                 "identities":{"version":1,"corpus_id":corpus,"trusted":true,"repos":[]},
                 "backup":{"path":"/nonexistent/remote/backup","manifest_sha256":"c".repeat(64)},
