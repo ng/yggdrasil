@@ -121,7 +121,10 @@ Reverse cancellation now has an immutable SQL barrier that drains admitted host
 operations and rejects delayed fences. It only starts at the original OKF
 generation. Authenticated host restoration now preserves original fence evidence,
 restores only the exact original selection, and records a local complete-host census.
-The SQL completion seal and reservation release still remain.
+An immutable SQL completion seal now validates the complete restored census before
+releasing admission for a fresh operation. Competing requests serialize; terminal
+retries only inspect historical evidence and cannot unfence a newer operation.
+Reconciliation after a changed remote at the global reverse fence remains separate.
 
 ### Faults, performance and packaging
 

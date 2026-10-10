@@ -196,3 +196,76 @@ impl FenceLease<'_> {
         Ok(result)
     }
 }
+
+impl FenceLease<'_> {
+    /// A terminal SQL seal permits inspection only. Never recreate a missing
+    /// receipt or touch a selection that may now belong to a newer operation.
+    pub(crate) fn inspect_cancelled(
+        &self,
+        generation: i64,
+        coordinator: CoordinatorBinding,
+        expected: &Binding,
+        request_sha256: &str,
+        known_fence: Option<&LocalFence>,
+        committed: &LocalCancellation,
+    ) -> Result<LocalCancellation> {
+        self.policy.verify_root_path(&self.path)?;
+        let original = serde_json::to_string(expected)?;
+        let intent_name = format!(
+            "local-rollback-cancel-{}-intent.json",
+            coordinator.migration_operation
+        );
+        let done_name = format!(
+            "local-rollback-cancel-{}-done.json",
+            coordinator.migration_operation
+        );
+        let bytes = self
+            .policy
+            .read_artifact(&intent_name)?
+            .context("completed cancellation intent missing")?;
+        let intent: CancelIntent = serde_json::from_str(&bytes)?;
+        ensure!(
+            intent.version == 1
+                && intent.original == original
+                && expected.phase == Phase::Okf
+                && expected.generation == generation
+                && self.config.knowledge_policy_dir.canonicalize()? == self.path
+                && self.config.knowledge_dir.canonicalize()? == expected.bundle
+                && intent.policy_identity == identity(&self.path)?
+                && intent.bundle_identity == identity(&expected.bundle)?,
+            "completed cancellation roots or binding changed"
+        );
+        let fence = intent
+            .fence_intent
+            .as_deref()
+            .map(|b| self.cancellation_fence(b, generation, coordinator, &original))
+            .transpose()?;
+        let result = LocalCancellation {
+            coordinator,
+            request_sha256: request_sha256.to_owned(),
+            database_id: expected.mappings.database_id,
+            corpus_id: expected.mappings.corpus_id,
+            source_generation: generation,
+            policy: self.path.clone(),
+            original_sha256: digest(original.as_bytes()),
+            fence,
+        };
+        ensure!(
+            intent.result == result
+                && &result == committed
+                && known_fence.is_none_or(|known| Some(known) == result.fence.as_ref()),
+            "completed local cancellation differs from SQL census"
+        );
+        ensure!(
+            self.policy.read_artifact(&done_name)?.as_deref()
+                == Some(serde_json::to_string(&result)?.as_str()),
+            "completed cancellation receipt missing or changed"
+        );
+        self.policy.verify_root_path(&self.path)?;
+        ensure!(
+            self.policy.read_artifact(&intent_name)?.as_deref() == Some(bytes.as_str()),
+            "completed cancellation intent changed during inspection"
+        );
+        Ok(result)
+    }
+}

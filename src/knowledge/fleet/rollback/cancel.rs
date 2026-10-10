@@ -83,10 +83,12 @@ impl RollbackPlan {
     ) -> Result<()> {
         self.validate_cancellation(receipt)?;
         self.registered_identity_on(tx).await?;
-        ensure!(
-            self.host_phase_on(tx).await?.is_none(),
-            "cancellation requires original active OKF generation"
-        );
+        if self.saved_cancellation_on(tx).await?.is_none() {
+            ensure!(
+                self.host_phase_on(tx).await?.is_none(),
+                "cancellation requires original active OKF generation"
+            );
+        }
         let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_fleet_rollback_cancellations WHERE operation_id=$1 AND request_sha256=$2 AND database_id=$3 AND source_generation=$4)")
             .bind(receipt.operation).bind(&receipt.request_sha256).bind(receipt.database_id).bind(receipt.source_generation).fetch_one(&mut **tx).await?;
         ensure!(matches, "committed rollback cancellation required");
@@ -133,16 +135,36 @@ impl RollbackPlan {
             .await?;
         self.cancellation_on(&mut tx, receipt).await?;
         local.verify_shared(&forward.plan().shared)?;
-        let result = local.cancel(
-            self.request.source_generation,
-            CoordinatorBinding {
-                migration_operation: self.operation(),
-                participant,
-            },
-            &expected,
-            self.sha256(),
-            known_fence,
-        )?;
+        let coordinator = CoordinatorBinding {
+            migration_operation: self.operation(),
+            participant,
+        };
+        let result = if let Some(completed) = self.saved_cancellation_on(&mut tx).await? {
+            let census: serde_json::Value = serde_json::from_str(&completed.hosts_json)?;
+            let record = census["participants"]
+                .as_array()
+                .context("completed census missing")?
+                .iter()
+                .find(|h| h["coordinator"]["participant"] == serde_json::json!(participant))
+                .context("completed participant missing")?;
+            let committed = serde_json::from_value(record.clone())?;
+            local.inspect_cancelled(
+                self.request.source_generation,
+                coordinator,
+                &expected,
+                self.sha256(),
+                known_fence,
+                &committed,
+            )?
+        } else {
+            local.cancel(
+                self.request.source_generation,
+                coordinator,
+                &expected,
+                self.sha256(),
+                known_fence,
+            )?
+        };
         local.verify_shared(&forward.plan().shared)?;
         tx.commit()
             .await

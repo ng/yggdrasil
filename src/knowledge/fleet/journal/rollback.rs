@@ -184,6 +184,20 @@ impl Journal {
     ) -> Result<String> {
         self.verify()?;
         reverse.expected_binding(&self.plan, self.plan.plan().participants[0].id)?;
+        if let Some(saved) = reverse.cancellation_complete(pool).await? {
+            let prefix = format!("rollback-{}", reverse.operation());
+            self.store.retain_artifact(
+                &format!("{prefix}-restored.json"),
+                &saved.hosts_json,
+                false,
+            )?;
+            self.store.retain_artifact(
+                &format!("{prefix}-cancelled.json"),
+                &saved.hosts_json,
+                false,
+            )?;
+            return Ok(saved.hosts_sha256);
+        }
         let receipt = reverse.begin_cancellation(pool).await?;
         let prefix = format!("rollback-{}", reverse.operation());
         self.store
@@ -254,5 +268,68 @@ impl Journal {
             .retain_artifact(&format!("{prefix}-restored.json"), &hosts, false)?;
         tx.commit().await?;
         Ok(crate::knowledge::document::digest(hosts.as_bytes()))
+    }
+}
+
+impl Journal {
+    /// Seal complete authenticated restoration in SQL before admitting a fresh
+    /// rollback. After commit, reconcile from SQL without contacting old hosts.
+    pub async fn complete_rollback_cancellation(
+        &self,
+        reverse: &RollbackPlan,
+        pool: &sqlx::PgPool,
+        identity: Option<&Path>,
+    ) -> Result<String> {
+        let expected = self.restore_rollback_hosts(reverse, pool, identity).await?;
+        let prefix = format!("rollback-{}", reverse.operation());
+        if let Some(saved) = reverse.cancellation_complete(pool).await? {
+            ensure!(
+                saved.hosts_sha256 == expected,
+                "committed cancellation changed"
+            );
+            return Ok(saved.hosts_sha256);
+        }
+        let receipt = reverse.begin_cancellation(pool).await?;
+        let hosts = self
+            .store
+            .read_artifact(&format!("{prefix}-restored.json"))?
+            .context("restoration census missing")?;
+        ensure!(
+            crate::knowledge::document::digest(hosts.as_bytes()) == expected,
+            "restoration census changed"
+        );
+        let saved = reverse
+            .seal_cancellation(pool, &receipt, &hosts, || {
+                self.verify()?;
+                ensure!(
+                    self.store
+                        .read_artifact(&format!("{prefix}-restored.json"))?
+                        .as_deref()
+                        == Some(hosts.as_str()),
+                    "restoration census changed before SQL completion"
+                );
+                let census: serde_json::Value = serde_json::from_str(&hosts)?;
+                for host in census["participants"]
+                    .as_array()
+                    .context("restoration participants missing")?
+                {
+                    let id: uuid::Uuid =
+                        serde_json::from_value(host["coordinator"]["participant"].clone())?;
+                    let record = self
+                        .store
+                        .read_artifact(&format!("{prefix}-cancel-host-{id}.json"))?
+                        .context("restored host receipt missing")?;
+                    ensure!(
+                        serde_json::from_str::<serde_json::Value>(&record)? == *host,
+                        "restored host receipt changed"
+                    );
+                }
+                Ok(())
+            })
+            .await?;
+        self.verify()?;
+        self.store.retain_artifact(&format!("{prefix}-cancelled.json"), &saved.hosts_json, false)
+            .context("SQL cancellation completion committed; retry exact request to retain local receipt")?;
+        Ok(saved.hosts_sha256)
     }
 }

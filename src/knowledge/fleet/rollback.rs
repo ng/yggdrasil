@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 mod cancel;
 pub use cancel::CancellationReceipt;
+mod completion;
 mod deselect;
 mod transition;
 
@@ -137,7 +138,7 @@ impl RollbackPlan {
             );
         } else {
             let owner: Option<Uuid> = sqlx::query_scalar(
-                "SELECT operation_id FROM public.knowledge_fleet_rollbacks WHERE database_id=$1 AND source_generation=$2")
+                "SELECT operation_id FROM public.knowledge_fleet_rollbacks r WHERE database_id=$1 AND source_generation=$2 AND NOT EXISTS (SELECT 1 FROM public.knowledge_fleet_rollback_completions c WHERE c.operation_id=r.operation_id)")
                 .bind(self.forward.database_id).bind(self.request.source_generation).fetch_optional(&mut *tx).await?;
             ensure!(
                 owner.is_none(),

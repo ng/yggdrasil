@@ -3022,6 +3022,17 @@ async fn partial_fleet_finalization_fixture(
             .is_err()
     );
     let reverse = RollbackPlan::parse(forward, &request.to_string()).unwrap();
+    // Test the digest constraint on an admissible generation before reserving it.
+    let bad_hash = sqlx::query("INSERT INTO knowledge_fleet_rollbacks(operation_id,forward_operation_id,database_id,source_generation,request_sha256,request_json) VALUES($1,$2,$3,3,$4,$5)")
+        .bind(Uuid::new_v4()).bind(forward.plan().operation).bind(forward.plan().mappings.database_id)
+        .bind("0".repeat(64)).bind(reverse.bytes()).execute(&first.pool).await.unwrap_err();
+    assert_eq!(
+        bad_hash
+            .as_database_error()
+            .and_then(|e| e.code())
+            .as_deref(),
+        Some("23514")
+    );
     let mut contender = request.clone();
     contender["operation"] = serde_json::json!(Uuid::new_v4());
     let contender = RollbackPlan::parse(forward, &contender.to_string()).unwrap();
@@ -3078,16 +3089,6 @@ async fn partial_fleet_finalization_fixture(
     ] {
         assert!(sqlx::query(mutation).execute(&first.pool).await.is_err());
     }
-    let bad_hash = sqlx::query("INSERT INTO knowledge_fleet_rollbacks(operation_id,forward_operation_id,database_id,source_generation,request_sha256,request_json) VALUES($1,$2,$3,4,$4,$5)")
-        .bind(Uuid::new_v4()).bind(forward.plan().operation).bind(forward.plan().mappings.database_id)
-        .bind("0".repeat(64)).bind(winner.bytes()).execute(&first.pool).await.unwrap_err();
-    assert_eq!(
-        bad_hash
-            .as_database_error()
-            .and_then(|e| e.code())
-            .as_deref(),
-        Some("23514")
-    );
     // Even a granted runtime INSERT must not bypass migration-owner checks.
     let mut tx = first.pool.begin().await.unwrap();
     let role = format!("reverse_runtime_{}", Uuid::new_v4().simple());
@@ -3244,6 +3245,13 @@ async fn partial_fleet_finalization_fixture(
                 .exists()
         );
         assert!(loser.register(&first.pool).await.is_err());
+        assert_eq!(
+            journal
+                .complete_rollback_cancellation(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .unwrap(),
+            restored
+        );
         first.pool.close().await;
         return;
     }
@@ -3543,6 +3551,149 @@ async fn partial_fleet_finalization_fixture(
             loser.register(&first.pool).await.is_err(),
             "local acknowledgements alone released SQL reservation"
         );
+        let restored_path = first.journal.join(format!("{prefix}-restored.json"));
+        let hosts = std::fs::read_to_string(&restored_path).unwrap();
+        let mut incomplete: serde_json::Value = serde_json::from_str(&hosts).unwrap();
+        incomplete["participants"].as_array_mut().unwrap().pop();
+        let incomplete = serde_json::to_string(&incomplete).unwrap();
+        let failure = sqlx::query("INSERT INTO knowledge_fleet_rollback_completions(operation_id,hosts_sha256,hosts_json) VALUES($1,$2,$3)")
+            .bind(winner.operation()).bind(digest(incomplete.as_bytes())).bind(&incomplete).execute(&first.pool).await.unwrap_err();
+        assert!(
+            failure.to_string().contains("participant census differs"),
+            "{failure}"
+        );
+        assert!(loser.register(&first.pool).await.is_err());
+        assert_eq!(
+            journal
+                .complete_rollback_cancellation(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .unwrap(),
+            restored
+        );
+        for mutation in [
+            "UPDATE knowledge_fleet_rollback_completions SET hosts_json=hosts_json",
+            "DELETE FROM knowledge_fleet_rollback_completions",
+            "TRUNCATE knowledge_fleet_rollback_completions",
+        ] {
+            assert!(sqlx::query(mutation).execute(&first.pool).await.is_err());
+        }
+        // Once SQL completion commits, missing local proof is never recreated.
+        let done_bytes = std::fs::read(&done).unwrap();
+        std::fs::remove_file(&done).unwrap();
+        assert!(
+            ygg::knowledge::fleet::protocol::call_rollback_cancel(
+                &journal,
+                winner,
+                participants[0],
+                &cancellation,
+                Some(first_fence.fence()),
+                Some(&ssh2.identity)
+            )
+            .await
+            .is_err()
+        );
+        assert!(!done.exists());
+        std::fs::remove_file(&restored_path).unwrap();
+        std::fs::remove_file(first.journal.join(format!("{prefix}-cancelled.json"))).unwrap();
+        assert_eq!(
+            journal
+                .complete_rollback_cancellation(winner, &first.pool, None)
+                .await
+                .unwrap(),
+            restored
+        );
+        assert!(
+            !done.exists(),
+            "completed coordinator retry contacted hosts or recreated their proof"
+        );
+        std::fs::write(&done, done_bytes).unwrap();
+        // Fresh operations keep old history and compete for one active reservation.
+        let mut next: serde_json::Value = serde_json::from_str(winner.bytes()).unwrap();
+        next["operation"] = serde_json::json!(Uuid::new_v4());
+        next["expected_remote_commit"] = serde_json::json!(remote_after);
+        let next_a = ygg::knowledge::fleet::rollback::RollbackPlan::parse(
+            journal.plan().unwrap(),
+            &next.to_string(),
+        )
+        .unwrap();
+        next["operation"] = serde_json::json!(Uuid::new_v4());
+        let next_b = ygg::knowledge::fleet::rollback::RollbackPlan::parse(
+            journal.plan().unwrap(),
+            &next.to_string(),
+        )
+        .unwrap();
+        let other_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*first.pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(next_a.register(&first.pool), next_b.register(&other_pool));
+        assert_ne!(
+            a.is_ok(),
+            b.is_ok(),
+            "fresh reservations were not exclusive: {a:?} {b:?}"
+        );
+        let admitted = if a.is_ok() { &next_a } else { &next_b };
+        let rejected = if a.is_ok() { &next_b } else { &next_a };
+        let raw = sqlx::query("INSERT INTO knowledge_fleet_rollbacks(operation_id,forward_operation_id,database_id,source_generation,request_sha256,request_json) VALUES($1,$2,$3,3,$4,$5)")
+            .bind(rejected.operation()).bind(journal.plan().unwrap().plan().operation).bind(first.plan.mappings.database_id)
+            .bind(rejected.sha256()).bind(rejected.bytes()).execute(&other_pool).await.unwrap_err();
+        assert!(
+            raw.to_string().contains("another rollback operation owns"),
+            "{raw}"
+        );
+        other_pool.close().await;
+        assert!(winner.register(&first.pool).await.is_err());
+        let new_fence =
+            call_rollback_fence(&journal, admitted, participants[0], Some(&ssh2.identity))
+                .await
+                .unwrap();
+        assert_ne!(new_fence.fence().operation, first_fence.fence().operation);
+        assert_eq!(
+            new_fence.fence().coordinator.unwrap().migration_operation,
+            admitted.operation()
+        );
+        let new_intent = std::fs::read(&local_intent).unwrap();
+        let new_runtime = std::fs::read(&runtime).unwrap();
+        ygg::knowledge::fleet::protocol::call_rollback_cancel(
+            &journal,
+            winner,
+            participants[0],
+            &cancellation,
+            Some(first_fence.fence()),
+            Some(&ssh2.identity),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&local_intent).unwrap(), new_intent);
+        assert_eq!(std::fs::read(&runtime).unwrap(), new_runtime);
+        let new_global = journal
+            .fence_rollback_hosts(admitted, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap();
+        assert_eq!(new_global.remote_commit, remote_after);
+        assert_eq!(first.marker().await, (4, "fenced".into()));
+        // Historical completed cancellation is read-only even after SQL advances.
+        ygg::knowledge::fleet::protocol::call_rollback_cancel(
+            &journal,
+            winner,
+            participants[0],
+            &cancellation,
+            Some(first_fence.fence()),
+            Some(&ssh2.identity),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            journal
+                .complete_rollback_cancellation(winner, &first.pool, None)
+                .await
+                .unwrap(),
+            restored
+        );
+        assert_eq!(std::fs::read(&local_intent).unwrap(), new_intent);
+        assert_eq!(std::fs::read(&runtime).unwrap(), new_runtime);
+        assert_eq!(first.marker().await, (4, "fenced".into()));
         first.pool.close().await;
         return;
     }
