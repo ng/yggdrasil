@@ -28,7 +28,7 @@ struct Intent {
     fenced: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SqlPreparation {
     pub coordinator: CoordinatorBinding,
@@ -343,6 +343,29 @@ pub async fn inspect_sql_backed(
     let local = local_config(config);
     let host = Host::open(&local, binding, coordinator)?;
     host.verify(&local)?;
+    let tx = inspection_lease(
+        &host,
+        binding,
+        coordinator,
+        request_sha256,
+        source_backup_sha256,
+        pool,
+    )
+    .await?;
+    verify_host_backup(&host, config, binding, backup_path, backup_sha256, None)?;
+    host.verify(&local)?;
+    tx.commit().await?;
+    Ok(host.report(binding))
+}
+
+async fn inspection_lease(
+    host: &Host,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    request_sha256: &str,
+    source_backup_sha256: &str,
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
@@ -366,11 +389,11 @@ pub async fn inspect_sql_backed(
                 == Some(host.desired.fenced.as_str()),
         "prepared host fence is absent, changed or cancelled"
     );
-    verify_host_backup(&host, config, binding, backup_path, backup_sha256, None)?;
-    host.verify(&local)?;
-    tx.commit().await?;
-    Ok(host.report(binding))
+    Ok(tx)
 }
+
+mod ready;
+pub use ready::{SqlReadiness, ready_sql_backed};
 
 async fn prepare_at_source(
     host: &Host,

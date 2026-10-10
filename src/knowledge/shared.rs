@@ -577,6 +577,11 @@ impl SharedGit {
             !state.blocked && state.commit == expected_commit,
             "recovery commit differs from confirmed shared state"
         );
+        self.verify_remote_tip(expected_commit)?;
+        recovery.verify_corpus_root(&self.control, &self.root)
+    }
+
+    fn verify_remote_tip(&self, expected_commit: &str) -> Result<()> {
         let reference = format!("refs/heads/{}", self.config.branch);
         let output = self.checked(
             &[
@@ -597,7 +602,22 @@ impl SharedGit {
                 && oid(fields[0].as_bytes())? == expected_commit,
             "remote branch changed since recovery capture"
         );
-        recovery.verify_corpus_root(&self.control, &self.root)
+        Ok(())
+    }
+    /// Check a frozen staging cache without fetching or rewriting its receipts.
+    pub(crate) fn verify_current_snapshot(&self, expected_commit: &str) -> Result<Snapshot> {
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        ensure!(
+            self.pending()?.is_none(),
+            "staging cache contains an unconfirmed publication"
+        );
+        let snapshot = self.cached()?;
+        ensure!(
+            snapshot.is_current && snapshot.commit == expected_commit,
+            "staging cache differs from expected publication"
+        );
+        self.verify_remote_tip(expected_commit)?;
+        Ok(snapshot)
     }
 
     /// Refresh before taking the paired backup. Afterward this reads only its

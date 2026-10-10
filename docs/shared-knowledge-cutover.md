@@ -491,9 +491,9 @@ Unreachable hosts remain fenced while reachable hosts reconcile; the complete
 abort seal appears only after every host acknowledges. Pre-fence cancellation
 remains a separate source +1 operation.
 
-These library/RPC components do not yet export or publish the shared snapshot,
-activate hosts, or roll back current shared data after activation. The public
-shared migration command remains unavailable.
+The later export, publication, and readiness phases are described below. Host
+activation and rollback of current shared data remain unavailable, as does the
+public shared migration command.
 
 The native `native_fleet_owned_fence_resume_and_abort` fixture verifies the SQL
 writer drain, pre-fence recovery refusal, post-fence resume, read-only rejection of
@@ -521,7 +521,7 @@ the current remote tip; being an ancestor of a later independent commit is
 insufficient. Without a matching pending record, recovery can only confirm the
 current tip and cannot push. Local Git fixtures cover pre-push interruption,
 changed desired bytes, lost responses, repeated confirmation and independent
-remote advances. Coordinator publication-intent wiring remains outstanding.
+remote advances. Coordinator publication-intent wiring is described below.
 
 
 ### Conditional coordinator publication
@@ -542,5 +542,29 @@ SQL return is committed, host reconciliation depends on that immutable abort
 receipt, not remote availability; later remote edits and SQL writes survive retry.
 The native fixture covers a 42-document publication, retained remote metadata,
 idempotent publication, lost local completion, independent remote advance refusal,
-and resumed abort with the remote offline. Host ready/activation/finalization and
-current-state rollback remain unimplemented.
+and resumed abort with the remote offline. Host activation/finalization and current-state rollback remain unimplemented.
+
+
+### Host readiness before activation
+
+`Journal::ready_hosts` obtains fresh publication-bound RPC v3 responses from every
+participant and checks each against its sealed preparation. Older RPC versions
+are rejected before SQL fencing. Each host verifies its original backup, policy,
+and owned SQL fence, then stages the exact published Git snapshot beside its
+original corpus. It checks the manifest and every document against frozen SQL,
+rejects unlisted knowledge, and retains candidate identities and a verified backup.
+The original corpus and selected policy remain unchanged and fenced.
+
+Retries verify the retained candidate and backup without refreshing or overwriting
+them. Changed candidate bytes, missing retained backups, a different publication,
+or a completed SQL abort prevent readiness. The coordinator seals `fleet-ready.json`
+only after rechecking the prepared set, publication, and owned SQL fence under the
+exclusive generation lease. This seal records readiness evidence; it does not
+activate the database or authorize a later host swap without revalidation.
+
+The native PostgreSQL/SSH/Git fixture covers repeat readiness, unchanged original
+corpus identity, candidate edit refusal, mismatched publication refusal, retained
+backup verification, and refusal after abort. RPC tests reject stale nonces and
+changed publication, preparation, path, or backup evidence. Same-filesystem staging
+is checked; rename eligibility, crash-safe finalization, multi-host activation,
+and rollback from current shared data still require implementation and qualification.

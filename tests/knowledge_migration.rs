@@ -2102,6 +2102,62 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         published
     );
     assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "2");
+    use std::os::unix::fs::MetadataExt;
+    let original_corpus = std::fs::metadata(&config.knowledge_dir).unwrap();
+    let ready_seal = journal
+        .ready_hosts(&config, &f.pool, Some(&ssh.identity))
+        .await
+        .unwrap();
+    assert_eq!(
+        journal
+            .ready_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        ready_seal
+    );
+    let ready_response =
+        protocol::call_ready(&journal, participant, &published, Some(&ssh.identity))
+            .await
+            .unwrap();
+    let ready = ready_response.readiness().unwrap();
+    let candidate = ready.staging.join("candidate");
+    let candidate_backup = ready.staging.join("candidate-backup");
+    assert_eq!(
+        ygg::knowledge::store::KnowledgeBackup::verify_restored(&candidate_backup, &candidate)
+            .unwrap()
+            .revision,
+        ready.archive_revision
+    );
+    let after_ready = std::fs::metadata(&config.knowledge_dir).unwrap();
+    assert_eq!(
+        (after_ready.dev(), after_ready.ino()),
+        (original_corpus.dev(), original_corpus.ino())
+    );
+    assert!(
+        runtime.exists(),
+        "readiness must leave the original host fenced"
+    );
+    assert!(f.journal.join("fleet-ready.json").exists());
+    std::fs::write(candidate.join("independent.txt"), "do not overwrite").unwrap();
+    assert!(
+        protocol::call_ready(&journal, participant, &published, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(candidate.join("independent.txt")).unwrap(),
+        "do not overwrite"
+    );
+    std::fs::remove_file(candidate.join("independent.txt")).unwrap();
+    let mut wrong = serde_json::to_value(&published).unwrap();
+    wrong["manifest_sha256"] = serde_json::json!("e".repeat(64));
+    let wrong = serde_json::from_value(wrong).unwrap();
+    assert!(
+        protocol::call_ready(&journal, participant, &wrong, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    ygg::knowledge::store::KnowledgeBackup::verify_restored(&candidate_backup, &candidate).unwrap();
     git(&seed, &["fetch", remote.to_str().unwrap(), "knowledge"]);
     git(&seed, &["reset", "--hard", "FETCH_HEAD"]);
     std::fs::write(seed.join("independent.txt"), "external change\n").unwrap();
@@ -2236,6 +2292,12 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         aborted
     );
     assert_eq!(git(&remote, &["rev-parse", "knowledge"]), independent);
+    assert!(
+        protocol::call_ready(&journal, participant, &published, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    ygg::knowledge::store::KnowledgeBackup::verify_restored(&candidate_backup, &candidate).unwrap();
     let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
         .fetch_one(&f.pool)
         .await

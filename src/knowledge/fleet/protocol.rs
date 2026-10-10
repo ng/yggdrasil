@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
-// Version 2 requires owned-fence inspection and post-fence abort support.
-// A preparation-only v1 host must fail before the coordinator fences SQL.
-const RPC_VERSION: u32 = 2;
+// Version 3 additionally requires publication-bound host readiness.
+// Older hosts must fail before the coordinator fences SQL.
+const RPC_VERSION: u32 = 3;
 const MAX_REQUEST: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +19,7 @@ pub enum Action {
     CancelSql,
     InspectSql,
     AbortSql,
+    ReadySql,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +32,8 @@ struct Envelope {
     action: Action,
     /// Exact original plan bytes, never a reconstructed JSON object.
     plan: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication: Option<super::journal::Publication>,
 }
 pub struct Request {
     envelope: Envelope,
@@ -46,12 +49,15 @@ struct Response {
     nonce: Uuid,
     action: Action,
     preparation: SqlPreparation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    readiness: Option<crate::knowledge::fence::SqlReadiness>,
 }
 /// This type is constructed only from the matching successful SSH exchange.
 /// It deliberately has no public deserializer or file-import constructor.
 pub struct AuthenticatedPreparation {
     preparation: SqlPreparation,
     action: Action,
+    readiness: Option<crate::knowledge::fence::SqlReadiness>,
 }
 impl AuthenticatedPreparation {
     pub fn preparation(&self) -> &SqlPreparation {
@@ -60,9 +66,32 @@ impl AuthenticatedPreparation {
     pub fn action(&self) -> Action {
         self.action
     }
+    pub fn readiness(&self) -> Option<&crate::knowledge::fence::SqlReadiness> {
+        self.readiness.as_ref()
+    }
 }
 impl Request {
     pub fn new(plan: &ValidatedPlan, participant: Uuid, action: Action) -> Result<Self> {
+        Self::build(plan, participant, action, None)
+    }
+    pub fn new_ready(
+        plan: &ValidatedPlan,
+        participant: Uuid,
+        publication: &super::journal::Publication,
+    ) -> Result<Self> {
+        Self::build(
+            plan,
+            participant,
+            Action::ReadySql,
+            Some(publication.clone()),
+        )
+    }
+    fn build(
+        plan: &ValidatedPlan,
+        participant: Uuid,
+        action: Action,
+        publication: Option<super::journal::Publication>,
+    ) -> Result<Self> {
         let bytes = serde_json::to_vec(&Envelope {
             version: RPC_VERSION,
             operation: plan.plan().operation,
@@ -71,6 +100,7 @@ impl Request {
             nonce: Uuid::new_v4(),
             action,
             plan: plan.bytes().to_owned(),
+            publication,
         })?;
         Self::parse(&bytes)
     }
@@ -93,6 +123,13 @@ impl Request {
                     .any(|p| p.id == envelope.participant),
             "participant request differs from complete plan"
         );
+        ensure!(
+            (envelope.action == Action::ReadySql) == envelope.publication.is_some(),
+            "readiness requires an explicit publication; other actions cannot carry it"
+        );
+        if let Some(publication) = &envelope.publication {
+            publication.validate_plan(&plan)?;
+        }
         Ok(Self { envelope, plan })
     }
     pub fn plan(&self) -> &ValidatedPlan {
@@ -110,7 +147,18 @@ impl Request {
     /// Participant-side serialization after executing the requested host action.
     /// This does not construct authenticated coordinator-side evidence.
     pub fn respond(&self, preparation: SqlPreparation) -> Result<Vec<u8>> {
+        self.respond_with(preparation, None)
+    }
+    fn respond_ready(&self, ready: crate::knowledge::fence::SqlReadiness) -> Result<Vec<u8>> {
+        self.respond_with(ready.preparation.clone(), Some(ready))
+    }
+    fn respond_with(
+        &self,
+        preparation: SqlPreparation,
+        readiness: Option<crate::knowledge::fence::SqlReadiness>,
+    ) -> Result<Vec<u8>> {
         self.validate_preparation(&preparation)?;
+        self.validate_readiness(readiness.as_ref(), &preparation)?;
         let result = serde_json::to_vec(&Response {
             version: RPC_VERSION,
             operation: self.envelope.operation,
@@ -119,6 +167,7 @@ impl Request {
             nonce: self.envelope.nonce,
             action: self.action(),
             preparation,
+            readiness,
         })?;
         ensure!(
             result.len() <= MAX_RESPONSE,
@@ -164,6 +213,18 @@ impl Request {
             participant: host.id,
         };
         let result = match self.action() {
+            Action::ReadySql => {
+                return self.respond_ready(
+                    fence::ready_sql_backed(
+                        config,
+                        &self.plan,
+                        self.participant(),
+                        self.envelope.publication.as_ref().unwrap(),
+                        pool,
+                    )
+                    .await?,
+                );
+            }
             Action::PrepareSql => {
                 fence::prepare_sql_backed(
                     config,
@@ -246,6 +307,56 @@ impl Request {
         }
         Ok(())
     }
+    fn validate_readiness(
+        &self,
+        ready: Option<&crate::knowledge::fence::SqlReadiness>,
+        preparation: &SqlPreparation,
+    ) -> Result<()> {
+        if self.action() != Action::ReadySql {
+            ensure!(ready.is_none(), "unexpected readiness receipt");
+            return Ok(());
+        }
+        let ready = ready.context("readiness receipt missing")?;
+        let publication = self
+            .envelope
+            .publication
+            .as_ref()
+            .context("publication missing")?;
+        let host = self
+            .plan
+            .plan()
+            .participants
+            .iter()
+            .find(|h| h.id == self.participant())
+            .unwrap();
+        let staging = host
+            .corpus
+            .parent()
+            .context("corpus parent missing")?
+            .join(format!(
+                ".ygg-fleet-{}-{}",
+                self.plan.plan().operation,
+                host.id
+            ));
+        ensure!(
+            &ready.preparation == preparation
+                && &ready.publication == publication
+                && ready.staging == staging
+                && ready.staging_identity.1 > 0
+                && ready.candidate_identity.1 > 0,
+            "readiness differs from requested host or publication"
+        );
+        for hash in [&ready.archive_revision, &ready.intent_sha256] {
+            ensure!(
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "readiness requires retained SHA-256 evidence"
+            );
+        }
+        Ok(())
+    }
     fn accept(&self, bytes: &[u8]) -> Result<AuthenticatedPreparation> {
         ensure!(
             bytes.len() <= MAX_RESPONSE,
@@ -262,9 +373,11 @@ impl Request {
             "stale or mismatched participant response"
         );
         self.validate_preparation(&response.preparation)?;
+        self.validate_readiness(response.readiness.as_ref(), &response.preparation)?;
         Ok(AuthenticatedPreparation {
             preparation: response.preparation,
             action: response.action,
+            readiness: response.readiness,
         })
     }
 }
@@ -278,7 +391,25 @@ pub async fn call(
 ) -> Result<AuthenticatedPreparation> {
     let plan = journal.plan()?;
     let request = Request::new(plan, participant, action)?;
-    let host = plan
+    exchange_request(journal, request, identity).await
+}
+pub async fn call_ready(
+    journal: &Journal,
+    participant: Uuid,
+    publication: &super::journal::Publication,
+    identity: Option<&Path>,
+) -> Result<AuthenticatedPreparation> {
+    let request = Request::new_ready(journal.plan()?, participant, publication)?;
+    exchange_request(journal, request, identity).await
+}
+async fn exchange_request(
+    journal: &Journal,
+    request: Request,
+    identity: Option<&Path>,
+) -> Result<AuthenticatedPreparation> {
+    let participant = request.participant();
+    let host = journal
+        .plan()?
         .plan()
         .participants
         .iter()
@@ -349,8 +480,57 @@ mod tests {
     fn rejects_preparation_only_protocol_before_execution() {
         let request = request();
         let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
-        legacy["version"] = json!(1);
-        assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
+        for version in [1, 2] {
+            legacy["version"] = json!(version);
+            assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
+        }
+    }
+    #[test]
+    fn readiness_is_bound_to_publication_preparation_and_nonce() {
+        let plain = request();
+        let p = plain.plan.plan();
+        let publication = serde_json::from_value(json!({"version":1,
+            "operation":p.operation,"request_sha256":plain.plan.registration().request_sha256,
+            "base":p.expected_remote_commit,"manifest_sha256":"a".repeat(64),
+            "desired_sha256":"b".repeat(64),"commit":"c".repeat(40)}))
+        .unwrap();
+        let request = Request::new_ready(&plain.plan, plain.participant(), &publication).unwrap();
+        let ready = crate::knowledge::fence::SqlReadiness {
+            preparation: receipt(&request),
+            publication: publication.clone(),
+            staging: p.participants[0].corpus.parent().unwrap().join(format!(
+                ".ygg-fleet-{}-{}",
+                p.operation,
+                plain.participant()
+            )),
+            staging_identity: (1, 1),
+            candidate_identity: (1, 2),
+            archive_revision: "d".repeat(64),
+            intent_sha256: "e".repeat(64),
+        };
+        assert!(request.respond(ready.preparation.clone()).is_err());
+        let bytes = request.respond_ready(ready).unwrap();
+        assert!(request.accept(&bytes).unwrap().readiness().is_some());
+        let retry = Request::new_ready(&plain.plan, plain.participant(), &publication).unwrap();
+        assert!(retry.accept(&bytes).is_err());
+        let original: Value = serde_json::from_slice(&bytes).unwrap();
+        for pointer in [
+            "/readiness/publication/commit",
+            "/readiness/staging",
+            "/readiness/preparation/intent_sha256",
+            "/readiness/archive_revision",
+        ] {
+            let mut altered = original.clone();
+            *altered.pointer_mut(pointer).unwrap() = json!("changed");
+            assert!(
+                request
+                    .accept(&serde_json::to_vec(&altered).unwrap())
+                    .is_err()
+            );
+        }
+        let mut missing: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
+        missing.as_object_mut().unwrap().remove("publication");
+        assert!(Request::parse(&serde_json::to_vec(&missing).unwrap()).is_err());
     }
     #[test]
     fn rejects_wrong_host_evidence_and_tampered_plan_request() {
