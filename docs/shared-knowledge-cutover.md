@@ -579,3 +579,21 @@ visible to another host. It also verifies that old readiness backup evidence
 rejects those later writes rather than authorizing restoration over them. This
 qualifies cache relocation; it does not qualify the unfinished crash-safe host
 swap protocol or database activation.
+
+
+`DirectorySwapPlan` implements the filesystem half of finalization. A retained
+plan pins the private parent, staging, original corpus, and candidate directory
+identities. Each `advance` performs at most one exclusive rename: original corpus
+to `staging/original`, then `staging/candidate` to the configured corpus. Both
+parent directories are synced, including retries that observe an already-installed
+candidate. Independent destinations, replaced roots, or symlinks cause refusal;
+no destination is overwritten. An installed retry preserves later content changes.
+
+This component requires an externally held selection lease, stopped editors,
+verified backups, and authenticated database activation authority. It does not
+supply those checks or publish policy, and is not yet wired into fleet finalization.
+Capture checks same-filesystem identity and private-directory ownership; mounted
+corpus rename eligibility still needs pre-activation qualification. Unit and
+subprocess fixtures exercise restart after either rename, conflicting destinations,
+replaced sources/staging, and preservation of subsequent writes. They do not yet
+qualify complete host activation or power loss between rename and directory sync.

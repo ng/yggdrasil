@@ -19,7 +19,9 @@ mod backup;
 pub use backup::{BackupEntry, KnowledgeBackup, PairedBackup};
 mod index;
 pub(crate) use index::{Candidate, Candidates};
+mod directory_swap;
 mod moves;
+pub use directory_swap::{DirectorySwapPlan, DirectorySwapState};
 use uuid::Uuid;
 
 use super::document::{Document, MAX_DOCUMENT_BYTES, Scope, digest};
