@@ -40,6 +40,56 @@ leave a persistent fence, not a lease that expires and silently permits writers.
 A host that cannot prepare blocks activation. Previously unknown or offline hosts
 must remain disabled until explicitly enrolled; no majority/quorum shortcut.
 
+## SQL-source host preparation contract
+
+The existing `fence::local_for_migration` requires an already selected OKF corpus.
+It cannot prepare a legacy SQL host. Do not treat that receipt as forward-migration
+readiness or reuse it by inventing an original OKF selection.
+
+Implement SQL-source preparation with an explicit absent original selection and a
+retained host-local intent before publishing a fenced `runtime.json`. The intent
+must bind operation, participant, database/corpus IDs, source generation, canonical
+local configuration paths, directory identities, and exact preexisting policy
+bytes. Capture each host's own configuration/identity policy in its backup; the
+coordinator's backup cannot stand in for remote host state. A retry must accept
+only the saved absent selection or exact fenced bytes, and must reject a changed
+request, replaced directory, or independently selected corpus. Preserve existing
+identity and shared-transport configuration until validated conditional staging;
+preparation must not erase it to make an empty-host fixture pass.
+
+`runtime::Selection::load` already rejects a valid `Phase::Fenced` selection before
+opening SQL or the corpus. Reuse that compatibility boundary instead of adding a
+second fence format that existing compatible clients would ignore. A legacy
+command may have observed an absent selection immediately before publication and
+already entered its SQL path. Local preparation therefore stops subsequent entry
+but does **not** drain legacy SQL transactions. The coordinator must acquire the
+exclusive database advisory migration lock, audit clients, verify source backup
+and guards, and commit the database fence before export. Existing legacy guard
+transactions hold the shared advisory lock until their work finishes.
+
+Preparation can fail before the SQL fence exists. Provide a distinct pre-fence
+abort event under the database migration lock: verify the source SQL generation,
+record cancellation for this operation, and prevent a delayed coordinator from
+fencing after cancellation. Each host may remove only its exact prepared fence
+after checking that event and current SQL generation under a shared database
+lease. A timeout or absence of a database event does not authorize local unfencing.
+After a committed SQL fence, use the recorded return generation and conditional
+host restoration described below. Neither abort path may restore a stale entire
+policy snapshot over later independent changes.
+
+The private `migration::Journal::prepare_policy` provides related byte/identity
+checks, but runs after database fencing and export. Its `abort` requires a committed
+fence, so calling it independently for fleet preparation leaves the pre-fence abort
+case unsolved. Extract common validated operations only while preserving private
+journal compatibility; do not sequentially invoke private migrations for each host.
+
+Required additional fixture: begin with two hosts having no `runtime.json`, hold a
+legacy SQL write transaction across local preparation, and show that SQL fencing
+waits for it. Fresh CLI commands on both prepared hosts must refuse SQL fallback.
+Kill after intent and after selection publication, resume in new processes, abort
+before the SQL fence, then race a delayed coordinator against that cancellation.
+Check exact original absence, saved local identities, and untouched policy bytes.
+
 ## Forward state machine
 
 1. Prepare all participating hosts and preserve their corpus/configuration/policy
@@ -160,3 +210,7 @@ This drains selected OKF operations only. Legacy SQL clients without a local OKF
 selection do not hold this lease. The receipt does not prove SQL writer drainage,
 authenticate a host, establish a complete census, or authorize activation. Shared
 migration execution remains rejected pending the complete coordinator workflow.
+
+Latest integrated validation at `53c52d2`: full serial suite passed with 596 tests,
+29 opt-in cases ignored, and 93 result groups. This includes the advertised-OID
+guard and coordinator-bound local fence regression; check, clippy and fmt passed.
