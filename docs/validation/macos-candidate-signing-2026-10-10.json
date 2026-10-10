@@ -1,0 +1,42 @@
+{
+  "source_run": 38013540700,
+  "source_commit": "6e80c7e4e5346f76398f800f35642b07d7d824d2",
+  "artifact": "ygg-native-bundles-aarch64-apple-darwin",
+  "sha256": "4fe2ed939af0b647efe06b54e5e1cf0b1eda496714ec7511e96a491b1003fcc5",
+  "macos": "26.7.1",
+  "checks": [
+    {
+      "command": [
+        "codesign",
+        "--verify",
+        "--strict",
+        "<downloaded-candidate>"
+      ],
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "command": [
+        "codesign",
+        "-d",
+        "--verbose=4",
+        "<downloaded-candidate>"
+      ],
+      "returncode": 0,
+      "output": "Executable=/private<downloaded-candidate>\nIdentifier=ygg-131a757776d0be5d\nFormat=Mach-O thin (arm64)\nCodeDirectory v=20400 size=144472 flags=0x20002(adhoc,linker-signed) hashes=4511+0 location=embedded\nVersionPlatform=1\nVersionMin=720896\nVersionSDK=984320\nHash type=sha256 size=32\nCandidateCDHash sha256=9b31a37cd482ff29184771028fa2d005d17dc6fa\nCandidateCDHashFull sha256=9b31a37cd482ff29184771028fa2d005d17dc6fa60e2d89138fec0636fb51470\nHash choices=sha256\nCMSDigest=9b31a37cd482ff29184771028fa2d005d17dc6fa60e2d89138fec0636fb51470\nCMSDigestType=2\nExecutable Segment base=0\nExecutable Segment limit=13828096\nExecutable Segment flags=0x1\nPage size=4096\nCDHash=9b31a37cd482ff29184771028fa2d005d17dc6fa\nSignature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\nSealed Resources=none\nInternal requirements=none\n"
+    },
+    {
+      "command": [
+        "spctl",
+        "--assess",
+        "--type",
+        "execute",
+        "--verbose=4",
+        "<downloaded-candidate>"
+      ],
+      "returncode": 3,
+      "output": "<downloaded-candidate>: rejected\n"
+    }
+  ],
+  "scope": "Uploaded candidate CLI only; no quarantine first-launch or nested PostgreSQL assessment. No signing or quarantine state changed."
+}

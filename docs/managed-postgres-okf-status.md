@@ -177,3 +177,22 @@ runs with read-only source/artifact mounts and a writable temporary filesystem;
 the offline test has networking disabled. Both modes exercise initialization,
 persistent identity, archive-free reuse, backup verification and owned shutdown.
 This qualifies candidate bundles on that distribution only. At `fc281cf`, the complete native Linux job passed in [run 38017240665](https://github.com/ng/yggdrasil/actions/runs/38017240665/job/114110131143), including both container modes. Standard PG16/18 CI also passed in [run 38017240616](https://github.com/ng/yggdrasil/actions/runs/38017240616). The local Docker daemon was unavailable; this is CI execution evidence. Published artifacts, macOS signing and broader distribution qualification remain open.
+
+### Uploaded macOS candidate signing audit
+
+The arm64 CLI downloaded from native run `38013540700` matches its accompanying
+`SHA256SUMS`. On macOS, `codesign --verify --strict` succeeds, but signature
+display reports `adhoc,linker-signed`, no Team ID, and `spctl --assess --type
+execute` rejects it (exit 3). [Raw evidence](validation/macos-candidate-signing-2026-10-10.json)
+records the candidate digest and assessment. No signatures, quarantine attributes
+or system policy were changed. This is CLI assessment only, not a quarantine
+first-launch rehearsal or qualification of nested PostgreSQL binaries.
+
+Apple's [notarization guidance](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+requires Developer ID signing and hardened runtime for command-line targets.
+Signature integrity alone does not meet that distribution requirement. The pinned
+PostgreSQL archive is currently retained byte-for-byte; signing its executables
+would change archive digests and therefore needs explicit release provenance and
+catalog/packaging support, not an unrecorded post-verification mutation. The
+release workflow currently has no signing/notarization stage. This gate remains
+open; do not clear quarantine or weaken Gatekeeper to claim a pass.
