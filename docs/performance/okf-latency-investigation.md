@@ -76,3 +76,22 @@ An initial parallel run failed four scheduler tests; a serial retry against that
 reused database failed two approval tests. All 32 integration tests passed in the
 fresh database. These earlier failures are fixture-contamination evidence and
 must not be represented as successful runs.
+
+## Uninstrumented repeats at `ba7aff6`
+
+Two consecutive release-CLI runs with phase diagnostics disabled passed the
+original 10,000-document, 20-client, 100-sample-per-mode workload:
+
+| Run | SQL p95 ms | OKF p95 ms | Added p95 ms |
+| --- | ---: | ---: | ---: |
+| `okf-hooks-2026-10-10-identity-uninstrumented.json` | 346.66 | 285.15 | -61.51 |
+| `okf-hooks-2026-10-10-identity-uninstrumented-repeat.json` | 283.11 | 287.97 | 4.86 |
+
+Both preserve the expected ordered output and all 2,400 usage observations.
+These are passing local qualification samples. They do not establish that the
+historical 108.57 ms failure was fixed: only diagnostic instrumentation changed,
+and the SQL p95 differs considerably even between these two runs. The harness
+measures SQL before OKF, so time-varying machine load can affect the comparison.
+A future stability investigation should counterbalance measurement order while
+preserving the same workload and backend correctness checks, rather than accept
+only favorable runs or weaken the 50 ms threshold.
