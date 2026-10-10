@@ -193,9 +193,15 @@ impl RollbackPlan {
         Ok(true)
     }
     async fn verify_reverse_import_on(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+        let reconciliation = self.reconciliation_on(tx).await?;
+        let commit = reconciliation
+            .as_ref()
+            .map_or(self.expected_remote_commit(), |r| {
+                r.expected_remote_commit()
+            });
         let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_reverse_receipts WHERE operation_id=$1 AND database_id=$2 AND corpus_id=$3 AND fenced_generation=$4 AND evidence->>'shared_commit'=$5)")
             .bind(self.operation()).bind(self.forward.database_id).bind(self.forward.corpus_id)
-            .bind(self.request.source_generation + 1).bind(self.expected_remote_commit())
+            .bind(self.request.source_generation + 1).bind(commit)
             .fetch_one(&mut **tx).await?;
         ensure!(matches, "fleet reverse import receipt missing or changed");
         Ok(())

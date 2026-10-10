@@ -59,10 +59,40 @@ impl Journal {
             ensure!(cache.is_dir(), "committed rollback cache missing");
         }
         let git = SharedGit::open(&cache, self.plan.plan().shared.clone())?;
+        let reconciliation = if committed {
+            reverse.reconciliation(pool).await?
+        } else {
+            None
+        };
+        let selected_git = if let Some(request) = &reconciliation {
+            let selected_cache = self
+                .intent
+                .directory
+                .join(format!("{}-cache", request.prefix(reverse)));
+            ensure!(
+                selected_cache.is_dir(),
+                "selected reconciliation cache missing"
+            );
+            Some(SharedGit::open(
+                &selected_cache,
+                self.plan.plan().shared.clone(),
+            )?)
+        } else {
+            None
+        };
+        let verify_snapshot = || -> Result<()> {
+            if let (Some(request), Some(selected)) = (&reconciliation, &selected_git) {
+                git.verify_retained_snapshot(reverse.expected_remote_commit())?;
+                selected.verify_current_snapshot(request.expected_remote_commit())?;
+            } else {
+                git.verify_current_snapshot(reverse.expected_remote_commit())?;
+            }
+            Ok(())
+        };
         if committed {
             // A later recovery archive may bind this cache. Reconcile without
             // fetching or rewriting its confirmed snapshot, even on failure.
-            git.verify_current_snapshot(reverse.expected_remote_commit())?;
+            verify_snapshot()?;
         } else {
             ensure!(
                 git.refresh()?.commit == reverse.expected_remote_commit(),
@@ -81,7 +111,7 @@ impl Journal {
                             == Some(reverse.bytes()),
                     "rollback evidence changed before SQL fence"
                 );
-                git.verify_current_snapshot(reverse.expected_remote_commit())?;
+                verify_snapshot()?;
                 Ok(())
             })
             .await?;

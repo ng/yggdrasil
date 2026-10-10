@@ -1,7 +1,7 @@
 //! Explicit private Git transport. Remote commits are authoritative; cached
 //! snapshots and unconfirmed local commits never imply successful publication.
 use super::{document::digest, store::KnowledgeStore};
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -603,6 +603,33 @@ impl SharedGit {
             "remote branch changed since recovery capture"
         );
         Ok(())
+    }
+    /// Verify ancestry in the already fetched object graph; never change refs.
+    pub(crate) fn verify_ancestor(&self, ancestor: &str, descendant: &str) -> Result<()> {
+        oid(ancestor.as_bytes())?;
+        oid(descendant.as_bytes())?;
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        self.checked(
+            &["merge-base", "--is-ancestor", ancestor, descendant],
+            &[],
+            None,
+        )
+        .context("reconciliation must preserve predecessor Git history")?;
+        Ok(())
+    }
+    /// Inspect immutable local evidence without claiming the remote is unchanged.
+    pub(crate) fn verify_retained_snapshot(&self, expected_commit: &str) -> Result<Snapshot> {
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        ensure!(
+            self.pending()?.is_none(),
+            "retained cache contains an unconfirmed publication"
+        );
+        let snapshot = self.cached()?;
+        ensure!(
+            snapshot.is_current && snapshot.commit == expected_commit,
+            "retained cache differs from expected snapshot"
+        );
+        Ok(snapshot)
     }
     /// Check a frozen staging cache without fetching or rewriting its receipts.
     pub(crate) fn verify_current_snapshot(&self, expected_commit: &str) -> Result<Snapshot> {

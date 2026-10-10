@@ -43,7 +43,11 @@ impl Journal {
     ) -> Result<SqlReturnReceipt> {
         self.verify()?;
         let backup = self.source_backup(config)?;
-        let prefix = format!("rollback-{}", reverse.operation());
+        let selected = reverse.reconciliation(pool).await?;
+        let prefix = selected.as_ref().map_or_else(
+            || format!("rollback-{}", reverse.operation()),
+            |r| r.prefix(reverse),
+        );
         let capture_name = format!("{prefix}-capture.json");
         if let Some(bytes) = self.store.read_artifact(&capture_name)? {
             let event = reverse.return_event(&digest(bytes.as_bytes()), backup.digest());
@@ -73,9 +77,10 @@ impl Journal {
             }
             tx.rollback().await?;
         }
-        let capture = self
+        let (capture, prefix) = self
             .capture_rollback_inner(reverse, config, pool, ssh_identity, true)
             .await?;
+        let capture_name = format!("{prefix}-capture.json");
         let bytes = serde_json::to_string(&capture)?;
         self.verify()?;
         ensure!(
@@ -162,8 +167,10 @@ impl Journal {
         pool: &sqlx::PgPool,
         ssh_identity: Option<&Path>,
     ) -> Result<RollbackCapture> {
-        self.capture_rollback_inner(reverse, config, pool, ssh_identity, false)
-            .await
+        Ok(self
+            .capture_rollback_inner(reverse, config, pool, ssh_identity, false)
+            .await?
+            .0)
     }
     async fn capture_rollback_inner(
         &self,
@@ -172,17 +179,24 @@ impl Journal {
         pool: &sqlx::PgPool,
         ssh_identity: Option<&Path>,
         return_sql: bool,
-    ) -> Result<RollbackCapture> {
+    ) -> Result<(RollbackCapture, String)> {
         let fence = self
             .fence_rollback_hosts(reverse, pool, ssh_identity)
             .await?;
         let backup = self.source_backup(config)?;
         let original = self.verified_export()?;
         let original_sha = digest(&serde_json::to_vec(&original)?);
-        let prefix = format!("rollback-{}", reverse.operation());
+        let original_prefix = format!("rollback-{}", reverse.operation());
+        let selected = reverse.reconciliation(pool).await?;
+        let prefix = selected
+            .as_ref()
+            .map_or_else(|| original_prefix.clone(), |r| r.prefix(reverse));
+        let selected_commit = selected
+            .as_ref()
+            .map_or(fence.remote_commit.as_str(), |r| r.expected_remote_commit());
         let hosts = self
             .store
-            .read_artifact(&format!("{prefix}-hosts.json"))?
+            .read_artifact(&format!("{original_prefix}-hosts.json"))?
             .context("reverse fence seal missing")?;
         ensure!(
             digest(hosts.as_bytes()) == fence.hosts_sha256,
@@ -191,7 +205,7 @@ impl Journal {
         let cache = self.intent.directory.join(format!("{prefix}-cache"));
         ensure!(cache.is_dir(), "committed rollback cache missing");
         let git = SharedGit::open(&cache, self.plan.plan().shared.clone())?;
-        git.verify_current_snapshot(&fence.remote_commit)?;
+        git.verify_current_snapshot(selected_commit)?;
         let knowledge_config = KnowledgeConfig {
             data_dir: config.data_dir.clone(),
             knowledge_dir: config.knowledge_dir.clone(),
@@ -202,12 +216,14 @@ impl Journal {
         let policy = KnowledgeStore::open(&policy_path, false)?;
         let local_fence =
             self.capture_local_policy(reverse, config, &policy, &lease, fence.generation, &hosts)?;
-        let intent = serde_json::to_string(
-            &serde_json::json!({"version":1,"rollback_sha256":reverse.sha256(),
+        let mut intent = serde_json::json!({"version":1,"rollback_sha256":reverse.sha256(),
             "fence":fence,"source_backup_sha256":backup.digest(),"original_sha256":original_sha,
             "cache":cache,"cache_identity":super::identity(&cache)?,
-            "policy":policy_path,"policy_identity":super::identity(&policy_path)?,"local_fence":local_fence}),
-        )?;
+            "policy":policy_path,"policy_identity":super::identity(&policy_path)?,"local_fence":local_fence});
+        if let Some(request) = &selected {
+            intent["reconciliation_sha256"] = request.sha256().into();
+        }
+        let intent = serde_json::to_string(&intent)?;
         let intent_name = format!("{prefix}-capture-intent.json");
         self.store.retain_artifact(&intent_name, &intent, false)?;
         let corpus = KnowledgeStore::open(&cache, false)?;
@@ -225,6 +241,11 @@ impl Journal {
         let mut tx = reverse
             .fenced_transaction(pool, &fence.hosts_sha256)
             .await?;
+        let current = reverse.reconciliation_on(&mut tx).await?;
+        ensure!(
+            current.as_ref().map(|r| r.sha256()) == selected.as_ref().map(|r| r.sha256()),
+            "reconciliation changed before capture lease"
+        );
         backup.verify_on(&mut tx).await?;
         let captured = reverse::capture_shared_recovery_on(
             &mut tx,
@@ -235,7 +256,7 @@ impl Journal {
         )
         .await?;
         ensure!(
-            captured.commit == fence.remote_commit,
+            captured.commit == selected_commit,
             "current rollback commit changed"
         );
         let evidence = RecoveryEvidence::new(
@@ -257,7 +278,7 @@ impl Journal {
             self.store.read_artifact(&intent_name)?.as_deref() == Some(intent.as_str())
                 && self
                     .store
-                    .read_artifact(&format!("{prefix}-hosts.json"))?
+                    .read_artifact(&format!("{original_prefix}-hosts.json"))?
                     .as_deref()
                     == Some(hosts.as_str()),
             "rollback capture evidence changed"
@@ -304,6 +325,6 @@ impl Journal {
         } else {
             tx.rollback().await?;
         }
-        Ok(result)
+        Ok((result, prefix))
     }
 }

@@ -124,7 +124,11 @@ restores only the exact original selection, and records a local complete-host ce
 An immutable SQL completion seal now validates the complete restored census before
 releasing admission for a fresh operation. Competing requests serialize; terminal
 retries only inspect historical evidence and cannot unfence a newer operation.
-Reconciliation after a changed remote at the global reverse fence remains separate.
+Explicit reconciliation after the global reverse fence now retains a chain of
+fresh quiescence requests and descendant Git snapshots in separate caches. Capture,
+SQL return and host deselection resolve the selected request; superseded imports
+and Git rewinds are refused. Earlier captures and archives remain unchanged.
+The public shared migration CLI and broader recovery qualification remain open.
 
 ### Faults, performance and packaging
 

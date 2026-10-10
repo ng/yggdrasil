@@ -3998,6 +3998,24 @@ async fn partial_fleet_finalization_fixture(
     );
     git(&seed, &["reset", "--hard", "FETCH_HEAD"]);
     std::fs::write(seed.join("README.txt"), "independent after reverse fence").unwrap();
+    if !return_sql {
+        let (path, bytes) = current
+            .files
+            .iter()
+            .find(|(_, bytes)| {
+                String::from_utf8_lossy(bytes).contains("write after fleet recovery")
+            })
+            .unwrap();
+        std::fs::write(
+            seed.join(path),
+            String::from_utf8_lossy(bytes).replace(
+                "write after fleet recovery",
+                "write after remote reconciliation",
+            ),
+        )
+        .unwrap();
+        git(&seed, &["add", "--", path]);
+    }
     git(&seed, &["add", "README.txt"]);
     git(&seed, &["commit", "-m", "independent metadata"]);
     git(
@@ -4172,6 +4190,265 @@ async fn partial_fleet_finalization_fixture(
         cache.cached().unwrap().commit,
         winner.expected_remote_commit(),
         "failed remote validation must not rewrite the committed recovery cache"
+    );
+    use ygg::knowledge::fleet::rollback::ReconciliationPlan;
+    let old_capture = std::fs::read(first.journal.join(format!("{prefix}-capture.json"))).unwrap();
+    let old_runtime = std::fs::read(&runtime).unwrap();
+    let reconciliation = serde_json::json!({
+        "version":1,"operation":Uuid::new_v4(),"rollback_operation":winner.operation(),
+        "rollback_request_sha256":winner.sha256(),"fenced_generation":4,
+        "previous_request_sha256":winner.sha256(),"previous_remote_commit":winner.expected_remote_commit(),
+        "expected_remote_commit":advanced,"all_participating_hosts_listed":true,
+        "schema_changes_stopped":true,"session_preserving_endpoint":true,"remote_writers_stopped":true,
+        "participants":participants.map(|id|serde_json::json!({"id":id,"knowledge_writers_stopped":true,"external_editors_stopped":true}))
+    });
+    for field in [
+        "all_participating_hosts_listed",
+        "schema_changes_stopped",
+        "session_preserving_endpoint",
+        "remote_writers_stopped",
+    ] {
+        let mut invalid = reconciliation.clone();
+        invalid[field] = false.into();
+        assert!(ReconciliationPlan::parse(winner, &invalid.to_string()).is_err());
+    }
+    let mut invalid = reconciliation.clone();
+    invalid["participants"][0]["external_editors_stopped"] = false.into();
+    assert!(ReconciliationPlan::parse(winner, &invalid.to_string()).is_err());
+    let reconcile = ReconciliationPlan::parse(winner, &reconciliation.to_string()).unwrap();
+    let retained_intent = std::fs::read(&local_intent).unwrap();
+    std::fs::remove_file(&local_intent).unwrap();
+    assert!(
+        journal
+            .reconcile_rollback_remote(winner, &reconcile, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM knowledge_fleet_rollback_reconciliations")
+            .fetch_one(&first.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    assert!(!local_intent.exists());
+    std::fs::write(&local_intent, retained_intent).unwrap();
+    let mut competing = reconciliation.clone();
+    competing["operation"] = serde_json::json!(Uuid::new_v4());
+    let competing = ReconciliationPlan::parse(winner, &competing.to_string()).unwrap();
+    let reconciliation_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*first.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let mut reconciliation_connection = reconciliation_pool.acquire().await.unwrap();
+    clients::register(&mut reconciliation_connection)
+        .await
+        .unwrap();
+    drop(reconciliation_connection);
+    let (a, b) = tokio::join!(
+        journal.reconcile_rollback_remote(winner, &reconcile, &first.pool, Some(&ssh2.identity)),
+        journal.reconcile_rollback_remote(
+            winner,
+            &competing,
+            &reconciliation_pool,
+            Some(&ssh2.identity)
+        )
+    );
+    assert_ne!(
+        a.is_ok(),
+        b.is_ok(),
+        "exactly one reconciliation must win: {a:?} {b:?}"
+    );
+    let rejected = a.as_ref().err().or_else(|| b.as_ref().err()).unwrap();
+    assert!(
+        format!("{rejected:#}").contains("predecessor is no longer current"),
+        "{rejected:#}"
+    );
+    let reconcile = if a.is_ok() { reconcile } else { competing };
+    reconciliation_pool.close().await;
+    let reconciled_prefix = format!("{prefix}-reconcile-{}", reconcile.operation());
+    std::fs::remove_file(
+        first
+            .journal
+            .join(format!("{reconciled_prefix}-selected.json")),
+    )
+    .unwrap();
+    assert_eq!(
+        journal
+            .reconcile_rollback_remote(winner, &reconcile, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap(),
+        reconcile.sha256()
+    );
+    assert_eq!(std::fs::read(&runtime).unwrap(), old_runtime);
+    assert_eq!(
+        std::fs::read(first.journal.join(format!("{prefix}-capture.json"))).unwrap(),
+        old_capture
+    );
+    for mutation in [
+        "UPDATE knowledge_fleet_rollback_reconciliations SET remote_commit=remote_commit",
+        "DELETE FROM knowledge_fleet_rollback_reconciliations",
+        "TRUNCATE knowledge_fleet_rollback_reconciliations",
+    ] {
+        assert!(sqlx::query(mutation).execute(&first.pool).await.is_err());
+    }
+    let mut competing = reconciliation.clone();
+    competing["operation"] = serde_json::json!(Uuid::new_v4());
+    let competing = ReconciliationPlan::parse(winner, &competing.to_string()).unwrap();
+    assert!(
+        journal
+            .reconcile_rollback_remote(winner, &competing, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    // Even an old binary calling the raw apply function cannot import the old snapshot.
+    let stale = sqlx::query("SELECT public.ygg_knowledge_reverse_apply_once($1,$2,$3,4,$4,$5,$6)")
+        .bind(winner.operation())
+        .bind(capture.candidate.database_id)
+        .bind(capture.candidate.corpus_id)
+        .bind(serde_json::to_value(&capture.evidence).unwrap())
+        .bind(serde_json::to_value(&capture.candidate.notes).unwrap())
+        .bind(serde_json::to_value(&capture.candidate.learnings).unwrap())
+        .execute(&first.pool)
+        .await
+        .unwrap_err();
+    assert!(
+        stale
+            .to_string()
+            .contains("superseded reconciliation snapshot"),
+        "{stale}"
+    );
+    assert_eq!(first.marker().await, (4, "fenced".into()));
+    let reconciled = journal
+        .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap();
+    assert_eq!(reconciled.shared_commit, advanced);
+    let notes = serde_json::to_string(&reconciled.candidate.notes).unwrap();
+    assert!(notes.contains("write after remote reconciliation"));
+    assert!(!notes.contains("write after fleet recovery"));
+    let first_reconciled_bytes = std::fs::read(
+        first
+            .journal
+            .join(format!("{reconciled_prefix}-capture.json")),
+    )
+    .unwrap();
+    // A rewind requires different recovery, never silent loss of acknowledged history.
+    let mut rewind = reconciliation.clone();
+    rewind["operation"] = serde_json::json!(Uuid::new_v4());
+    rewind["previous_request_sha256"] = reconcile.sha256().into();
+    rewind["previous_remote_commit"] = advanced.clone().into();
+    rewind["expected_remote_commit"] = winner.expected_remote_commit().into();
+    git(
+        &remote,
+        &[
+            "update-ref",
+            "refs/heads/knowledge",
+            winner.expected_remote_commit(),
+        ],
+    );
+    let rewind = ReconciliationPlan::parse(winner, &rewind.to_string()).unwrap();
+    let rejected = journal
+        .reconcile_rollback_remote(winner, &rewind, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap_err();
+    assert!(format!("{rejected:#}").contains("preserve predecessor Git history"));
+    git(&remote, &["update-ref", "refs/heads/knowledge", &advanced]);
+    // Another remote advance gets its own request/cache; the first archive stays immutable.
+    std::fs::write(seed.join("README.txt"), "second independent remote advance").unwrap();
+    git(&seed, &["add", "README.txt"]);
+    git(&seed, &["commit", "-m", "second remote advance"]);
+    git(
+        &seed,
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/knowledge",
+        ],
+    );
+    let latest = git(&seed, &["rev-parse", "HEAD"]);
+    let mut next = reconciliation.clone();
+    next["operation"] = serde_json::json!(Uuid::new_v4());
+    next["previous_request_sha256"] = reconcile.sha256().into();
+    next["previous_remote_commit"] = advanced.clone().into();
+    next["expected_remote_commit"] = latest.clone().into();
+    let next = ReconciliationPlan::parse(winner, &next.to_string()).unwrap();
+    assert!(
+        journal
+            .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    journal
+        .reconcile_rollback_remote(winner, &next, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap();
+    let returned = journal
+        .return_rollback_sql(winner, &config, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap();
+    assert_eq!(first.marker().await, (5, "sql".into()));
+    let texts: Vec<String> = sqlx::query_scalar("SELECT text FROM memories")
+        .fetch_all(&first.pool)
+        .await
+        .unwrap();
+    assert!(
+        texts
+            .iter()
+            .any(|s| s == "write after remote reconciliation")
+    );
+    assert!(!texts.iter().any(|s| s == "write after fleet recovery"));
+    sqlx::query(
+        "INSERT INTO memories(text,user_id) VALUES('SQL after reconciled rollback','alice')",
+    )
+    .execute(&first.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        journal
+            .return_rollback_sql(winner, &config, &first.pool, None)
+            .await
+            .unwrap(),
+        returned
+    );
+    assert_eq!(
+        journal
+            .deselect_rollback_hosts(winner, &config, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap(),
+        returned
+    );
+    assert!(!runtime.exists());
+    let later_write: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM memories WHERE text='SQL after reconciled rollback')",
+    )
+    .fetch_one(&first.pool)
+    .await
+    .unwrap();
+    assert!(later_write, "reconciled retry lost later SQL write");
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/knowledge"]), latest);
+    assert_eq!(
+        std::fs::read(
+            first
+                .journal
+                .join(format!("{reconciled_prefix}-capture.json"))
+        )
+        .unwrap(),
+        first_reconciled_bytes
+    );
+    assert_eq!(
+        std::fs::read(first.journal.join(format!("{prefix}-capture.json"))).unwrap(),
+        old_capture
+    );
+    assert_eq!(
+        cache.cached().unwrap().commit,
+        winner.expected_remote_commit()
+    );
+    assert!(
+        journal
+            .reconcile_rollback_remote(winner, &next, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
     );
     first.pool.close().await;
 }

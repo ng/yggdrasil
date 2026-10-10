@@ -9,6 +9,8 @@ use uuid::Uuid;
 mod cancel;
 pub use cancel::CancellationReceipt;
 mod completion;
+mod reconcile;
+pub use reconcile::ReconciliationPlan;
 mod deselect;
 mod transition;
 

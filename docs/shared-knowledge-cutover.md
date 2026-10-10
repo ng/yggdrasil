@@ -547,7 +547,7 @@ and resumed abort with the remote offline. Current-state fleet rollback remains 
 
 ### Host readiness before activation
 
-`Journal::ready_hosts` obtains fresh publication-bound RPC v11 responses from every
+`Journal::ready_hosts` obtains fresh publication-bound RPC v12 responses from every
 participant and checks each against its sealed preparation. Older RPC versions
 are rejected before SQL fencing. Each host verifies its original backup, policy,
 and owned SQL fence, then stages the exact published Git snapshot beside its
@@ -601,7 +601,7 @@ qualify complete host activation or power loss between rename and directory sync
 
 
 Host readiness now captures `directory-swap.json` and binds its exact SHA-256 to
-both the authenticated RPC v11 response and the coordinator readiness seal. Retries
+both the authenticated RPC v12 response and the coordinator readiness seal. Retries
 recompute the expected directory identities and refuse changed or missing retained
 swap evidence. A new readiness receipt cannot be issued for an unsafe parent or a
 layout that has already moved. Older participant protocols fail before SQL fencing.
@@ -660,11 +660,11 @@ mount-boundary check's platform qualification; it does not establish immunity to
 all filesystem restrictions or power-loss behavior.
 
 
-`Journal::activate_hosts` obtains fresh RPC v11 readiness, rechecks the owned fence,
+`Journal::activate_hosts` obtains fresh RPC v12 readiness, rechecks the owned fence,
 source backup, export, and exact publication under the SQL generation lease, then
 seeds telemetry and commits the active marker and fleet receipt together. An
 uncertain commit resumes from the immutable SQL receipt; it never republishes the
-old snapshot or compares later shared writes to frozen export data. RPC v1–v10
+old snapshot or compares later shared writes to frozen export data. RPC v1–v11
 participants are refused before SQL fencing, and preparation rejects configured
 corpus aliases that could become unresolvable during directory recovery.
 
@@ -700,7 +700,7 @@ stored request digest in PostgreSQL.
 
 This reservation is not a host fence, remote freshness proof, current-data backup,
 reverse import, or SQL activation. OKF remains writable until the subsequent
-fencing workflow. Authenticated participant fencing is now available through RPC v11. It locks local
+fencing workflow. Authenticated participant fencing is now available through RPC v12. It locks local
 selection before acquiring the connected active-generation lease, requires the
 exact registered rollback and activation/telemetry receipts, and checks the complete
 selected binding and shared transport before writing a durable local fence. Retries
@@ -727,7 +727,7 @@ The stored census and individual receipts must still match; a lost coordinator
 completion file can be reconstructed from the committed operation and live hosts.
 Post-commit checks read the retained Git cache without refreshing it, preserving
 recovery evidence even when the remote has advanced. Independent remote advances
-are never reset or silently adopted. RPC v11 requires
+are never reset or silently adopted. RPC v12 requires
 this post-commit inspection capability before forward fencing.
 
 The native two-host test verifies partial transport failure, selected SQL lease
@@ -752,7 +752,7 @@ selections and missing original fence evidence are preserved for inspection.
 The coordinator retains per-host results and seals the complete census only while
 the same SQL generation remains authoritative. Partial completion does not prevent
 later hosts from returning to SQL; retries preserve writes made by completed hosts.
-RPC v11 requires this deselection capability before forward fencing.
+RPC v12 requires this deselection capability before forward fencing.
 
 `RollbackPlan::begin_cancellation` now commits an immutable cancellation barrier
 while SQL is still at the original OKF generation. Its exclusive generation lease
@@ -760,12 +760,12 @@ drains admitted host operations. Exact retries retain the receipt; changed reque
 cancellation after the global reverse fence, and delayed local/global fencing are
 refused. The SQL receipt trigger also rejects cancelled operations and requires
 READ COMMITTED to avoid a stale cancellation snapshot after an advisory wait.
-RPC v11 requires hosts to check this barrier before local fencing; versions 1–10
+RPC v12 requires hosts to check this barrier before local fencing; versions 1–11
 are rejected during preparation. This step leaves local fences and the unique
 reservation intact: it does not yet
 restore host selections or permit a new reverse operation. Authenticated host
 cancellation and a complete-host seal must precede reservation release/replanning.
-`Journal::restore_rollback_hosts` now obtains authenticated RPC v11 restoration
+`Journal::restore_rollback_hosts` now obtains authenticated RPC v12 restoration
 receipts from every host after the cancellation barrier. A host retains its original
 fence in an operation-bound intent before restoring the exact original selection;
 then it removes only that operation's live fence and records completion. Retries
@@ -787,11 +787,27 @@ historical request unchanged. Fresh quiescence declarations and the current Git
 commit belong to the new request rather than a retargeted old one.
 
 After SQL completion, coordinator retries reconcile the recorded census without
-host RPCs. RPC v11 host retries only inspect retained cancellation evidence; missing
+host RPCs. RPC v12 host retries only inspect retained cancellation evidence; missing
 proof is never recreated, and a newer operation's selection and fence remain
 untouched even after its SQL generation advances. This completes cancellation and
-replanning before the global reverse fence. Remote advancement after that fence
-still requires safe reconciliation. The public shared migration command and broader
+replanning before the global reverse fence.
+
+After the global reverse fence, `ReconciliationPlan` requires a new operation UUID,
+the exact rollback digest, predecessor request and Git commit, and fresh complete-host
+quiescence declarations. `Journal::reconcile_rollback_remote` authenticates every
+retained host fence and confirms the explicitly selected descendant Git commit in a
+separate cache. Rewinds or rewritten history are refused. No previous request,
+cache, capture or paired archive is rewritten. SQL records an immutable chain with
+one successor per predecessor; competing requests cannot both select a new snapshot.
+Remote writers must remain stopped through capture and SQL return.
+
+Capture and SQL return resolve the selected request under the generation lease and
+bind its digest into a new capture intent. A further remote advance requires another
+explicit request and another cache/archive pair. PostgreSQL rejects imports of a
+superseded snapshot, including calls from older binaries. Committed SQL-return retries
+still preserve later SQL writes without consulting the remote; RPC v12 participants
+verify the selected reconciliation before deselection. Selection cannot change after
+an import receipt is committed. The public shared migration command and broader
 crash/deployment qualification remain unfinished.
 
 Selected-generation leases and rollback-host leases explicitly use `READ COMMITTED`.
