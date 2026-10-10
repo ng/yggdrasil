@@ -107,6 +107,12 @@ archives, and a lossless reverse candidate; retries require identical evidence.
 Capture leaves SQL fenced and does not apply the candidate or return hosts to SQL.
 The two-host fixture covers post-cutover writes, exact retry, lost completion
 record recovery, and refusal of independent policy or remote changes.
+The journal can subsequently apply that candidate, its reverse-import receipt, and
+SQL generation activation in one transaction. The SQL recovery event binds the
+exact rollback request, capture, and source backup. Committed retries verify the
+SQL generation and schema without replaying old rows or requiring the old Git tip.
+Authenticated host deselection is still outstanding; both hosts remain locally
+fenced after this SQL-only step, and the public shared migration CLI stays disabled.
 
 ### Faults, performance and packaging
 

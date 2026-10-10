@@ -23,7 +23,81 @@ pub struct RollbackCapture {
     pub candidate: Candidate,
     pub evidence: RecoveryEvidence,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlReturnReceipt {
+    pub operation: uuid::Uuid,
+    pub generation: i64,
+    pub capture_sha256: String,
+    pub request_sha256: String,
+}
 impl Journal {
+    /// Apply current shared data and return SQL authority atomically. Host local
+    /// selections remain fenced until authenticated deselection is completed.
+    pub async fn return_rollback_sql(
+        &self,
+        reverse: &RollbackPlan,
+        config: &DeploymentConfig,
+        pool: &sqlx::PgPool,
+        ssh_identity: Option<&Path>,
+    ) -> Result<SqlReturnReceipt> {
+        self.verify()?;
+        let backup = self.source_backup(config)?;
+        let prefix = format!("rollback-{}", reverse.operation());
+        let capture_name = format!("{prefix}-capture.json");
+        if let Some(bytes) = self.store.read_artifact(&capture_name)? {
+            let event = reverse.return_event(&digest(bytes.as_bytes()), backup.digest());
+            let mut tx = crate::knowledge::recovery_event::owner_transaction(pool).await?;
+            if reverse.returned_on(&mut tx, &event).await? {
+                // Current SQL rows and Git history may have legitimate new writes.
+                // Verify schema and the exact committed capture, never replay it.
+                backup.verify_schema_on(&mut tx).await?;
+                self.verify()?;
+                ensure!(
+                    self.store.read_artifact(&capture_name)?.as_deref() == Some(bytes.as_str()),
+                    "committed capture changed during SQL return retry"
+                );
+                let receipt = SqlReturnReceipt {
+                    operation: reverse.operation(),
+                    generation: event.generation,
+                    capture_sha256: digest(bytes.as_bytes()),
+                    request_sha256: event.request,
+                };
+                self.store.retain_artifact(
+                    &format!("{prefix}-sql.json"),
+                    &serde_json::to_string(&receipt)?,
+                    false,
+                )?;
+                tx.commit().await?;
+                return Ok(receipt);
+            }
+            tx.rollback().await?;
+        }
+        let capture = self
+            .capture_rollback_inner(reverse, config, pool, ssh_identity, true)
+            .await?;
+        let bytes = serde_json::to_string(&capture)?;
+        self.verify()?;
+        ensure!(
+            self.store.read_artifact(&capture_name)?.as_deref() == Some(bytes.as_str()),
+            "committed capture changed before local SQL receipt"
+        );
+        let event = reverse.return_event(&digest(bytes.as_bytes()), backup.digest());
+        let receipt = SqlReturnReceipt {
+            operation: reverse.operation(),
+            generation: event.generation,
+            capture_sha256: digest(bytes.as_bytes()),
+            request_sha256: event.request,
+        };
+        self.store
+            .retain_artifact(
+                &format!("{prefix}-sql.json"),
+                &serde_json::to_string(&receipt)?,
+                false,
+            )
+            .context("SQL return committed but local receipt missing; resume exact rollback")?;
+        Ok(receipt)
+    }
     /// An unselected coordinator policy is allowed. If this coordinator is also
     /// a participant, its actual policy must retain the exact committed fence.
     fn capture_local_policy(
@@ -87,6 +161,17 @@ impl Journal {
         config: &DeploymentConfig,
         pool: &sqlx::PgPool,
         ssh_identity: Option<&Path>,
+    ) -> Result<RollbackCapture> {
+        self.capture_rollback_inner(reverse, config, pool, ssh_identity, false)
+            .await
+    }
+    async fn capture_rollback_inner(
+        &self,
+        reverse: &RollbackPlan,
+        config: &DeploymentConfig,
+        pool: &sqlx::PgPool,
+        ssh_identity: Option<&Path>,
+        return_sql: bool,
     ) -> Result<RollbackCapture> {
         let fence = self
             .fence_rollback_hosts(reverse, pool, ssh_identity)
@@ -190,7 +275,35 @@ impl Journal {
             false,
         )?;
         git.verify_recovery(&recovery, &result.shared_commit)?;
-        tx.rollback().await?;
+        if return_sql {
+            reverse::apply_once_on(
+                &mut tx,
+                reverse.operation(),
+                &result.candidate,
+                &result.evidence,
+                fence.generation,
+            )
+            .await?;
+            backup.verify_schema_on(&mut tx).await?;
+            let bytes = serde_json::to_string(&result)?;
+            let event = reverse.return_event(&digest(bytes.as_bytes()), backup.digest());
+            reverse.return_on(&mut tx, &event).await?;
+            self.verify()?;
+            ensure!(
+                self.store
+                    .read_artifact(&format!("{prefix}-capture.json"))?
+                    .as_deref()
+                    == Some(bytes.as_str()),
+                "capture changed before SQL return commit"
+            );
+            recovery.verify_paths(&cache, &policy_path)?;
+            git.verify_recovery(&recovery, &result.shared_commit)?;
+            tx.commit()
+                .await
+                .context("fleet SQL return outcome uncertain; resume exact rollback")?;
+        } else {
+            tx.rollback().await?;
+        }
         Ok(result)
     }
 }

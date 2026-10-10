@@ -151,3 +151,71 @@ impl RollbackPlan {
         Ok(tx)
     }
 }
+
+impl RollbackPlan {
+    pub(in crate::knowledge::fleet) fn return_event(
+        &self,
+        capture_sha256: &str,
+        backup_sha256: &str,
+    ) -> crate::knowledge::recovery_event::Event {
+        crate::knowledge::recovery_event::Event {
+            operation: self.operation(),
+            step: "sql",
+            request: digest(
+                format!("{}\n{capture_sha256}\n{backup_sha256}", self.sha256()).as_bytes(),
+            ),
+            database: self.forward.database_id,
+            corpus: self.forward.corpus_id,
+            generation: self.request.source_generation + 2,
+        }
+    }
+    pub(in crate::knowledge::fleet) async fn returned_on(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        event: &crate::knowledge::recovery_event::Event,
+    ) -> Result<bool> {
+        self.registered_on(tx).await?;
+        if !event.recorded(tx).await? {
+            return Ok(false);
+        }
+        let marker: (Uuid,i64,i32,String,Option<Uuid>) = sqlx::query_as("SELECT database_id,generation,minimum_client,backend,corpus_id FROM public.knowledge_storage WHERE singleton")
+            .fetch_one(&mut **tx).await?;
+        ensure!(
+            marker.0 == event.database
+                && marker.1 == event.generation
+                && marker.2 > 0
+                && marker.2 <= crate::knowledge::guard::CLIENT_PROTOCOL
+                && marker.3 == "sql"
+                && marker.4.is_none(),
+            "recorded fleet SQL return is no longer current"
+        );
+        self.verify_reverse_import_on(tx).await?;
+        Ok(true)
+    }
+    async fn verify_reverse_import_on(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+        let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_reverse_receipts WHERE operation_id=$1 AND database_id=$2 AND corpus_id=$3 AND fenced_generation=$4 AND evidence->>'shared_commit'=$5)")
+            .bind(self.operation()).bind(self.forward.database_id).bind(self.forward.corpus_id)
+            .bind(self.request.source_generation + 1).bind(self.expected_remote_commit())
+            .fetch_one(&mut **tx).await?;
+        ensure!(matches, "fleet reverse import receipt missing or changed");
+        Ok(())
+    }
+    pub(in crate::knowledge::fleet) async fn return_on(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        event: &crate::knowledge::recovery_event::Event,
+    ) -> Result<()> {
+        self.registered_on(tx).await?;
+        self.host_phase_on(tx)
+            .await?
+            .context("owned reverse fence required for SQL return")?;
+        self.verify_reverse_import_on(tx).await?;
+        ensure!(
+            crate::knowledge::clients::audit(tx).await?.live_blockers == 0,
+            "incompatible live clients block fleet SQL return"
+        );
+        sqlx::query("UPDATE public.knowledge_storage SET backend='sql',generation=$1,corpus_id=NULL WHERE singleton")
+            .bind(event.generation).execute(&mut **tx).await?;
+        event.record(tx).await
+    }
+}

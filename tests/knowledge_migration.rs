@@ -2698,14 +2698,19 @@ async fn fleet_fence_fixture(finalize_steps: Option<usize>) {
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; two-host post-activation recovery"]
 async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
-    partial_fleet_finalization_fixture(false).await;
+    partial_fleet_finalization_fixture(false, false).await;
 }
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; complete reverse fence and resume"]
 async fn native_fleet_reverse_fence_resumes_without_recreating_host_evidence() {
-    partial_fleet_finalization_fixture(true).await;
+    partial_fleet_finalization_fixture(true, false).await;
 }
-async fn partial_fleet_finalization_fixture(complete_reverse: bool) {
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; atomic current-data SQL return"]
+async fn native_fleet_sql_return_is_atomic_and_retry_preserves_later_writes() {
+    partial_fleet_finalization_fixture(true, true).await;
+}
+async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: bool) {
     use ygg::knowledge::{
         document::digest,
         fleet::{journal::Journal, plan::ValidatedPlan},
@@ -2713,6 +2718,11 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool) {
     };
     let server = Server::new();
     let mut first = Fixture::new(&server).await;
+    if return_sql {
+        // Install before backup so fault injection preserves schema parity.
+        sqlx::raw_sql("CREATE FUNCTION public.test_fail_return() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF current_setting('ygg.test_fail_return',true) = 'on' THEN RAISE EXCEPTION 'injected return failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER test_fail_return BEFORE INSERT ON public.knowledge_recovery_events FOR EACH ROW EXECUTE FUNCTION public.test_fail_return();")
+            .execute(&first.pool).await.unwrap();
+    }
     let config = ygg::config::database::DeploymentConfig::load(first.env.clone()).unwrap();
     KnowledgeStore::open(&config.knowledge_dir, true).unwrap();
     let identities =
@@ -3419,6 +3429,64 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool) {
         .unwrap(),
         retained
     );
+    let returned = if return_sql {
+        // Fail the last SQL event write: neither imported rows nor authority may commit.
+        sqlx::query("SET ygg.test_fail_return = 'on'")
+            .execute(&first.pool)
+            .await
+            .unwrap();
+        let failure = journal
+            .return_rollback_sql(winner, &config, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{failure:#}").contains("injected return failure"),
+            "{failure:#}"
+        );
+        assert_eq!(first.marker().await, (4, "fenced".into()));
+        let texts: Vec<String> = sqlx::query_scalar("SELECT text FROM memories ORDER BY text")
+            .fetch_all(&first.pool)
+            .await
+            .unwrap();
+        assert_eq!(texts, vec!["source note"]);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM knowledge_reverse_receipts WHERE operation_id=$1",
+        )
+        .bind(winner.operation())
+        .fetch_one(&first.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("SET ygg.test_fail_return = 'off'")
+            .execute(&first.pool)
+            .await
+            .unwrap();
+        let receipt = journal
+            .return_rollback_sql(winner, &config, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap();
+        assert_eq!(receipt.generation, 5);
+        assert_eq!(first.marker().await, (5, "sql".into()));
+        let texts: Vec<String> = sqlx::query_scalar("SELECT text FROM memories ORDER BY text")
+            .fetch_all(&first.pool)
+            .await
+            .unwrap();
+        for text in [
+            "source note",
+            "write during partial fleet finalization",
+            "write after fleet recovery",
+        ] {
+            assert!(texts.iter().any(|t| t == text), "SQL return lost {text}");
+        }
+        sqlx::query("INSERT INTO memories(text,user_id) VALUES('later SQL write','alice')")
+            .execute(&first.pool)
+            .await
+            .unwrap();
+        std::fs::remove_file(first.journal.join(format!("{prefix}-sql.json"))).unwrap();
+        Some(receipt)
+    } else {
+        None
+    };
     // Independent remote changes cannot be reset or adopted on a later retry.
     git(
         &seed,
@@ -3437,6 +3505,51 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool) {
         ],
     );
     let advanced = git(&seed, &["rev-parse", "HEAD"]);
+    if let Some(receipt) = returned {
+        drop(journal);
+        let journal = Journal::resume(&first.journal, &hash).unwrap();
+        let retried = journal
+            .return_rollback_sql(winner, &config, &first.pool, None)
+            .await
+            .unwrap();
+        assert_eq!(retried, receipt);
+        assert_eq!(first.marker().await, (5, "sql".into()));
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE text='later SQL write')",
+        )
+        .fetch_one(&first.pool)
+        .await
+        .unwrap();
+        assert!(exists, "committed retry replayed the old import");
+        let capture_path = first.journal.join(format!("{prefix}-capture.json"));
+        let exact_capture = std::fs::read(&capture_path).unwrap();
+        let mut changed_capture = exact_capture.clone();
+        changed_capture.push(b' ');
+        std::fs::write(&capture_path, &changed_capture).unwrap();
+        assert!(
+            journal
+                .return_rollback_sql(winner, &config, &first.pool, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&capture_path).unwrap(), changed_capture);
+        assert_eq!(first.marker().await, (5, "sql".into()));
+        std::fs::write(&capture_path, exact_capture).unwrap();
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/knowledge"]),
+            advanced
+        );
+        // SQL authority alone does not remove either host's local fence.
+        for host_config in [&config, &config2] {
+            let binding: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(host_config.knowledge_policy_dir.join("runtime.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(binding["phase"], "fenced");
+        }
+        first.pool.close().await;
+        return;
+    }
     assert!(
         journal
             .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))

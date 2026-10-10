@@ -11,7 +11,7 @@ use std::{
 };
 
 mod capture;
-pub use capture::RollbackCapture;
+pub use capture::{RollbackCapture, SqlReturnReceipt};
 mod rollback;
 pub use rollback::RollbackFenceReceipt;
 mod activation;
