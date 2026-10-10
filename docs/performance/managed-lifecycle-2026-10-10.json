@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "ci_run": 38053885160,
+  "pull_request_head": "6d49d51b4915c8c83595c33d5c5dbd2cf7e88045",
+  "artifact_source_note": "Manifest build_source_commit is the CI pull-request merge checkout, not the PR head. Bundles verified against downloaded SHA256SUMS and all manifest members.",
+  "system": "Darwin",
+  "architecture": "arm64",
+  "os_version": "26.7.1",
+  "smoke_script_sha256": "6892316523bdde24d7ad0bdf2330f34297bf1bad6b6157f2590eb8d4d496b80b",
+  "samples_per_flavor": 1,
+  "measurement_order": [
+    "offline",
+    "online"
+  ],
+  "measurements": [
+    {
+      "flavor": "offline",
+      "version": "ygg 0.1.0",
+      "verified": true,
+      "cluster_id": "76379a02-1e16-49f8-a56c-f7933521b5da",
+      "backup_verified": true,
+      "target": "aarch64-apple-darwin",
+      "build_source_commit": "f79947f28f70a5baeb44b9032a48cd5da685de8b",
+      "timing_ms": {
+        "fresh_profile_init": 9518.926042001112,
+        "running_cluster_init_reuse": 25.770542008103803,
+        "stopped_cluster_start": 93.2038329920033
+      },
+      "timing_scope": "Single wall-clock lifecycle observations, including CLI startup; fresh profile and stopped initialized cluster, not OS cache eviction or a cold machine. Online init includes download. Separate from warm hook latency; no percentile or threshold claim.",
+      "bundle_sha256": "e5a1b5b48c0ac670aa1fcc6f2a345b6cf01dc270e14b839f7c2d5c31f243ccae"
+    },
+    {
+      "flavor": "online",
+      "version": "ygg 0.1.0",
+      "verified": true,
+      "cluster_id": "7b16e389-1e25-492f-8f40-c2762368e2dc",
+      "backup_verified": true,
+      "target": "aarch64-apple-darwin",
+      "build_source_commit": "f79947f28f70a5baeb44b9032a48cd5da685de8b",
+      "timing_ms": {
+        "fresh_profile_init": 9910.554500005674,
+        "running_cluster_init_reuse": 28.22566700342577,
+        "stopped_cluster_start": 95.9972089913208
+      },
+      "timing_scope": "Single wall-clock lifecycle observations, including CLI startup; fresh profile and stopped initialized cluster, not OS cache eviction or a cold machine. Online init includes download. Separate from warm hook latency; no percentile or threshold claim.",
+      "bundle_sha256": "f20ae1c67eeca3836245420d6ce2239a672ed6589c2d45ccb2ee3075e167c2ff"
+    }
+  ],
+  "limits": [
+    "CI candidate artifacts, not published release assets.",
+    "One lifecycle observation per flavor; not p95 or an acceptance threshold.",
+    "No OS cache eviction; CLI version was checked before initialization.",
+    "Isolated profiles; existing operator databases untouched.",
+    "Shared-remote and warm-hook latency are separate workloads."
+  ]
+}

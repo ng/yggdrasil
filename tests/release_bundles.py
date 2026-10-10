@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Artifact integrity and publication regressions; native lifecycle smoke is separate."""
 import importlib.util
+import contextlib
+import io
+import subprocess
 import json
 from pathlib import Path
 import tempfile
@@ -48,6 +51,41 @@ class MacDistribution(unittest.TestCase):
             with self.assertRaises(ValueError):
                 audit.inspect("fat", b"\xca\xfe\xba\xbe" + bytes(20), Path(tmp))
             self.assertIsNone(audit.inspect("README", b"plain text", Path(tmp)))
+
+
+class SmokeReporting(unittest.TestCase):
+    def test_failed_final_shutdown_cannot_report_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "profile"
+            manifest = {"version": "0.1.0", "flavor": "offline",
+                        "target": "fixture", "build_source_commit": "fixture"}
+            files = {"bin/ygg": (b"fixture", 0o755),
+                     "initialize": (b"fixture", 0o755)}
+            stops = 0
+
+            def run(args, **kwargs):
+                nonlocal stops
+                if "--version" in args:
+                    return "ygg 0.1.0"
+                if Path(args[0]).name == "initialize":
+                    (directory / "data/postgres").mkdir(parents=True)
+                if "status" in args:
+                    return json.dumps({"mode": "managed", "cluster_id": "same",
+                                       "supervisor_pid": 1, "postgres": {"state": "ready"}})
+                if "stop" in args:
+                    stops += 1
+                    if stops == 2:
+                        raise subprocess.CalledProcessError(1, args, output="shutdown failed")
+                return "{}"
+
+            output = io.StringIO()
+            with patch.object(smoke, "verified_files", return_value=(manifest, files)), \
+                    patch.object(smoke.subprocess, "check_output", run), \
+                    contextlib.redirect_stdout(output):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    smoke.smoke(Path("unused"), directory)
+            self.assertEqual(stops, 2)
+            self.assertEqual(output.getvalue(), "")
 
 
 class BundleTests(unittest.TestCase):

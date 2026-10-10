@@ -302,3 +302,25 @@ Linux and Apple Silicon native jobs passed in
 [run 38053885160](https://github.com/ng/yggdrasil/actions/runs/38053885160);
 Intel remains in progress. Release publication, deployment rehearsal and dogfood
 gates remain open.
+
+### Separate database lifecycle measurements
+
+The verified Apple Silicon candidate bundles from native run `38053885160`
+(PR head `6d49d51`, manifest build source `f79947f28f70a5baeb44b9032a48cd5da685de8b`)
+passed the updated smoke test with fresh disposable profiles, preserved cluster
+identity across restart, verified backups and clean shutdown. The manifest source
+is the CI pull-request merge checkout. Raw measurements, bundle hashes and scope
+limits are retained in [the lifecycle report](performance/managed-lifecycle-2026-10-10.json).
+
+| Bundle | Fresh profile init | Running-cluster init reuse | Stopped-cluster start |
+| --- | ---: | ---: | ---: |
+| Offline | 9,518.93 ms | 25.77 ms | 93.20 ms |
+| Online (including download) | 9,910.55 ms | 28.23 ms | 96.00 ms |
+
+Each value is one wall-clock observation including CLI overhead. The CLI version
+check precedes initialization; OS caches were not evicted. These are database
+lifecycle measurements, separate from the warm-hook benchmark, not cold-machine,
+p95, universal latency or published-artifact qualification. The smoke now emits
+success only after teardown succeeds; all nine bundle regression tests pass,
+including refusal to report success when final shutdown fails. Shared-remote
+latency still requires its separate measurement.

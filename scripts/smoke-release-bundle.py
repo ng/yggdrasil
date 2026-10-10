@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import tarfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -70,6 +71,14 @@ def smoke(bundle, directory, allow_download=False):
         return subprocess.check_output(args, env=env, cwd=directory, stdin=subprocess.DEVNULL,
                                        stderr=subprocess.STDOUT, timeout=timeout, text=True)
 
+    timings = {}
+
+    def measured(name, *args):
+        started = time.perf_counter()
+        result = run(*args)
+        timings[name] = (time.perf_counter() - started) * 1000
+        return result
+
     version = run(str(binary), "--version", timeout=30).strip()
     if version != f'ygg {manifest["version"]}':
         raise ValueError("packaged binary version mismatch")
@@ -78,7 +87,7 @@ def smoke(bundle, directory, allow_download=False):
                           "download_init_tested": False}))
         return
     try:
-        run(str(extracted / "initialize"), "--yes", "--skip", "tmux,jq,rtk,hooks,project")
+        measured("fresh_profile_init", str(extracted / "initialize"), "--yes", "--skip", "tmux,jq,rtk,hooks,project")
         first = json.loads(run(str(binary), "db", "status", "--json"))
         if first["mode"] != "managed" or not first.get("cluster_id") or not first.get("supervisor_pid") or first["postgres"]["state"] != "ready":
             raise ValueError("packaged init did not leave a supervised managed cluster")
@@ -87,19 +96,31 @@ def smoke(bundle, directory, allow_download=False):
             for path in (extracted / "postgres").iterdir():
                 path.unlink()
         env["PATH"] = str(blocker) + os.pathsep + env["PATH"]
-        run(str(binary), "init", "--yes", "--skip", "tmux,jq,rtk,hooks,project")
+        measured("running_cluster_init_reuse", str(binary), "init", "--yes", "--skip", "tmux,jq,rtk,hooks,project")
         second = json.loads(run(str(binary), "db", "status", "--json"))
         if first != second:
             raise ValueError("repeat init changed cluster or process identity")
+        run(str(binary), "db", "stop", "--timeout", "30", "--json", timeout=40)
+        measured("stopped_cluster_start", str(binary), "db", "start", "--timeout", "30", "--json")
+        restarted = json.loads(run(str(binary), "db", "status", "--json"))
+        if (restarted["cluster_id"] != first["cluster_id"]
+                or restarted["postgres"]["state"] != "ready"
+                or not restarted.get("supervisor_pid")):
+            raise ValueError("restart changed cluster identity or failed readiness")
         # Real backup exercises packaged pg_dump, runtime/owner routing and schema.
         run(str(binary), "db", "backup", str(directory / "backup"), "--json")
         run(str(binary), "db", "verify-backup", str(directory / "backup"), "--json")
-        print(json.dumps({"flavor": manifest["flavor"], "version": version, "verified": True,
-                          "cluster_id": first["cluster_id"], "backup_verified": True}))
     finally:
         # The environment and cwd above identify only this disposable profile.
         if (directory / "data/postgres").exists():
             run(str(binary), "db", "stop", "--timeout", "30", "--json", timeout=40)
+    # Emit success only after teardown succeeds; never certify a partial run.
+    print(json.dumps({"flavor": manifest["flavor"], "version": version, "verified": True,
+                      "cluster_id": first["cluster_id"], "backup_verified": True,
+                      "target": manifest["target"],
+                      "build_source_commit": manifest["build_source_commit"],
+                      "timing_ms": timings,
+                      "timing_scope": "Single wall-clock lifecycle observations, including CLI startup; fresh profile and stopped initialized cluster, not OS cache eviction or a cold machine. Online init includes download. Separate from warm hook latency; no percentile or threshold claim."}))
 
 
 if __name__ == "__main__":
