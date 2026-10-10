@@ -1116,6 +1116,20 @@ async fn native_fleet_registration_serializes_coordinators_and_preserves_cancell
     use ygg::knowledge::fleet::Registration;
     let server = Server::new();
     let f = Fixture::new(&server).await;
+    // The coordinator must retain a backup digest in its plan before registering
+    // that plan. Registration metadata must not invalidate the source evidence.
+    let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
+    let backup_path = f.temp.path().canonicalize().unwrap().join("fleet-backup");
+    ygg::db::deployment_backup::create(&config, &backup_path, Some(&server.bin), None)
+        .await
+        .unwrap();
+    let backup = ygg::knowledge::source_backup::SourceBackup::open(
+        &backup_path,
+        f.plan.mappings.database_id,
+        1,
+    )
+    .unwrap();
+    let backup_digest = backup.digest().to_owned();
     let first = Registration {
         version: 1,
         operation: Uuid::new_v4(),
@@ -1138,6 +1152,14 @@ async fn native_fleet_registration_serializes_coordinators_and_preserves_cancell
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     let winner = if a.is_ok() { first } else { second };
     assert_eq!(f.marker().await, (1, "sql".into()));
+    let mut tx = f.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(1497843531,1)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    backup.verify_on(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(backup.digest(), backup_digest);
     let mut reordered = winner.clone();
     reordered.participants.reverse();
     reordered.register(&contender).await.unwrap();
@@ -1200,6 +1222,21 @@ async fn native_fleet_registration_serializes_coordinators_and_preserves_cancell
         .await
         .unwrap();
     assert_eq!(winner.cancel(&contender).await.unwrap(), 2);
+    // Genuine legacy content drift still invalidates the same backup.
+    let mut tx = f.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(1497843531,1)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(
+        backup
+            .verify_on(&mut tx)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("source memories changed")
+    );
+    tx.rollback().await.unwrap();
     assert!(winner.register(&f.pool).await.is_err());
     assert_eq!(f.marker().await, (2, "sql".into()));
     let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
