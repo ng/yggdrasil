@@ -1,6 +1,6 @@
 # OKF hook latency investigation
 
-The release gate remains **unqualified**. The selected-UUID batching repeat
+The latest two bracketed runs meet the local latency target; historical failures remain below for comparison. The selected-UUID batching repeat
 measured SQL p95 279.39 ms and OKF p95 387.96 ms: **108.57 ms added**, against
 50 ms allowed. It uses 10,000 documents, 20 concurrent clients and 100 warm
 samples per mode. See `okf-hooks-2026-10-09-selected-uuid-batch-repeat.json`.
@@ -95,3 +95,29 @@ measures SQL before OKF, so time-varying machine load can affect the comparison.
 A future stability investigation should counterbalance measurement order while
 preserving the same workload and backend correctness checks, rather than accept
 only favorable runs or weaken the 50 ms threshold.
+
+## Bracketed baseline
+
+The release-CLI fixture now measures SQL → OKF → SQL, each with 20 warm-up
+requests and 100 measured requests. Each request uses a fresh session and checks
+the same 20 ordered rules. The gate uses the **larger** added p95 from the two
+SQL comparisons, preserving the 50 ms limit. SQL usage totals must reach 240
+applications per matching rule across both phases; OKF must still record 2,400
+observations. Transitions are fixture-only and do not qualify production rollback.
+
+The first uninstrumented run passes: SQL-before p95 240.79 ms, OKF 253.11 ms,
+SQL-after 235.50 ms, worst added p95 **17.61 ms**. Raw samples are in
+`okf-hooks-2026-10-10-bracketed.json`. This guards against a slow initial baseline
+masking a regression; it does not eliminate all machine-load variance or explain
+the historical failure.
+
+The idle-build repeat also passes: SQL-before p95 231.95 ms, OKF 247.97 ms,
+SQL-after 239.97 ms, worst added p95 **16.01 ms**. See
+`okf-hooks-2026-10-10-bracketed-repeat.json`. Both bracketed runs preserve output
+and usage-accounting invariants. This meets the local measured target for these
+two runs; it does not claim a production optimization or universal latency bound.
+
+Validation after the fixture change: **590 passed, 29 opt-in ignored, 93 result
+groups** against a fresh disposable database, plus `cargo check --all-targets`,
+`cargo fmt --check` and `git diff --check`. Both bracketed measurements ran in
+release mode with diagnostics disabled and no concurrent local Cargo build.

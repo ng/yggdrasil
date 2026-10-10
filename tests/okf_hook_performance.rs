@@ -374,19 +374,57 @@ async fn qualify(f: &Fixture) {
         .fetch_one(&f.pool)
         .await
         .unwrap();
-    let added = percentile(&okf, 95) - percentile(&sql, 95);
+    // Bracket OKF with SQL phases so a slow initial baseline cannot hide a
+    // regression. All child processes have exited before fixture-only switches.
+    // This deliberately does not qualify production rollback orchestration.
+    sqlx::query("UPDATE public.knowledge_storage SET backend='fenced',generation=4")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE public.knowledge_storage SET backend='sql',corpus_id=NULL,generation=5")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    fs::remove_file(
+        root.join("policy")
+            .join(ygg::knowledge::runtime::SELECTION_FILE),
+    )
+    .unwrap();
+    let sql_after = measure(root, &f.url, &expected);
+    let current: Vec<Learning> = sqlx::query_as("SELECT * FROM learnings")
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+    for row in current {
+        assert_eq!(
+            row.applied_count,
+            if row.file_glob.as_deref() == Some("src/*.rs") {
+                240
+            } else {
+                0
+            },
+            "bracketing SQL hook lost a usage observation"
+        );
+    }
+    let added_before = percentile(&okf, 95) - percentile(&sql, 95);
+    let added_after = percentile(&okf, 95) - percentile(&sql_after, 95);
+    let added = added_before.max(added_after);
     let report = serde_json::json!({"documents":10000,"clients":20,"samples_per_mode":sql.len(),
         "platform":format!("{}-{}",std::env::consts::OS,std::env::consts::ARCH),
         "logical_cpus":std::thread::available_parallelism().unwrap().get(),"postgres":version,
         "okf_observed_applications":observed,"expected_applications":2400,
         "sql_ms":{"p50":percentile(&sql,50),"p95":percentile(&sql,95)},
         "okf_ms":{"p50":percentile(&okf,50),"p95":percentile(&okf,95)},
+        "sql_after_ms":{"p50":percentile(&sql_after,50),"p95":percentile(&sql_after,95)},
+        "added_before_p95_ms":added_before,"added_after_p95_ms":added_after,
         "added_p95_ms":added,"limit_ms":50,"passed":added<=50. && observed==2400,
-        "measurement":"warm actual pre-tool-use CLI, including startup, matching, revalidation, output, coordination and telemetry; SQL phase then OKF; new session per request; 20 identical rules required",
+        "measurement":"warm actual pre-tool-use CLI, including startup, matching, revalidation, output, coordination and telemetry; SQL then OKF then SQL; worst of both SQL comparisons; new session per request; 20 identical rules required",
         "sql_samples_ms":sql.iter().map(|s| s.total_ms).collect::<Vec<_>>(),
+        "sql_after_samples_ms":sql_after.iter().map(|s| s.total_ms).collect::<Vec<_>>(),
         "okf_samples_ms":okf.iter().map(|s| s.total_ms).collect::<Vec<_>>(),
         "phase_diagnostics_enabled":std::env::var_os("YGG_HOOK_BENCH_PHASES").is_some(),
         "phase_note":"Nested phase timings are inclusive and must not be summed; debug tracing adds overhead. Diagnostic runs do not replace uninstrumented qualification.",
+        "sql_after_phase_samples_us":sql_after.iter().map(|s| &s.phases_us).collect::<Vec<_>>(),
         "sql_phase_samples_us":sql.iter().map(|s| &s.phases_us).collect::<Vec<_>>(),
         "okf_phase_samples_us":okf.iter().map(|s| &s.phases_us).collect::<Vec<_>>()});
     println!("{report}");
