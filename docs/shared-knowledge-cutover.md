@@ -267,3 +267,25 @@ not publish a new fence intent or runtime selection. The offline `prepare_sql` i
 a lower-level primitive and cannot provide this database check; coordinator work
 must use the connected path. Request authentication, plan validation, complete
 census and activation remain the coordinator's responsibility.
+
+## Coordinator registration
+
+`fleet::Registration` now reserves one source database generation for a coordinator
+operation under the migration advisory lock. The immutable database row binds the
+complete plan digest, corpus and canonical participant set (1–1024 unique non-nil
+IDs). Matching retries succeed; different plans, corpora, participants or competing
+operations refuse. Only the migration owner can register or cancel. Registration
+leaves SQL authority and generation unchanged; it does not prove authentication,
+quiescence, host availability or readiness.
+
+Pre-fence cancellation advances SQL generation and records the existing immutable
+cancellation receipt atomically. It preserves later SQL writes on retry and leaves
+participant restoration explicit. A new operation may reserve the returned SQL
+generation. Connected participant preparation now additionally requires membership
+in this registered plan with the exact request digest/database/corpus/generation;
+this checks the declared identity, while authenticating the actual host remains a
+separate transport requirement. Registration has no activation/fencing method or
+CLI until the full backup, host verification, publication and recovery workflow is
+implemented. Private migrations still use their existing journal; a competing
+private transition invalidates the fleet source generation rather than being
+adopted as a fleet-owned fence.

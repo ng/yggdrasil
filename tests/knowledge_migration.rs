@@ -944,6 +944,16 @@ async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_
         participant: Uuid::new_v4(),
     };
     let request = ygg::knowledge::document::digest(&coordinator_bytes);
+    let registration = ygg::knowledge::fleet::Registration {
+        version: 1,
+        operation: coordinator.migration_operation,
+        request_sha256: request.clone(),
+        database_id: f.plan.mappings.database_id,
+        source_generation: 1,
+        corpus_id: f.plan.mappings.corpus_id,
+        participants: vec![coordinator.participant],
+    };
+    registration.register(&f.pool).await.unwrap();
     let host_root = tempfile::tempdir().unwrap();
     let root = host_root.path().canonicalize().unwrap();
     let corpus = root.join("corpus");
@@ -966,7 +976,23 @@ async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_
         mappings: serde_json::from_value(serde_json::to_value(&f.plan.mappings).unwrap()).unwrap(),
         agents: BTreeMap::new(),
     };
-    prepare_sql_at_source(&host, &binding, coordinator, &f.pool)
+    let outsider = CoordinatorBinding {
+        participant: Uuid::new_v4(),
+        ..coordinator
+    };
+    assert!(
+        prepare_sql_at_source(&host, &binding, outsider, &request, &f.pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        prepare_sql_at_source(&host, &binding, coordinator, &"0".repeat(64), &f.pool)
+            .await
+            .is_err()
+    );
+    assert!(!policy.join("runtime.json").exists());
+    assert!(!policy.join("sql-fence-1.json").exists());
+    prepare_sql_at_source(&host, &binding, coordinator, &request, &f.pool)
         .await
         .unwrap();
     let selection = policy.join("runtime.json");
@@ -978,11 +1004,11 @@ async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_
     );
     assert_eq!(std::fs::read(&selection).unwrap(), fenced);
     assert!(!policy.join("sql-fence-1-cancelled.json").exists());
-    success(f.migrate(&server, true).await);
+    assert_eq!(registration.cancel(&f.pool).await.unwrap(), 2);
     // A participant without the local cancellation tombstone must still reject
     // a delayed request by consulting the current source and coordinator receipt.
     assert!(
-        prepare_sql_at_source(&host, &binding, coordinator, &f.pool)
+        prepare_sql_at_source(&host, &binding, coordinator, &request, &f.pool)
             .await
             .is_err()
     );
@@ -1010,14 +1036,14 @@ async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_
         serde_json::from_value(serde_json::to_value(&binding).unwrap()).unwrap();
     other_binding.bundle = other_corpus;
     assert!(
-        prepare_sql_at_source(&other_host, &other_binding, coordinator, &f.pool)
+        prepare_sql_at_source(&other_host, &other_binding, coordinator, &request, &f.pool)
             .await
             .is_err()
     );
     // Editing the generation to match cannot reuse a cancelled operation UUID.
     other_binding.generation = 2;
     assert!(
-        prepare_sql_at_source(&other_host, &other_binding, coordinator, &f.pool)
+        prepare_sql_at_source(&other_host, &other_binding, coordinator, &request, &f.pool)
             .await
             .is_err()
     );
@@ -1081,5 +1107,114 @@ async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_
     );
     assert!(!selection.exists());
     assert_eq!(std::fs::read(&tombstone_path).unwrap(), tombstone);
+    f.pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN; starts disposable native PostgreSQL"]
+async fn native_fleet_registration_serializes_coordinators_and_preserves_cancellation() {
+    use ygg::knowledge::fleet::Registration;
+    let server = Server::new();
+    let f = Fixture::new(&server).await;
+    let first = Registration {
+        version: 1,
+        operation: Uuid::new_v4(),
+        request_sha256: ygg::knowledge::document::digest(b"complete fixture plan"),
+        database_id: f.plan.mappings.database_id,
+        source_generation: 1,
+        corpus_id: f.plan.mappings.corpus_id,
+        participants: vec![Uuid::new_v4(), Uuid::new_v4()],
+    };
+    let second = Registration {
+        operation: Uuid::new_v4(),
+        ..first.clone()
+    };
+    let contender = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&f.env["DATABASE_URL"])
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(first.register(&f.pool), second.register(&contender));
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    let winner = if a.is_ok() { first } else { second };
+    assert_eq!(f.marker().await, (1, "sql".into()));
+    let mut reordered = winner.clone();
+    reordered.participants.reverse();
+    reordered.register(&contender).await.unwrap();
+    for mutation in 0..3 {
+        let mut changed = winner.clone();
+        match mutation {
+            0 => changed.request_sha256 = "0".repeat(64),
+            1 => changed.participants.push(Uuid::new_v4()),
+            _ => changed.corpus_id = Uuid::new_v4(),
+        }
+        assert!(changed.register(&f.pool).await.is_err());
+        assert!(changed.cancel(&f.pool).await.is_err());
+    }
+    let mut duplicate = winner.clone();
+    duplicate.participants.push(duplicate.participants[0]);
+    assert!(duplicate.register(&f.pool).await.is_err());
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_fleet_operations")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert!(
+        sqlx::query("DELETE FROM knowledge_fleet_operations")
+            .execute(&f.pool)
+            .await
+            .is_err()
+    );
+    let role = format!("fleet_runtime_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE ROLE {role} LOGIN"))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let mut runtime_url = url::Url::parse(&f.env["DATABASE_URL"]).unwrap();
+    runtime_url.set_username(&role).unwrap();
+    let runtime = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(runtime_url.as_str())
+        .await
+        .unwrap();
+    assert!(
+        winner
+            .register(&runtime)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("migration owner")
+    );
+    assert!(
+        winner
+            .cancel(&runtime)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("migration owner")
+    );
+    runtime.close().await;
+    assert_eq!(winner.cancel(&f.pool).await.unwrap(), 2);
+    sqlx::query("UPDATE memories SET text='later SQL write'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(winner.cancel(&contender).await.unwrap(), 2);
+    assert!(winner.register(&f.pool).await.is_err());
+    assert_eq!(f.marker().await, (2, "sql".into()));
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "later SQL write");
+    let next = Registration {
+        operation: Uuid::new_v4(),
+        source_generation: 2,
+        ..winner.clone()
+    };
+    next.register(&contender).await.unwrap();
+    assert_eq!(next.cancel(&contender).await.unwrap(), 3);
+    assert!(winner.cancel(&f.pool).await.is_err());
+    contender.close().await;
     f.pool.close().await;
 }

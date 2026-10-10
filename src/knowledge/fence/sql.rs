@@ -155,6 +155,7 @@ pub async fn prepare_sql_at_source(
     config: &KnowledgeConfig,
     binding: &Binding,
     coordinator: CoordinatorBinding,
+    request_sha256: &str,
     pool: &sqlx::PgPool,
 ) -> Result<SqlPreparation> {
     let host = Host::open(config, binding, coordinator)?;
@@ -183,6 +184,14 @@ pub async fn prepare_sql_at_source(
     ensure!(
         !cancelled,
         "coordinator operation was cancelled; prepare a new request"
+    );
+    let registered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_fleet_operations WHERE operation_id=$1 AND request_sha256=$2 AND database_id=$3 AND source_generation=$4 AND corpus_id=$5 AND $6=ANY(participants))")
+        .bind(coordinator.migration_operation).bind(request_sha256).bind(binding.mappings.database_id)
+        .bind(binding.generation).bind(binding.mappings.corpus_id).bind(coordinator.participant)
+        .fetch_one(&mut *tx).await?;
+    ensure!(
+        registered,
+        "participant and source must match the registered coordinator plan"
     );
     let report = publish_preparation(&host, config, binding)?;
     tx.commit().await?;
