@@ -28,6 +28,11 @@ pub async fn selected_transaction(
     generation: i64,
 ) -> anyhow::Result<Transaction<'static, Postgres>> {
     let mut transaction = pool.begin().await?;
+    // Take the marker snapshot after the advisory wait, even when a hosted
+    // session defaults to REPEATABLE READ or SERIALIZABLE.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock_shared(1497843531, 1)")
         .execute(&mut *transaction)
         .await?;

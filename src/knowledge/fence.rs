@@ -180,6 +180,39 @@ impl<'a> FenceLease<'a> {
         );
         Ok(())
     }
+    /// After a global fence, only inspect the retained local fence. Missing
+    /// evidence must never be reconstructed from a supplied expected binding.
+    pub(crate) fn inspect(
+        &self,
+        generation: i64,
+        coordinator: CoordinatorBinding,
+        expected: &Binding,
+    ) -> Result<LocalFence> {
+        self.policy.verify_root_path(&self.path)?;
+        let bytes = self
+            .policy
+            .read_artifact(&format!("local-fence-{generation}.json"))?
+            .context("retained local rollback fence missing")?;
+        let intent: Intent = serde_json::from_str(&bytes)?;
+        let binding = intent.validate(self.config, generation)?;
+        ensure!(
+            intent.coordinator == Some(coordinator)
+                && intent.original == serde_json::to_string(expected)?
+                && self.policy.read_control(SELECTION_FILE)?.as_deref()
+                    == Some(intent.fenced.as_str()),
+            "retained local rollback fence differs"
+        );
+        Ok(LocalFence {
+            operation: intent.operation,
+            coordinator: intent.coordinator,
+            database_id: binding.mappings.database_id,
+            corpus_id: binding.mappings.corpus_id,
+            source_generation: generation,
+            policy: self.path.clone(),
+            original_sha256: digest(intent.original.as_bytes()),
+            fenced_sha256: digest(intent.fenced.as_bytes()),
+        })
+    }
     pub(crate) fn fence(
         &self,
         generation: i64,

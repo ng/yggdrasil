@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
-// Version 6 additionally requires registered rollback host fencing.
+// Version 7 additionally requires inspection after the global rollback fence.
 // Older hosts must fail before the coordinator fences SQL.
-const RPC_VERSION: u32 = 6;
+const RPC_VERSION: u32 = 7;
 mod rollback;
 pub use rollback::{AuthenticatedRollbackFence, call_rollback_fence};
 // Preserve the forward limit while reserving room for an escaped 1 MiB
@@ -640,7 +640,7 @@ mod tests {
     fn rejects_preparation_only_protocol_before_execution() {
         let request = request();
         let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
-        for version in [1, 2, 3, 4, 5] {
+        for version in [1, 2, 3, 4, 5, 6] {
             legacy["version"] = json!(version);
             assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
         }

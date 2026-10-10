@@ -1,11 +1,12 @@
 //! Fresh reverse-operation reservation for an activated fleet. Registration does
 //! not fence hosts, certify remote freshness, import rows, or activate SQL.
-use super::{Registration, plan::ValidatedPlan, transition};
+use super::{Registration, plan::ValidatedPlan, transition as forward_transition};
 use crate::knowledge::document::digest;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uuid::Uuid;
+mod transition;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,10 +108,10 @@ impl RollbackPlan {
     /// a reservation. The supplied commit remains a declaration until capture.
     pub async fn register(&self, pool: &sqlx::PgPool) -> Result<()> {
         let mut tx = Registration::transaction(pool).await?;
-        let activation = transition::saved_activation(&self.forward, &mut tx)
+        let activation = forward_transition::saved_activation(&self.forward, &mut tx)
             .await?
             .context("rollback requires committed fleet activation")?;
-        transition::verify_activation(&self.forward, &mut tx, &activation).await?;
+        forward_transition::verify_activation(&self.forward, &mut tx, &activation).await?;
         ensure!(
             activation.ready_sha256 == self.request.activation_sha256,
             "rollback activation digest differs from committed fleet"
@@ -205,35 +206,59 @@ impl RollbackPlan {
             knowledge_policy_dir: config.knowledge_policy_dir.clone(),
         };
         let local = crate::knowledge::fence::FenceLease::acquire(&config)?;
-        let mut tx = crate::knowledge::guard::selected_transaction(
-            pool,
-            self.forward.database_id,
-            self.forward.corpus_id,
-            self.request.source_generation,
-        )
-        .await?;
-        let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_fleet_rollbacks r JOIN public.knowledge_fleet_operations o ON o.operation_id=r.forward_operation_id JOIN public.knowledge_fleet_activations a ON a.operation_id=o.operation_id JOIN public.knowledge_forward_receipts f ON f.operation_id=o.operation_id WHERE r.operation_id=$1 AND r.forward_operation_id=$2 AND r.database_id=$3 AND r.source_generation=$4 AND r.request_sha256=$5 AND r.request_json=$6 AND o.request_sha256=$7 AND a.ready_sha256=$8 AND a.generation=$4 AND f.database_id=$3 AND f.corpus_id=$9 AND f.active_generation=$4 AND f.fenced_generation=$4-1 AND f.manifest_sha256=(a.ready_json::jsonb->'publication'->>'manifest_sha256'))")
-            .bind(self.operation()).bind(self.forward.operation).bind(self.forward.database_id)
-            .bind(self.request.source_generation).bind(&self.sha256).bind(&self.bytes)
-            .bind(&self.forward.request_sha256).bind(&self.request.activation_sha256).bind(self.forward.corpus_id)
-            .fetch_one(&mut *tx).await?;
-        ensure!(
-            matches,
-            "matching registered rollback and committed activation required"
-        );
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(1497843531,1)")
+            .execute(&mut *tx)
+            .await?;
+        self.registered_on(&mut tx).await?;
+        let saved = self.host_phase_on(&mut tx).await?;
         local.verify_shared(&forward.plan().shared)?;
-        let receipt = local.fence(
-            self.request.source_generation,
-            Some(crate::knowledge::fence::CoordinatorBinding {
-                migration_operation: self.operation(),
-                participant,
-            }),
-            Some(&expected),
-        )?;
+        let coordinator = crate::knowledge::fence::CoordinatorBinding {
+            migration_operation: self.operation(),
+            participant,
+        };
+        let receipt = if let Some(saved) = saved {
+            let actual = local.inspect(self.request.source_generation, coordinator, &expected)?;
+            let evidence: serde_json::Value = serde_json::from_str(&saved.hosts_json)?;
+            let actual_value = serde_json::to_value(&actual)?;
+            ensure!(
+                evidence["participants"]
+                    .as_array()
+                    .context("reverse fence census missing")?
+                    .iter()
+                    .any(|r| *r == actual_value),
+                "local rollback fence differs from committed host evidence"
+            );
+            actual
+        } else {
+            local.fence(
+                self.request.source_generation,
+                Some(coordinator),
+                Some(&expected),
+            )?
+        };
         local.verify_shared(&forward.plan().shared)?;
         tx.commit()
             .await
             .context("host rollback fence published; retry exact registered request")?;
         Ok(receipt)
+    }
+}
+
+impl RollbackPlan {
+    async fn registered_on(&self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+        let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_fleet_rollbacks r JOIN public.knowledge_fleet_operations o ON o.operation_id=r.forward_operation_id JOIN public.knowledge_fleet_activations a ON a.operation_id=o.operation_id JOIN public.knowledge_forward_receipts f ON f.operation_id=o.operation_id WHERE r.operation_id=$1 AND r.forward_operation_id=$2 AND r.database_id=$3 AND r.source_generation=$4 AND r.request_sha256=$5 AND r.request_json=$6 AND o.request_sha256=$7 AND a.ready_sha256=$8 AND a.generation=$4 AND f.database_id=$3 AND f.corpus_id=$9 AND f.active_generation=$4 AND f.fenced_generation=$4-1 AND f.manifest_sha256=(a.ready_json::jsonb->'publication'->>'manifest_sha256'))")
+            .bind(self.operation()).bind(self.forward.operation).bind(self.forward.database_id)
+            .bind(self.request.source_generation).bind(&self.sha256).bind(&self.bytes)
+            .bind(&self.forward.request_sha256).bind(&self.request.activation_sha256).bind(self.forward.corpus_id)
+            .fetch_one(&mut **tx).await?;
+        ensure!(
+            matches,
+            "matching registered rollback and committed activation required"
+        );
+        Ok(())
     }
 }

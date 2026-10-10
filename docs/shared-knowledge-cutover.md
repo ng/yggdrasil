@@ -547,7 +547,7 @@ and resumed abort with the remote offline. Current-state fleet rollback remains 
 
 ### Host readiness before activation
 
-`Journal::ready_hosts` obtains fresh publication-bound RPC v6 responses from every
+`Journal::ready_hosts` obtains fresh publication-bound RPC v7 responses from every
 participant and checks each against its sealed preparation. Older RPC versions
 are rejected before SQL fencing. Each host verifies its original backup, policy,
 and owned SQL fence, then stages the exact published Git snapshot beside its
@@ -601,7 +601,7 @@ qualify complete host activation or power loss between rename and directory sync
 
 
 Host readiness now captures `directory-swap.json` and binds its exact SHA-256 to
-both the authenticated RPC v6 response and the coordinator readiness seal. Retries
+both the authenticated RPC v7 response and the coordinator readiness seal. Retries
 recompute the expected directory identities and refuse changed or missing retained
 swap evidence. A new readiness receipt cannot be issued for an unsafe parent or a
 layout that has already moved. Older participant protocols fail before SQL fencing.
@@ -660,11 +660,11 @@ mount-boundary check's platform qualification; it does not establish immunity to
 all filesystem restrictions or power-loss behavior.
 
 
-`Journal::activate_hosts` obtains fresh RPC v6 readiness, rechecks the owned fence,
+`Journal::activate_hosts` obtains fresh RPC v7 readiness, rechecks the owned fence,
 source backup, export, and exact publication under the SQL generation lease, then
 seeds telemetry and commits the active marker and fleet receipt together. An
 uncertain commit resumes from the immutable SQL receipt; it never republishes the
-old snapshot or compares later shared writes to frozen export data. RPC v1–v5
+old snapshot or compares later shared writes to frozen export data. RPC v1–v6
 participants are refused before SQL fencing, and preparation rejects configured
 corpus aliases that could become unresolvable during directory recovery.
 
@@ -700,7 +700,7 @@ stored request digest in PostgreSQL.
 
 This reservation is not a host fence, remote freshness proof, current-data backup,
 reverse import, or SQL activation. OKF remains writable until the subsequent
-fencing workflow. Authenticated participant fencing is now available through RPC v6. It locks local
+fencing workflow. Authenticated participant fencing is now available through RPC v7. It locks local
 selection before acquiring the connected active-generation lease, requires the
 exact registered rollback and activation/telemetry receipts, and checks the complete
 selected binding and shared transport before writing a durable local fence. Retries
@@ -714,5 +714,31 @@ The two-host native fixture rejects an unregistered reverse operation, a changed
 agent mapping, and a changed shared branch before creating local fence evidence.
 It then fences each host through real SSH: host 1 stops writing while host 2 can
 still write, and SQL stays on the active OKF generation with legacy writes blocked.
-Whole-fleet reverse-fence sealing, SQL fencing, current shared snapshot capture,
-atomic reverse import/SQL activation, and host deselection remain unfinished.
+`Journal::fence_rollback_hosts` now recontacts every participant, retains each
+operation-bound fence, and seals the complete census before taking the SQL
+transition lease. A failed earlier host does not prevent later hosts from replying.
+It verifies the exact requested remote commit, drains selected SQL leases, audits
+compatible clients, and commits the reverse-fenced generation and immutable host
+evidence together. It does not import rows or activate SQL.
+
+A retry after commit requires that same SQL fence and freshly authenticated host
+inspection. Missing local fence intent or selection is rejected without recreation.
+The stored census and individual receipts must still match; a lost coordinator
+completion file can be reconstructed from the committed operation and live hosts.
+Post-commit checks read the retained Git cache without refreshing it, preserving
+recovery evidence even when the remote has advanced. Independent remote advances
+are never reset or silently adopted. RPC v7 requires
+this post-commit inspection capability before forward fencing.
+
+The native two-host test verifies partial transport failure, selected SQL lease
+drainage, incomplete-census refusal, atomic generation/receipt publication, lost
+completion recovery, missing-host-evidence refusal, immutable SQL receipts, and
+remote-advance refusal before and after the reverse fence. Current shared snapshot
+capture, atomic reverse import/SQL activation, host deselection, and cancellation
+of a reverse request whose expected remote changed remain unfinished.
+
+Selected-generation leases and rollback-host leases explicitly use `READ COMMITTED`.
+This prevents a session configured for repeatable reads from retaining a pre-wait
+marker snapshot after the transition lease is released. A native independent-
+connection test holds the owner lease, commits a fence while such a client waits,
+and verifies that the waiting client rejects the formerly active generation.

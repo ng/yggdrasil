@@ -2698,6 +2698,14 @@ async fn fleet_fence_fixture(finalize_steps: Option<usize>) {
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; two-host post-activation recovery"]
 async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
+    partial_fleet_finalization_fixture(false).await;
+}
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; complete reverse fence and resume"]
+async fn native_fleet_reverse_fence_resumes_without_recreating_host_evidence() {
+    partial_fleet_finalization_fixture(true).await;
+}
+async fn partial_fleet_finalization_fixture(complete_reverse: bool) {
     use ygg::knowledge::{
         document::digest,
         fleet::{journal::Journal, plan::ValidatedPlan},
@@ -2998,10 +3006,16 @@ async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
     let mut contender = request.clone();
     contender["operation"] = serde_json::json!(Uuid::new_v4());
     let contender = RollbackPlan::parse(forward, &contender.to_string()).unwrap();
+    let competing_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&first.env["DATABASE_URL"])
+        .await
+        .unwrap();
     let (a, b) = tokio::join!(
         reverse.register(&first.pool),
-        contender.register(&first.pool)
+        contender.register(&competing_pool)
     );
+    competing_pool.close().await;
     assert_ne!(
         a.is_ok(),
         b.is_ok(),
@@ -3080,20 +3094,22 @@ async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
         Some("42501")
     );
     tx.rollback().await.unwrap();
-    // Reserving a reverse operation is not a storage transition or write fence.
-    success(
-        second
-            .command()
-            .args([
-                "remember",
-                "reservation alone does not fence",
-                "--global",
-                "--json",
-            ])
-            .output()
-            .await
-            .unwrap(),
-    );
+    if !complete_reverse {
+        // Reserving a reverse operation is not a storage transition or write fence.
+        success(
+            second
+                .command()
+                .args([
+                    "remember",
+                    "reservation alone does not fence",
+                    "--global",
+                    "--json",
+                ])
+                .output()
+                .await
+                .unwrap(),
+        );
+    }
     use ygg::knowledge::fleet::protocol::call_rollback_fence;
     let loser = if a.is_ok() { &contender } else { &reverse };
     assert!(
@@ -3162,20 +3178,22 @@ async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
             .status
             .success()
     );
-    // A local fence does not assert other hosts or SQL have been fenced.
-    success(
-        second
-            .command()
-            .args([
-                "remember",
-                "other host still selected",
-                "--global",
-                "--json",
-            ])
-            .output()
-            .await
-            .unwrap(),
-    );
+    if !complete_reverse {
+        // A local fence does not assert other hosts or SQL have been fenced.
+        success(
+            second
+                .command()
+                .args([
+                    "remember",
+                    "other host still selected",
+                    "--global",
+                    "--json",
+                ])
+                .output()
+                .await
+                .unwrap(),
+        );
+    }
     call_rollback_fence(&journal, winner, participants[1], Some(&ssh2.identity))
         .await
         .unwrap();
@@ -3196,5 +3214,276 @@ async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
             .await
             .is_err()
     );
+    if !complete_reverse {
+        let rejected = journal
+            .fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap_err();
+        assert!(format!("{rejected:#}").contains("remote changed from rollback request"));
+        assert_eq!(first.marker().await, (3, "okf".into()));
+        first.pool.close().await;
+        return;
+    }
+    sqlx::query("SET default_transaction_isolation='repeatable read'")
+        .execute(&first.pool)
+        .await
+        .unwrap();
+    winner
+        .fence_host(
+            journal.plan().unwrap(),
+            &config,
+            participants[0],
+            &first.pool,
+        )
+        .await
+        .unwrap();
+    sqlx::query("SET default_transaction_isolation='read committed'")
+        .execute(&first.pool)
+        .await
+        .unwrap();
+    // The SQL receipt rejects an incomplete census even under migration-owner
+    // authority; the failed transaction rolls back its temporary marker change.
+    let mut tx = first.pool.begin().await.unwrap();
+    sqlx::query("UPDATE knowledge_storage SET generation=4,backend='fenced' WHERE singleton")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let incomplete =
+        serde_json::json!({"version":1,"rollback_sha256":winner.sha256(),"participants":[]})
+            .to_string();
+    assert!(sqlx::query("INSERT INTO knowledge_fleet_rollback_fences(operation_id,generation,hosts_sha256,hosts_json,remote_commit) VALUES($1,4,$2,$3,$4)")
+        .bind(winner.operation()).bind(digest(incomplete.as_bytes())).bind(&incomplete).bind(winner.expected_remote_commit()).execute(&mut *tx).await.is_err());
+    tx.rollback().await.unwrap();
+    let authorized = std::fs::read(ssh1.identity.with_extension("pub")).unwrap();
+    std::fs::write(ssh1.identity.with_extension("pub"), b"").unwrap();
+    assert!(
+        journal
+            .fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(first.marker().await, (3, "okf".into()));
+    let prefix = format!("rollback-{}", winner.operation());
+    assert!(
+        first
+            .journal
+            .join(format!("{prefix}-host-{}.json", participants[1]))
+            .exists()
+    );
+    assert!(!first.journal.join(format!("{prefix}-hosts.json")).exists());
+    std::fs::write(ssh1.identity.with_extension("pub"), authorized).unwrap();
+    use sqlx::Connection;
+    let mut lease_connection = sqlx::PgConnection::connect_with(&first.pool.connect_options())
+        .await
+        .unwrap();
+    let mut observer = sqlx::PgConnection::connect_with(&first.pool.connect_options())
+        .await
+        .unwrap();
+    clients::register(&mut lease_connection).await.unwrap();
+    clients::register(&mut observer).await.unwrap();
+    let mut held = lease_connection.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(1497843531,1)")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let fenced = {
+        let pending = journal.fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity));
+        tokio::pin!(pending);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            tokio::select! {
+                result = &mut pending => panic!("reverse fence finished before selected SQL lease drained: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1497843531 AND objid=1 AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))")
+                .fetch_one(&mut observer).await.unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reverse coordinator did not reach generation lease"
+            );
+        }
+        held.commit().await.unwrap();
+        pending.await.unwrap()
+    };
+    lease_connection.close().await.unwrap();
+    observer.close().await.unwrap();
+    assert_eq!(fenced.generation, 4);
+    assert_eq!(fenced.remote_commit, winner.expected_remote_commit());
+    assert_eq!(first.marker().await, (4, "fenced".into()));
+    let stored: (String, String) = sqlx::query_as(
+        "SELECT hosts_sha256,hosts_json FROM knowledge_fleet_rollback_fences WHERE operation_id=$1",
+    )
+    .bind(winner.operation())
+    .fetch_one(&first.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, digest(stored.1.as_bytes()));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stored.1).unwrap()["participants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    std::fs::remove_file(first.journal.join(format!("{prefix}-fenced.json"))).unwrap();
+    drop(journal);
+    let journal = Journal::resume(&first.journal, &hash).unwrap();
+    assert_eq!(
+        journal
+            .fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap(),
+        fenced
+    );
+    // Global commit may not recreate a lost local intent or selection.
+    for path in [&local_intent, &runtime] {
+        let retained = std::fs::read(path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            journal
+                .fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        assert!(!path.exists());
+        assert_eq!(first.marker().await, (4, "fenced".into()));
+        std::fs::write(path, retained).unwrap();
+    }
+    assert_eq!(
+        journal
+            .fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+            .await
+            .unwrap(),
+        fenced
+    );
+    for mutation in [
+        "UPDATE knowledge_fleet_rollback_fences SET hosts_json=hosts_json",
+        "DELETE FROM knowledge_fleet_rollback_fences",
+        "TRUNCATE knowledge_fleet_rollback_fences",
+    ] {
+        assert!(sqlx::query(mutation).execute(&first.pool).await.is_err());
+    }
+    assert!(
+        sqlx::query("UPDATE memories SET text='still fenced'")
+            .execute(&first.pool)
+            .await
+            .is_err()
+    );
+    // Independent remote changes cannot be reset or adopted on a later retry.
+    git(
+        &seed,
+        &["fetch", remote.to_str().unwrap(), "refs/heads/knowledge"],
+    );
+    git(&seed, &["reset", "--hard", "FETCH_HEAD"]);
+    std::fs::write(seed.join("README.txt"), "independent after reverse fence").unwrap();
+    git(&seed, &["add", "README.txt"]);
+    git(&seed, &["commit", "-m", "independent metadata"]);
+    git(
+        &seed,
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/knowledge",
+        ],
+    );
+    let advanced = git(&seed, &["rev-parse", "HEAD"]);
+    assert!(
+        journal
+            .fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/knowledge"]),
+        advanced
+    );
+    assert_eq!(first.marker().await, (4, "fenced".into()));
+    let cache = ygg::knowledge::shared::SharedGit::open(
+        &first.journal.join(format!("{prefix}-cache")),
+        journal.plan().unwrap().plan().shared.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        cache.cached().unwrap().commit,
+        winner.expected_remote_commit(),
+        "failed remote validation must not rewrite the committed recovery cache"
+    );
     first.pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN; selected guard freshness after advisory wait"]
+async fn native_selected_guard_observes_commit_with_repeatable_read_default() {
+    use sqlx::Connection;
+    let server = Server::new();
+    let f = Fixture::new(&server).await;
+    // Isolate the guard contract: an owner publishes a synthetic OKF marker,
+    // then fences it while a default-REPEATABLE-READ client waits on the lease.
+    sqlx::query(
+        "UPDATE knowledge_storage SET backend='fenced',generation=2,corpus_id=$1 WHERE singleton",
+    )
+    .bind(f.plan.mappings.corpus_id)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE knowledge_storage SET backend='okf',generation=3 WHERE singleton")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("SET default_transaction_isolation='repeatable read'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let mut owner = sqlx::PgConnection::connect_with(&f.pool.connect_options())
+        .await
+        .unwrap();
+    let mut observer = sqlx::PgConnection::connect_with(&f.pool.connect_options())
+        .await
+        .unwrap();
+    let mut change = owner.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(1497843531,1)")
+        .execute(&mut *change)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE knowledge_storage SET backend='fenced',generation=4 WHERE singleton")
+        .execute(&mut *change)
+        .await
+        .unwrap();
+    {
+        let selected = ygg::knowledge::guard::selected_transaction(
+            &f.pool,
+            f.plan.mappings.database_id,
+            f.plan.mappings.corpus_id,
+            3,
+        );
+        tokio::pin!(selected);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            tokio::select! {
+                result = &mut selected => panic!("selected guard completed while owner held the transition lease: {}", result.is_ok()),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1497843531 AND objid=1 AND mode='ShareLock' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))")
+                .fetch_one(&mut observer).await.unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "selected guard did not reach lease"
+            );
+        }
+        change.commit().await.unwrap();
+        assert!(
+            selected.await.is_err(),
+            "guard accepted a pre-wait storage snapshot after the fence committed"
+        );
+    }
+    assert_eq!(f.marker().await, (4, "fenced".into()));
+    owner.close().await.unwrap();
+    observer.close().await.unwrap();
+    f.pool.close().await;
 }
