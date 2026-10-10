@@ -23,6 +23,7 @@ on:
       - 'tests/okf_disk_full.rs'
       - 'src/knowledge/**'
       - 'src/cli/knowledge_cmd.rs'
+      - 'src/cli/knowledge_cmd/**'
 
 permissions:
   contents: read
