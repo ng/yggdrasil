@@ -116,3 +116,33 @@ writes. Partial host availability blocks rollback rather than losing offline edi
 These tests establish protocol behavior on controlled participants. Deployment
 census, external access controls, final release artifacts and 14-day dogfooding
 remain separate evidence requirements from the original plan.
+
+## Implemented transport primitive
+
+`SharedGit::replace_snapshot(expected_commit, desired)` now provides conditional
+whole-tree publication for a future coordinator. It retains the 20,000-file and
+64 MiB snapshot limits, rejects duplicate document UUIDs, and produces one commit.
+It compares the entire expected remote commit, not just affected file digests. A
+trusted operation-local pre-push hook also requires Git's advertised old object ID
+to match; receive-pack then checks that advertised ID atomically. This prevents a
+remote rewind between fetch and push from accepting a stale snapshot. The push
+never uses force, and remote/corpus-provided hooks remain disabled.
+Pending intent records this strict-base mode; inspection exposes `exact_base`,
+confirmation recovers a remotely reachable commit, and retry refuses a changed
+remote base. Explicit discard retains the local draft. Ordinary `change` retains
+its 32-path limit and disjoint-edit retry behavior. Identical snapshots return the
+confirmed base without an extra commit.
+
+Real bare-Git tests cover 64-file atomic publication, stale-base rejection,
+independent remote edits during push, uncertain-publication reopening and limits.
+This primitive does not validate an export manifest or authorize migration. Host
+preparation, authenticated evidence exchange, database activation and coordinated
+rollback above are still unimplemented; shared/fleet execution remains rejected.
+
+Validation: the initial bulk implementation passed the full serial suite against a
+fresh disposable PostgreSQL database (**594 passed, 29 opt-in ignored, 93 result
+groups**). Review then added the advertised-OID rewind guard and its regression;
+all **13 shared-transport tests** passed on that correction (one subprocess helper
+ignored). Current-source `cargo check --all-targets`, `cargo clippy --all-targets`,
+`cargo fmt --check` and `git diff --check` passed. The full-suite result predates
+the rewind guard and is not represented as an exact-final-source full-suite run.

@@ -41,6 +41,8 @@ struct State {
 struct Pending {
     commit: String,
     base: String,
+    #[serde(default)]
+    exact_base: bool,
 }
 
 pub struct Snapshot {
@@ -74,6 +76,7 @@ pub struct RecoverySnapshot {
 pub struct PendingInfo {
     pub commit: String,
     pub base: String,
+    pub exact_base: bool,
     pub changes: Vec<PendingChange>,
 }
 #[derive(Serialize)]
@@ -126,6 +129,38 @@ impl Temporary {
 impl Drop for Temporary {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+// A trusted, operation-local pre-push hook checks Git's advertised old OID.
+// receive-pack then compares that same OID atomically when applying the update.
+// This prevents remote rewinds from turning a stale import into a fast-forward,
+// without permitting force-push or executing hooks from the corpus/config.
+struct PushGuard(PathBuf);
+impl PushGuard {
+    fn new(root: &Path, expected: &str) -> Result<Self> {
+        oid(expected.as_bytes())?;
+        let path = root.join(format!(".push-guard-{}", Uuid::new_v4()));
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        let guard = Self(path);
+        let mut hook = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(guard.0.join("pre-push"))?;
+        // expected has been restricted to a full hexadecimal object ID.
+        writeln!(
+            hook,
+            "#!/bin/sh\ncount=0\nwhile read -r local_ref local_oid remote_ref remote_oid; do\n  [ \"$remote_oid\" = \"{expected}\" ] || exit 1\n  count=$((count + 1))\ndone\n[ \"$count\" -eq 1 ]"
+        )?;
+        hook.sync_all()?;
+        Ok(guard)
+    }
+}
+impl Drop for PushGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0.join("pre-push"));
+        let _ = std::fs::remove_dir(&self.0);
     }
 }
 struct Process(std::process::Child, bool);
@@ -278,6 +313,22 @@ impl SharedGit {
         Ok(())
     }
     fn run(&self, args: &[&str], input: &[u8], index: Option<&Path>) -> Result<Output> {
+        self.run_with_expected(args, input, index, None)
+    }
+    fn run_with_expected(
+        &self,
+        args: &[&str],
+        input: &[u8],
+        index: Option<&Path>,
+        expected: Option<&str>,
+    ) -> Result<Output> {
+        ensure!(
+            expected.is_none() || args.first() == Some(&"push"),
+            "push guard requires push"
+        );
+        let guard = expected
+            .map(|expected| PushGuard::new(&self.root, expected))
+            .transpose()?;
         ensure!(input.len() as u64 <= MAX_BYTES, "Git input exceeds limit");
         let mut stdin = Temporary::new(&self.root)?;
         stdin.file.write_all(input)?;
@@ -331,11 +382,16 @@ impl SharedGit {
                 "--git-dir={}",
                 self.root.join("objects.git").display()
             ))
-            .args(args)
             .stdin(Stdio::from(stdin.file.try_clone()?))
             .stdout(Stdio::from(stdout.file.try_clone()?))
             .stderr(Stdio::null())
             .process_group(0);
+        if let Some(guard) = &guard {
+            command
+                .arg("-c")
+                .arg(format!("core.hooksPath={}", guard.0.display()));
+        }
+        command.args(args);
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);
         }
@@ -638,7 +694,10 @@ impl SharedGit {
                 replacement: after.get(p).cloned(),
             })
             .collect();
-        ensure!(changes.len() <= 32, "pending change batch exceeds limit");
+        ensure!(
+            changes.len() <= if pending.exact_base { 40_000 } else { 32 },
+            "pending change batch exceeds limit"
+        );
         Ok(changes)
     }
     /// Inspect local intent even when the remote or disposable read cache fails.
@@ -659,6 +718,7 @@ impl SharedGit {
         Ok(Some(PendingInfo {
             commit: pending.commit,
             base: pending.base,
+            exact_base: pending.exact_base,
             changes,
         }))
     }
@@ -691,7 +751,11 @@ impl SharedGit {
         }
         match action {
             RecoveryAction::Retry => {
-                let receipt = self.change_locked(&changes, &mut |_| Ok(()))?;
+                let receipt = self.change_locked(
+                    &changes,
+                    pending.exact_base.then_some(pending.base.as_str()),
+                    &mut |_| Ok(()),
+                )?;
                 Ok(Recovery {
                     commit: receipt.commit,
                     outcome: RecoveryOutcome::Published,
@@ -712,6 +776,81 @@ impl SharedGit {
                 })
             }
         }
+    }
+
+    /// Publish one complete snapshot against an exact remote commit. This is a
+    /// transport primitive for coordinated imports, not migration authorization.
+    /// Callers must validate document semantics and retain the source manifest.
+    /// Recovery never rebases this whole-tree intent onto another remote state.
+    pub fn replace_snapshot(
+        &self,
+        expected_commit: &str,
+        desired: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<Receipt> {
+        self.replace_snapshot_at(expected_commit, desired, &mut |_| Ok(()))
+    }
+    fn replace_snapshot_at(
+        &self,
+        expected_commit: &str,
+        desired: &BTreeMap<String, Vec<u8>>,
+        prepared: &mut impl FnMut(&str) -> Result<()>,
+    ) -> Result<Receipt> {
+        ensure!(
+            oid(expected_commit.as_bytes())? == expected_commit,
+            "full base commit ID required"
+        );
+        ensure!(
+            desired.len() <= 20_000,
+            "shared snapshot exceeds file limit"
+        );
+        let mut bytes = 0u64;
+        let mut ids = BTreeSet::new();
+        for (name, contents) in desired {
+            path(name)?;
+            // Include the batch object's header/newline overhead in the same
+            // output budget used when reading the resulting committed snapshot.
+            bytes = bytes
+                .checked_add(contents.len() as u64 + 128)
+                .ok_or_else(|| anyhow!("shared snapshot exceeds byte limit"))?;
+            ensure!(bytes <= MAX_BYTES, "shared snapshot exceeds byte limit");
+            if let Some(id) = name
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.strip_suffix(".md"))
+                .and_then(|s| Uuid::parse_str(s).ok())
+            {
+                ensure!(
+                    ids.insert(id),
+                    "shared snapshot has duplicate document UUID"
+                );
+            }
+        }
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        ensure!(
+            self.pending()?.is_none(),
+            "prior shared publication is uncertain; recover it first"
+        );
+        let base = self.fetch()?;
+        ensure!(
+            base == expected_commit,
+            "shared snapshot base changed; reload before publication"
+        );
+        let current = self.files(&base)?;
+        if current == *desired {
+            self.publish_cache(base.clone(), Utc::now())?;
+            return Ok(Receipt { commit: base });
+        }
+        let paths: BTreeSet<_> = current.keys().chain(desired.keys()).collect();
+        let changes: Vec<_> = paths
+            .into_iter()
+            .filter(|name| current.get(*name) != desired.get(*name))
+            .map(|name| Change {
+                path: name.clone(),
+                expected: current.get(name).map(|bytes| digest(bytes)),
+                replacement: desired.get(name).cloned(),
+            })
+            .collect();
+        self.change_locked(&changes, Some(expected_commit), prepared)
     }
 
     pub fn change(&self, changes: &[Change]) -> Result<Receipt> {
@@ -743,17 +882,25 @@ impl SharedGit {
             self.pending()?.is_none(),
             "prior shared publication is uncertain; confirm it before another write"
         );
-        self.change_locked(changes, prepared)
+        self.change_locked(changes, None, prepared)
     }
     fn change_locked(
         &self,
         changes: &[Change],
+        exact_base: Option<&str>,
         prepared: &mut impl FnMut(&str) -> Result<()>,
     ) -> Result<Receipt> {
         for _ in 0..3 {
             let base = self.fetch()?;
+            ensure!(
+                exact_base.is_none_or(|expected| expected == base),
+                "shared snapshot base changed; bulk publication cannot rebase"
+            );
             let files = self.files(&base)?;
-            for change in changes.iter().filter(|c| c.replacement.is_some()) {
+            for change in changes
+                .iter()
+                .filter(|c| exact_base.is_none() && c.replacement.is_some())
+            {
                 let id = change
                     .path
                     .rsplit('/')
@@ -821,12 +968,13 @@ impl SharedGit {
             let pending = Pending {
                 commit: commit.clone(),
                 base,
+                exact_base: exact_base.is_some(),
             };
             self.control.update_control("pending.json", |_| {
                 Ok((serde_json::to_string(&Some(&pending))?, ()))
             })?;
             prepared(&commit)?;
-            let pushed = self.run(
+            let pushed = self.run_with_expected(
                 &[
                     "push",
                     "--porcelain",
@@ -836,6 +984,7 @@ impl SharedGit {
                 ],
                 &[],
                 None,
+                exact_base,
             );
             // Always check reachability, including after a lost push response.
             let remote = self
@@ -923,6 +1072,178 @@ mod tests {
             replacement: Some(text.to_vec()),
         }
     }
+    fn bulk_files() -> BTreeMap<String, Vec<u8>> {
+        (0..64)
+            .map(|n| (format!("note-{n}.md"), format!("body {n}\n").into_bytes()))
+            .collect()
+    }
+    #[test]
+    fn bulk_snapshot_rejects_ambiguous_ids_and_excess_files_before_publication() {
+        let (temp, config) = fixture();
+        let transport = SharedGit::open(&temp.path().join("bulk"), config.clone()).unwrap();
+        let before = transport.refresh().unwrap();
+        let id = Uuid::new_v4();
+        let ambiguous = BTreeMap::from([
+            (format!("global/notes/{id}.md"), b"one".to_vec()),
+            (format!("global/learnings/{id}.md"), b"two".to_vec()),
+        ]);
+        assert!(
+            transport
+                .replace_snapshot(&before.commit, &ambiguous)
+                .is_err()
+        );
+        let excess = (0..20_001)
+            .map(|n| (format!("note-{n}.md"), Vec::new()))
+            .collect();
+        assert!(transport.replace_snapshot(&before.commit, &excess).is_err());
+        assert!(transport.pending_info().unwrap().is_none());
+        assert_eq!(transport.refresh().unwrap().commit, before.commit);
+    }
+    #[test]
+    fn bulk_snapshot_is_one_commit_and_does_not_relax_ordinary_changes() {
+        let (temp, config) = fixture();
+        let transport = SharedGit::open(&temp.path().join("bulk"), config.clone()).unwrap();
+        let before = transport.refresh().unwrap();
+        let desired = bulk_files();
+        let ordinary: Vec<_> = desired
+            .iter()
+            .map(|(path, bytes)| Change {
+                path: path.clone(),
+                expected: None,
+                replacement: Some(bytes.clone()),
+            })
+            .collect();
+        assert!(transport.change(&ordinary).is_err());
+        let receipt = transport
+            .replace_snapshot(&before.commit, &desired)
+            .unwrap();
+        assert_eq!(transport.refresh().unwrap().files, desired);
+        assert_eq!(
+            git(
+                Path::new(&config.remote),
+                &["rev-list", "--count", "knowledge"]
+            ),
+            "2"
+        );
+        assert!(
+            transport
+                .replace_snapshot(&before.commit, &desired)
+                .is_err()
+        );
+        assert_eq!(
+            transport
+                .replace_snapshot(&receipt.commit, &desired)
+                .unwrap()
+                .commit,
+            receipt.commit
+        );
+        assert_eq!(
+            git(
+                Path::new(&config.remote),
+                &["rev-list", "--count", "knowledge"]
+            ),
+            "2"
+        );
+    }
+    #[test]
+    fn rejected_bulk_snapshot_never_rebases_over_an_independent_remote_edit() {
+        let (temp, config) = fixture();
+        let transport = SharedGit::open(&temp.path().join("bulk"), config.clone()).unwrap();
+        let other = SharedGit::open(&temp.path().join("other"), config.clone()).unwrap();
+        let before = transport.refresh().unwrap();
+        let result = transport.replace_snapshot_at(&before.commit, &bulk_files(), &mut |_| {
+            other.change(&[Change {
+                path: "independent.md".into(),
+                expected: None,
+                replacement: Some(b"keep this\n".to_vec()),
+            }])?;
+            Ok(())
+        });
+        assert!(result.is_err());
+        let pending = transport.pending_info().unwrap().unwrap();
+        assert_eq!(pending.changes.len(), 65);
+        assert!(pending.exact_base);
+        assert!(
+            transport
+                .recover(&pending.commit, RecoveryAction::Retry)
+                .is_err()
+        );
+        let snapshot = other.refresh().unwrap();
+        assert_eq!(snapshot.files.len(), 2);
+        assert_eq!(snapshot.files["independent.md"], b"keep this\n");
+        assert_eq!(
+            git(
+                Path::new(&config.remote),
+                &["rev-list", "--count", "knowledge"]
+            ),
+            "2"
+        );
+        transport
+            .recover(&pending.commit, RecoveryAction::Discard)
+            .unwrap();
+        assert!(transport.pending_info().unwrap().is_none());
+    }
+    #[test]
+    fn bulk_snapshot_cannot_overwrite_a_remote_rewind_after_preparation() {
+        let (temp, config) = fixture();
+        let transport = SharedGit::open(&temp.path().join("bulk"), config.clone()).unwrap();
+        let initial = transport.refresh().unwrap();
+        transport
+            .change(&[edit(b"new base\n", b"original\n")])
+            .unwrap();
+        let before = transport.refresh().unwrap();
+        let remote = Path::new(&config.remote);
+        assert!(
+            transport
+                .replace_snapshot_at(&before.commit, &bulk_files(), &mut |_| {
+                    git(
+                        remote,
+                        &["update-ref", "refs/heads/knowledge", &initial.commit],
+                    );
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(git(remote, &["rev-parse", "knowledge"]), initial.commit);
+        assert!(transport.pending_info().unwrap().unwrap().exact_base);
+    }
+    #[test]
+    fn uncertain_bulk_publication_reopens_and_confirms_without_repeating() {
+        let (temp, config) = fixture();
+        let root = temp.path().join("bulk");
+        let transport = SharedGit::open(&root, config.clone()).unwrap();
+        let before = transport.refresh().unwrap();
+        let remote = PathBuf::from(&config.remote);
+        let hidden = temp.path().join("offline.git");
+        assert!(
+            transport
+                .replace_snapshot_at(&before.commit, &bulk_files(), &mut |commit| {
+                    transport.checked(
+                        &[
+                            "push",
+                            &config.remote,
+                            &format!("{commit}:refs/heads/knowledge"),
+                        ],
+                        &[],
+                        None,
+                    )?;
+                    std::fs::rename(&remote, &hidden)?;
+                    Ok(())
+                })
+                .is_err()
+        );
+        let pending = transport.pending_info().unwrap().unwrap();
+        drop(transport);
+        std::fs::rename(&hidden, &remote).unwrap();
+        let reopened = SharedGit::open(&root, config).unwrap();
+        assert_eq!(
+            reopened.confirm_pending().unwrap().unwrap().commit,
+            pending.commit
+        );
+        assert_eq!(reopened.refresh().unwrap().files, bulk_files());
+        assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "2");
+    }
+
     #[test]
     fn recovery_pins_confirmed_objects_and_rejects_remote_changes_outage_and_drafts() {
         let (temp, config) = fixture();
@@ -1013,6 +1334,7 @@ mod tests {
             .update_control("pending.json", |_| {
                 Ok((
                     serde_json::to_string(&Pending {
+                        exact_base: false,
                         commit: now.clone(),
                         base: now.clone(),
                     })?,
