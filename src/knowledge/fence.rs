@@ -51,7 +51,8 @@ struct Intent {
     fenced: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalFence {
     pub operation: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,74 +144,126 @@ fn local_bound(
     generation: i64,
     coordinator: Option<CoordinatorBinding>,
 ) -> Result<LocalFence> {
-    if let Some(binding) = coordinator {
-        binding.validate()?;
+    FenceLease::acquire(config)?.fence(generation, coordinator, None)
+}
+
+/// Keeps local selection drained while a caller validates connected authority.
+/// Always acquire this before taking a SQL generation lease.
+pub(crate) struct FenceLease<'a> {
+    config: &'a KnowledgeConfig,
+    policy: KnowledgeStore,
+    path: PathBuf,
+    _selection: std::fs::File,
+}
+impl<'a> FenceLease<'a> {
+    pub(crate) fn acquire(config: &'a KnowledgeConfig) -> Result<Self> {
+        let policy = KnowledgeStore::open(&config.knowledge_policy_dir, false)?;
+        let path = config.knowledge_policy_dir.canonicalize()?;
+        policy.verify_root_path(&path)?;
+        let selection = policy.selection_lease(true)?;
+        Ok(Self {
+            config,
+            policy,
+            path,
+            _selection: selection,
+        })
     }
-    ensure!(generation > 0, "positive expected generation required");
-    let policy = KnowledgeStore::open(&config.knowledge_policy_dir, false)?;
-    let path = config.knowledge_policy_dir.canonicalize()?;
-    policy.verify_root_path(&path)?;
-    let _selection = policy.selection_lease(true)?;
-    let name = format!("local-fence-{generation}.json");
-    let intent = if let Some(saved) = policy.read_artifact(&name)? {
-        let intent: Intent = serde_json::from_str(&saved)?;
-        intent.validate(config, generation)?;
+    pub(crate) fn verify_shared(&self, expected: &super::shared::Config) -> Result<()> {
+        self.policy.verify_root_path(&self.path)?;
+        let bytes = self
+            .policy
+            .read_control("shared.json")?
+            .context("shared transport missing before rollback fence")?;
         ensure!(
-            intent.coordinator == coordinator,
-            "local fence belongs to another migration operation or participant"
+            serde_json::from_str::<serde_json::Value>(&bytes)? == serde_json::to_value(expected)?,
+            "shared transport differs from rollback fleet"
         );
-        intent
-    } else {
-        let original = policy
-            .read_control(SELECTION_FILE)?
-            .context("no selected OKF corpus to fence")?;
-        let mut binding: Binding = serde_json::from_str(&original)?;
-        let bundle_identity = identity(&binding.bundle)?;
-        binding.phase = Phase::Fenced;
-        let intent = Intent {
-            version: if coordinator.is_some() { 2 } else { 1 },
-            operation: Uuid::new_v4(),
-            coordinator,
-            policy: path.clone(),
-            policy_identity: identity(&path)?,
-            bundle_identity,
-            original,
-            fenced: serde_json::to_string(&binding)?,
+        Ok(())
+    }
+    pub(crate) fn fence(
+        &self,
+        generation: i64,
+        coordinator: Option<CoordinatorBinding>,
+        expected: Option<&Binding>,
+    ) -> Result<LocalFence> {
+        if let Some(binding) = coordinator {
+            binding.validate()?;
+        }
+        ensure!(generation > 0, "positive expected generation required");
+        let config = self.config;
+        let policy = &self.policy;
+        let path = self.path.clone();
+        let expected = expected.map(serde_json::to_string).transpose()?;
+        let name = format!("local-fence-{generation}.json");
+        let intent = if let Some(saved) = policy.read_artifact(&name)? {
+            let intent: Intent = serde_json::from_str(&saved)?;
+            intent.validate(config, generation)?;
+            ensure!(
+                intent.coordinator == coordinator,
+                "local fence belongs to another migration operation or participant"
+            );
+            ensure!(
+                expected.as_ref().is_none_or(|e| e == &intent.original),
+                "local fence original differs from expected fleet binding"
+            );
+            intent
+        } else {
+            let original = policy
+                .read_control(SELECTION_FILE)?
+                .context("no selected OKF corpus to fence")?;
+            ensure!(
+                expected.as_ref().is_none_or(|e| e == &original),
+                "selected binding differs from expected fleet binding"
+            );
+            let mut binding: Binding = serde_json::from_str(&original)?;
+            let bundle_identity = identity(&binding.bundle)?;
+            binding.phase = Phase::Fenced;
+            let intent = Intent {
+                version: if coordinator.is_some() { 2 } else { 1 },
+                operation: Uuid::new_v4(),
+                coordinator,
+                policy: path.clone(),
+                policy_identity: identity(&path)?,
+                bundle_identity,
+                original,
+                fenced: serde_json::to_string(&binding)?,
+            };
+            intent.validate(config, generation)?;
+            // Saved and fsynced before selection publication. An interrupted command
+            // reuses this operation instead of inferring success from current phase.
+            policy.retain_artifact(&name, &serde_json::to_string(&intent)?, false)?;
+            intent
         };
-        intent.validate(config, generation)?;
-        // Saved and fsynced before selection publication. An interrupted command
-        // reuses this operation instead of inferring success from current phase.
-        policy.retain_artifact(&name, &serde_json::to_string(&intent)?, false)?;
-        intent
-    };
-    let binding = intent.validate(config, generation)?;
-    policy.verify_root_path(&path)?;
-    let saved = serde_json::to_string(&intent)?;
-    ensure!(
-        policy.read_artifact(&name)?.as_deref() == Some(&saved),
-        "local fence journal changed"
-    );
-    policy.update_control(SELECTION_FILE, |current| {
+        let binding = intent.validate(config, generation)?;
+        policy.verify_root_path(&path)?;
+        let saved = serde_json::to_string(&intent)?;
         ensure!(
-            current == Some(intent.original.as_str()) || current == Some(intent.fenced.as_str()),
-            "selection differs from retained local fence; preserve evidence and inspect"
+            policy.read_artifact(&name)?.as_deref() == Some(&saved),
+            "local fence journal changed"
         );
-        Ok((intent.fenced.clone(), ()))
-    })?;
-    policy.verify_root_path(&path)?;
-    intent.validate(config, generation)?;
-    ensure!(
-        policy.read_artifact(&name)?.as_deref() == Some(&saved),
-        "local fence journal changed after publication; inspect retained evidence"
-    );
-    Ok(LocalFence {
-        operation: intent.operation,
-        coordinator: intent.coordinator,
-        database_id: binding.mappings.database_id,
-        corpus_id: binding.mappings.corpus_id,
-        source_generation: generation,
-        policy: path,
-        original_sha256: digest(intent.original.as_bytes()),
-        fenced_sha256: digest(intent.fenced.as_bytes()),
-    })
+        policy.update_control(SELECTION_FILE, |current| {
+            ensure!(
+                current == Some(intent.original.as_str())
+                    || current == Some(intent.fenced.as_str()),
+                "selection differs from retained local fence; preserve evidence and inspect"
+            );
+            Ok((intent.fenced.clone(), ()))
+        })?;
+        policy.verify_root_path(&path)?;
+        intent.validate(config, generation)?;
+        ensure!(
+            policy.read_artifact(&name)?.as_deref() == Some(&saved),
+            "local fence journal changed after publication; inspect retained evidence"
+        );
+        Ok(LocalFence {
+            operation: intent.operation,
+            coordinator: intent.coordinator,
+            database_id: binding.mappings.database_id,
+            corpus_id: binding.mappings.corpus_id,
+            source_generation: generation,
+            policy: path,
+            original_sha256: digest(intent.original.as_bytes()),
+            fenced_sha256: digest(intent.fenced.as_bytes()),
+        })
+    }
 }

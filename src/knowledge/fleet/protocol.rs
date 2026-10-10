@@ -7,10 +7,15 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
-// Version 5 additionally requires committed-activation host finalization.
+// Version 6 additionally requires registered rollback host fencing.
 // Older hosts must fail before the coordinator fences SQL.
-const RPC_VERSION: u32 = 5;
-const MAX_REQUEST: usize = 8 * 1024 * 1024;
+const RPC_VERSION: u32 = 6;
+mod rollback;
+pub use rollback::{AuthenticatedRollbackFence, call_rollback_fence};
+// Preserve the forward limit while reserving room for an escaped 1 MiB
+// reverse request, so a previously accepted fleet remains addressable.
+pub const MAX_REQUEST: usize = 11 * 1024 * 1024;
+const MAX_FORWARD_REQUEST: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +26,7 @@ pub enum Action {
     AbortSql,
     ReadySql,
     FinalizeSql,
+    FenceOkf,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +43,8 @@ struct Envelope {
     publication: Option<super::journal::Publication>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_request: Option<String>,
 }
 pub struct Request {
     envelope: Envelope,
@@ -127,15 +135,20 @@ impl Request {
             plan: plan.bytes().to_owned(),
             publication,
             activation_sha256,
+            rollback_request: None,
         })?;
         Self::parse(&bytes)
     }
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_REQUEST,
-            "participant request exceeds 8 MiB"
+            "participant request exceeds 11 MiB"
         );
         let envelope: Envelope = serde_json::from_slice(bytes)?;
+        ensure!(
+            envelope.action == Action::FenceOkf || bytes.len() <= MAX_FORWARD_REQUEST,
+            "forward participant request exceeds 8 MiB"
+        );
         let plan = ValidatedPlan::parse(&envelope.plan)?;
         ensure!(
             envelope.version == RPC_VERSION
@@ -158,6 +171,13 @@ impl Request {
             (envelope.action == Action::FinalizeSql) == envelope.activation_sha256.is_some(),
             "finalization requires activation digest only"
         );
+        ensure!(
+            (envelope.action == Action::FenceOkf) == envelope.rollback_request.is_some(),
+            "rollback fence requires a dedicated rollback request only"
+        );
+        if let Some(reverse) = &envelope.rollback_request {
+            super::rollback::RollbackPlan::parse(&plan, reverse)?;
+        }
         if let Some(hash) = &envelope.activation_sha256 {
             ensure!(
                 hash.len() == 64
@@ -284,6 +304,13 @@ impl Request {
             participant: host.id,
         };
         let result = match self.action() {
+            Action::FenceOkf => {
+                return self.respond_rollback(
+                    self.rollback()?
+                        .fence_host(&self.plan, config, self.participant(), pool)
+                        .await?,
+                );
+            }
             Action::FinalizeSql => {
                 return self.respond_finalized(
                     fence::finalize_sql_backed(
@@ -613,7 +640,7 @@ mod tests {
     fn rejects_preparation_only_protocol_before_execution() {
         let request = request();
         let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             legacy["version"] = json!(version);
             assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
         }

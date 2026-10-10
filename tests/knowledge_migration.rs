@@ -3094,5 +3094,107 @@ async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
             .await
             .unwrap(),
     );
+    use ygg::knowledge::fleet::protocol::call_rollback_fence;
+    let loser = if a.is_ok() { &contender } else { &reverse };
+    assert!(
+        call_rollback_fence(&journal, loser, participants[0], Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    let local_intent = config.knowledge_policy_dir.join("local-fence-3.json");
+    assert!(!local_intent.exists());
+    // Verify the entire selected binding before writing any rollback intent.
+    let runtime = config.knowledge_policy_dir.join("runtime.json");
+    let original_binding = std::fs::read(&runtime).unwrap();
+    let mut changed: serde_json::Value = serde_json::from_slice(&original_binding).unwrap();
+    changed["agents"] = serde_json::json!({"independent":Uuid::new_v4()});
+    std::fs::write(&runtime, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(
+        call_rollback_fence(&journal, winner, participants[0], Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    assert!(!local_intent.exists());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&runtime).unwrap()).unwrap(),
+        changed
+    );
+    std::fs::write(&runtime, original_binding).unwrap();
+    let transport_path = config.knowledge_policy_dir.join("shared.json");
+    let original_transport = std::fs::read(&transport_path).unwrap();
+    let mut changed_transport: serde_json::Value =
+        serde_json::from_slice(&original_transport).unwrap();
+    changed_transport["branch"] = "independent-branch".into();
+    std::fs::write(
+        &transport_path,
+        serde_json::to_vec(&changed_transport).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        call_rollback_fence(&journal, winner, participants[0], Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    assert!(!local_intent.exists());
+    std::fs::write(&transport_path, original_transport).unwrap();
+    let first_fence = call_rollback_fence(&journal, winner, participants[0], Some(&ssh2.identity))
+        .await
+        .unwrap();
+    assert_eq!(
+        first_fence.fence().coordinator.unwrap().migration_operation,
+        winner.operation()
+    );
+    assert_eq!(first_fence.fence().source_generation, 3);
+    assert_eq!(
+        call_rollback_fence(&journal, winner, participants[0], Some(&ssh2.identity))
+            .await
+            .unwrap()
+            .fence(),
+        first_fence.fence()
+    );
+    assert!(
+        !first
+            .command()
+            .args(["remember", "blocked reverse host", "--global", "--json"])
+            .output()
+            .await
+            .unwrap()
+            .status
+            .success()
+    );
+    // A local fence does not assert other hosts or SQL have been fenced.
+    success(
+        second
+            .command()
+            .args([
+                "remember",
+                "other host still selected",
+                "--global",
+                "--json",
+            ])
+            .output()
+            .await
+            .unwrap(),
+    );
+    call_rollback_fence(&journal, winner, participants[1], Some(&ssh2.identity))
+        .await
+        .unwrap();
+    assert!(
+        !second
+            .command()
+            .args(["remember", "blocked reverse host two", "--global", "--json"])
+            .output()
+            .await
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(first.marker().await, (3, "okf".into()));
+    assert!(
+        sqlx::query("UPDATE memories SET text='no SQL activation yet'")
+            .execute(&first.pool)
+            .await
+            .is_err()
+    );
     first.pool.close().await;
 }

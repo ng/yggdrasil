@@ -15,7 +15,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-const MAX_REQUEST: usize = 8 * 1024 * 1024;
+const MAX_REQUEST: usize = super::protocol::MAX_REQUEST;
 const MAX_RESPONSE: usize = 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]

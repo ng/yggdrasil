@@ -148,3 +148,92 @@ impl RollbackPlan {
             .context("rollback reservation outcome uncertain; retry exact request")
     }
 }
+
+impl RollbackPlan {
+    pub(super) fn expected_binding(
+        &self,
+        forward: &ValidatedPlan,
+        participant: Uuid,
+    ) -> Result<crate::knowledge::runtime::Binding> {
+        ensure!(
+            forward.registration().request_sha256 == self.forward.request_sha256,
+            "rollback forward request changed"
+        );
+        let host = forward
+            .plan()
+            .participants
+            .iter()
+            .find(|h| h.id == participant)
+            .context("rollback participant missing")?;
+        Ok(crate::knowledge::runtime::Binding {
+            version: 1,
+            minimum_client: crate::knowledge::guard::CLIENT_PROTOCOL,
+            generation: self.request.source_generation,
+            phase: crate::knowledge::runtime::Phase::Okf,
+            bundle: host.corpus.clone(),
+            mappings: serde_json::from_value(serde_json::to_value(&forward.plan().mappings)?)?,
+            agents: forward
+                .plan()
+                .agents
+                .iter()
+                .map(|a| (a.name.clone(), a.id))
+                .collect(),
+        })
+    }
+    pub async fn fence_host(
+        &self,
+        forward: &ValidatedPlan,
+        config: &crate::config::database::DeploymentConfig,
+        participant: Uuid,
+        pool: &sqlx::PgPool,
+    ) -> Result<crate::knowledge::fence::LocalFence> {
+        let expected = self.expected_binding(forward, participant)?;
+        let host = forward
+            .plan()
+            .participants
+            .iter()
+            .find(|h| h.id == participant)
+            .unwrap();
+        ensure!(
+            config.knowledge_dir == host.corpus
+                && config.knowledge_policy_dir.canonicalize()? == host.policy,
+            "rollback participant differs from configured host paths"
+        );
+        let config = crate::config::database::KnowledgeConfig {
+            data_dir: config.data_dir.clone(),
+            knowledge_dir: config.knowledge_dir.clone(),
+            knowledge_policy_dir: config.knowledge_policy_dir.clone(),
+        };
+        let local = crate::knowledge::fence::FenceLease::acquire(&config)?;
+        let mut tx = crate::knowledge::guard::selected_transaction(
+            pool,
+            self.forward.database_id,
+            self.forward.corpus_id,
+            self.request.source_generation,
+        )
+        .await?;
+        let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_fleet_rollbacks r JOIN public.knowledge_fleet_operations o ON o.operation_id=r.forward_operation_id JOIN public.knowledge_fleet_activations a ON a.operation_id=o.operation_id JOIN public.knowledge_forward_receipts f ON f.operation_id=o.operation_id WHERE r.operation_id=$1 AND r.forward_operation_id=$2 AND r.database_id=$3 AND r.source_generation=$4 AND r.request_sha256=$5 AND r.request_json=$6 AND o.request_sha256=$7 AND a.ready_sha256=$8 AND a.generation=$4 AND f.database_id=$3 AND f.corpus_id=$9 AND f.active_generation=$4 AND f.fenced_generation=$4-1 AND f.manifest_sha256=(a.ready_json::jsonb->'publication'->>'manifest_sha256'))")
+            .bind(self.operation()).bind(self.forward.operation).bind(self.forward.database_id)
+            .bind(self.request.source_generation).bind(&self.sha256).bind(&self.bytes)
+            .bind(&self.forward.request_sha256).bind(&self.request.activation_sha256).bind(self.forward.corpus_id)
+            .fetch_one(&mut *tx).await?;
+        ensure!(
+            matches,
+            "matching registered rollback and committed activation required"
+        );
+        local.verify_shared(&forward.plan().shared)?;
+        let receipt = local.fence(
+            self.request.source_generation,
+            Some(crate::knowledge::fence::CoordinatorBinding {
+                migration_operation: self.operation(),
+                participant,
+            }),
+            Some(&expected),
+        )?;
+        local.verify_shared(&forward.plan().shared)?;
+        tx.commit()
+            .await
+            .context("host rollback fence published; retry exact registered request")?;
+        Ok(receipt)
+    }
+}

@@ -547,7 +547,7 @@ and resumed abort with the remote offline. Current-state fleet rollback remains 
 
 ### Host readiness before activation
 
-`Journal::ready_hosts` obtains fresh publication-bound RPC v5 responses from every
+`Journal::ready_hosts` obtains fresh publication-bound RPC v6 responses from every
 participant and checks each against its sealed preparation. Older RPC versions
 are rejected before SQL fencing. Each host verifies its original backup, policy,
 and owned SQL fence, then stages the exact published Git snapshot beside its
@@ -601,7 +601,7 @@ qualify complete host activation or power loss between rename and directory sync
 
 
 Host readiness now captures `directory-swap.json` and binds its exact SHA-256 to
-both the authenticated RPC v5 response and the coordinator readiness seal. Retries
+both the authenticated RPC v6 response and the coordinator readiness seal. Retries
 recompute the expected directory identities and refuse changed or missing retained
 swap evidence. A new readiness receipt cannot be issued for an unsafe parent or a
 layout that has already moved. Older participant protocols fail before SQL fencing.
@@ -660,11 +660,11 @@ mount-boundary check's platform qualification; it does not establish immunity to
 all filesystem restrictions or power-loss behavior.
 
 
-`Journal::activate_hosts` obtains fresh RPC v5 readiness, rechecks the owned fence,
+`Journal::activate_hosts` obtains fresh RPC v6 readiness, rechecks the owned fence,
 source backup, export, and exact publication under the SQL generation lease, then
 seeds telemetry and commits the active marker and fleet receipt together. An
 uncertain commit resumes from the immutable SQL receipt; it never republishes the
-old snapshot or compares later shared writes to frozen export data. RPC v1–v4
+old snapshot or compares later shared writes to frozen export data. RPC v1–v5
 participants are refused before SQL fencing, and preparation rejects configured
 corpus aliases that could become unresolvable during directory recovery.
 
@@ -700,6 +700,19 @@ stored request digest in PostgreSQL.
 
 This reservation is not a host fence, remote freshness proof, current-data backup,
 reverse import, or SQL activation. OKF remains writable until the subsequent
-fencing workflow. Authenticated reverse host fencing, current shared snapshot
-capture, atomic reverse import/SQL activation, and host deselection still need to
-be wired before the public fleet rollback command can be enabled.
+fencing workflow. Authenticated participant fencing is now available through RPC v6. It locks local
+selection before acquiring the connected active-generation lease, requires the
+exact registered rollback and activation/telemetry receipts, and checks the complete
+selected binding and shared transport before writing a durable local fence. Retries
+return the same operation-bound fence. Authenticated responses bind the forward and
+reverse request digests, participant, nonce, generation, and original/fenced binding
+hashes. Older protocols fail before forward SQL fencing. The request transport
+reserves additional bounded space for rollback metadata while retaining the 8 MiB
+forward-request limit.
+
+The two-host native fixture rejects an unregistered reverse operation, a changed
+agent mapping, and a changed shared branch before creating local fence evidence.
+It then fences each host through real SSH: host 1 stops writing while host 2 can
+still write, and SQL stays on the active OKF generation with legacy writes blocked.
+Whole-fleet reverse-fence sealing, SQL fencing, current shared snapshot capture,
+atomic reverse import/SQL activation, and host deselection remain unfinished.

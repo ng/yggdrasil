@@ -341,7 +341,7 @@ pub fn browse(path: Option<&str>, json: bool) -> Result<()> {
 /// diagnostics stay on stderr. This does not orchestrate or activate a fleet.
 pub async fn fleet_participant() -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    const MAX_REQUEST: usize = 8 * 1024 * 1024;
+    const MAX_REQUEST: usize = crate::knowledge::fleet::protocol::MAX_REQUEST;
     let mut bytes = Vec::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -353,7 +353,7 @@ pub async fn fleet_participant() -> Result<()> {
     .map_err(|_| anyhow::anyhow!("participant request input timed out"))??;
     ensure!(
         bytes.len() <= MAX_REQUEST,
-        "participant request exceeds 8 MiB"
+        "participant request exceeds 11 MiB"
     );
     let request = crate::knowledge::fleet::protocol::Request::parse(&bytes)?;
     let config =
