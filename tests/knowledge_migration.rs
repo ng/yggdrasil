@@ -1625,6 +1625,18 @@ async fn native_authenticated_ssh_participant_preparation_and_cancellation() {
         prepared.preparation().intent_sha256,
         repeated.preparation().intent_sha256
     );
+    let prepared_digest = journal
+        .prepare_hosts(&config, &f.pool, Some(&ssh.identity))
+        .await
+        .unwrap();
+    assert_eq!(
+        journal
+            .prepare_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        prepared_digest
+    );
+    assert!(f.journal.join("fleet-prepared.json").exists());
     assert!(
         protocol::call(
             &journal,
@@ -1681,4 +1693,141 @@ async fn native_authenticated_ssh_participant_preparation_and_cancellation() {
         .unwrap();
     assert_eq!(text, "after SSH cancellation");
     f.pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH tools; starts disposable PG and two SSH servers"]
+async fn native_partial_fleet_cancellation_includes_unprepared_host() {
+    use ygg::knowledge::{
+        document::digest,
+        fleet::{journal::Journal, plan::ValidatedPlan},
+        store::KnowledgeStore,
+    };
+    let server = Server::new();
+    let mut first = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(first.env.clone()).unwrap();
+    KnowledgeStore::open(&config.knowledge_dir, true).unwrap();
+    let identities =
+        ygg::knowledge::identity::IdentityRegistry::open(&config.knowledge_policy_dir, true)
+            .unwrap()
+            .initialize(true)
+            .unwrap();
+    first.plan.mappings.corpus_id = identities.corpus_id;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut env = first.env.clone();
+    for (key, name) in [
+        ("YGG_CONFIG_DIR", "config"),
+        ("YGG_DATA_DIR", "data"),
+        ("YGG_KNOWLEDGE_DIR", "corpus"),
+        ("YGG_KNOWLEDGE_POLICY_DIR", "policy"),
+    ] {
+        env.insert(key.into(), root.join(name).display().to_string());
+    }
+    let second = Fixture {
+        pool: first.pool.clone(),
+        temp,
+        env,
+        plan: serde_json::from_value(serde_json::to_value(&first.plan).unwrap()).unwrap(),
+        journal: root.join("journal"),
+    };
+    let config2 = ygg::config::database::DeploymentConfig::load(second.env.clone()).unwrap();
+    KnowledgeStore::open(&config2.knowledge_dir, true).unwrap();
+    KnowledgeStore::open(&config2.knowledge_policy_dir, true).unwrap();
+    std::fs::write(
+        config2.knowledge_policy_dir.join("identity.json"),
+        serde_json::to_vec(&identities).unwrap(),
+    )
+    .unwrap();
+    let mut backups = Vec::new();
+    for (fixture, config) in [(&first, &config), (&second, &config2)] {
+        let path = fixture.temp.path().canonicalize().unwrap().join("backup");
+        let manifest = ygg::db::deployment_backup::create(config, &path, Some(&server.bin), None)
+            .await
+            .unwrap();
+        backups.push(serde_json::json!({"path":path,"manifest_sha256":digest(&serde_json::to_vec(&manifest).unwrap())}));
+    }
+    let ssh1 = ParticipantSsh::new(&first).await;
+    let ssh2 = ParticipantSsh::new(&second).await;
+    let participants = [Uuid::new_v4(), Uuid::new_v4()];
+    let hosts = [(&config, &ssh1), (&config2, &ssh2)].into_iter().enumerate().map(|(i,(config,ssh))| serde_json::json!({
+        "id":participants[i],"name":format!("host-{i}"),"protocol":1,"endpoint":&ssh.endpoint,
+        "corpus":config.knowledge_dir.canonicalize().unwrap(),"policy":config.knowledge_policy_dir.canonicalize().unwrap(),
+        "identities":&identities,"backup":&backups[i],"knowledge_writers_stopped":true,"external_editors_stopped":true
+    })).collect::<Vec<_>>();
+    let plan = ValidatedPlan::parse(&serde_json::json!({
+        "version":1,"operation":Uuid::new_v4(),"source_generation":1,"mappings":&first.plan.mappings,"agents":[],
+        "shared":{"version":1,"remote":"git@example.test:knowledge.git","branch":"main"},"expected_remote_commit":"a".repeat(40),
+        "source_backup":backups[0],"all_participating_hosts_listed":true,"schema_changes_stopped":true,
+        "session_preserving_endpoint":true,"remote_writers_stopped":true,"participants":hosts
+    }).to_string()).unwrap();
+    let hash = plan.registration().request_sha256.clone();
+    let journal = Journal::prepare(&first.journal, plan).unwrap();
+    // The supplied key authenticates host 1 but not host 2.
+    assert!(
+        journal
+            .prepare_hosts(&config, &first.pool, Some(&ssh1.identity))
+            .await
+            .is_err()
+    );
+    assert!(config.knowledge_policy_dir.join("runtime.json").exists());
+    assert!(!config2.knowledge_policy_dir.join("runtime.json").exists());
+    assert!(
+        first
+            .journal
+            .join(format!("prepared-{}.json", participants[0]))
+            .exists()
+    );
+    assert!(!first.journal.join("fleet-prepared.json").exists());
+    assert!(
+        journal
+            .cancel_hosts(&first.pool, Some(&ssh1.identity))
+            .await
+            .is_err()
+    );
+    assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
+    assert!(!first.journal.join("fleet-cancelled.json").exists());
+    sqlx::query("UPDATE memories SET text='after partial fleet cancellation'")
+        .execute(&first.pool)
+        .await
+        .unwrap();
+    drop(journal);
+    // Repair only this disposable server's authorized client key, then resume.
+    std::fs::copy(
+        ssh1.identity.with_extension("pub"),
+        ssh2.identity.with_extension("pub"),
+    )
+    .unwrap();
+    let journal = Journal::resume(&first.journal, &hash).unwrap();
+    let seal = journal
+        .cancel_hosts(&first.pool, Some(&ssh1.identity))
+        .await
+        .unwrap();
+    assert_eq!(
+        journal
+            .cancel_hosts(&first.pool, Some(&ssh1.identity))
+            .await
+            .unwrap(),
+        seal
+    );
+    assert!(first.journal.join("fleet-cancelled.json").exists());
+    assert!(
+        config2
+            .knowledge_policy_dir
+            .join("sql-fence-1-cancelled.json")
+            .exists()
+    );
+    assert!(!config2.knowledge_policy_dir.join("runtime.json").exists());
+    assert!(
+        journal
+            .prepare_hosts(&config, &first.pool, Some(&ssh1.identity))
+            .await
+            .is_err()
+    );
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&first.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "after partial fleet cancellation");
+    first.pool.close().await;
 }

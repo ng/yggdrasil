@@ -270,6 +270,7 @@ pub async fn cancel_sql_backed(
         coordinator,
         request_sha256,
         pool,
+        true,
         || {
             verify_host_backup(
                 &host,
@@ -399,6 +400,7 @@ pub async fn cancel_sql(
         coordinator,
         coordinator_request_sha256,
         pool,
+        false,
         || Ok(()),
     )
     .await
@@ -410,6 +412,7 @@ async fn cancel_with_host(
     coordinator: CoordinatorBinding,
     coordinator_request_sha256: &str,
     pool: &sqlx::PgPool,
+    allow_unprepared: bool,
     verify: impl Fn() -> Result<()>,
 ) -> Result<SqlPreparation> {
     ensure!(
@@ -419,7 +422,15 @@ async fn cancel_with_host(
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
         "coordinator request SHA-256 required"
     );
-    host.verify(config)?;
+    let unprepared = host.policy.read_artifact(&host.name)?.is_none();
+    if unprepared {
+        ensure!(
+            allow_unprepared && host.policy.read_control(SELECTION_FILE)?.is_none(),
+            "unprepared cancellation requires backed original SQL selection"
+        );
+    } else {
+        host.verify(config)?;
+    }
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
@@ -453,8 +464,16 @@ async fn cancel_with_host(
             )),
         "matching coordinator cancellation receipt required"
     );
-    host.verify(config)?;
     verify()?;
+    if unprepared {
+        ensure!(
+            host.policy.read_control(SELECTION_FILE)?.is_none(),
+            "unprepared host selection changed"
+        );
+        host.policy
+            .retain_artifact(&host.name, &host.bytes, false)?;
+    }
+    host.verify(config)?;
     let current = host.policy.read_control(SELECTION_FILE)?;
     let tombstone = host.policy.read_artifact(&host.cancellation_name())?;
     let cancellation = serde_json::to_string(&Cancellation {

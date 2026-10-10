@@ -442,3 +442,19 @@ automatically removed private directory beneath the user-owned home rather than
 world-writable `/tmp`. Native Linux CI installs OpenSSH server tools for this test.
 This proves the one-participant preparation/cancellation path, not multi-host
 cutover, shared publication, activation or current-state rollback.
+
+`Journal::prepare_hosts` now verifies the coordinator's pinned source backup and
+configuration, rejects journal overlap with local deployment/backup paths,
+registers the plan, and contacts every participant. Each successful authenticated
+receipt is retained separately. `fleet-prepared.json` is written only after the
+complete declared set responds. A retry recontacts every host and compares exact
+retained evidence; it never treats a cached receipt as current readiness.
+
+`Journal::cancel_hosts` first records database cancellation, then reconciles every
+participant and writes `fleet-cancelled.json` only after all respond. A backed
+host that never prepared may acknowledge cancellation only after verifying the
+original absent selection, original backup, matching database cancellation event
+and current SQL return generation. It records intent plus cancellation tombstone
+without publishing a fence. A partial or uncertain attempt remains resumable;
+there is no implicit success for an unavailable host. These coordinator methods
+still stop before database fencing, export, publication or activation.

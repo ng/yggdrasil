@@ -108,6 +108,88 @@ impl Journal {
         result.verify()?;
         Ok(result)
     }
+    /// Reserve and prepare every declared participant. Partial success remains
+    /// journaled; retry revalidates every host instead of trusting cached receipts.
+    /// This does not fence the database or publish/activate shared knowledge.
+    pub async fn prepare_hosts(
+        &self,
+        config: &crate::config::database::DeploymentConfig,
+        pool: &sqlx::PgPool,
+        ssh_identity: Option<&Path>,
+    ) -> Result<String> {
+        use crate::knowledge::source_backup::SourceBackup;
+        let plan = self.plan()?.plan();
+        for path in [
+            &config.data_dir,
+            &config.knowledge_dir,
+            &config.knowledge_policy_dir,
+            &plan.source_backup.path,
+        ] {
+            let path = target(path)?;
+            ensure!(
+                !path.starts_with(&self.intent.directory)
+                    && !self.intent.directory.starts_with(&path),
+                "coordinator journal overlaps deployment or backup paths"
+            );
+        }
+        let backup = SourceBackup::open(
+            &plan.source_backup.path,
+            plan.mappings.database_id,
+            plan.source_generation,
+        )?;
+        ensure!(
+            backup.digest() == plan.source_backup.manifest_sha256,
+            "coordinator source backup digest changed"
+        );
+        backup.verify()?;
+        backup.verify_configuration(config)?;
+        self.plan.registration().register(pool).await?;
+        self.visit_hosts(super::protocol::Action::PrepareSql, ssh_identity)
+            .await
+    }
+    /// Cancel the SQL source generation first, then reconcile all declared hosts,
+    /// including hosts which never prepared. No cached receipt skips a host.
+    pub async fn cancel_hosts(
+        &self,
+        pool: &sqlx::PgPool,
+        ssh_identity: Option<&Path>,
+    ) -> Result<String> {
+        self.plan()?.registration().cancel(pool).await?;
+        self.visit_hosts(super::protocol::Action::CancelSql, ssh_identity)
+            .await
+    }
+    async fn visit_hosts(
+        &self,
+        action: super::protocol::Action,
+        ssh_identity: Option<&Path>,
+    ) -> Result<String> {
+        use crate::knowledge::document::digest;
+        let phase = match action {
+            super::protocol::Action::PrepareSql => "prepared",
+            super::protocol::Action::CancelSql => "cancelled",
+        };
+        let mut records = Vec::new();
+        for participant in &self.plan()?.plan().participants {
+            let response =
+                super::protocol::call(self, participant.id, action, ssh_identity).await?;
+            self.verify()?;
+            let record = serde_json::json!({"version":1,"operation":self.plan.plan().operation,
+                "request_sha256":self.intent.request_sha256,"action":action,"receipt":response.preparation()});
+            let bytes = serde_json::to_string(&record)?;
+            self.store.retain_artifact(
+                &format!("{phase}-{}.json", participant.id),
+                &bytes,
+                false,
+            )?;
+            records.push(record);
+        }
+        self.verify()?;
+        let bytes = serde_json::to_string(&records)?;
+        self.store
+            .retain_artifact(&format!("fleet-{phase}.json"), &bytes, false)?;
+        Ok(digest(bytes.as_bytes()))
+    }
+
     fn verify(&self) -> Result<()> {
         self.store.verify_root_path(&self.intent.directory)?;
         ensure!(
@@ -132,6 +214,28 @@ mod tests {
     fn plan() -> ValidatedPlan {
         ValidatedPlan::parse(&super::super::plan::tests::fixture().to_string()).unwrap()
     }
+    fn resume_after_release(directory: &Path, hash: &str) -> Journal {
+        // Other tests launch subprocesses concurrently. Permit a short WouldBlock
+        // after dropping our owner, while inherited descriptors close at exec.
+        // Do not retry integrity errors or relax the live-owner exclusion test.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match Journal::resume(directory, hash) {
+                Ok(journal) => return journal,
+                Err(error)
+                    if std::time::Instant::now() < deadline
+                        && error.chain().any(|cause| {
+                            cause
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+                        }) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("journal resume after owner release failed: {error:#}"),
+            }
+        }
+    }
     #[test]
     fn persists_exact_request_excludes_competing_owner_and_resumes() {
         let temp = tempfile::tempdir().unwrap();
@@ -144,7 +248,7 @@ mod tests {
         assert!(Journal::prepare(&dir, plan()).is_err());
         assert_eq!(journal.plan().unwrap().bytes(), bytes);
         drop(journal);
-        let journal = Journal::resume(&dir, &hash).unwrap();
+        let journal = resume_after_release(&dir, &hash);
         assert_eq!(journal.plan().unwrap().bytes(), bytes);
         drop(journal);
         assert!(Journal::resume(&dir, &"0".repeat(64)).is_err());
