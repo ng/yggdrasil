@@ -160,7 +160,7 @@ pub(super) struct Activation {
     pub prepared_sha256: String,
     pub backup_sha256: String,
 }
-async fn saved_activation(
+pub(super) async fn saved_activation(
     registration: &Registration,
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<Option<Activation>> {
@@ -175,7 +175,7 @@ async fn saved_activation(
         },
     ))
 }
-async fn verify_activation(
+pub(super) async fn verify_activation(
     registration: &Registration,
     tx: &mut Transaction<'_, Postgres>,
     saved: &Activation,

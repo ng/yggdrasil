@@ -684,3 +684,22 @@ After repairing only that disposable host's authorization, a resumed coordinator
 finalizes both hosts without changing the successful receipt or resetting the
 advanced Git snapshot. Both hosts' subsequent writes survive repeated finalization.
 Broader multi-host crash/power-loss cases and current-state rollback remain open.
+
+### Fresh rollback reservation
+
+`fleet::rollback::RollbackPlan` binds a new reverse operation to the exact original
+fleet request, committed activation digest, active generation, participant census,
+and an explicitly chosen current remote commit. It requires fresh schema, remote
+writer, host writer, and editor quiescence declarations rather than treating the
+old forward-plan declarations as current evidence. Registration verifies the live
+activation and forward/telemetry receipt under the exclusive SQL generation lease.
+Only one reverse operation can reserve that database generation; matching retries
+preserve the exact request bytes, and competing or edited requests are rejected.
+The owner-only reservation table rejects update/delete/truncate and checks the
+stored request digest in PostgreSQL.
+
+This reservation is not a host fence, remote freshness proof, current-data backup,
+reverse import, or SQL activation. OKF remains writable until the subsequent
+fencing workflow. Authenticated reverse host fencing, current shared snapshot
+capture, atomic reverse import/SQL activation, and host deselection still need to
+be wired before the public fleet rollback command can be enabled.

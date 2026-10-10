@@ -2953,5 +2953,146 @@ async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
             .await
             .is_err()
     );
+    use ygg::knowledge::fleet::rollback::RollbackPlan;
+    let forward = journal.plan().unwrap();
+    let request = serde_json::json!({
+        "version":1,"operation":Uuid::new_v4(),"forward_operation":forward.plan().operation,
+        "forward_request_sha256":forward.registration().request_sha256,
+        "activation_sha256":active.readiness_sha256,"source_generation":3,
+        "expected_remote_commit":current.commit,"all_participating_hosts_listed":true,
+        "schema_changes_stopped":true,"session_preserving_endpoint":true,"remote_writers_stopped":true,
+        "participants":participants.map(|id| serde_json::json!({"id":id,"knowledge_writers_stopped":true,"external_editors_stopped":true}))
+    });
+    for field in [
+        "all_participating_hosts_listed",
+        "schema_changes_stopped",
+        "session_preserving_endpoint",
+        "remote_writers_stopped",
+    ] {
+        let mut invalid = request.clone();
+        invalid[field] = false.into();
+        assert!(RollbackPlan::parse(forward, &invalid.to_string()).is_err());
+    }
+    let mut invalid = request.clone();
+    invalid["participants"][0]["knowledge_writers_stopped"] = false.into();
+    assert!(RollbackPlan::parse(forward, &invalid.to_string()).is_err());
+    invalid = request.clone();
+    invalid["participants"][0]["id"] = serde_json::json!(Uuid::new_v4());
+    assert!(RollbackPlan::parse(forward, &invalid.to_string()).is_err());
+    invalid = request.clone();
+    invalid["source_generation"] = 1.into();
+    assert!(RollbackPlan::parse(forward, &invalid.to_string()).is_err());
+    invalid = request.clone();
+    invalid["forward_request_sha256"] = "0".repeat(64).into();
+    assert!(RollbackPlan::parse(forward, &invalid.to_string()).is_err());
+    invalid = request.clone();
+    invalid["activation_sha256"] = "0".repeat(64).into();
+    assert!(
+        RollbackPlan::parse(forward, &invalid.to_string())
+            .unwrap()
+            .register(&first.pool)
+            .await
+            .is_err()
+    );
+    let reverse = RollbackPlan::parse(forward, &request.to_string()).unwrap();
+    let mut contender = request.clone();
+    contender["operation"] = serde_json::json!(Uuid::new_v4());
+    let contender = RollbackPlan::parse(forward, &contender.to_string()).unwrap();
+    let (a, b) = tokio::join!(
+        reverse.register(&first.pool),
+        contender.register(&first.pool)
+    );
+    assert_ne!(
+        a.is_ok(),
+        b.is_ok(),
+        "one reverse reservation must own the active generation"
+    );
+    let winner = if a.is_ok() { &reverse } else { &contender };
+    winner.register(&first.pool).await.unwrap();
+    // Exact request bytes are part of recovery identity, including whitespace.
+    assert!(
+        RollbackPlan::parse(forward, &format!("{}\n", winner.bytes()))
+            .unwrap()
+            .register(&first.pool)
+            .await
+            .is_err()
+    );
+    let mut changed: serde_json::Value = serde_json::from_str(winner.bytes()).unwrap();
+    changed["expected_remote_commit"] = active.publication.commit.clone().into();
+    assert!(
+        RollbackPlan::parse(forward, &changed.to_string())
+            .unwrap()
+            .register(&first.pool)
+            .await
+            .is_err()
+    );
+    assert_eq!(first.marker().await, (3, "okf".into()));
+    let stored: (String, String) = sqlx::query_as(
+        "SELECT request_sha256,request_json FROM knowledge_fleet_rollbacks WHERE operation_id=$1",
+    )
+    .bind(winner.operation())
+    .fetch_one(&first.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        (winner.sha256().to_owned(), winner.bytes().to_owned())
+    );
+    for mutation in [
+        "UPDATE knowledge_fleet_rollbacks SET request_json=request_json",
+        "DELETE FROM knowledge_fleet_rollbacks",
+        "TRUNCATE knowledge_fleet_rollbacks",
+    ] {
+        assert!(sqlx::query(mutation).execute(&first.pool).await.is_err());
+    }
+    let bad_hash = sqlx::query("INSERT INTO knowledge_fleet_rollbacks(operation_id,forward_operation_id,database_id,source_generation,request_sha256,request_json) VALUES($1,$2,$3,4,$4,$5)")
+        .bind(Uuid::new_v4()).bind(forward.plan().operation).bind(forward.plan().mappings.database_id)
+        .bind("0".repeat(64)).bind(winner.bytes()).execute(&first.pool).await.unwrap_err();
+    assert_eq!(
+        bad_hash
+            .as_database_error()
+            .and_then(|e| e.code())
+            .as_deref(),
+        Some("23514")
+    );
+    // Even a granted runtime INSERT must not bypass migration-owner checks.
+    let mut tx = first.pool.begin().await.unwrap();
+    let role = format!("reverse_runtime_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE ROLE {role}"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "GRANT INSERT ON knowledge_fleet_rollbacks TO {role}"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(&format!("SET LOCAL ROLE {role}"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let denied = sqlx::query("INSERT INTO knowledge_fleet_rollbacks(operation_id,forward_operation_id,database_id,source_generation,request_sha256,request_json) VALUES($1,$2,$3,3,$4,$5)")
+        .bind(winner.operation()).bind(forward.plan().operation).bind(forward.plan().mappings.database_id)
+        .bind(winner.sha256()).bind(winner.bytes()).execute(&mut *tx).await.unwrap_err();
+    assert_eq!(
+        denied.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    tx.rollback().await.unwrap();
+    // Reserving a reverse operation is not a storage transition or write fence.
+    success(
+        second
+            .command()
+            .args([
+                "remember",
+                "reservation alone does not fence",
+                "--global",
+                "--json",
+            ])
+            .output()
+            .await
+            .unwrap(),
+    );
     first.pool.close().await;
 }

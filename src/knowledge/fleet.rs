@@ -1,7 +1,8 @@
 //! Durable coordinator reservations and cancellation. Registration binds a plan
 //! digest and declared participant set; it does not authenticate hosts or prove
 //! quiescence/readiness. The journal supports owned SQL fencing and pre-activation
-//! abort; shared publication and activation orchestration remain unavailable.
+//! abort, shared publication, and activation. Reverse reservations are separate
+//! from the still-incomplete fleet reverse-import workflow.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod journal;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -187,3 +188,6 @@ pub mod protocol;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod transition;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod rollback;
