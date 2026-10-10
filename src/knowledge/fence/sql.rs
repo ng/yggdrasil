@@ -28,7 +28,8 @@ struct Intent {
     fenced: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SqlPreparation {
     pub coordinator: CoordinatorBinding,
     pub source_generation: i64,

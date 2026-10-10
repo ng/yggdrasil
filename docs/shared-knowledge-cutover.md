@@ -357,8 +357,7 @@ A disposable, unprivileged loopback OpenSSH probe on macOS (2026-10-10) accepted
 the matching temporary host/client keys and rejected both a wrong pinned host key
 and a wrong client key (exit 255, no remote-command output). No system SSH
 configuration or operator keys were changed; the test daemon was stopped. This
-establishes local test feasibility only. The participant command, nonce validation and two-host migration integration remain
-to be implemented. OpenSSH's [configuration manual](https://man.openbsd.org/ssh_config.5)
+establishes local test feasibility only. The participant command and two-host migration integration remain to be implemented. OpenSSH's [configuration manual](https://man.openbsd.org/ssh_config.5)
 defines the host-key alias and strict-checking behavior used by this design.
 
 
@@ -377,3 +376,21 @@ a forced echo command; it verifies transport only, not participant behavior. The
 participant CLI is not implemented or enabled, and callers must still validate
 operation/plan/participant/action/nonce and retained host evidence before using any
 response. Shared migration remains unavailable.
+
+
+`fleet::protocol` now binds preparation/cancellation requests and responses to
+version, operation, participant, exact plan digest, action and a fresh nonce.
+`protocol::call` dispatches over the pinned SSH transport and rechecks the journal
+before returning a matching `AuthenticatedPreparation`. That type has no public
+JSON/file constructor. Receipt validation additionally checks source database,
+corpus, generation, host policy path and evidence hash formats. A response from
+an earlier invocation cannot satisfy a new nonce, even for the same idempotent
+operation. Participant handlers must reconcile prior local results and return
+those results in the current request envelope.
+
+These checks do not compare hashes against live host files or prove that backups
+remain valid. The participant command must perform those checks under the host
+lease; complete-set revalidation and database transitions remain outstanding.
+Protocol tests reject replay, changed envelope fields, tampered plan bytes and
+wrong host/source evidence. This remains a library API with shared CLI execution
+disabled.
