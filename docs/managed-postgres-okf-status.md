@@ -176,6 +176,4 @@ smoke harness, but no system PostgreSQL, Rust, or Docker tools. A non-root user
 runs with read-only source/artifact mounts and a writable temporary filesystem;
 the offline test has networking disabled. Both modes exercise initialization,
 persistent identity, archive-free reuse, backup verification and owned shutdown.
-This qualifies candidate bundles on that distribution only. Execution is pending
-CI; the local Docker daemon was unavailable. Published artifacts, macOS signing
-and broader distribution qualification remain open.
+This qualifies candidate bundles on that distribution only. At `fc281cf`, the complete native Linux job passed in [run 38017240665](https://github.com/ng/yggdrasil/actions/runs/38017240665/job/114110131143), including both container modes. Standard PG16/18 CI also passed in [run 38017240616](https://github.com/ng/yggdrasil/actions/runs/38017240616). The local Docker daemon was unavailable; this is CI execution evidence. Published artifacts, macOS signing and broader distribution qualification remain open.
