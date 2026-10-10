@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
-// Version 3 additionally requires publication-bound host readiness.
+// Version 4 additionally requires retained directory-swap evidence.
 // Older hosts must fail before the coordinator fences SQL.
-const RPC_VERSION: u32 = 3;
+const RPC_VERSION: u32 = 4;
 const MAX_REQUEST: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,7 +346,11 @@ impl Request {
                 && ready.candidate_identity.1 > 0,
             "readiness differs from requested host or publication"
         );
-        for hash in [&ready.archive_revision, &ready.intent_sha256] {
+        for hash in [
+            &ready.archive_revision,
+            &ready.intent_sha256,
+            &ready.swap_sha256,
+        ] {
             ensure!(
                 hash.len() == 64
                     && hash
@@ -480,7 +484,7 @@ mod tests {
     fn rejects_preparation_only_protocol_before_execution() {
         let request = request();
         let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             legacy["version"] = json!(version);
             assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
         }
@@ -505,6 +509,7 @@ mod tests {
             )),
             staging_identity: (1, 1),
             candidate_identity: (1, 2),
+            swap_sha256: "f".repeat(64),
             archive_revision: "d".repeat(64),
             intent_sha256: "e".repeat(64),
         };
@@ -519,6 +524,7 @@ mod tests {
             "/readiness/staging",
             "/readiness/preparation/intent_sha256",
             "/readiness/archive_revision",
+            "/readiness/swap_sha256",
         ] {
             let mut altered = original.clone();
             *altered.pointer_mut(pointer).unwrap() = json!("changed");

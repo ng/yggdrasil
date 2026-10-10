@@ -8,7 +8,7 @@ use std::{
     ffi::CString,
     fs::File,
     os::fd::AsRawFd,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -17,6 +17,18 @@ fn identity(file: &File) -> Result<Identity> {
     let m = file.metadata()?;
     ensure!(m.is_dir(), "swap entry must be a directory");
     Ok((m.dev(), m.ino()))
+}
+fn parent_directory(path: &Path) -> Result<File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o022 == 0,
+        "swap parent must be owned and not writable by other users"
+    );
+    Ok(file)
 }
 fn entry(parent: &File, name: &str) -> Result<Option<Identity>> {
     match child(parent, name, libc::O_RDONLY | libc::O_DIRECTORY, 0) {
@@ -89,13 +101,14 @@ pub enum DirectorySwapState {
     CandidateInstalled,
 }
 struct Roots {
-    parent: KnowledgeStore,
+    parent: File,
     stage: KnowledgeStore,
 }
 impl DirectorySwapPlan {
     /// Capture an existing private sibling layout without moving anything.
-    /// This requires a private parent and proves identity/same-filesystem only;
-    /// it does not prove rename eligibility of mount points or grant activation.
+    /// The parent must be owned and not writable by others. Capture proves
+    /// identity/same-filesystem only, not mount-point rename eligibility or
+    /// activation authority.
     pub fn capture(corpus: &Path, staging: &Path) -> Result<Self> {
         ensure!(
             corpus.is_absolute() && staging.is_absolute(),
@@ -109,8 +122,7 @@ impl DirectorySwapPlan {
             corpus != staging && corpus.parent() == staging.parent(),
             "swap roots must be distinct siblings"
         );
-        let parent =
-            KnowledgeStore::open(corpus.parent().context("corpus parent missing")?, false)?;
+        let parent = parent_directory(corpus.parent().context("corpus parent missing")?)?;
         let stage = KnowledgeStore::open(staging, false)?;
         let original = KnowledgeStore::open(corpus, false)?;
         let candidate = KnowledgeStore::open(&staging.join("candidate"), false)?;
@@ -118,7 +130,7 @@ impl DirectorySwapPlan {
             version: 1,
             corpus: corpus.to_owned(),
             staging: staging.to_owned(),
-            parent: identity(&parent.root)?,
+            parent: identity(&parent)?,
             stage: identity(&stage.root)?,
             original: identity(&original.root)?,
             candidate: identity(&candidate.root)?,
@@ -151,22 +163,24 @@ impl DirectorySwapPlan {
                 && self.staging.canonicalize()? == self.staging,
             "swap parent path changed"
         );
-        let parent = KnowledgeStore::open(parent_path, false)?;
+        let parent = parent_directory(parent_path)?;
         let stage = KnowledgeStore::open(&self.staging, false)?;
         ensure!(
-            identity(&parent.root)? == self.parent
+            identity(&parent)? == self.parent
                 && identity(&stage.root)? == self.stage
-                && entry(&parent.root, name(&self.staging)?)? == Some(self.stage),
+                && entry(&parent, name(&self.staging)?)? == Some(self.stage),
             "swap parent or staging identity changed"
         );
         Ok(Roots { parent, stage })
     }
     fn state(&self, roots: &Roots) -> Result<DirectorySwapState> {
-        roots
-            .parent
-            .verify_root_path(self.corpus.parent().unwrap())?;
+        let current_parent = parent_directory(self.corpus.parent().unwrap())?;
+        ensure!(
+            identity(&current_parent)? == identity(&roots.parent)?,
+            "swap parent path changed"
+        );
         roots.stage.verify_root_path(&self.staging)?;
-        let selected = entry(&roots.parent.root, name(&self.corpus)?)?;
+        let selected = entry(&roots.parent, name(&self.corpus)?)?;
         let candidate = entry(&roots.stage.root, "candidate")?;
         let original = entry(&roots.stage.root, "original")?;
         match (selected, candidate, original) {
@@ -192,7 +206,7 @@ impl DirectorySwapPlan {
         let roots = self.roots()?;
         match self.state(&roots)? {
             DirectorySwapState::Prepared => rename(
-                &roots.parent.root,
+                &roots.parent,
                 name(&self.corpus)?,
                 &roots.stage.root,
                 "original",
@@ -200,14 +214,14 @@ impl DirectorySwapPlan {
             DirectorySwapState::OriginalRetained => rename(
                 &roots.stage.root,
                 "candidate",
-                &roots.parent.root,
+                &roots.parent,
                 name(&self.corpus)?,
             )?,
             DirectorySwapState::CandidateInstalled => {}
         }
         // A previous process may have died after rename but before fsync.
         // Even an already-installed retry must make observed entries durable.
-        roots.parent.root.sync_all()?;
+        roots.parent.sync_all()?;
         roots.stage.root.sync_all()?;
         self.state(&roots)
     }
@@ -356,6 +370,19 @@ mod tests {
     }
 
     #[test]
+    fn parent_may_be_readable_but_never_writable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, plan) = fixture();
+        let parent = plan.corpus.parent().unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(DirectorySwapPlan::capture(&plan.corpus, &plan.staging).is_ok());
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(DirectorySwapPlan::capture(&plan.corpus, &plan.staging).is_err());
+        assert!(plan.advance().is_err());
+        assert!(plan.corpus.join("original.txt").exists());
+    }
+
+    #[test]
     fn capture_never_creates_a_missing_candidate() {
         let (_temp, plan) = fixture();
         std::fs::rename(plan.staging.join("candidate"), plan.staging.join("saved")).unwrap();
@@ -372,7 +399,7 @@ mod tests {
         std::fs::create_dir(plan.staging.join("original")).unwrap();
         assert!(
             rename(
-                &roots.parent.root,
+                &roots.parent,
                 name(&plan.corpus).unwrap(),
                 &roots.stage.root,
                 "original"

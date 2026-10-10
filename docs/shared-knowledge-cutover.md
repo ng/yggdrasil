@@ -547,7 +547,7 @@ and resumed abort with the remote offline. Host activation/finalization and curr
 
 ### Host readiness before activation
 
-`Journal::ready_hosts` obtains fresh publication-bound RPC v3 responses from every
+`Journal::ready_hosts` obtains fresh publication-bound RPC v4 responses from every
 participant and checks each against its sealed preparation. Older RPC versions
 are rejected before SQL fencing. Each host verifies its original backup, policy,
 and owned SQL fence, then stages the exact published Git snapshot beside its
@@ -582,7 +582,7 @@ swap protocol or database activation.
 
 
 `DirectorySwapPlan` implements the filesystem half of finalization. A retained
-plan pins the private parent, staging, original corpus, and candidate directory
+plan pins the owned parent, private staging, original corpus, and candidate directory
 identities. Each `advance` performs at most one exclusive rename: original corpus
 to `staging/original`, then `staging/candidate` to the configured corpus. Both
 parent directories are synced, including retries that observe an already-installed
@@ -592,8 +592,18 @@ no destination is overwritten. An installed retry preserves later content change
 This component requires an externally held selection lease, stopped editors,
 verified backups, and authenticated database activation authority. It does not
 supply those checks or publish policy, and is not yet wired into fleet finalization.
-Capture checks same-filesystem identity and private-directory ownership; mounted
+Capture checks same-filesystem identity, private corpus/staging ownership, and a parent
+owned by the current user and not writable by others; mounted
 corpus rename eligibility still needs pre-activation qualification. Unit and
 subprocess fixtures exercise restart after either rename, conflicting destinations,
 replaced sources/staging, and preservation of subsequent writes. They do not yet
 qualify complete host activation or power loss between rename and directory sync.
+
+
+Host readiness now captures `directory-swap.json` and binds its exact SHA-256 to
+both the authenticated RPC v4 response and the coordinator readiness seal. Retries
+recompute the expected directory identities and refuse changed or missing retained
+swap evidence. A new readiness receipt cannot be issued for an unsafe parent or a
+layout that has already moved. Older participant protocols fail before SQL fencing.
+Readiness still performs no rename or activation; finalization must verify this
+retained plan against its activation authority before advancing it.

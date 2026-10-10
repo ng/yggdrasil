@@ -2122,6 +2122,40 @@ async fn native_fleet_owned_fence_resume_and_abort() {
     let ready = ready_response.readiness().unwrap();
     let candidate = ready.staging.join("candidate");
     let candidate_backup = ready.staging.join("candidate-backup");
+    let swap_path = ready.staging.join("directory-swap.json");
+    let swap_bytes = std::fs::read(&swap_path).unwrap();
+    assert_eq!(
+        ygg::knowledge::document::digest(&swap_bytes),
+        ready.swap_sha256
+    );
+    let swap: ygg::knowledge::store::DirectorySwapPlan =
+        serde_json::from_slice(&swap_bytes).unwrap();
+    assert_eq!(
+        swap.inspect().unwrap(),
+        ygg::knowledge::store::DirectorySwapState::Prepared
+    );
+    std::fs::write(&swap_path, "independent edit").unwrap();
+    assert!(
+        protocol::call_ready(&journal, participant, &published, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&swap_path).unwrap(),
+        "independent edit"
+    );
+    std::fs::remove_file(&swap_path).unwrap();
+    assert!(
+        protocol::call_ready(&journal, participant, &published, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(
+        !swap_path.exists(),
+        "retry must not recreate missing sealed evidence"
+    );
+    std::fs::write(&swap_path, &swap_bytes).unwrap();
+
     assert_eq!(
         ygg::knowledge::store::KnowledgeBackup::verify_restored(&candidate_backup, &candidate)
             .unwrap()

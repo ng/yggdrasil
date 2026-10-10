@@ -7,7 +7,7 @@ use crate::knowledge::{
     inventory,
     shared::SharedGit,
     source_backup::SourceBackup,
-    store::{Key, KnowledgeBackup},
+    store::{DirectorySwapPlan, Key, KnowledgeBackup},
 };
 use anyhow::Context;
 use std::{collections::BTreeMap, path::Path};
@@ -22,6 +22,7 @@ pub struct SqlReadiness {
     pub candidate_identity: (u64, u64),
     pub archive_revision: String,
     pub intent_sha256: String,
+    pub swap_sha256: String,
 }
 fn exists(path: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
@@ -276,12 +277,25 @@ pub async fn ready_sql_backed(
     } else {
         KnowledgeStore::open(&candidate, false)?.backup(&archive)?
     };
+    let swap = DirectorySwapPlan::capture(&declared.corpus, &staging)?;
+    let swap_bytes = serde_json::to_string(&swap)?;
+    let swap_sha256 = digest(swap_bytes.as_bytes());
+    if let Some(saved) = &saved {
+        ensure!(
+            saved.swap_sha256 == swap_sha256
+                && stage.read_artifact("directory-swap.json")?.as_deref()
+                    == Some(swap_bytes.as_str()),
+            "retained directory swap plan changed or is missing"
+        );
+    }
+    stage.retain_artifact("directory-swap.json", &swap_bytes, false)?;
     let ready = SqlReadiness {
         preparation,
         publication: publication.clone(),
         staging: staging.clone(),
         staging_identity,
         candidate_identity: identity(&candidate)?,
+        swap_sha256,
         archive_revision: capture.revision,
         intent_sha256: digest(intent.as_bytes()),
     };
@@ -301,6 +315,11 @@ pub async fn ready_sql_backed(
         None,
     )?;
     stage.verify_root_path(&staging)?;
+    ensure!(
+        DirectorySwapPlan::capture(&declared.corpus, &staging)? == swap
+            && stage.read_artifact("directory-swap.json")?.as_deref() == Some(swap_bytes.as_str()),
+        "directory swap evidence changed before readiness completion"
+    );
     stage.retain_artifact("ready-intent.json", &intent, false)?;
     stage.retain_artifact("ready.json", &serde_json::to_string(&ready)?, false)?;
     tx.commit()
