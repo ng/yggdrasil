@@ -10,6 +10,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod publication;
+pub use publication::Publication;
+
 const FILE: &str = "fleet-intent.json";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -222,13 +225,7 @@ impl Journal {
                         && manifest.mappings == serde_json::to_value(&plan.mappings)?,
                     "staged export differs from the owned fleet source"
                 );
-                let bytes = serde_json::to_string(&serde_json::json!({
-                    "version":1, "operation":plan.operation,
-                    "request_sha256":self.intent.request_sha256,
-                    "prepared_sha256":prepared_sha256,
-                    "source_backup_sha256":backup.digest(),
-                    "manifest":&manifest,
-                }))?;
+                let bytes = self.export_bytes(&manifest, &prepared_sha256, backup.digest())?;
                 self.store
                     .retain_artifact("fleet-export.json", &bytes, false)?;
                 self.verify_prepared(&prepared_sha256)?;
@@ -236,6 +233,19 @@ impl Journal {
             },
         )
         .await
+    }
+    fn export_bytes(
+        &self,
+        manifest: &crate::knowledge::export::Manifest,
+        prepared: &str,
+        backup: &str,
+    ) -> Result<String> {
+        Ok(serde_json::to_string(&serde_json::json!({
+            "version":1, "operation":self.plan()?.plan().operation,
+            "request_sha256":self.intent.request_sha256,
+            "prepared_sha256":prepared, "source_backup_sha256":backup,
+            "manifest":manifest,
+        }))?)
     }
     /// Return only this operation's still-fenced SQL source to generation +2,
     /// then reconcile hosts. After activation, use current-state rollback instead.
@@ -257,6 +267,7 @@ impl Journal {
             &backup,
             &prepared,
             || self.verify_prepared(&prepared),
+            || self.verify_publication_for_abort(),
         )
         .await?;
         self.visit_hosts(super::protocol::Action::AbortSql, ssh_identity)

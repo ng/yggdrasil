@@ -527,6 +527,16 @@ impl SharedGit {
         let commit = self.fetch()?;
         self.publish_cache(commit, Utc::now())
     }
+    /// Read a retained immutable tree for a coordinator's exact-base comparison.
+    /// This neither fetches nor establishes that the commit is still current.
+    pub(crate) fn snapshot_files(&self, commit: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+        ensure!(
+            oid(commit.as_bytes())? == commit,
+            "full snapshot commit ID required"
+        );
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        self.files(commit)
+    }
     pub fn cached(&self) -> Result<Snapshot> {
         let state: State = serde_json::from_str(
             &self

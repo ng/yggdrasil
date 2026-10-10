@@ -1867,6 +1867,8 @@ async fn native_fleet_owned_fence_resume_and_abort() {
     };
     let server = Server::new();
     let mut f = Fixture::new(&server).await;
+    sqlx::query("INSERT INTO memories(text,user_id) SELECT 'bulk note ' || n,'alice' FROM generate_series(1,40) n")
+        .execute(&f.pool).await.unwrap();
     let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
     KnowledgeStore::open(&config.knowledge_dir, true).unwrap();
     let identities =
@@ -1882,10 +1884,47 @@ async fn native_fleet_owned_fence_resume_and_abort() {
     let hash = digest(&serde_json::to_vec(&manifest).unwrap());
     let ssh = ParticipantSsh::new(&f).await;
     let participant = Uuid::new_v4();
+    fn git(root: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+    let seed = f.temp.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    git(&seed, &["init", "-b", "knowledge"]);
+    std::fs::write(seed.join("README.txt"), "retained remote metadata\n").unwrap();
+    git(&seed, &["add", "README.txt"]);
+    git(&seed, &["commit", "-m", "initial"]);
+    let remote = f.temp.path().join("remote.git");
+    git(f.temp.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        &seed,
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/knowledge",
+        ],
+    );
+    let base = git(&seed, &["rev-parse", "HEAD"]);
     let plan = ValidatedPlan::parse(&serde_json::json!({
         "version":1,"operation":Uuid::new_v4(),"source_generation":1,"mappings":&f.plan.mappings,"agents":[],
-        "shared":{"version":1,"remote":"git@example.test:knowledge.git","branch":"main"},
-        "expected_remote_commit":"a".repeat(40),"source_backup":{"path":backup,"manifest_sha256":hash},
+        "shared":{"version":1,"remote":remote,"branch":"knowledge"},
+        "expected_remote_commit":base,"source_backup":{"path":backup,"manifest_sha256":hash},
         "all_participating_hosts_listed":true,"schema_changes_stopped":true,"session_preserving_endpoint":true,"remote_writers_stopped":true,
         "participants":[{"id":participant,"name":"ssh-host","protocol":1,"endpoint":&ssh.endpoint,
             "corpus":config.knowledge_dir.canonicalize().unwrap(),"policy":config.knowledge_policy_dir.canonicalize().unwrap(),
@@ -1997,7 +2036,11 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         .await
         .unwrap();
     assert_eq!(exported.generation, 2);
-    assert!(!exported.entries.is_empty());
+    assert_eq!(
+        exported.entries.len(),
+        42,
+        "fleet publication must exceed the ordinary 32-change limit"
+    );
     assert!(f.journal.join("fleet-export.json").exists());
     assert_eq!(
         journal
@@ -2023,6 +2066,75 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         b"independent stage edit"
     );
     std::fs::write(&staged_document, original_document).unwrap();
+    let published = journal
+        .publish_hosts(&config, &f.pool, Some(&ssh.identity))
+        .await
+        .unwrap();
+    assert_eq!(git(&remote, &["rev-parse", "knowledge"]), published.commit);
+    assert_eq!(
+        git(
+            &remote,
+            &["show", &format!("{}:README.txt", published.commit)]
+        ),
+        "retained remote metadata"
+    );
+    assert_eq!(
+        journal
+            .publish_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        published
+    );
+    assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "2");
+    assert!(
+        runtime.exists(),
+        "Git publication must leave the host fenced"
+    );
+    // Model a lost local completion write after push and transport confirmation.
+    std::fs::remove_file(f.journal.join("fleet-published.json")).unwrap();
+    drop(journal);
+    let journal = Journal::resume(&f.journal, &request_hash).unwrap();
+    assert_eq!(
+        journal
+            .publish_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        published
+    );
+    assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "2");
+    git(&seed, &["fetch", remote.to_str().unwrap(), "knowledge"]);
+    git(&seed, &["reset", "--hard", "FETCH_HEAD"]);
+    std::fs::write(seed.join("independent.txt"), "external change\n").unwrap();
+    git(&seed, &["add", "independent.txt"]);
+    git(&seed, &["commit", "-m", "independent"]);
+    git(
+        &seed,
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/knowledge",
+        ],
+    );
+    let independent = git(&remote, &["rev-parse", "knowledge"]);
+    assert!(
+        journal
+            .publish_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(
+        journal
+            .abort_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(git(&remote, &["rev-parse", "knowledge"]), independent);
+    // Fixture-only operator reconciliation restores the exact publication. The
+    // coordinator itself must never reset a remote branch to accomplish abort.
+    git(
+        &remote,
+        &["update-ref", "refs/heads/knowledge", &published.commit],
+    );
     let original_runtime = std::fs::read(&runtime).unwrap();
     std::fs::remove_file(&runtime).unwrap();
     assert!(
@@ -2068,6 +2180,8 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         .await
         .unwrap();
     drop(journal);
+    let offline = f.temp.path().join("offline-remote.git");
+    std::fs::rename(&remote, &offline).unwrap();
     let journal = Journal::resume(&f.journal, &request_hash).unwrap();
     let aborted = journal
         .abort_hosts(&config, &f.pool, Some(&ssh.identity))
@@ -2107,6 +2221,21 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         ygg::knowledge::export::verify(&f.journal.join("stage")).unwrap(),
         exported
     );
+    // SQL return is already committed: host reconciliation must not depend on
+    // remote availability or overwrite independent later Git changes.
+    std::fs::rename(&offline, &remote).unwrap();
+    git(
+        &remote,
+        &["update-ref", "refs/heads/knowledge", &independent],
+    );
+    assert_eq!(
+        journal
+            .abort_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        aborted
+    );
+    assert_eq!(git(&remote, &["rev-parse", "knowledge"]), independent);
     let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
         .fetch_one(&f.pool)
         .await

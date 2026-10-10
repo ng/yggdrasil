@@ -97,6 +97,7 @@ pub(super) async fn abort(
     backup: &SourceBackup,
     prepared_sha256: &str,
     verify_journal: impl Fn() -> Result<()>,
+    verify_publication: impl Fn() -> Result<()>,
 ) -> Result<i64> {
     let evidence = (prepared_sha256.to_owned(), backup.digest().to_owned());
     let mut tx = Registration::transaction(pool).await?;
@@ -115,6 +116,7 @@ pub(super) async fn abort(
         verify_fenced(registration, &marker)?;
         backup.verify_on(&mut tx).await?;
         verify_journal()?;
+        verify_publication()?;
         sqlx::query("UPDATE public.knowledge_storage SET backend='sql',generation=$1,corpus_id=NULL WHERE singleton")
             .bind(registration.source_generation+2).execute(&mut *tx).await?;
         record(registration, &mut tx, "aborted", &evidence).await?;

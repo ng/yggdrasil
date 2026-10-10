@@ -522,3 +522,25 @@ insufficient. Without a matching pending record, recovery can only confirm the
 current tip and cannot push. Local Git fixtures cover pre-push interruption,
 changed desired bytes, lost responses, repeated confirmation and independent
 remote advances. Coordinator publication-intent wiring remains outstanding.
+
+
+### Conditional coordinator publication
+
+`Journal::publish_hosts` stages the export and rechecks every prepared host before
+holding the SQL generation lease across publication. It verifies the exact
+planned remote base, preserves non-knowledge metadata, and refuses conflicting
+or unrelated remote knowledge rather than silently replacing it. It publishes
+all exported documents plus an operation-specific manifest as one complete tree.
+The coordinator retains a candidate-commit intent before push and completes its
+publication receipt only after the exact commit/tree is the current remote tip.
+Matching retries use the same retained commit; lost completion writes can be
+reconciled without creating another commit. Hosts remain locally fenced.
+
+Initial pre-activation abort checks any pending or completed publication against
+the exact base/candidate and retains all Git evidence without push/reset. Once
+SQL return is committed, host reconciliation depends on that immutable abort
+receipt, not remote availability; later remote edits and SQL writes survive retry.
+The native fixture covers a 42-document publication, retained remote metadata,
+idempotent publication, lost local completion, independent remote advance refusal,
+and resumed abort with the remote offline. Host ready/activation/finalization and
+current-state rollback remain unimplemented.
