@@ -9,6 +9,8 @@ import sys
 
 sys.dont_write_bytecode = True
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,6 +24,30 @@ def module(name, filename):
 
 build = module("bundle_build", "build-release-bundles.py")
 smoke = module("bundle_smoke", "smoke-release-bundle.py")
+
+
+class MacDistribution(unittest.TestCase):
+    def test_distribution_checks_fail_closed(self):
+        audit = module("mac_audit", "audit-macos-release-bundle.py")
+        image = struct.pack("<IIII", 0xFEEDFACF, 0x100000C, 0, 2)
+        signed = "Authority=Developer ID Application: Fixture\nTeamIdentifier=FIXTURE\nCodeDirectory flags=0x10000(runtime)\n"
+        for metadata, failed_check, expected in [
+                (signed, None, True), (signed, "--verify", False),
+                (signed, "--assess", False), ("Signature=adhoc\n", None, False),
+                (signed.replace("(runtime)", ""), None, False)]:
+            with self.subTest(metadata=metadata, failed_check=failed_check):
+                def run(args, **kwargs):
+                    return SimpleNamespace(returncode=int(failed_check in args) if failed_check else 0,
+                                           stdout="", stderr=metadata if "--display" in args else "")
+                with tempfile.TemporaryDirectory() as tmp, patch.object(audit.subprocess, "run", run):
+                    self.assertEqual(audit.inspect("ygg", image, Path(tmp))["passed"], expected)
+
+    def test_unsupported_macho_is_not_silently_skipped(self):
+        audit = module("mac_audit", "audit-macos-release-bundle.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                audit.inspect("fat", b"\xca\xfe\xba\xbe" + bytes(20), Path(tmp))
+            self.assertIsNone(audit.inspect("README", b"plain text", Path(tmp)))
 
 
 class BundleTests(unittest.TestCase):

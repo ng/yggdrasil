@@ -646,3 +646,22 @@ completion in the retained abandoned directory, and verifies that the published
 cluster's control file is unchanged. Test-only output redirection lets the orphan
 finish without depending on pipes owned by the killed parent. The native matrix
 runs this fixture alongside the six publication-boundary crash tests.
+
+### macOS distribution audit
+
+Run the explicit audit on a native macOS machine against an offline candidate:
+
+```sh
+python3 scripts/audit-macos-release-bundle.py /absolute/offline-bundle.tar.gz \
+  --report /absolute/new-signature-report.json
+```
+
+It validates the bundle manifest and nested PostgreSQL pin, inspects the CLI and
+PostgreSQL Mach-O images, and requires valid Developer ID signatures, Team IDs,
+hardened runtime for executables, and successful executable Gatekeeper assessments.
+The JSON report retains per-image digests and command results; any failed check
+returns nonzero. It never signs, executes payloads, changes quarantine or weakens
+system policy. Current ad-hoc candidates fail this audit (123 images inspected in
+the arm64 candidate from run `38013540700`). A passing static audit still requires
+separate quarantine first-launch and offline-notarization-ticket rehearsal on the
+final distribution. It is not evidence that the entire release gate is complete.
