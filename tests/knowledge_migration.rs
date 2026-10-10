@@ -2698,27 +2698,49 @@ async fn fleet_fence_fixture(finalize_steps: Option<usize>) {
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; two-host post-activation recovery"]
 async fn native_partial_fleet_finalization_preserves_writes_on_resume() {
-    partial_fleet_finalization_fixture(false, false, false).await;
+    partial_fleet_finalization_fixture(false, false, false, None).await;
 }
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; complete reverse fence and resume"]
 async fn native_fleet_reverse_fence_resumes_without_recreating_host_evidence() {
-    partial_fleet_finalization_fixture(true, false, false).await;
+    partial_fleet_finalization_fixture(true, false, false, None).await;
 }
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; atomic current-data SQL return"]
 async fn native_fleet_sql_return_is_atomic_and_retry_preserves_later_writes() {
-    partial_fleet_finalization_fixture(true, true, false).await;
+    partial_fleet_finalization_fixture(true, true, false, None).await;
 }
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; cancel mixed fenced and unfenced hosts"]
 async fn native_fleet_cancellation_restores_mixed_hosts_without_fabricating_fences() {
-    partial_fleet_finalization_fixture(false, false, true).await;
+    partial_fleet_finalization_fixture(false, false, true, None).await;
+}
+#[derive(Clone, Copy)]
+enum FleetCliScenario {
+    Execute,
+    Cancel,
+    Abort,
+}
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; public fleet CLI complete recovery"]
+async fn native_fleet_cli_executes_cancels_reconciles_and_returns_sql() {
+    partial_fleet_finalization_fixture(true, false, false, Some(FleetCliScenario::Execute)).await;
+}
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; public fleet CLI prefence cancellation"]
+async fn native_fleet_cli_cancels_prepared_hosts() {
+    partial_fleet_finalization_fixture(false, false, false, Some(FleetCliScenario::Cancel)).await;
+}
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; public fleet CLI fenced abort"]
+async fn native_fleet_cli_aborts_after_publication_refusal() {
+    partial_fleet_finalization_fixture(false, false, false, Some(FleetCliScenario::Abort)).await;
 }
 async fn partial_fleet_finalization_fixture(
     complete_reverse: bool,
     return_sql: bool,
     cancel_early: bool,
+    cli: Option<FleetCliScenario>,
 ) {
     use ygg::knowledge::{
         document::digest,
@@ -2833,6 +2855,304 @@ async fn partial_fleet_finalization_fixture(
         "session_preserving_endpoint":true,"remote_writers_stopped":true,"participants":hosts
     }).to_string()).unwrap();
     let hash = plan.registration().request_sha256.clone();
+    if let Some(scenario) = cli {
+        let plan_path = first.temp.path().join("fleet.json");
+        std::fs::write(&plan_path, plan.bytes()).unwrap();
+        let fleet = || {
+            let mut command = first.command();
+            command
+                .args(["knowledge", "fleet", "--plan"])
+                .arg(&plan_path)
+                .arg("--journal")
+                .arg(&first.journal)
+                .args(["--request-sha256", &hash, "--ssh-identity"])
+                .arg(&ssh2.identity)
+                .arg("--json");
+            command
+        };
+        fn json_output(output: Output) -> serde_json::Value {
+            serde_json::from_slice(&success(output).stdout).unwrap()
+        }
+        let missing = fleet().arg("status").output().await.unwrap();
+        assert!(!missing.status.success() && !first.journal.exists());
+        assert_eq!(
+            json_output(fleet().arg("prepare").output().await.unwrap())["phase"],
+            "prepared"
+        );
+        assert_eq!(first.marker().await, (1, "sql".into()));
+        let status = json_output(
+            fleet()
+                .env("DATABASE_URL", "invalid")
+                .env("YGG_DATABASE_OWNER_URL", "invalid")
+                .arg("status")
+                .output()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(status["phase"], "local_evidence_only");
+        assert!(status["receipts"]["fleet-prepared.json"].is_string());
+        if matches!(scenario, FleetCliScenario::Cancel) {
+            for _ in 0..2 {
+                assert_eq!(
+                    json_output(fleet().arg("cancel").output().await.unwrap())["phase"],
+                    "cancelled"
+                );
+            }
+            assert!(
+                !fleet()
+                    .arg("execute")
+                    .output()
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert_eq!(first.marker().await, (2, "sql".into()));
+            assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
+            assert!(!config2.knowledge_policy_dir.join("runtime.json").exists());
+            first.pool.close().await;
+            return;
+        }
+        if matches!(scenario, FleetCliScenario::Abort) {
+            std::fs::write(seed.join("README.txt"), "independent before publication").unwrap();
+            git(&seed, &["add", "README.txt"]);
+            git(&seed, &["commit", "-m", "advance before publication"]);
+            git(
+                &seed,
+                &[
+                    "push",
+                    remote.to_str().unwrap(),
+                    "HEAD:refs/heads/knowledge",
+                ],
+            );
+            let tip = git(&seed, &["rev-parse", "HEAD"]);
+            assert!(
+                !fleet()
+                    .arg("execute")
+                    .output()
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert_eq!(first.marker().await, (2, "fenced".into()));
+            for _ in 0..2 {
+                assert_eq!(
+                    json_output(fleet().arg("abort").output().await.unwrap())["phase"],
+                    "aborted"
+                );
+            }
+            assert_eq!(first.marker().await, (3, "sql".into()));
+            assert_eq!(git(&remote, &["rev-parse", "refs/heads/knowledge"]), tip);
+            assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
+            assert!(!config2.knowledge_policy_dir.join("runtime.json").exists());
+            first.pool.close().await;
+            return;
+        }
+        let active = json_output(fleet().arg("execute").output().await.unwrap());
+        assert_eq!(active["phase"], "finalized");
+        assert_eq!(first.marker().await, (3, "okf".into()));
+        for fixture in [&first, &second] {
+            success(
+                fixture
+                    .command()
+                    .args(["remember", "CLI shared write", "--global", "--json"])
+                    .output()
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            json_output(fleet().arg("execute").output().await.unwrap()),
+            active
+        );
+        for invalid in ["abort", "cancel"] {
+            assert!(
+                !fleet()
+                    .arg(invalid)
+                    .output()
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert_eq!(first.marker().await, (3, "okf".into()));
+        }
+        let shared = ygg::knowledge::shared::SharedGit::open(
+            &config.knowledge_dir,
+            plan.plan().shared.clone(),
+        )
+        .unwrap();
+        let current = shared.refresh().unwrap();
+        let mut reverse = serde_json::json!({"version":1,"operation":Uuid::new_v4(),"forward_operation":plan.plan().operation,
+            "forward_request_sha256":hash,"activation_sha256":active["receipt"]["readiness_sha256"],"source_generation":3,
+            "expected_remote_commit":current.commit,"all_participating_hosts_listed":true,"schema_changes_stopped":true,
+            "session_preserving_endpoint":true,"remote_writers_stopped":true,"participants":participants.map(|id|serde_json::json!({"id":id,"knowledge_writers_stopped":true,"external_editors_stopped":true}))});
+        let reverse_path = first.temp.path().join("reverse.json");
+        std::fs::write(&reverse_path, reverse.to_string()).unwrap();
+        let reverse_sha = digest(reverse.to_string().as_bytes());
+        let invalid = fleet()
+            .args(["rollback", "--request"])
+            .arg(&reverse_path)
+            .args(["--sha256", &"0".repeat(64)])
+            .output()
+            .await
+            .unwrap();
+        assert!(!invalid.status.success() && invalid.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&invalid.stderr).contains("differs from supplied SHA-256"));
+        std::fs::write(ssh1.identity.with_extension("pub"), b"").unwrap();
+        let partial = fleet()
+            .args(["rollback", "--request"])
+            .arg(&reverse_path)
+            .args(["--sha256", &reverse_sha])
+            .output()
+            .await
+            .unwrap();
+        assert!(!partial.status.success() && partial.stdout.is_empty());
+        assert_eq!(first.marker().await, (3, "okf".into()));
+        std::fs::write(ssh1.identity.with_extension("pub"), &client_key).unwrap();
+        let cancelled = json_output(
+            fleet()
+                .args(["cancel-rollback", "--request"])
+                .arg(&reverse_path)
+                .args(["--sha256", &reverse_sha])
+                .output()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(cancelled["phase"], "rollback_cancelled");
+        assert_eq!(
+            json_output(
+                fleet()
+                    .args(["cancel-rollback", "--request"])
+                    .arg(&reverse_path)
+                    .args(["--sha256", &reverse_sha])
+                    .output()
+                    .await
+                    .unwrap()
+            ),
+            cancelled
+        );
+        assert_eq!(first.marker().await, (3, "okf".into()));
+        // An unrepresentable current document stops rollback after the fleet fence.
+        git(
+            &seed,
+            &["fetch", remote.to_str().unwrap(), "refs/heads/knowledge"],
+        );
+        git(&seed, &["reset", "--hard", "FETCH_HEAD"]);
+        std::fs::write(
+            seed.join("decision.md"),
+            "---\ntype: Design Decision\n---\nRetained in Git history and recovery archive.\n",
+        )
+        .unwrap();
+        git(&seed, &["add", "decision.md"]);
+        git(&seed, &["commit", "-m", "generic current knowledge"]);
+        git(
+            &seed,
+            &[
+                "push",
+                remote.to_str().unwrap(),
+                "HEAD:refs/heads/knowledge",
+            ],
+        );
+        let before = git(&seed, &["rev-parse", "HEAD"]);
+        reverse["operation"] = serde_json::json!(Uuid::new_v4());
+        reverse["expected_remote_commit"] = before.clone().into();
+        std::fs::write(&reverse_path, reverse.to_string()).unwrap();
+        let reverse_sha = digest(reverse.to_string().as_bytes());
+        let rejected = fleet()
+            .args(["rollback", "--request"])
+            .arg(&reverse_path)
+            .args(["--sha256", &reverse_sha])
+            .output()
+            .await
+            .unwrap();
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("SQL cannot represent"),
+            "{}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert_eq!(first.marker().await, (4, "fenced".into()));
+        git(&seed, &["rm", "decision.md"]);
+        git(
+            &seed,
+            &["commit", "-m", "explicit removal of unsupported document"],
+        );
+        git(
+            &seed,
+            &[
+                "push",
+                remote.to_str().unwrap(),
+                "HEAD:refs/heads/knowledge",
+            ],
+        );
+        let after = git(&seed, &["rev-parse", "HEAD"]);
+        let reconciliation = serde_json::json!({"version":1,"operation":Uuid::new_v4(),"rollback_operation":reverse["operation"],
+            "rollback_request_sha256":reverse_sha,"fenced_generation":4,"previous_request_sha256":reverse_sha,
+            "previous_remote_commit":before,"expected_remote_commit":after,"all_participating_hosts_listed":true,
+            "schema_changes_stopped":true,"session_preserving_endpoint":true,"remote_writers_stopped":true,"participants":reverse["participants"]});
+        let reconcile_path = first.temp.path().join("reconcile.json");
+        std::fs::write(&reconcile_path, reconciliation.to_string()).unwrap();
+        let reconcile_sha = digest(reconciliation.to_string().as_bytes());
+        let reconciled = json_output(
+            fleet()
+                .args(["reconcile-rollback", "--rollback-request"])
+                .arg(&reverse_path)
+                .args(["--rollback-sha256", &reverse_sha, "--request"])
+                .arg(&reconcile_path)
+                .args(["--sha256", &reconcile_sha])
+                .output()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(reconciled["phase"], "rollback_reconciled");
+        assert_eq!(first.marker().await, (4, "fenced".into()));
+        let returned = json_output(
+            fleet()
+                .args(["rollback", "--request"])
+                .arg(&reverse_path)
+                .args(["--sha256", &reverse_sha])
+                .output()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(returned["phase"], "sql_returned");
+        assert_eq!(first.marker().await, (5, "sql".into()));
+        sqlx::query("INSERT INTO memories(text,user_id) VALUES('CLI later SQL write','alice')")
+            .execute(&first.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            json_output(
+                fleet()
+                    .args(["rollback", "--request"])
+                    .arg(&reverse_path)
+                    .args(["--sha256", &reverse_sha])
+                    .output()
+                    .await
+                    .unwrap()
+            ),
+            returned
+        );
+        let texts: Vec<String> = sqlx::query_scalar("SELECT text FROM memories")
+            .fetch_all(&first.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|t| t.as_str() == "CLI shared write")
+                .count(),
+            2
+        );
+        assert!(texts.iter().any(|t| t == "CLI later SQL write"));
+        assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
+        assert!(!config2.knowledge_policy_dir.join("runtime.json").exists());
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/knowledge"]), after);
+        first.pool.close().await;
+        return;
+    }
     let journal = Journal::prepare(&first.journal, plan).unwrap();
     let active = journal
         .activate_hosts(&config, &first.pool, Some(&ssh2.identity))

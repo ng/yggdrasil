@@ -58,6 +58,51 @@ fn identity(path: &Path) -> Result<(u64, u64)> {
     Ok((meta.dev(), meta.ino()))
 }
 impl Journal {
+    /// Validate local placement before creating any journal files. This is the
+    /// public command boundary; later phases still verify the actual backup.
+    pub fn prepare_for_deployment(
+        directory: &Path,
+        plan: ValidatedPlan,
+        config: &crate::config::database::DeploymentConfig,
+    ) -> Result<Self> {
+        let directory = target(directory)?;
+        for path in [
+            &config.data_dir,
+            &config.knowledge_dir,
+            &config.knowledge_policy_dir,
+            &plan.plan().source_backup.path,
+        ] {
+            let path = target(path)?;
+            ensure!(
+                !path.starts_with(&directory) && !directory.starts_with(&path),
+                "coordinator journal overlaps deployment or backup paths"
+            );
+        }
+        Self::prepare(&directory, plan)
+    }
+    /// Local evidence only: receipt presence and hashes never assert live SQL
+    /// authority or that every remote host still has the recorded selection.
+    pub fn local_receipts(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        self.verify()?;
+        let mut records = std::collections::BTreeMap::new();
+        for phase in [
+            "prepared",
+            "export",
+            "published",
+            "ready",
+            "activated",
+            "finalized",
+            "cancelled",
+            "aborted",
+        ] {
+            let name = format!("fleet-{phase}.json");
+            if let Some(bytes) = self.store.read_artifact(&name)? {
+                records.insert(name, crate::knowledge::document::digest(bytes.as_bytes()));
+            }
+        }
+        self.verify()?;
+        Ok(records)
+    }
     /// Persist the exact request before registration or participant preparation.
     /// A conflicting existing journal is never rewritten. The caller must choose
     /// a directory separate from local deployment/corpus/policy/backup roots.

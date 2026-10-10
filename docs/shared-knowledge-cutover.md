@@ -1,9 +1,81 @@
 # Shared knowledge cutover protocol
 
-Implementation design for the remaining M5/M6 work in PR #122. **Not implemented
-or operator-ready.** `migration::Plan` must continue rejecting shared/multi-host
-execution until the forward, abort and current-state rollback paths below work
-end to end. This extends the existing plan; it does not replace its release gates.
+The public `ygg knowledge fleet` command implements shared forward cutover,
+recovery and current-state SQL return. The protocol and implementation history below
+record the incremental work in PR #122; earlier statements about unavailable phases
+are historical. Deployment qualification and the original release gates remain open.
+The private `migration::Plan` path still rejects shared/multi-host execution.
+
+## Operator command workflow
+
+Use the same reviewed forward request and absolute, UTF-8 coordinator journal path
+throughout an operation. The journal must be separate from the deployment data,
+corpus, policy and source backup paths. Retain the journal and all paired archives.
+The request schemas are defined by `fleet::plan`, `fleet::rollback`, and their
+validated types; see the protocol sections below for required evidence.
+
+Before preparation, provision the maintenance/owner database connection, verified
+source backup, complete host and writer census, recoverable scope mappings, pinned
+SSH host keys and compatible participant binaries. Stop declared external writers
+for the required window. A declaration alone does not establish deployment-wide
+quiescence or compatibility. The optional SSH identity selects the provisioned key;
+it does not bypass host authentication.
+
+Put common options **before** the action. Compute pins from the exact reviewed JSON
+bytes, without reformatting between approval and execution:
+
+```sh
+forward_sha=$(shasum -a 256 forward.json | cut -d ' ' -f 1)
+ygg knowledge fleet --plan forward.json --journal /absolute/fleet-journal \
+  --request-sha256 "$forward_sha" --ssh-identity /absolute/ssh-key --json prepare
+ygg knowledge fleet --plan forward.json --journal /absolute/fleet-journal \
+  --request-sha256 "$forward_sha" --ssh-identity /absolute/ssh-key --json execute
+```
+
+`execute` resumes the entire forward workflow through every host's final selection.
+Repeat the same command after resolving a partial failure. `cancel` restores the
+prepared host set before the forward SQL fence; `abort` restores SQL after that
+fence but before OKF activation. Neither is a rollback after activation.
+
+`status` uses the same common options and reads only local receipt hashes. It needs
+no database or SSH access, requires an existing journal, and reports
+`local_evidence_only`; it does not prove live SQL or host authority.
+
+After activation, supply a fresh reviewed reverse request and its exact SHA-256:
+
+```sh
+reverse_sha=$(shasum -a 256 rollback.json | cut -d ' ' -f 1)
+ygg knowledge fleet --plan forward.json --journal /absolute/fleet-journal \
+  --request-sha256 "$forward_sha" --ssh-identity /absolute/ssh-key --json \
+  rollback --request rollback.json --sha256 "$reverse_sha"
+```
+
+This command fences participants, captures current shared data and usage, commits
+SQL return once, and deselects every host. Retrying preserves later SQL writes.
+Before the global reverse fence, `cancel-rollback` takes the same reverse arguments
+and restores all participants before releasing admission for a new operation.
+After the global reverse fence, cancellation is refused. If a changed remote needs
+reconciliation, review a new descendant snapshot and fresh quiescence request:
+
+```sh
+reconcile_sha=$(shasum -a 256 reconcile.json | cut -d ' ' -f 1)
+ygg knowledge fleet --plan forward.json --journal /absolute/fleet-journal \
+  --request-sha256 "$forward_sha" --ssh-identity /absolute/ssh-key --json \
+  reconcile-rollback --rollback-request rollback.json --rollback-sha256 "$reverse_sha" \
+  --request reconcile.json --sha256 "$reconcile_sha"
+```
+
+Reconciliation selects evidence and **leaves SQL fenced**. Then repeat `rollback`
+with the original reverse request to finish capture, SQL return and host deselection.
+No command force-pushes or silently rewrites an earlier request or archive.
+Successful JSON output contains a version, phase, operation, journal and receipt
+(or local receipt hashes for status). Failure exits nonzero without a success object;
+a partial operation may still have durable evidence to resume.
+
+Three native two-host CLI fixtures cover complete cutover/current-data return,
+partial reverse cancellation and descendant reconciliation, pre-fence cancellation,
+and post-fence abort after publication refusal. These fixtures do not replace the
+broader crash, provider, deployed-fleet and dogfood qualification gates.
 
 ## Existing boundaries
 

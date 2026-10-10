@@ -48,6 +48,23 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
+    /// Execute or recover an explicitly reviewed shared fleet migration
+    Fleet {
+        /// Exact forward fleet request, including backups and pinned SSH hosts
+        #[arg(long)]
+        plan: std::path::PathBuf,
+        #[arg(long)]
+        journal: std::path::PathBuf,
+        /// SHA-256 of the exact reviewed forward request bytes
+        #[arg(long)]
+        request_sha256: String,
+        #[arg(long)]
+        ssh_identity: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: ygg::cli::knowledge_cmd::fleet::Action,
+    },
     /// Internal bounded participant protocol; no fleet activation capability
     #[command(hide = true)]
     FleetParticipant,
@@ -1472,6 +1489,24 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Knowledge { action } => match action {
+            KnowledgeAction::Fleet {
+                plan,
+                journal,
+                request_sha256,
+                ssh_identity,
+                json,
+                action,
+            } => {
+                ygg::cli::knowledge_cmd::fleet::run(
+                    &plan,
+                    &journal,
+                    &request_sha256,
+                    ssh_identity.as_deref(),
+                    action,
+                    json,
+                )
+                .await?;
+            }
             KnowledgeAction::FleetParticipant => {
                 ygg::cli::knowledge_cmd::fleet_participant().await?
             }

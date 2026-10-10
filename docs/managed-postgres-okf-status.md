@@ -22,8 +22,8 @@ to repository evidence and explicitly identifies missing implementation or proof
 | M2: integration | `src/config/database.rs`, `src/db.rs`, init and `db` commands; common connection resolver, existing URL preservation, no fallback on external failure, no hook download/init/upgrade. | Clean-machine operator qualification using the final released artifacts. Default knowledge rollout remains M7. |
 | M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch, current selection-path rebasing and preserved database/knowledge IDs. | Explicit patch upgrade now has a journal, backup validation, startup fence, resume and pre-switch abort; local native 16.14→16.15 happy-path and seven crash/abort cases pass. Patch-upgrade native CI passed on all three platforms at `25187e7`. An explicit managed 16→18 backup/restore/switch path now uses a separate pinned 18.6 catalog and new data directory; its populated native CLI flow passes locally. The major-flow baseline suite passed 590 tests; the later startup-deadline correction passed 11 native regressions. At `6e80c7e`, standard CI (run `38013540750`) passes PostgreSQL 16/18 tests, check, Clippy and formatting; native Linux, Intel macOS and Apple Silicon macOS all pass in run `38013540700`. This qualifies the candidate lifecycle fixtures, not published artifacts or clean-machine distribution. Broader deployment-move, credential/provider recovery and published-platform qualification remain. |
 | M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation, offline fixtures and real-disk-full tests on all three native platforms. | Two uninstrumented local repeats at `ba7aff6` pass the SQL-relative latency threshold (−61.51 ms and 4.86 ms added p95); the stricter SQL→OKF→SQL fixture passes twice at 17.61 ms and 16.01 ms worst added p95, meeting the local measured target. Historical variance, including the prior 108.57 ms failure, remains documented; these runs do not establish a universal latency bound. See `docs/performance/okf-latency-investigation.md`. Broader filesystem fault qualification remains open. |
-| M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures; bounded complete-snapshot publication with exact remote-base checks. | Shared remote credential/provider and resource/latency qualification; complete shared cutover and rollback orchestration. Component fixtures do not prove a deployed fleet. |
-| M6: cutover/dogfood | Database generation/write guards and client registration; full row export/round-trip validation; private single-host forward/abort/current-state rollback coordinators with journals, backups, apply-once receipts and killed-process resumption; pre-fence cancellation, immutable fleet registration, and registered SQL-host preparation/cancellation primitives. | Shared/multi-host execution is rejected. Deployment-wide client compatibility and writer quiescence must be established; local operator declarations alone do not demonstrate them. Full recovery/rollback rehearsal and recorded dogfooding remain. |
+| M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures; bounded complete-snapshot publication with exact remote-base checks. | Shared remote credential/provider and resource/latency qualification; deployed shared cutover and rollback rehearsal. Component fixtures do not prove a deployed fleet. |
+| M6: cutover/dogfood | Database generation/write guards and client registration; full row export/round-trip validation; private single-host forward/abort/current-state rollback coordinators with journals, backups, apply-once receipts and killed-process resumption; pre-fence cancellation, immutable fleet registration, and registered SQL-host preparation/cancellation primitives. | The public `knowledge fleet` coordinator supports shared forward/recovery/current-state reverse execution; three native two-host CLI fixtures pass. Deployment-wide client compatibility and writer quiescence must be established; local operator declarations alone do not demonstrate them. Full recovery/rollback rehearsal and recorded dogfooding remain. |
 | M7: removal/default rollout | Deliberately deferred; legacy tables/repositories remain available for the compatibility/recovery window. | **14 days of dogfooding plus successful rollback rehearsal**, preceding milestone gates, then a new forward removal migration, repository removal, installer/default changes and final restore/coordination qualification. |
 
 ## Requirements and evidence boundaries
@@ -99,8 +99,8 @@ Private cutover and reverse import preserve current edits, deletions, activation
 and usage baselines; retries do not replay committed mutations or overwrite later
 writes. Shared transport uses confirmed Git snapshots, conditional non-force
 pushes and a 60-second automatic-injection freshness limit. Retained pending
-commits support explicit inspection/recovery. Shared reverse-capture primitives
-exist, but there is no complete shared/fleet migration command. The fleet journal
+commits support explicit inspection/recovery. The public `knowledge fleet` command
+orchestrates forward cutover and current-state SQL return. The fleet journal
 now captures current shared documents and SQL usage only after the authenticated
 fleet fence commits. It retains immutable intent, paired coordinator cache/policy
 archives, and a lossless reverse candidate; retries require identical evidence.
@@ -115,8 +115,8 @@ The separate authenticated deselection step removes only each host's exact commi
 local fence after checking the SQL-return receipt under a shared generation lease.
 It retains local intent before removal and per-host coordinator evidence afterward.
 Retries preserve independently changed selections and refuse missing evidence.
-The public shared migration CLI stays disabled pending reverse cancellation and
-remaining orchestration/qualification gates.
+The public CLI also exposes forward cancellation/abort, reverse cancellation and
+explicit descendant reconciliation; deployment qualification remains open.
 Reverse cancellation now has an immutable SQL barrier that drains admitted host
 operations and rejects delayed fences. It only starts at the original OKF
 generation. Authenticated host restoration now preserves original fence evidence,
@@ -128,7 +128,7 @@ Explicit reconciliation after the global reverse fence now retains a chain of
 fresh quiescence requests and descendant Git snapshots in separate caches. Capture,
 SQL return and host deselection resolve the selected request; superseded imports
 and Git rewinds are refused. Earlier captures and archives remain unchanged.
-The public shared migration CLI and broader recovery qualification remain open.
+The public CLI workflow is documented in [shared cutover](shared-knowledge-cutover.md#operator-command-workflow). Broader recovery qualification remains open.
 
 ### Faults, performance and packaging
 
@@ -184,7 +184,7 @@ timeouts are not test failures or reasons to restart a running job.
 1. Qualify [explicit patch upgrades](managed-postgres-upgrades.md) across native
    platforms and qualify the explicit 16→18 new-directory restore/switch workflow; never turn ordinary startup into an upgrade.
 2. Qualify final native artifacts and complete the remaining latency/fault cases.
-3. Complete shared/fleet cutover and current-state rollback, with explicit evidence
+3. Qualify deployed shared/fleet cutover and current-state rollback, with explicit evidence
    of participating-client compatibility, writer quiescence and recoverable identity
    mappings. Rehearse deployment moves and external credential recovery.
 4. Record the required dogfood window and rollback evidence. Only then implement

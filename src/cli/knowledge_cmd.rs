@@ -1,3 +1,4 @@
+pub mod fleet;
 use anyhow::{Result, ensure};
 use std::{io::Read, path::Path};
 
