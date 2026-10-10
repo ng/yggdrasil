@@ -289,3 +289,23 @@ CLI until the full backup, host verification, publication and recovery workflow 
 implemented. Private migrations still use their existing journal; a competing
 private transition invalidates the fleet source generation rather than being
 adopted as a fleet-owned fence.
+
+## Validated fleet request
+
+`fleet::plan::ValidatedPlan` accepts a bounded versioned request and retains its
+exact JSON bytes. Its registration hashes those bytes, binding source identity,
+generation, explicit user/repository/agent mappings, remote branch/base commit,
+source-backup digest, participant set and each participant's policy and backup
+reference. Reformatting the request changes its digest; recovery must use the
+retained original bytes. Host-local paths are validated lexically, never resolved
+on the coordinator. Each host must still verify its own canonical paths, directory
+identities, backup contents and exact configuration under its local lease.
+
+Validation rejects incomplete declarations, duplicate participants/names, missing
+repository mappings, mismatched corpus identity, incompatible protocols and
+invalid backup hashes. It does not authenticate hosts, inspect backups, establish
+quiescence or prove that every source row has a mapping. The durable coordinator
+journal, authenticated evidence exchange and full execution remain unfinished;
+this parser does not enable shared migration. A native PostgreSQL regression
+confirms that source backup verification accepts subsequent fleet registration
+metadata but rejects subsequent legacy knowledge edits.

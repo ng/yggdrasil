@@ -1,6 +1,9 @@
 //! Durable coordinator reservations and cancellation. Registration binds a plan
 //! digest and declared participant set; it does not authenticate hosts or prove
 //! quiescence/readiness. Shared migration execution remains unavailable.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod plan;
+
 use super::guard::CLIENT_PROTOCOL;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
