@@ -282,3 +282,17 @@ the fixture still requires failed writes to preserve acknowledged data and a
 successful retry after space is freed. This resolves the earlier Intel fixture
 failure. Later public fleet CLI and cross-mode move additions require their own
 native results; this checkpoint does not qualify those additions or a release.
+
+### Public fleet CLI verification
+
+The complete repository suite for `80b453f` passed against a disposable UTF-8
+PostgreSQL 16 cluster: 623 passed, 47 ignored across 94 result groups; teardown
+completed cleanly. All 23 native migration tests passed separately, as did the
+all-target check, formatting and whitespace checks. The later `6d49d51` changes
+add only cross-mode tests, CI and documentation; both new native tests and their
+compile check passed separately. Standard PostgreSQL 16/18 CI passed at `6d49d51`
+in [run 38053885195](https://github.com/ng/yggdrasil/actions/runs/38053885195).
+Linux and Apple Silicon native jobs passed in
+[run 38053885160](https://github.com/ng/yggdrasil/actions/runs/38053885160);
+Intel remains in progress. Release publication, deployment rehearsal and dogfood
+gates remain open.
