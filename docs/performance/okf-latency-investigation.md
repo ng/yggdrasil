@@ -1,6 +1,6 @@
 # OKF hook latency investigation
 
-The release gate remains **failed**. The latest selected-UUID batching repeat
+The release gate remains **unqualified**. The selected-UUID batching repeat
 measured SQL p95 279.39 ms and OKF p95 387.96 ms: **108.57 ms added**, against
 50 ms allowed. It uses 10,000 documents, 20 concurrent clients and 100 warm
 samples per mode. See `okf-hooks-2026-10-09-selected-uuid-batch-repeat.json`.
@@ -45,3 +45,34 @@ membership cache is not adequate evidence of authoritative membership.
 Any optimization must rerun `sql_relative_edit_hook_p95` in release mode at the
 original workload, retaining ordered output and usage-accounting checks. Keep
 cold database startup and shared-remote latency separate from this local warm gate.
+
+## Identity phase measurement (2026-10-10)
+
+With only opt-in timing instrumentation added, the unchanged release-CLI workload
+passed once: SQL p95 351.20 ms, OKF p95 362.45 ms, added p95 **11.26 ms**.
+Raw samples: `okf-hooks-2026-10-10-identity-phases.json`. This diagnostic pass
+is not evidence of a performance fix: SQL itself was slower than the previous
+failed repeat, and no optimization was made. Repeat without diagnostics before
+claiming qualification; retain the earlier failure as evidence of variance.
+
+| Identity phase | Median ms | p95 ms |
+| --- | ---: | ---: |
+| Repository total | 114.54 | 166.02 |
+| Git common directory | 61.83 | 96.41 |
+| Git origin | 46.99 | 90.97 |
+| Canonicalize directory | 0.04 | 0.17 |
+| Parse origin | 0.00 | 0.00 |
+| Registry resolution | 0.09 | 0.24 |
+
+This attributes the repository phase primarily to the two Git subprocesses under
+concurrency. It does not measure a safe alternative. Any attempt to avoid an
+origin lookup must still detect origin/common-directory mapping conflicts and
+must preserve missing-origin and linked-worktree behavior.
+
+Validation of the instrumentation: 590 tests passed, 29 opt-in tests ignored
+across 93 result groups, using a fresh disposable database and serial execution;
+`cargo check --all-targets`, `cargo fmt --check` and `git diff --check` passed.
+An initial parallel run failed four scheduler tests; a serial retry against that
+reused database failed two approval tests. All 32 integration tests passed in the
+fresh database. These earlier failures are fixture-contamination evidence and
+must not be represented as successful runs.

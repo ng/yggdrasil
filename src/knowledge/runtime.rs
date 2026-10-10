@@ -339,7 +339,9 @@ impl Context {
             })
     }
     pub fn repo(&self, cwd: &Path) -> Result<Uuid> {
-        self.registry.resolve(&GitIdentity::discover(cwd)?)?
+        let identity = GitIdentity::discover(cwd)?;
+        let _phase = super::timing::Phase::start("identity_registry");
+        self.registry.resolve(&identity)?
             .ok_or_else(|| anyhow!("repository has no explicit knowledge binding; use --global only for intentional global scope"))
     }
     /// Connected task claims use the task's database scope, never checkout scope.

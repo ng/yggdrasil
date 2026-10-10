@@ -30,6 +30,7 @@ impl GitIdentity {
     /// Git's common directory, unlike basename or worktree .git, is shared by
     /// all worktrees. Errors never turn a repo document into global knowledge.
     pub fn discover(cwd: &Path) -> Result<Self> {
+        let phase = super::timing::Phase::start("identity_git_common_dir");
         let output = Command::new("git")
             .arg("-C")
             .arg(cwd)
@@ -39,12 +40,18 @@ impl GitIdentity {
             output.status.success(),
             "cannot resolve Git common directory"
         );
+        drop(phase);
+        let phase = super::timing::Phase::start("identity_canonicalize");
         let common_dir = PathBuf::from(git_line(output.stdout)?).canonicalize()?;
+        drop(phase);
+        let phase = super::timing::Phase::start("identity_git_origin");
         let output = Command::new("git")
             .arg("-C")
             .arg(cwd)
             .args(["config", "--get", "remote.origin.url"])
             .output()?;
+        drop(phase);
+        let _phase = super::timing::Phase::start("identity_origin_parse");
         let origin = match output.status.code() {
             Some(0) => Some(canonical_url(&git_line(output.stdout)?, cwd)?),
             Some(1) => None,
