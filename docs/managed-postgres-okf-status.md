@@ -18,12 +18,12 @@ to repository evidence and explicitly identifies missing implementation or proof
 | Milestone | Implemented evidence | Remaining acceptance |
 | --- | --- | --- |
 | M0: contracts | ADR 0019; `tests/database_config.rs`, `knowledge_contracts.rs`, `okf_documents.rs`, and `fixtures/knowledge/`; pinned OKF specification and deterministic profile/digest fixtures. | Keep contracts and operator examples aligned with subsequent changes. |
-| M1: managed runtime | `src/db/runtime.rs`, `supervisor.rs`, `package.rs`; native installer/lifecycle fixtures, 20-process startup race, surviving-server adoption, killed bootstrap recovery and committed-row preservation. Native candidate bundles pass on three platforms. | Public released-artifact qualification, macOS quarantine/signing path and clean-machine dependency handling. |
+| M1: managed runtime | `src/db/runtime.rs`, `supervisor.rs`, `package.rs`; native installer/lifecycle fixtures, 20-process startup race, surviving-server adoption, killed bootstrap recovery and committed-row preservation. Native candidate bundles pass on three platforms; clean Ubuntu 24.04 runtime qualification is recorded below. | Public released-artifact qualification and macOS quarantine/signing path. |
 | M2: integration | `src/config/database.rs`, `src/db.rs`, init and `db` commands; common connection resolver, existing URL preservation, no fallback on external failure, no hook download/init/upgrade. | Clean-machine operator qualification using the final released artifacts. Default knowledge rollout remains M7. |
 | M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch, current selection-path rebasing and preserved database/knowledge IDs. | Explicit patch upgrade now has a journal, backup validation, startup fence, resume and pre-switch abort; local native 16.14→16.15 happy-path and seven crash/abort cases pass. Patch-upgrade native CI passed on all three platforms at `25187e7`. An explicit managed 16→18 backup/restore/switch path now uses a separate pinned 18.6 catalog and new data directory; its populated native CLI flow passes locally. The major-flow baseline suite passed 590 tests; the later startup-deadline correction passed 11 native regressions. At `6e80c7e`, standard CI (run `38013540750`) passes PostgreSQL 16/18 tests, check, Clippy and formatting; native Linux, Intel macOS and Apple Silicon macOS all pass in run `38013540700`. This qualifies the candidate lifecycle fixtures, not published artifacts or clean-machine distribution. Broader deployment-move, credential/provider recovery and published-platform qualification remain. |
 | M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation, offline fixtures and real-disk-full tests on all three native platforms. | Two uninstrumented local repeats at `ba7aff6` pass the SQL-relative latency threshold (−61.51 ms and 4.86 ms added p95); the stricter SQL→OKF→SQL fixture passes twice at 17.61 ms and 16.01 ms worst added p95, meeting the local measured target. Historical variance, including the prior 108.57 ms failure, remains documented; these runs do not establish a universal latency bound. See `docs/performance/okf-latency-investigation.md`. Broader filesystem fault qualification remains open. |
-| M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures. | Shared remote credential/provider and resource/latency qualification; complete shared cutover and rollback orchestration. Component fixtures do not prove a deployed fleet. |
-| M6: cutover/dogfood | Database generation/write guards and client registration; full row export/round-trip validation; private single-host forward/abort/current-state rollback coordinators with journals, backups, apply-once receipts and killed-process resumption. | Shared/multi-host execution is rejected. Deployment-wide client compatibility and writer quiescence must be established; local operator declarations alone do not demonstrate them. Full recovery/rollback rehearsal and recorded dogfooding remain. |
+| M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures; bounded complete-snapshot publication with exact remote-base checks. | Shared remote credential/provider and resource/latency qualification; complete shared cutover and rollback orchestration. Component fixtures do not prove a deployed fleet. |
+| M6: cutover/dogfood | Database generation/write guards and client registration; full row export/round-trip validation; private single-host forward/abort/current-state rollback coordinators with journals, backups, apply-once receipts and killed-process resumption; pre-fence cancellation, immutable fleet registration, and registered SQL-host preparation/cancellation primitives. | Shared/multi-host execution is rejected. Deployment-wide client compatibility and writer quiescence must be established; local operator declarations alone do not demonstrate them. Full recovery/rollback rehearsal and recorded dogfooding remain. |
 | M7: removal/default rollout | Deliberately deferred; legacy tables/repositories remain available for the compatibility/recovery window. | **14 days of dogfooding plus successful rollback rehearsal**, preceding milestone gates, then a new forward removal migration, repository removal, installer/default changes and final restore/coordination qualification. |
 
 ## Requirements and evidence boundaries
@@ -113,7 +113,7 @@ exist, but there is no complete shared/fleet migration command.
 | Warm hook latency | Actual release CLI: 10,000 documents, 20 concurrent clients, 100 warm samples/mode; ordered output and all 2,400 observations pass. Latest unchanged batching repeat: SQL 279.39 ms / OKF 387.96 ms p95, **108.57 ms added**, exceeding the **50 ms** target. Earlier passing samples do not qualify the release. Reports: `docs/performance/okf-hooks-2026-10-09-selected-uuid*.json`. |
 | Separate latency cases | Shared-network, database cold-start, broader scope distributions and cross-platform qualification remain. Warm local measurements cannot stand in for these cases. |
 | Native bundles | Online/offline assembler, manifests, license retention, deterministic checksums, bounded extraction and extracted-binary lifecycle/backup smoke passed on all three target platforms at `b3153a7` in [run 37991943961](https://github.com/ng/yggdrasil/actions/runs/37991943961). CI candidates are not public release artifacts. |
-| Final distribution | Release publication, macOS quarantine/Developer ID/notarization workflow and clean-machine Linux runtime dependency qualification remain. |
+| Final distribution | Release publication and macOS quarantine/Developer ID/notarization workflow remain; clean Ubuntu runtime candidate qualification is recorded below. |
 
 A separate local debug-build initialization, running alongside the full suite,
 hit the 30-second `postgres --version` bootstrap deadline for newly extracted
@@ -196,3 +196,32 @@ would change archive digests and therefore needs explicit release provenance and
 catalog/packaging support, not an unrecorded post-verification mutation. The
 release workflow currently has no signing/notarization stage. This gate remains
 open; do not clear quarantine or weaken Gatekeeper to claim a pass.
+
+A read-only local signing-identity inventory on 2026-10-10 found **zero Developer
+ID Application identities**; the one available identity was Apple Development.
+No private key was used and no identity was changed. The positive Developer ID
+audit cannot be completed using this local identity inventory. Certificate names
+and fingerprints are intentionally omitted from this public implementation ledger.
+
+### Coordinator preparation progress
+
+At `ea5abe4`, `fleet::Registration` binds an immutable operation/plan digest/corpus/
+participant set to one SQL source generation and rejects competing coordinators.
+Registration and cancellation require the migration owner. Connected SQL-host
+preparation requires current SQL authority and matching registered membership;
+local cancellation verifies the database receipt and retains a durable cancellation
+record before restoring original selection absence. These are library primitives,
+not an operator-ready fleet workflow. The private-only execution rejection remains.
+See [the shared cutover protocol](shared-knowledge-cutover.md) for remaining
+authentication, backup/evidence, publication, readiness, activation and rollback work.
+
+Validation: ten native migration tests and eight OKF command tests passed locally,
+including independent-connection coordinator contention, role denial, changed
+registration refusal, unnotified-host preparation rejection, cancellation recovery
+and preservation of later SQL writes. [Standard PostgreSQL 16/18 CI](https://github.com/ng/yggdrasil/actions/runs/38027051846)
+passed for `ea5abe4`; its native qualification is still pending. The preceding
+`93bc8ed` passed [standard CI](https://github.com/ng/yggdrasil/actions/runs/38025750973)
+and [native qualification on all three platforms](https://github.com/ng/yggdrasil/actions/runs/38025750969).
+CI's strict clippy step uses `continue-on-error: true` while existing warnings are
+addressed; a green job does not establish a warning-free build. Local non-strict
+clippy, all-target checking and formatting passed.
