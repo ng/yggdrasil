@@ -607,3 +607,17 @@ swap evidence. A new readiness receipt cannot be issued for an unsafe parent or 
 layout that has already moved. Older participant protocols fail before SQL fencing.
 Readiness still performs no rename or activation; finalization must verify this
 retained plan against its activation authority before advancing it.
+
+
+Swap inspection now compares mount identity for each descriptor-opened directory
+and its parent, rather than relying only on filesystem device numbers. Linux uses
+`statx(STATX_MNT_ID)` and refuses kernels that omit that field; macOS uses the mount
+location returned by `fstatfs`. This runs during readiness capture and again before
+and after swap steps. See the [Linux statx interface](https://man7.org/linux/man-pages/man2/statx.2.html)
+and [Apple fstatfs interface](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/statfs.2.html).
+The Linux-only ignored `same_device_bind_mount_cannot_become_a_swap_candidate`
+fixture mounts an owned source onto either the corpus or candidate, proves that
+device numbers match, and requires mount-boundary refusal without data changes.
+The existing native CI `okf_disk_full` invocation includes it. Its Linux result and
+other filesystem-specific rename restrictions still require qualification before
+enabling fleet activation.

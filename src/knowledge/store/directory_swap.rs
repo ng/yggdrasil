@@ -30,9 +30,66 @@ fn parent_directory(path: &Path) -> Result<File> {
     );
     Ok(file)
 }
+// Device IDs alone cannot distinguish Linux bind mounts. Query the mount
+// containing each open descriptor, so pathname aliases cannot hide a boundary.
+#[cfg(target_os = "linux")]
+fn mount_key(file: &File) -> Result<Vec<u8>> {
+    let mut stat = std::mem::MaybeUninit::<libc::statx>::zeroed();
+    let result = unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_MNT_ID,
+            stat.as_mut_ptr(),
+        )
+    };
+    ensure!(
+        result == 0,
+        "cannot inspect swap mount: {}",
+        std::io::Error::last_os_error()
+    );
+    let stat = unsafe { stat.assume_init() };
+    ensure!(
+        stat.stx_mask & libc::STATX_MNT_ID != 0,
+        "kernel does not expose swap mount identity"
+    );
+    Ok(stat.stx_mnt_id.to_le_bytes().to_vec())
+}
+#[cfg(target_os = "macos")]
+fn mount_key(file: &File) -> Result<Vec<u8>> {
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    let result = unsafe { libc::fstatfs(file.as_raw_fd(), stat.as_mut_ptr()) };
+    ensure!(
+        result == 0,
+        "cannot inspect swap mount: {}",
+        std::io::Error::last_os_error()
+    );
+    let stat = unsafe { stat.assume_init() };
+    let end = stat
+        .f_mntonname
+        .iter()
+        .position(|byte| *byte == 0)
+        .context("invalid swap mount name")?;
+    ensure!(end > 0, "empty swap mount name");
+    Ok(stat.f_mntonname[..end]
+        .iter()
+        .map(|byte| *byte as u8)
+        .collect())
+}
+fn same_mount(parent: &File, child: &File) -> Result<()> {
+    ensure!(
+        mount_key(parent)? == mount_key(child)?,
+        "swap directory crosses a mount boundary"
+    );
+    Ok(())
+}
 fn entry(parent: &File, name: &str) -> Result<Option<Identity>> {
     match child(parent, name, libc::O_RDONLY | libc::O_DIRECTORY, 0) {
-        Ok(file) => Ok(Some(identity(&file)?)),
+        Ok(file) => {
+            same_mount(parent, &file)?;
+            Ok(Some(identity(&file)?))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -107,8 +164,8 @@ struct Roots {
 impl DirectorySwapPlan {
     /// Capture an existing private sibling layout without moving anything.
     /// The parent must be owned and not writable by others. Capture proves
-    /// identity/same-filesystem only, not mount-point rename eligibility or
-    /// activation authority.
+    /// identity, same-filesystem, and same-mount layout. It does not prove all
+    /// filesystem rename permissions or grant activation authority.
     pub fn capture(corpus: &Path, staging: &Path) -> Result<Self> {
         ensure!(
             corpus.is_absolute() && staging.is_absolute(),
@@ -380,6 +437,15 @@ mod tests {
         assert!(DirectorySwapPlan::capture(&plan.corpus, &plan.staging).is_err());
         assert!(plan.advance().is_err());
         assert!(plan.corpus.join("original.txt").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_mount_identity_rejects_proc_boundary() {
+        let root = File::open("/").unwrap();
+        let proc = File::open("/proc").unwrap();
+        assert_ne!(mount_key(&root).unwrap(), mount_key(&proc).unwrap());
+        assert!(same_mount(&root, &proc).is_err());
     }
 
     #[test]

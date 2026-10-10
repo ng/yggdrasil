@@ -276,3 +276,83 @@ fn actual_disk_full_preserves_acknowledged_documents_and_allows_retry() {
     assert_eq!(reopened.document, edited);
     assert_ne!(reopened.revision, acknowledged.revision);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts owned same-filesystem bind fixture (sudo -n required)"]
+fn same_device_bind_mount_cannot_become_a_swap_candidate() {
+    use ygg::knowledge::store::DirectorySwapPlan;
+    struct BindFixture {
+        root: PathBuf,
+        target: PathBuf,
+    }
+    impl Drop for BindFixture {
+        fn drop(&mut self) {
+            let output = Command::new("sudo")
+                .args(["-n", "--", "umount"])
+                .arg(&self.target)
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    fs::remove_dir_all(&self.root).expect("remove detached bind fixture")
+                }
+                other => {
+                    eprintln!(
+                        "bind detach failed; retained {}: {other:?}",
+                        self.root.display()
+                    );
+                    assert!(std::thread::panicking(), "bind fixture cleanup failed");
+                }
+            }
+        }
+    }
+    for candidate_mounted in [false, true] {
+        // Keep the directory if mount or detach fails; never recursively remove
+        // a path that might still point at a mounted source directory.
+        let root = tempfile::Builder::new()
+            .prefix("ygg-swap-bind-")
+            .tempdir()
+            .unwrap()
+            .keep()
+            .canonicalize()
+            .unwrap();
+        let corpus = root.join("corpus");
+        let stage = root.join("stage");
+        let candidate = stage.join("candidate");
+        let source = root.join("source");
+        for path in [&corpus, &stage, &candidate, &source] {
+            KnowledgeStore::open(path, true).unwrap();
+        }
+        fs::write(source.join("preserved.txt"), "mounted data").unwrap();
+        let fixture = BindFixture {
+            root,
+            target: if candidate_mounted {
+                candidate
+            } else {
+                corpus.clone()
+            },
+        };
+        checked(
+            Command::new("sudo")
+                .args(["-n", "--", "mount", "--bind"])
+                .arg(&source)
+                .arg(&fixture.target),
+        );
+        assert_eq!(
+            fs::metadata(&fixture.target).unwrap().dev(),
+            fs::metadata(fixture.target.parent().unwrap())
+                .unwrap()
+                .dev(),
+            "fixture must defeat device-only detection"
+        );
+        let error = DirectorySwapPlan::capture(&corpus, &stage).unwrap_err();
+        assert!(
+            error.to_string().contains("mount boundary"),
+            "expected mount identity rejection: {error:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.target.join("preserved.txt")).unwrap(),
+            "mounted data"
+        );
+    }
+}
