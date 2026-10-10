@@ -169,9 +169,21 @@ impl Journal {
             super::protocol::Action::CancelSql => "cancelled",
         };
         let mut records = Vec::new();
+        let mut failures = Vec::new();
         for participant in &self.plan()?.plan().participants {
             let response =
-                super::protocol::call(self, participant.id, action, ssh_identity).await?;
+                match super::protocol::call(self, participant.id, action, ssh_identity).await {
+                    Ok(response) => response,
+                    Err(error) if action == super::protocol::Action::CancelSql => {
+                        // Cancellation has already committed in SQL. Reconcile later
+                        // reachable hosts even if this host needs a subsequent retry.
+                        // A changed local journal still stops the operation immediately.
+                        self.verify()?;
+                        failures.push(format!("{}: {error:#}", participant.id));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
             self.verify()?;
             let record = serde_json::json!({"version":1,"operation":self.plan.plan().operation,
                 "request_sha256":self.intent.request_sha256,"action":action,"receipt":response.preparation()});
@@ -184,6 +196,11 @@ impl Journal {
             records.push(record);
         }
         self.verify()?;
+        ensure!(
+            failures.is_empty(),
+            "fleet cancellation incomplete; retry the same journal: {}",
+            failures.join("; ")
+        );
         let bytes = serde_json::to_string(&records)?;
         self.store
             .retain_artifact(&format!("fleet-{phase}.json"), &bytes, false)?;

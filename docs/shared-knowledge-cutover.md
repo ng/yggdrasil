@@ -451,7 +451,10 @@ complete declared set responds. A retry recontacts every host and compares exact
 retained evidence; it never treats a cached receipt as current readiness.
 
 `Journal::cancel_hosts` first records database cancellation, then reconciles every
-participant and writes `fleet-cancelled.json` only after all respond. A backed
+participant and writes `fleet-cancelled.json` only after all respond. An unreachable
+participant does not prevent cancellation of later reachable participants; the
+coordinator retains successful receipts and reports every failed participant for
+retry. Journal integrity or receipt-retention failures still stop immediately. A backed
 host that never prepared may acknowledge cancellation only after verifying the
 original absent selection, original backup, matching database cancellation event
 and current SQL return generation. It records intent plus cancellation tombstone

@@ -1779,13 +1779,33 @@ async fn native_partial_fleet_cancellation_includes_unprepared_host() {
             .exists()
     );
     assert!(!first.journal.join("fleet-prepared.json").exists());
+    // Cancel with host 2's key: host 1 is unreachable, but host 2 must still
+    // receive its cancellation tombstone even though it never prepared.
     assert!(
         journal
-            .cancel_hosts(&first.pool, Some(&ssh1.identity))
+            .cancel_hosts(&first.pool, Some(&ssh2.identity))
             .await
             .is_err()
     );
-    assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
+    assert!(config.knowledge_policy_dir.join("runtime.json").exists());
+    assert!(
+        config2
+            .knowledge_policy_dir
+            .join("sql-fence-1-cancelled.json")
+            .exists()
+    );
+    assert!(
+        first
+            .journal
+            .join(format!("cancelled-{}.json", participants[1]))
+            .exists()
+    );
+    assert!(
+        !first
+            .journal
+            .join(format!("cancelled-{}.json", participants[0]))
+            .exists()
+    );
     assert!(!first.journal.join("fleet-cancelled.json").exists());
     sqlx::query("UPDATE memories SET text='after partial fleet cancellation'")
         .execute(&first.pool)
@@ -1794,23 +1814,24 @@ async fn native_partial_fleet_cancellation_includes_unprepared_host() {
     drop(journal);
     // Repair only this disposable server's authorized client key, then resume.
     std::fs::copy(
-        ssh1.identity.with_extension("pub"),
         ssh2.identity.with_extension("pub"),
+        ssh1.identity.with_extension("pub"),
     )
     .unwrap();
     let journal = Journal::resume(&first.journal, &hash).unwrap();
     let seal = journal
-        .cancel_hosts(&first.pool, Some(&ssh1.identity))
+        .cancel_hosts(&first.pool, Some(&ssh2.identity))
         .await
         .unwrap();
     assert_eq!(
         journal
-            .cancel_hosts(&first.pool, Some(&ssh1.identity))
+            .cancel_hosts(&first.pool, Some(&ssh2.identity))
             .await
             .unwrap(),
         seal
     );
     assert!(first.journal.join("fleet-cancelled.json").exists());
+    assert!(!config.knowledge_policy_dir.join("runtime.json").exists());
     assert!(
         config2
             .knowledge_policy_dir
