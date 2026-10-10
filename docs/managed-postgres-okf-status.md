@@ -270,3 +270,15 @@ remote TLS/credential rotation, deployment-wide writer quiescence or a real oper
 move. Both directions passed locally against pinned PostgreSQL 16.15 in 104.79
 seconds; the new target compile, formatting and whitespace checks passed. The
 three-platform CI result remains pending.
+
+### Native reconciliation and disk-full checkpoint
+
+At `9ad3fd7`, all three native jobs passed in
+[run 38052446733](https://github.com/ng/yggdrasil/actions/runs/38052446733),
+including the real filesystem-full recovery step on Intel macOS, Apple Silicon
+macOS and Linux. Retaining acknowledged revision file handles prevents replaced
+blocks from being recycled indefinitely after filler allocation reaches ENOSPC;
+the fixture still requires failed writes to preserve acknowledged data and a
+successful retry after space is freed. This resolves the earlier Intel fixture
+failure. Later public fleet CLI and cross-mode move additions require their own
+native results; this checkpoint does not qualify those additions or a release.
