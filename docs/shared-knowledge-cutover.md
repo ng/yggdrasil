@@ -406,3 +406,18 @@ exempted or replaced. This permits an interrupted preparation to retry against
 its original backup while rejecting unrelated policy/corpus/configuration edits.
 A verification failure never removes a published fence. Participant dispatch and
 the complete fleet state machine remain outstanding.
+
+
+`protocol::Request::execute` now provides a host-side library handler for backed
+SQL preparation and cancellation. It compares canonical paths from the host's
+actual deployment configuration with that participant's planned paths, derives
+the source binding and explicit mappings, and serializes the checked result in
+the current request envelope. It does not copy coordinator-local aliases or
+configuration onto the host.
+
+`fence::cancel_sql_backed` checks the same original backup while permitting only
+the exact preparation controls and operation-bound cancellation tombstone. It
+requires the immutable database cancellation event and current return generation
+before restoring absent local selection. Repeated cancellation neither reapplies
+SQL rows nor erases independent files. This is still a library handler: the SSH
+participant CLI and complete coordinator workflow are not enabled.

@@ -13,7 +13,10 @@ use std::{os::unix::fs::MetadataExt, path::PathBuf};
 use uuid::Uuid;
 
 mod sql;
-pub use sql::{SqlPreparation, cancel_sql, prepare_sql, prepare_sql_at_source, prepare_sql_backed};
+pub use sql::{
+    SqlPreparation, cancel_sql, cancel_sql_backed, prepare_sql, prepare_sql_at_source,
+    prepare_sql_backed,
+};
 
 /// Request identity only; authenticated transport and a complete participant
 /// census remain the coordinator's responsibility.

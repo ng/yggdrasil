@@ -121,6 +121,72 @@ impl Request {
         );
         Ok(result)
     }
+    /// Host-side handler for an authenticated operator invocation. Uses the
+    /// host's actual deployment configuration, never coordinator-local paths.
+    /// This library handler is not an enabled CLI migration entry point.
+    pub async fn execute(
+        &self,
+        config: &crate::config::database::DeploymentConfig,
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<u8>> {
+        use crate::knowledge::{
+            fence,
+            guard::CLIENT_PROTOCOL,
+            runtime::{Binding, Phase},
+        };
+        let plan = self.plan.plan();
+        let host = plan
+            .participants
+            .iter()
+            .find(|p| p.id == self.participant())
+            .unwrap();
+        ensure!(
+            config.knowledge_dir.canonicalize()? == host.corpus
+                && config.knowledge_policy_dir.canonicalize()? == host.policy,
+            "participant request differs from actual host configuration"
+        );
+        let binding = Binding {
+            version: 1,
+            minimum_client: CLIENT_PROTOCOL,
+            generation: plan.source_generation,
+            phase: Phase::Fenced,
+            bundle: host.corpus.clone(),
+            mappings: serde_json::from_value(serde_json::to_value(&plan.mappings)?)?,
+            agents: plan.agents.iter().map(|a| (a.name.clone(), a.id)).collect(),
+        };
+        let coordinator = fence::CoordinatorBinding {
+            migration_operation: plan.operation,
+            participant: host.id,
+        };
+        let result = match self.action() {
+            Action::PrepareSql => {
+                fence::prepare_sql_backed(
+                    config,
+                    &binding,
+                    coordinator,
+                    &self.envelope.request_sha256,
+                    &host.backup.path,
+                    &host.backup.manifest_sha256,
+                    pool,
+                )
+                .await?
+            }
+            Action::CancelSql => {
+                fence::cancel_sql_backed(
+                    config,
+                    &binding,
+                    coordinator,
+                    &self.envelope.request_sha256,
+                    &host.backup.path,
+                    &host.backup.manifest_sha256,
+                    pool,
+                )
+                .await?
+            }
+        };
+        self.respond(result)
+    }
+
     fn validate_preparation(&self, result: &SqlPreparation) -> Result<()> {
         let host = self
             .plan

@@ -183,39 +183,10 @@ pub async fn prepare_sql_backed(
     backup_sha256: &str,
     pool: &sqlx::PgPool,
 ) -> Result<SqlPreparation> {
-    use crate::db::deployment_backup;
-    use crate::knowledge::store::KnowledgeBackup;
-    let local = KnowledgeConfig {
-        data_dir: config.data_dir.clone(),
-        knowledge_dir: config.knowledge_dir.clone(),
-        knowledge_policy_dir: config.knowledge_policy_dir.clone(),
-    };
+    let local = local_config(config);
     let host = Host::open(&local, binding, coordinator)?;
-    let verify_backup = || -> Result<()> {
-        let manifest = deployment_backup::verify(backup_path)?;
-        ensure!(
-            digest(&serde_json::to_vec(&manifest)?) == backup_sha256
-                && manifest.database.database_id == binding.mappings.database_id
-                && manifest.database.generation == binding.generation
-                && manifest.database.backend == "sql"
-                && manifest.database.corpus_id.is_none()
-                && manifest.knowledge.is_some(),
-            "participant backup differs from planned SQL source"
-        );
-        deployment_backup::read_configuration(backup_path, &manifest)?
-            .ok_or_else(|| anyhow::anyhow!("participant backup lacks configuration evidence"))?
-            .verify_selection(config)?;
-        KnowledgeBackup::verify_restored(&backup_path.join("knowledge"), &local.knowledge_dir)?;
-        KnowledgeBackup::verify_restored_with_new_controls(
-            &backup_path.join("policy"),
-            &local.knowledge_policy_dir,
-            &std::collections::BTreeMap::from([
-                (host.name.clone(), host.bytes.clone()),
-                (SELECTION_FILE.to_owned(), host.desired.fenced.clone()),
-            ]),
-        )?;
-        Ok(())
-    };
+    let verify_backup =
+        || verify_host_backup(&host, config, binding, backup_path, backup_sha256, None);
     prepare_at_source(
         &host,
         &local,
@@ -224,6 +195,91 @@ pub async fn prepare_sql_backed(
         request_sha256,
         pool,
         verify_backup,
+    )
+    .await
+}
+
+fn local_config(config: &crate::config::database::DeploymentConfig) -> KnowledgeConfig {
+    KnowledgeConfig {
+        data_dir: config.data_dir.clone(),
+        knowledge_dir: config.knowledge_dir.clone(),
+        knowledge_policy_dir: config.knowledge_policy_dir.clone(),
+    }
+}
+fn verify_host_backup(
+    host: &Host,
+    config: &crate::config::database::DeploymentConfig,
+    binding: &Binding,
+    backup_path: &std::path::Path,
+    backup_sha256: &str,
+    extra: Option<(&str, &str)>,
+) -> Result<()> {
+    use crate::{db::deployment_backup, knowledge::store::KnowledgeBackup};
+    let manifest = deployment_backup::verify(backup_path)?;
+    ensure!(
+        digest(&serde_json::to_vec(&manifest)?) == backup_sha256
+            && manifest.database.database_id == binding.mappings.database_id
+            && manifest.database.generation == binding.generation
+            && manifest.database.backend == "sql"
+            && manifest.database.corpus_id.is_none()
+            && manifest.knowledge.is_some(),
+        "participant backup differs from planned SQL source"
+    );
+    deployment_backup::read_configuration(backup_path, &manifest)?
+        .ok_or_else(|| anyhow::anyhow!("participant backup lacks configuration evidence"))?
+        .verify_selection(config)?;
+    KnowledgeBackup::verify_restored(&backup_path.join("knowledge"), &host.bundle_path)?;
+    let mut additions = std::collections::BTreeMap::from([
+        (host.name.clone(), host.bytes.clone()),
+        (SELECTION_FILE.to_owned(), host.desired.fenced.clone()),
+    ]);
+    if let Some((name, bytes)) = extra {
+        additions.insert(name.to_owned(), bytes.to_owned());
+    }
+    KnowledgeBackup::verify_restored_with_new_controls(
+        &backup_path.join("policy"),
+        &host.desired.policy,
+        &additions,
+    )
+}
+
+/// Cancel a backed participant while verifying exactly its own cancellation
+/// tombstone in addition to the original preparation artifacts.
+pub async fn cancel_sql_backed(
+    config: &crate::config::database::DeploymentConfig,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    request_sha256: &str,
+    backup_path: &std::path::Path,
+    backup_sha256: &str,
+    pool: &sqlx::PgPool,
+) -> Result<SqlPreparation> {
+    let local = local_config(config);
+    let host = Host::open(&local, binding, coordinator)?;
+    let name = host.cancellation_name();
+    let cancellation = serde_json::to_string(&Cancellation {
+        version: 1,
+        intent_sha256: digest(host.bytes.as_bytes()),
+        coordinator_request_sha256: request_sha256.to_owned(),
+        target_generation: binding.generation + 1,
+    })?;
+    cancel_with_host(
+        &host,
+        &local,
+        binding,
+        coordinator,
+        request_sha256,
+        pool,
+        || {
+            verify_host_backup(
+                &host,
+                config,
+                binding,
+                backup_path,
+                backup_sha256,
+                Some((&name, &cancellation)),
+            )
+        },
     )
     .await
 }
@@ -335,6 +391,27 @@ pub async fn cancel_sql(
     coordinator_request_sha256: &str,
     pool: &sqlx::PgPool,
 ) -> Result<SqlPreparation> {
+    let host = Host::open(config, binding, coordinator)?;
+    cancel_with_host(
+        &host,
+        config,
+        binding,
+        coordinator,
+        coordinator_request_sha256,
+        pool,
+        || Ok(()),
+    )
+    .await
+}
+async fn cancel_with_host(
+    host: &Host,
+    config: &KnowledgeConfig,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    coordinator_request_sha256: &str,
+    pool: &sqlx::PgPool,
+    verify: impl Fn() -> Result<()>,
+) -> Result<SqlPreparation> {
     ensure!(
         coordinator_request_sha256.len() == 64
             && coordinator_request_sha256
@@ -342,7 +419,6 @@ pub async fn cancel_sql(
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
         "coordinator request SHA-256 required"
     );
-    let host = Host::open(config, binding, coordinator)?;
     host.verify(config)?;
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
@@ -378,6 +454,7 @@ pub async fn cancel_sql(
         "matching coordinator cancellation receipt required"
     );
     host.verify(config)?;
+    verify()?;
     let current = host.policy.read_control(SELECTION_FILE)?;
     let tombstone = host.policy.read_artifact(&host.cancellation_name())?;
     let cancellation = serde_json::to_string(&Cancellation {
@@ -402,6 +479,7 @@ pub async fn cancel_sql(
     host.policy
         .remove_control(SELECTION_FILE, &host.desired.fenced)?;
     host.verify(config)?;
+    verify()?;
     tx.commit().await?;
     Ok(host.report(binding))
 }

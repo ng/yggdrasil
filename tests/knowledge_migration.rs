@@ -1262,7 +1262,6 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
     use ygg::knowledge::{
         document::digest,
         fence::{CoordinatorBinding, prepare_sql_backed},
-        fleet::Registration,
         runtime::{Binding, Phase},
         store::KnowledgeStore,
     };
@@ -1290,19 +1289,27 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
         migration_operation: Uuid::new_v4(),
         participant: Uuid::new_v4(),
     };
-    let request_hash = digest(b"complete backed fixture plan");
-    Registration {
-        version: 1,
-        operation: coordinator.migration_operation,
-        request_sha256: request_hash.clone(),
-        database_id: f.plan.mappings.database_id,
-        source_generation: 1,
-        corpus_id: identity.corpus_id,
-        participants: vec![coordinator.participant],
-    }
-    .register(&f.pool)
-    .await
-    .unwrap();
+    use ygg::knowledge::fleet::{
+        plan::ValidatedPlan,
+        protocol::{Action, Request},
+    };
+    let fleet = ValidatedPlan::parse(&serde_json::json!({
+        "version":1,"operation":coordinator.migration_operation,"source_generation":1,
+        "mappings":&f.plan.mappings,"agents":[],
+        "shared":{"version":1,"remote":"git@example.test:knowledge.git","branch":"main"},
+        "expected_remote_commit":"a".repeat(40),
+        "source_backup":{"path":&backup_path,"manifest_sha256":&backup_hash},
+        "all_participating_hosts_listed":true,"schema_changes_stopped":true,
+        "session_preserving_endpoint":true,"remote_writers_stopped":true,
+        "participants":[{"id":coordinator.participant,"name":"fixture","protocol":1,
+            "endpoint":{"host":"example.test","port":22,"account":"operator","host_key":"ssh-ed25519 AAAA"},
+            "corpus":config.knowledge_dir.canonicalize().unwrap(),
+            "policy":config.knowledge_policy_dir.canonicalize().unwrap(),"identities":identity,
+            "backup":{"path":&backup_path,"manifest_sha256":&backup_hash},
+            "knowledge_writers_stopped":true,"external_editors_stopped":true}]
+    }).to_string()).unwrap();
+    let request_hash = fleet.registration().request_sha256.clone();
+    fleet.registration().register(&f.pool).await.unwrap();
     let binding = Binding {
         version: 1,
         minimum_client: 1,
@@ -1337,17 +1344,11 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
     )
     .await
     .unwrap();
-    let retry = prepare_sql_backed(
-        &config,
-        &binding,
-        coordinator,
-        &request_hash,
-        &backup_path,
-        &backup_hash,
-        &f.pool,
-    )
-    .await
-    .unwrap();
+    let request = Request::new(&fleet, coordinator.participant, Action::PrepareSql).unwrap();
+    let response: serde_json::Value =
+        serde_json::from_slice(&request.execute(&config, &f.pool).await.unwrap()).unwrap();
+    let retry: ygg::knowledge::fence::SqlPreparation =
+        serde_json::from_value(response["preparation"].clone()).unwrap();
     assert_eq!(first.intent_sha256, retry.intent_sha256);
     let runtime = config.knowledge_policy_dir.join("runtime.json");
     let fenced = std::fs::read(&runtime).unwrap();
@@ -1385,5 +1386,29 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
     );
     assert_eq!(std::fs::read(&runtime).unwrap(), b"{}");
     assert_eq!(f.marker().await, (1, "sql".into()));
+    std::fs::write(&runtime, &fenced).unwrap();
+    let cancel = Request::new(&fleet, coordinator.participant, Action::CancelSql).unwrap();
+    assert!(cancel.execute(&config, &f.pool).await.is_err());
+    assert_eq!(std::fs::read(&runtime).unwrap(), fenced);
+    fleet.registration().cancel(&f.pool).await.unwrap();
+    cancel.execute(&config, &f.pool).await.unwrap();
+    assert!(!runtime.exists());
+    assert!(
+        config
+            .knowledge_policy_dir
+            .join("sql-fence-1-cancelled.json")
+            .exists()
+    );
+    sqlx::query("UPDATE memories SET text='after backed cancellation'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    cancel.execute(&config, &f.pool).await.unwrap();
+    assert!(request.execute(&config, &f.pool).await.is_err());
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "after backed cancellation");
     f.pool.close().await;
 }
