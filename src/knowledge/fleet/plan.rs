@@ -140,6 +140,25 @@ impl ValidatedPlan {
                 && !plan.shared.remote.chars().any(char::is_control),
             "invalid shared transport configuration"
         );
+        // Git runs from the cache directory, which moves during host
+        // finalization. A relative local remote would resolve to another path
+        // after selection; never publish a fleet plan with that ambiguity.
+        let remote = &plan.shared.remote;
+        let fixed_location = std::path::Path::new(remote).is_absolute()
+            || remote.split_once(':').is_some_and(|(prefix, suffix)| {
+                !prefix.is_empty()
+                    && !prefix.contains('/')
+                    && !prefix.contains('\\')
+                    && !suffix.is_empty()
+                    && !suffix.starts_with(':')
+                    && (prefix != "file"
+                        || suffix.starts_with("///")
+                        || suffix.starts_with("//localhost/"))
+            });
+        ensure!(
+            fixed_location,
+            "fleet remote must be an absolute local path, absolute file URL, or network remote"
+        );
         ensure!(
             Command::new("git")
                 .args([
@@ -289,6 +308,38 @@ pub(super) mod tests {
             hosts[0].identities.repos[0].id,
             hosts[1].identities.repos[0].id
         );
+    }
+
+    #[test]
+    fn fleet_remote_does_not_depend_on_candidate_directory() {
+        for remote in [
+            "remote.git",
+            "../remote.git",
+            "./host:path",
+            "dir/host:path",
+            "file:../remote.git",
+            "file://relative",
+            "helper::../remote.git",
+        ] {
+            let mut value = fixture();
+            value["shared"]["remote"] = json!(remote);
+            assert!(
+                ValidatedPlan::parse(&value.to_string()).is_err(),
+                "{remote}"
+            );
+        }
+        for remote in [
+            "/srv/knowledge.git",
+            "file:///srv/knowledge.git",
+            "file://localhost/srv/knowledge.git",
+            "git@example.test:private/knowledge.git",
+            "ssh://git@example.test/knowledge.git",
+            "https://example.test/knowledge.git",
+        ] {
+            let mut value = fixture();
+            value["shared"]["remote"] = json!(remote);
+            assert!(ValidatedPlan::parse(&value.to_string()).is_ok(), "{remote}");
+        }
     }
 
     #[test]

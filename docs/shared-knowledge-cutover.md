@@ -568,3 +568,14 @@ backup verification, and refusal after abort. RPC tests reject stale nonces and
 changed publication, preparation, path, or backup evidence. Same-filesystem staging
 is checked; rename eligibility, crash-safe finalization, multi-host activation,
 and rollback from current shared data still require implementation and qualification.
+
+
+Fleet plans require an absolute local Git remote path, an absolute `file://` URL,
+or a network remote (including SSH scp syntax). Relative local paths are refused
+because Git resolves them from the cache directory, which changes at finalization.
+A real Git fixture verifies that the staged cache and its backup survive the
+intended directory relocation, reopen at the selected path, and accept writes
+visible to another host. It also verifies that old readiness backup evidence
+rejects those later writes rather than authorizing restoration over them. This
+qualifies cache relocation; it does not qualify the unfinished crash-safe host
+swap protocol or database activation.
