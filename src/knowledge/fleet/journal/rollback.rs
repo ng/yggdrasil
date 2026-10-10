@@ -98,3 +98,77 @@ impl Journal {
         Ok(receipt)
     }
 }
+
+impl Journal {
+    /// Return SQL authority first, then contact every participant without holding
+    /// the SQL transition lease. Partial host completion is independently resumable.
+    pub async fn deselect_rollback_hosts(
+        &self,
+        reverse: &RollbackPlan,
+        config: &crate::config::database::DeploymentConfig,
+        pool: &sqlx::PgPool,
+        identity: Option<&Path>,
+    ) -> Result<super::SqlReturnReceipt> {
+        let receipt = self
+            .return_rollback_sql(reverse, config, pool, identity)
+            .await?;
+        let prefix = format!("rollback-{}", reverse.operation());
+        let mut completed = Vec::new();
+        let mut failures = Vec::new();
+        for host in &self.plan.plan().participants {
+            let response =
+                match protocol::call_rollback_deselect(self, reverse, host.id, &receipt, identity)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        failures.push(format!("{}: {error:#}", host.name));
+                        continue;
+                    }
+                };
+            self.verify()?;
+            ensure!(
+                self.store
+                    .read_artifact(&format!("{prefix}-host-{}.json", host.id))?
+                    .as_deref()
+                    == Some(serde_json::to_string(response.fence())?.as_str()),
+                "deselected fence differs from retained host evidence"
+            );
+            let record =
+                serde_json::to_string(&serde_json::json!({"version":1,"sql_return":receipt,
+                "participant":host.id,"fence":response.fence()}))?;
+            let name = format!("{prefix}-deselected-{}.json", host.id);
+            self.store.retain_artifact(&name, &record, false)?;
+            completed.push((name, record));
+        }
+        ensure!(
+            failures.is_empty(),
+            "SQL return committed; hosts still require deselection: {}",
+            failures.join("; ")
+        );
+        let mut tx = crate::knowledge::recovery_event::owner_transaction(pool).await?;
+        let event = reverse.validate_return(&self.plan, &receipt)?;
+        ensure!(
+            reverse.returned_on(&mut tx, &event).await?,
+            "SQL return changed before deselection seal"
+        );
+        self.verify()?;
+        let mut records = Vec::new();
+        for (name, record) in &completed {
+            ensure!(
+                self.store.read_artifact(name)?.as_deref() == Some(record.as_str()),
+                "host deselection receipt changed"
+            );
+            records.push(serde_json::from_str::<serde_json::Value>(record)?);
+        }
+        self.store.retain_artifact(
+            &format!("{prefix}-deselected.json"),
+            &serde_json::to_string(
+                &serde_json::json!({"version":1,"sql_return":receipt,"participants":records}),
+            )?,
+            false,
+        )?;
+        tx.commit().await?;
+        Ok(receipt)
+    }
+}

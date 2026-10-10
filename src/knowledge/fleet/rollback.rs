@@ -6,6 +6,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uuid::Uuid;
+mod deselect;
 mod transition;
 
 #[derive(Serialize, Deserialize)]

@@ -9,7 +9,7 @@ pub(in crate::knowledge::fleet) struct ReverseFence {
     pub remote_commit: String,
 }
 impl RollbackPlan {
-    async fn saved_fence_on(
+    pub(super) async fn saved_fence_on(
         &self,
         tx: &mut Transaction<'_, Postgres>,
     ) -> Result<Option<ReverseFence>> {

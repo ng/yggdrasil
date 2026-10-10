@@ -547,7 +547,7 @@ and resumed abort with the remote offline. Current-state fleet rollback remains 
 
 ### Host readiness before activation
 
-`Journal::ready_hosts` obtains fresh publication-bound RPC v7 responses from every
+`Journal::ready_hosts` obtains fresh publication-bound RPC v8 responses from every
 participant and checks each against its sealed preparation. Older RPC versions
 are rejected before SQL fencing. Each host verifies its original backup, policy,
 and owned SQL fence, then stages the exact published Git snapshot beside its
@@ -601,7 +601,7 @@ qualify complete host activation or power loss between rename and directory sync
 
 
 Host readiness now captures `directory-swap.json` and binds its exact SHA-256 to
-both the authenticated RPC v7 response and the coordinator readiness seal. Retries
+both the authenticated RPC v8 response and the coordinator readiness seal. Retries
 recompute the expected directory identities and refuse changed or missing retained
 swap evidence. A new readiness receipt cannot be issued for an unsafe parent or a
 layout that has already moved. Older participant protocols fail before SQL fencing.
@@ -660,11 +660,11 @@ mount-boundary check's platform qualification; it does not establish immunity to
 all filesystem restrictions or power-loss behavior.
 
 
-`Journal::activate_hosts` obtains fresh RPC v7 readiness, rechecks the owned fence,
+`Journal::activate_hosts` obtains fresh RPC v8 readiness, rechecks the owned fence,
 source backup, export, and exact publication under the SQL generation lease, then
 seeds telemetry and commits the active marker and fleet receipt together. An
 uncertain commit resumes from the immutable SQL receipt; it never republishes the
-old snapshot or compares later shared writes to frozen export data. RPC v1–v6
+old snapshot or compares later shared writes to frozen export data. RPC v1–v7
 participants are refused before SQL fencing, and preparation rejects configured
 corpus aliases that could become unresolvable during directory recovery.
 
@@ -700,7 +700,7 @@ stored request digest in PostgreSQL.
 
 This reservation is not a host fence, remote freshness proof, current-data backup,
 reverse import, or SQL activation. OKF remains writable until the subsequent
-fencing workflow. Authenticated participant fencing is now available through RPC v7. It locks local
+fencing workflow. Authenticated participant fencing is now available through RPC v8. It locks local
 selection before acquiring the connected active-generation lease, requires the
 exact registered rollback and activation/telemetry receipts, and checks the complete
 selected binding and shared transport before writing a durable local fence. Retries
@@ -727,15 +727,35 @@ The stored census and individual receipts must still match; a lost coordinator
 completion file can be reconstructed from the committed operation and live hosts.
 Post-commit checks read the retained Git cache without refreshing it, preserving
 recovery evidence even when the remote has advanced. Independent remote advances
-are never reset or silently adopted. RPC v7 requires
+are never reset or silently adopted. RPC v8 requires
 this post-commit inspection capability before forward fencing.
 
 The native two-host test verifies partial transport failure, selected SQL lease
 drainage, incomplete-census refusal, atomic generation/receipt publication, lost
 completion recovery, missing-host-evidence refusal, immutable SQL receipts, and
-remote-advance refusal before and after the reverse fence. Current shared snapshot
-capture, atomic reverse import/SQL activation, host deselection, and cancellation
-of a reverse request whose expected remote changed remain unfinished.
+remote-advance refusal before and after the reverse fence.
+
+`Journal::capture_rollback` retains the confirmed current shared snapshot, current
+SQL usage, and paired coordinator cache/policy archives under the owned reverse
+fence. `Journal::return_rollback_sql` applies the lossless candidate, import receipt,
+and SQL generation atomically. Its recovery event binds the exact rollback request,
+capture bytes, and source backup. Committed retries preserve subsequent SQL writes
+and do not require the old remote tip.
+
+`Journal::deselect_rollback_hosts` then contacts every host through pinned SSH.
+Each host verifies the exact committed SQL-return receipt and generation while
+holding its local selection lease followed by a shared SQL generation lease.
+Only the complete original binding and committed host fence may be removed.
+A durable local intent precedes removal, allowing a lost response to resume;
+an absent selection without that intent is refused. Independently changed
+selections and missing original fence evidence are preserved for inspection.
+The coordinator retains per-host results and seals the complete census only while
+the same SQL generation remains authoritative. Partial completion does not prevent
+later hosts from returning to SQL; retries preserve writes made by completed hosts.
+RPC v8 requires this deselection capability before forward fencing.
+
+Cancellation of a reverse request whose expected remote changed, the public shared
+migration command, and broader crash/deployment qualification remain unfinished.
 
 Selected-generation leases and rollback-host leases explicitly use `READ COMMITTED`.
 This prevents a session configured for repeatable reads from retaining a pre-wait

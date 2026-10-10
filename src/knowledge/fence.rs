@@ -300,3 +300,74 @@ impl<'a> FenceLease<'a> {
         })
     }
 }
+
+impl FenceLease<'_> {
+    /// The caller must hold a SQL generation lease and verify the committed SQL
+    /// return. Persist ownership before removal so a lost response can resume.
+    pub(crate) fn deselect(
+        &self,
+        generation: i64,
+        coordinator: CoordinatorBinding,
+        expected: &Binding,
+        committed: &LocalFence,
+        return_sha256: &str,
+    ) -> Result<LocalFence> {
+        self.policy.verify_root_path(&self.path)?;
+        let name = format!("local-fence-{generation}.json");
+        let bytes = self
+            .policy
+            .read_artifact(&name)?
+            .context("local fence missing before deselection")?;
+        let intent: Intent = serde_json::from_str(&bytes)?;
+        let binding = intent.validate(self.config, generation)?;
+        ensure!(
+            intent.coordinator == Some(coordinator)
+                && intent.original == serde_json::to_string(expected)?,
+            "deselection differs from original participant binding"
+        );
+        let actual = LocalFence {
+            operation: intent.operation,
+            coordinator: intent.coordinator,
+            database_id: binding.mappings.database_id,
+            corpus_id: binding.mappings.corpus_id,
+            source_generation: generation,
+            policy: self.path.clone(),
+            original_sha256: digest(intent.original.as_bytes()),
+            fenced_sha256: digest(intent.fenced.as_bytes()),
+        };
+        ensure!(
+            &actual == committed,
+            "deselection differs from committed host fence"
+        );
+        let receipt = serde_json::to_string(&serde_json::json!({"version":1,
+            "return_sha256":return_sha256,"fence":actual,"intent_sha256":digest(bytes.as_bytes())}))?;
+        let receipt_name = format!("local-sql-return-{generation}.json");
+        let saved = self.policy.read_artifact(&receipt_name)?;
+        ensure!(
+            saved.as_ref().is_none_or(|s| s == &receipt),
+            "local SQL return belongs to another request"
+        );
+        let current = self.policy.read_control(SELECTION_FILE)?;
+        ensure!(
+            current.as_deref() == Some(intent.fenced.as_str())
+                || (current.is_none() && saved.is_some()),
+            "local selection changed or missing without retained SQL return intent"
+        );
+        self.policy
+            .retain_artifact(&receipt_name, &receipt, false)?;
+        self.policy.verify_root_path(&self.path)?;
+        intent.validate(self.config, generation)?;
+        ensure!(
+            self.policy.read_artifact(&name)?.as_deref() == Some(bytes.as_str())
+                && self.policy.read_artifact(&receipt_name)?.as_deref() == Some(receipt.as_str()),
+            "local deselection evidence changed"
+        );
+        self.policy.remove_control(SELECTION_FILE, &intent.fenced)?;
+        self.policy.verify_root_path(&self.path)?;
+        ensure!(
+            self.policy.read_control(SELECTION_FILE)?.is_none(),
+            "selection changed during deselection"
+        );
+        Ok(actual)
+    }
+}

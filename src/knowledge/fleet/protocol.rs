@@ -7,11 +7,14 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
-// Version 7 additionally requires inspection after the global rollback fence.
+// Version 8 additionally requires receipt-bound deselection after SQL return.
 // Older hosts must fail before the coordinator fences SQL.
-const RPC_VERSION: u32 = 7;
+const RPC_VERSION: u32 = 8;
 mod rollback;
-pub use rollback::{AuthenticatedRollbackFence, call_rollback_fence};
+pub use rollback::{
+    AuthenticatedDeselection, AuthenticatedRollbackFence, call_rollback_deselect,
+    call_rollback_fence,
+};
 // Preserve the forward limit while reserving room for an escaped 1 MiB
 // reverse request, so a previously accepted fleet remains addressable.
 pub const MAX_REQUEST: usize = 11 * 1024 * 1024;
@@ -27,6 +30,7 @@ pub enum Action {
     ReadySql,
     FinalizeSql,
     FenceOkf,
+    DeselectOkf,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +49,8 @@ struct Envelope {
     activation_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rollback_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sql_return: Option<super::journal::SqlReturnReceipt>,
 }
 pub struct Request {
     envelope: Envelope,
@@ -136,6 +142,7 @@ impl Request {
             publication,
             activation_sha256,
             rollback_request: None,
+            sql_return: None,
         })?;
         Self::parse(&bytes)
     }
@@ -146,7 +153,8 @@ impl Request {
         );
         let envelope: Envelope = serde_json::from_slice(bytes)?;
         ensure!(
-            envelope.action == Action::FenceOkf || bytes.len() <= MAX_FORWARD_REQUEST,
+            matches!(envelope.action, Action::FenceOkf | Action::DeselectOkf)
+                || bytes.len() <= MAX_FORWARD_REQUEST,
             "forward participant request exceeds 8 MiB"
         );
         let plan = ValidatedPlan::parse(&envelope.plan)?;
@@ -172,11 +180,19 @@ impl Request {
             "finalization requires activation digest only"
         );
         ensure!(
-            (envelope.action == Action::FenceOkf) == envelope.rollback_request.is_some(),
+            matches!(envelope.action, Action::FenceOkf | Action::DeselectOkf)
+                == envelope.rollback_request.is_some(),
             "rollback fence requires a dedicated rollback request only"
         );
+        ensure!(
+            (envelope.action == Action::DeselectOkf) == envelope.sql_return.is_some(),
+            "deselection requires SQL return receipt only"
+        );
         if let Some(reverse) = &envelope.rollback_request {
-            super::rollback::RollbackPlan::parse(&plan, reverse)?;
+            let reverse = super::rollback::RollbackPlan::parse(&plan, reverse)?;
+            if let Some(receipt) = &envelope.sql_return {
+                reverse.validate_return(&plan, receipt)?;
+            }
         }
         if let Some(hash) = &envelope.activation_sha256 {
             ensure!(
@@ -304,6 +320,19 @@ impl Request {
             participant: host.id,
         };
         let result = match self.action() {
+            Action::DeselectOkf => {
+                return self.respond_rollback(
+                    self.rollback()?
+                        .deselect_host(
+                            &self.plan,
+                            config,
+                            self.participant(),
+                            self.envelope.sql_return.as_ref().unwrap(),
+                            pool,
+                        )
+                        .await?,
+                );
+            }
             Action::FenceOkf => {
                 return self.respond_rollback(
                     self.rollback()?
@@ -640,7 +669,7 @@ mod tests {
     fn rejects_preparation_only_protocol_before_execution() {
         let request = request();
         let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
-        for version in [1, 2, 3, 4, 5, 6] {
+        for version in [1, 2, 3, 4, 5, 6, 7] {
             legacy["version"] = json!(version);
             assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
         }

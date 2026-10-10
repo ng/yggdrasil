@@ -3430,6 +3430,40 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: 
         retained
     );
     let returned = if return_sql {
+        let capture_sha256 = digest(&serde_json::to_vec(&capture).unwrap());
+        let request_sha256 = digest(
+            format!(
+                "{}\n{}\n{}",
+                winner.sha256(),
+                capture_sha256,
+                journal.plan().unwrap().plan().source_backup.manifest_sha256
+            )
+            .as_bytes(),
+        );
+        let premature = ygg::knowledge::fleet::journal::SqlReturnReceipt {
+            operation: winner.operation(),
+            generation: 5,
+            capture_sha256,
+            request_sha256,
+        };
+        assert!(
+            ygg::knowledge::fleet::protocol::call_rollback_deselect(
+                &journal,
+                winner,
+                participants[0],
+                &premature,
+                Some(&ssh2.identity)
+            )
+            .await
+            .is_err()
+        );
+        assert!(config.knowledge_policy_dir.join("runtime.json").exists());
+        assert!(
+            !config
+                .knowledge_policy_dir
+                .join("local-sql-return-3.json")
+                .exists()
+        );
         // Fail the last SQL event write: neither imported rows nor authority may commit.
         sqlx::query("SET ygg.test_fail_return = 'on'")
             .execute(&first.pool)
@@ -3546,6 +3580,98 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool, return_sql: 
             )
             .unwrap();
             assert_eq!(binding["phase"], "fenced");
+        }
+        // A failed first host must not prevent the second from returning to SQL.
+        let authorized = std::fs::read(ssh1.identity.with_extension("pub")).unwrap();
+        std::fs::write(ssh1.identity.with_extension("pub"), b"").unwrap();
+        assert!(
+            journal
+                .deselect_rollback_hosts(winner, &config, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        let runtime1 = config.knowledge_policy_dir.join("runtime.json");
+        let runtime2 = config2.knowledge_policy_dir.join("runtime.json");
+        assert!(runtime1.exists());
+        assert!(!runtime2.exists());
+        success(
+            second
+                .command()
+                .args([
+                    "remember",
+                    "SQL after partial deselection",
+                    "--global",
+                    "--json",
+                ])
+                .output()
+                .await
+                .unwrap(),
+        );
+        std::fs::write(ssh1.identity.with_extension("pub"), authorized).unwrap();
+        // Independently changed selection cannot be removed by a retry.
+        let original = std::fs::read(&runtime1).unwrap();
+        std::fs::write(&runtime1, b"independent selection").unwrap();
+        assert!(
+            journal
+                .deselect_rollback_hosts(winner, &config, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&runtime1).unwrap(), b"independent selection");
+        std::fs::write(&runtime1, original).unwrap();
+        assert_eq!(
+            journal
+                .deselect_rollback_hosts(winner, &config, &first.pool, Some(&ssh2.identity))
+                .await
+                .unwrap(),
+            receipt
+        );
+        assert!(!runtime1.exists() && !runtime2.exists());
+        success(
+            first
+                .command()
+                .args([
+                    "remember",
+                    "SQL after complete deselection",
+                    "--global",
+                    "--json",
+                ])
+                .output()
+                .await
+                .unwrap(),
+        );
+        // Missing local evidence after removal must not be manufactured by retries.
+        let proof = config2.knowledge_policy_dir.join("local-sql-return-3.json");
+        let saved = std::fs::read(&proof).unwrap();
+        std::fs::remove_file(&proof).unwrap();
+        assert!(
+            journal
+                .deselect_rollback_hosts(winner, &config, &first.pool, Some(&ssh2.identity))
+                .await
+                .is_err()
+        );
+        assert!(!proof.exists() && !runtime2.exists());
+        std::fs::write(&proof, saved).unwrap();
+        std::fs::remove_file(first.journal.join(format!("{prefix}-deselected.json"))).unwrap();
+        drop(journal);
+        let journal = Journal::resume(&first.journal, &hash).unwrap();
+        assert_eq!(
+            journal
+                .deselect_rollback_hosts(winner, &config, &first.pool, Some(&ssh2.identity))
+                .await
+                .unwrap(),
+            receipt
+        );
+        let texts: Vec<String> = sqlx::query_scalar("SELECT text FROM memories")
+            .fetch_all(&first.pool)
+            .await
+            .unwrap();
+        for text in [
+            "later SQL write",
+            "SQL after partial deselection",
+            "SQL after complete deselection",
+        ] {
+            assert!(texts.iter().any(|t| t == text), "retry lost {text}");
         }
         first.pool.close().await;
         return;

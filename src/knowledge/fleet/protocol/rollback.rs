@@ -12,6 +12,8 @@ struct ReverseResponse {
     nonce: Uuid,
     action: Action,
     fence: LocalFence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sql_return: Option<super::super::journal::SqlReturnReceipt>,
 }
 /// Constructed only from a matching, pinned-SSH exchange.
 pub struct AuthenticatedRollbackFence(LocalFence);
@@ -37,11 +39,23 @@ impl Request {
             publication: None,
             activation_sha256: None,
             rollback_request: Some(rollback.bytes().to_owned()),
+            sql_return: None,
         })?)
+    }
+    pub fn new_rollback_deselect(
+        forward: &ValidatedPlan,
+        participant: Uuid,
+        rollback: &RollbackPlan,
+        receipt: &super::super::journal::SqlReturnReceipt,
+    ) -> Result<Self> {
+        let mut request = Self::new_rollback(forward, participant, rollback)?;
+        request.envelope.action = Action::DeselectOkf;
+        request.envelope.sql_return = Some(receipt.clone());
+        Self::parse(&serde_json::to_vec(&request.envelope)?)
     }
     pub(super) fn rollback(&self) -> Result<RollbackPlan> {
         ensure!(
-            self.action() == Action::FenceOkf,
+            matches!(self.action(), Action::FenceOkf | Action::DeselectOkf),
             "not a rollback fence request"
         );
         RollbackPlan::parse(
@@ -95,6 +109,7 @@ impl Request {
             nonce: self.envelope.nonce,
             action: self.action(),
             fence,
+            sql_return: self.envelope.sql_return.clone(),
         })?;
         ensure!(
             result.len() <= MAX_RESPONSE,
@@ -116,7 +131,8 @@ impl Request {
                 && response.request_sha256 == self.envelope.request_sha256
                 && response.rollback_sha256 == rollback.sha256()
                 && response.nonce == self.envelope.nonce
-                && response.action == self.action(),
+                && response.action == self.action()
+                && response.sql_return == self.envelope.sql_return,
             "rollback response differs from authenticated request"
         );
         self.validate_fence(&rollback, &response.fence)?;
@@ -141,6 +157,36 @@ pub async fn call_rollback_fence(
         transport::exchange(&host.endpoint, participant, &request.bytes()?, identity).await?;
     journal.plan()?;
     request.accept_rollback(&response)
+}
+
+/// Successful authenticated removal, bound to the exact committed SQL return.
+pub struct AuthenticatedDeselection(LocalFence);
+impl AuthenticatedDeselection {
+    pub fn fence(&self) -> &LocalFence {
+        &self.0
+    }
+}
+pub async fn call_rollback_deselect(
+    journal: &Journal,
+    rollback: &RollbackPlan,
+    participant: Uuid,
+    receipt: &super::super::journal::SqlReturnReceipt,
+    identity: Option<&Path>,
+) -> Result<AuthenticatedDeselection> {
+    let request = Request::new_rollback_deselect(journal.plan()?, participant, rollback, receipt)?;
+    let host = journal
+        .plan()?
+        .plan()
+        .participants
+        .iter()
+        .find(|h| h.id == participant)
+        .context("participant missing")?;
+    let response =
+        transport::exchange(&host.endpoint, participant, &request.bytes()?, identity).await?;
+    journal.plan()?;
+    Ok(AuthenticatedDeselection(
+        request.accept_rollback(&response)?.0,
+    ))
 }
 
 #[cfg(test)]
@@ -180,6 +226,38 @@ mod tests {
                 serde_json::to_string(&binding).unwrap().as_bytes(),
             ),
         };
+        let event =
+            rollback.return_event(&"c".repeat(64), &plan.plan().source_backup.manifest_sha256);
+        let receipt = super::super::super::journal::SqlReturnReceipt {
+            operation: rollback.operation(),
+            generation: event.generation,
+            capture_sha256: "c".repeat(64),
+            request_sha256: event.request,
+        };
+        let deselect =
+            Request::new_rollback_deselect(&plan, participant, &rollback, &receipt).unwrap();
+        let deselected = deselect.respond_rollback(fence.clone()).unwrap();
+        assert_eq!(
+            deselect.accept_rollback(&deselected).unwrap().fence(),
+            &fence
+        );
+        assert!(request.accept_rollback(&deselected).is_err());
+        assert!(
+            Request::new_rollback_deselect(&plan, participant, &rollback, &receipt)
+                .unwrap()
+                .accept_rollback(&deselected)
+                .is_err()
+        );
+        let mut tampered: Value = serde_json::from_slice(&deselected).unwrap();
+        tampered["sql_return"]["capture_sha256"] = json!("d".repeat(64));
+        assert!(
+            deselect
+                .accept_rollback(&serde_json::to_vec(&tampered).unwrap())
+                .is_err()
+        );
+        let mut missing: Value = serde_json::from_slice(&deselect.bytes().unwrap()).unwrap();
+        missing.as_object_mut().unwrap().remove("sql_return");
+        assert!(Request::parse(&serde_json::to_vec(&missing).unwrap()).is_err());
         let response = request.respond_rollback(fence.clone()).unwrap();
         assert_eq!(request.accept_rollback(&response).unwrap().fence(), &fence);
         assert!(

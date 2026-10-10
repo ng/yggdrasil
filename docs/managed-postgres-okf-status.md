@@ -111,8 +111,12 @@ The journal can subsequently apply that candidate, its reverse-import receipt, a
 SQL generation activation in one transaction. The SQL recovery event binds the
 exact rollback request, capture, and source backup. Committed retries verify the
 SQL generation and schema without replaying old rows or requiring the old Git tip.
-Authenticated host deselection is still outstanding; both hosts remain locally
-fenced after this SQL-only step, and the public shared migration CLI stays disabled.
+The separate authenticated deselection step removes only each host's exact committed
+local fence after checking the SQL-return receipt under a shared generation lease.
+It retains local intent before removal and per-host coordinator evidence afterward.
+Retries preserve independently changed selections and refuse missing evidence.
+The public shared migration CLI stays disabled pending reverse cancellation and
+remaining orchestration/qualification gates.
 
 ### Faults, performance and packaging
 
