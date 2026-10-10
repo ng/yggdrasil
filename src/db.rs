@@ -16,6 +16,8 @@ pub mod runtime;
 mod runtime_endpoint;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod supervisor;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod upgrade;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod backup;

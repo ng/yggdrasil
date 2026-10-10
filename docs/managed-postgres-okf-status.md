@@ -20,7 +20,7 @@ to repository evidence and explicitly identifies missing implementation or proof
 | M0: contracts | ADR 0019; `tests/database_config.rs`, `knowledge_contracts.rs`, `okf_documents.rs`, and `fixtures/knowledge/`; pinned OKF specification and deterministic profile/digest fixtures. | Keep contracts and operator examples aligned with subsequent changes. |
 | M1: managed runtime | `src/db/runtime.rs`, `supervisor.rs`, `package.rs`; native installer/lifecycle fixtures, 20-process startup race, surviving-server adoption, killed bootstrap recovery and committed-row preservation. Native candidate bundles pass on three platforms. | Public released-artifact qualification, macOS quarantine/signing path and clean-machine dependency handling. |
 | M2: integration | `src/config/database.rs`, `src/db.rs`, init and `db` commands; common connection resolver, existing URL preservation, no fallback on external failure, no hook download/init/upgrade. | Clean-machine operator qualification using the final released artifacts. Default knowledge rollout remains M7. |
-| M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch, current selection-path rebasing and preserved database/knowledge IDs. | **Explicit PostgreSQL patch/major upgrade commands are absent.** Broader deployment-move, credential/provider recovery and published-platform qualification remain. |
+| M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch, current selection-path rebasing and preserved database/knowledge IDs. | Explicit patch upgrade now has a journal, backup validation, startup fence, resume and pre-switch abort; local native 16.14→16.15 happy-path and seven crash/abort cases pass. Three-platform CI coverage is added but not yet qualified. **Major upgrade orchestration remains absent.** Broader deployment-move, credential/provider recovery and published-platform qualification remain. |
 | M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation, offline fixtures and real-disk-full tests on all three native platforms. | SQL-relative latency gate remains failed on its latest repeat. Broader filesystem fault qualification remains open. |
 | M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures. | Shared remote credential/provider and resource/latency qualification; complete shared cutover and rollback orchestration. Component fixtures do not prove a deployed fleet. |
 | M6: cutover/dogfood | Database generation/write guards and client registration; full row export/round-trip validation; private single-host forward/abort/current-state rollback coordinators with journals, backups, apply-once receipts and killed-process resumption. | Shared/multi-host execution is rejected. Deployment-wide client compatibility and writer quiescence must be established; local operator declarations alone do not demonstrate them. Full recovery/rollback rehearsal and recorded dogfooding remain. |
@@ -82,7 +82,7 @@ inherited/partitioned constraints and newer constraint semantics are not omitted
 The populated native `tests/restore_major.rs` fixture passed locally on 16.15→18.3,
 preserving task/run claims, IDs and row hashes, and rejecting changed rows,
 nullability, checks and domain checks. The original failed report remains historical
-evidence. This does not implement the explicit upgrade command or qualify all
+evidence. This restore evidence does not implement major upgrade orchestration or qualify all
 cross-major catalog differences. PG17 has not had a native restore rehearsal.
 
 Combined backups bind a consistent dump to corpus/policy revisions and exact user
@@ -153,8 +153,9 @@ timeouts are not test failures or reasons to restart a running job.
 
 ## Next release work
 
-1. Implement explicit PostgreSQL upgrades with verified backups and restart/new
-   data-directory recovery; never turn ordinary startup into an upgrade.
+1. Qualify [explicit patch upgrades](managed-postgres-upgrades.md) across native
+   platforms and implement major upgrades with a new data directory and validated
+   recovery; never turn ordinary startup into an upgrade.
 2. Qualify final native artifacts and complete the remaining latency/fault cases.
 3. Complete shared/fleet cutover and current-state rollback, with explicit evidence
    of participating-client compatibility, writer quiescence and recoverable identity

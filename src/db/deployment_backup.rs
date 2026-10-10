@@ -237,6 +237,24 @@ pub async fn create(
     pg_bin: Option<&Path>,
     policy_dir: Option<&Path>,
 ) -> Result<Manifest> {
+    create_inner(config, destination, pg_bin, policy_dir, None).await
+}
+
+pub(super) async fn create_for_upgrade(
+    config: &DeploymentConfig,
+    destination: &Path,
+    permit: super::upgrade::Permit,
+) -> Result<Manifest> {
+    create_inner(config, destination, None, None, Some(permit)).await
+}
+
+async fn create_inner(
+    config: &DeploymentConfig,
+    destination: &Path,
+    pg_bin: Option<&Path>,
+    policy_dir: Option<&Path>,
+    maintenance: Option<super::upgrade::Permit>,
+) -> Result<Manifest> {
     ensure!(
         destination.is_absolute(),
         "absolute backup destination required"
@@ -295,6 +313,10 @@ pub async fn create(
     let configuration_bytes = configuration.encode()?;
     let (bin, options) = match &config.database {
         DatabaseTarget::External { url } => {
+            ensure!(
+                maintenance.is_none(),
+                "managed upgrade cannot back up an external selection"
+            );
             let selected = config
                 .owner_url
                 .as_ref()
@@ -317,7 +339,11 @@ pub async fn create(
                 pg_bin.is_none(),
                 "managed backup uses its pinned tools; --pg-bin is external-only"
             );
-            let cluster = ManagedCluster::open(&data_dir.join("postgres"))?;
+            let root = data_dir.join("postgres");
+            let cluster = match maintenance {
+                Some(permit) => ManagedCluster::open_for_upgrade(&root, permit)?,
+                None => ManagedCluster::open(&root)?,
+            };
             ensure!(
                 matches!(cluster.status().await?, Status::Ready { .. }),
                 "managed database must be running; backup does not start it"

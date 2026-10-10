@@ -12,6 +12,49 @@ fn target() -> Result<DatabaseTarget> {
     Ok(DeploymentConfig::load(std::env::vars().collect())?.database)
 }
 
+pub async fn upgrade(
+    backup: PathBuf,
+    archive: Option<PathBuf>,
+    resume: Option<Uuid>,
+    abort: bool,
+    quiesced: bool,
+    seconds: u64,
+    json: bool,
+) -> Result<()> {
+    let config = DeploymentConfig::load(std::env::vars().collect())?;
+    let executable = std::env::current_exe()?;
+    let receipt = crate::db::upgrade::patch(
+        &config,
+        crate::db::upgrade::Request {
+            backup: &backup,
+            archive: archive.as_deref(),
+            resume,
+            abort,
+            quiesced,
+            duration: Duration::from_secs(seconds),
+            executable: &executable,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string(&receipt)?);
+    } else if receipt.aborted {
+        println!(
+            "PostgreSQL upgrade {} aborted; source retained",
+            receipt.operation
+        );
+    } else {
+        println!(
+            "PostgreSQL patch upgrade {} complete: {} → {}; backup: {}",
+            receipt.operation,
+            receipt.source_version,
+            receipt.target_version,
+            receipt.backup.display()
+        );
+    }
+    Ok(())
+}
+
 fn managed() -> Result<ManagedCluster> {
     match target()? {
         DatabaseTarget::ManagedLocal { data_dir } => {
@@ -37,11 +80,17 @@ pub async fn status(json: bool) -> Result<()> {
                 }
                 Err(error) => return Err(error.into()),
                 Ok(_) => {
-                    let cluster = ManagedCluster::open(&root)?;
-                    let supervisor = supervisor::inspect(&cluster).await.ok();
-                    let postgres = cluster.status().await?;
-                    serde_json::json!({"mode": "managed", "root": root, "cluster_id": cluster.id(),
+                    if let Some(upgrade) =
+                        crate::db::upgrade::inspect(&root)?.filter(|u| !u.complete && !u.aborted)
+                    {
+                        serde_json::json!({"mode": "managed", "state": "upgrade_pending", "root": root, "upgrade": upgrade})
+                    } else {
+                        let cluster = ManagedCluster::open(&root)?;
+                        let supervisor = supervisor::inspect(&cluster).await.ok();
+                        let postgres = cluster.status().await?;
+                        serde_json::json!({"mode": "managed", "root": root, "cluster_id": cluster.id(),
                         "postgres": postgres, "supervisor_pid": supervisor.map(|s| s.supervisor_pid)})
+                    }
                 }
             }
         }

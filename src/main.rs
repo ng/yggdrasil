@@ -139,6 +139,27 @@ enum KnowledgeAction {
 #[derive(Subcommand)]
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 enum DbAction {
+    /// Explicitly upgrade managed PostgreSQL to the pinned patch release
+    Upgrade {
+        /// New private directory for the verified pre-upgrade combined backup
+        #[arg(long)]
+        backup: std::path::PathBuf,
+        #[arg(long)]
+        postgres_archive: Option<std::path::PathBuf>,
+        /// Resume the exact pending operation after inspecting retained state
+        #[arg(long)]
+        resume: Option<uuid::Uuid>,
+        /// Abort before binary selection changes, retaining source and backup
+        #[arg(long, requires = "resume")]
+        abort: bool,
+        /// Assert that all application writers are stopped until completion
+        #[arg(long)]
+        quiesced: bool,
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate a restored deployment and atomically select its complete configuration
     Switch {
         backup: std::path::PathBuf,
@@ -1385,6 +1406,26 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 ygg::cli::db_cmd::switch(&backup, &restore_dir, &target_config, resume, json)
                     .await?;
+            }
+            DbAction::Upgrade {
+                backup,
+                postgres_archive,
+                resume,
+                abort,
+                quiesced,
+                timeout,
+                json,
+            } => {
+                ygg::cli::db_cmd::upgrade(
+                    backup,
+                    postgres_archive,
+                    resume,
+                    abort,
+                    quiesced,
+                    timeout,
+                    json,
+                )
+                .await?
             }
             DbAction::VerifyBackup { path, json } => ygg::cli::db_cmd::verify_backup(&path, json)?,
             DbAction::Diagnose { json } => ygg::cli::db_cmd::diagnose(json).await?,

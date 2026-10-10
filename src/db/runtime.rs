@@ -24,22 +24,23 @@ const LIMIT: u64 = 16 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
-    version: u32,
-    root: PathBuf,
-    cluster_id: Uuid,
-    system_id: String,
-    major: u32,
-    binary_version: String,
-    bin: PathBuf,
+pub(super) struct Manifest {
+    pub(super) version: u32,
+    pub(super) root: PathBuf,
+    pub(super) cluster_id: Uuid,
+    pub(super) system_id: String,
+    pub(super) major: u32,
+    pub(super) binary_version: String,
+    pub(super) bin: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    socket_dir: Option<PathBuf>,
+    pub(super) socket_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ManagedCluster {
     root: PathBuf,
     manifest: Manifest,
+    maintenance: Option<super::upgrade::Permit>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,6 +198,7 @@ impl ManagedCluster {
         );
         private_dir(root, true)?;
         let root = root.canonicalize()?;
+        super::upgrade::check(&root, None, None)?;
         let _lease = lease(&root)?.context("managed cluster is owned by another process")?;
         ensure!(
             !root.join("cluster.json").try_exists()?,
@@ -429,9 +431,18 @@ impl ManagedCluster {
 
     /// Inspect existing metadata only. Does not create directories or start a server.
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_inner(root, None)
+    }
+
+    pub(super) fn open_for_upgrade(root: &Path, permit: super::upgrade::Permit) -> Result<Self> {
+        Self::open_inner(root, Some(permit))
+    }
+
+    fn open_inner(root: &Path, maintenance: Option<super::upgrade::Permit>) -> Result<Self> {
         private_dir(root, false)?;
         let root = root.canonicalize()?;
         let manifest: Manifest = serde_json::from_str(&read(&root.join("cluster.json"))?)?;
+        super::upgrade::check(&root, Some(&manifest), maintenance.as_ref())?;
         ensure!(
             manifest.version == 1
                 && manifest.root == root
@@ -452,7 +463,38 @@ impl ManagedCluster {
             read(&root.join("data/PG_VERSION"))?.trim().parse::<u32>()? == manifest.major,
             "cluster major differs from manifest; explicit upgrade required"
         );
-        Ok(Self { root, manifest })
+        Ok(Self {
+            root,
+            manifest,
+            maintenance,
+        })
+    }
+
+    pub(super) fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    pub(super) fn verify_selection(&self) -> Result<()> {
+        super::upgrade::check(&self.root, Some(&self.manifest), self.maintenance.as_ref())?;
+        let current: Manifest = serde_json::from_str(&read(&self.root.join("cluster.json"))?)?;
+        ensure!(
+            current == self.manifest,
+            "managed cluster metadata changed; reopen the selected cluster before retrying"
+        );
+        Ok(())
+    }
+
+    pub(super) async fn patch_manifest(&self, bin: &Path) -> Result<Manifest> {
+        let bin = bin.canonicalize()?;
+        let binary_version = output(
+            command(&bin.join("postgres")).arg("--version"),
+            Duration::from_secs(30),
+        )
+        .await?;
+        let mut target = self.manifest.clone();
+        target.bin = bin;
+        target.binary_version = binary_version;
+        Ok(target)
     }
 
     pub(super) fn bin(&self) -> &Path {
@@ -577,11 +619,7 @@ impl ManagedCluster {
         // A caller can wait while maintenance changes the selected binaries or
         // cluster identity. Only the metadata observed under ownership may
         // authorize lifecycle operations; never revive a cached selection.
-        let current: Manifest = serde_json::from_str(&read(&self.root.join("cluster.json"))?)?;
-        ensure!(
-            current == self.manifest,
-            "managed cluster metadata changed; reopen the selected cluster before retrying"
-        );
+        self.verify_selection()?;
         Ok(Some(Owner {
             cluster: self.clone(),
             _lease: lease,
@@ -604,6 +642,28 @@ impl ManagedCluster {
 }
 
 impl Owner {
+    pub(super) async fn select_patch(&mut self, target: &Manifest) -> Result<()> {
+        self.cluster.verify_selection()?;
+        ensure!(
+            self.cluster.maintenance.is_some(),
+            "patch selection requires maintenance authority"
+        );
+        let mut compatible = self.cluster.manifest.clone();
+        compatible.bin = target.bin.clone();
+        compatible.binary_version = target.binary_version.clone();
+        ensure!(
+            compatible == *target,
+            "patch upgrade cannot change cluster identity or major"
+        );
+        ensure!(
+            self.cluster.status().await? == Status::Stopped,
+            "patch selection requires a verified stopped server"
+        );
+        super::upgrade::replace(&self.cluster.root, "cluster.json", target)?;
+        self.cluster.manifest = target.clone();
+        Ok(())
+    }
+
     pub(super) async fn prepare_endpoint(&self) -> Result<()> {
         let missing_directory = std::fs::symlink_metadata(self.cluster.socket_dir())
             .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
@@ -632,6 +692,7 @@ impl Owner {
 
     async fn start_or_adopt_inner(&mut self, duration: Duration) -> Result<i32> {
         loop {
+            self.cluster.verify_selection()?;
             if let Some(child) = &mut self.child {
                 if child.try_wait()?.is_some() {
                     self.child = None;
@@ -685,6 +746,7 @@ impl Owner {
             "managed log must be regular file"
         );
         let mut cmd = command(&self.cluster.manifest.bin.join("postgres"));
+        self.cluster.verify_selection()?;
         cmd.arg("-D")
             .arg(self.cluster.root.join("data"))
             .stdout(log.try_clone()?)
@@ -732,6 +794,7 @@ mod ownership_metadata_tests {
     fn fixture(root: &Path) -> ManagedCluster {
         let root = root.canonicalize().unwrap();
         let cluster = ManagedCluster {
+            maintenance: None,
             manifest: Manifest {
                 version: 1,
                 root: root.clone(),

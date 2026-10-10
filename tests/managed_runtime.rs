@@ -308,7 +308,16 @@ void _PG_init(void) { pg_usleep(2000000L); }
     writeln!(config, "shared_preload_libraries = '{}'", library.display()).unwrap();
     config.sync_all().unwrap();
     let mut owner = cluster.try_owner().unwrap().unwrap();
-    let started = owner.start_or_adopt(Duration::from_secs(8)).await;
+    // This verifies timestamp separation, not an eight-second startup SLA.
+    // Include binary admission and native preload initialization in the same
+    // bounded startup allowance used by the other lifecycle fixtures.
+    let started = owner.start_or_adopt(WAIT).await;
+    if let Err(error) = &started {
+        eprintln!(
+            "delayed startup failed: {error:#}; server log: {}",
+            std::fs::read_to_string(root.join("logs/postgres.log")).unwrap_or_default()
+        );
+    }
     // Read both timestamps even if the product rejected the ready server, so a
     // regression failure shows the actual legitimate divergence.
     let mut conn = connect(&root).await;
