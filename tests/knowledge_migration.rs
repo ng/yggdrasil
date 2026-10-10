@@ -1856,6 +1856,18 @@ async fn native_partial_fleet_cancellation_includes_unprepared_host() {
 #[tokio::test]
 #[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; disposable fleet fence/abort qualification"]
 async fn native_fleet_owned_fence_resume_and_abort() {
+    fleet_fence_fixture(None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; committed fleet host finalization"]
+async fn native_fleet_finalization_resumes_directory_states_and_preserves_writes() {
+    for completed_renames in 0..=2 {
+        fleet_fence_fixture(Some(completed_renames)).await;
+    }
+}
+
+async fn fleet_fence_fixture(finalize_steps: Option<usize>) {
     use ygg::knowledge::{
         document::digest,
         fleet::{
@@ -2302,6 +2314,208 @@ async fn native_fleet_owned_fence_resume_and_abort() {
         "readiness must leave the original host fenced"
     );
     assert!(f.journal.join("fleet-ready.json").exists());
+    if let Some(completed_renames) = finalize_steps {
+        use ygg::knowledge::fence::finalize_sql_backed;
+        assert!(
+            finalize_sql_backed(
+                &config,
+                journal.plan().unwrap(),
+                participant,
+                &ready_seal,
+                &f.pool
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            journal
+                .ready_hosts(&config, &f.pool, Some(&ssh.identity))
+                .await
+                .unwrap(),
+            ready_seal
+        );
+        let activated = journal
+            .activate_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap();
+        assert_eq!(activated.generation, 3);
+        assert_eq!(activated.readiness_sha256, ready_seal);
+        assert_eq!(activated.publication, published);
+        // Lost local completion is reconciled from immutable SQL authority.
+        std::fs::remove_file(f.journal.join("fleet-activated.json")).unwrap();
+        assert_eq!(
+            journal
+                .activate_hosts(&config, &f.pool, Some(&ssh.identity))
+                .await
+                .unwrap(),
+            activated
+        );
+        assert!(
+            finalize_sql_backed(
+                &config,
+                journal.plan().unwrap(),
+                participant,
+                &"0".repeat(64),
+                &f.pool
+            )
+            .await
+            .is_err()
+        );
+        for _ in 0..completed_renames {
+            swap.advance().unwrap();
+        }
+        if completed_renames == 1 {
+            assert!(!config.knowledge_dir.exists());
+        }
+        if completed_renames == 2 {
+            // Recover transport publication before the final binding write.
+            std::fs::write(
+                config.knowledge_policy_dir.join("shared.json"),
+                serde_json::to_vec(&journal.plan().unwrap().plan().shared).unwrap(),
+            )
+            .unwrap();
+        }
+        if completed_renames == 0 {
+            std::fs::write(
+                candidate.join("independent.txt"),
+                "preserve after activation",
+            )
+            .unwrap();
+            assert!(
+                finalize_sql_backed(
+                    &config,
+                    journal.plan().unwrap(),
+                    participant,
+                    &ready_seal,
+                    &f.pool
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(candidate.join("independent.txt")).unwrap(),
+                "preserve after activation"
+            );
+            assert_eq!(
+                swap.inspect().unwrap(),
+                ygg::knowledge::store::DirectorySwapState::Prepared
+            );
+            std::fs::remove_file(candidate.join("independent.txt")).unwrap();
+        }
+        let remote_finalized = protocol::call_finalize(
+            &journal,
+            participant,
+            &published,
+            &ready_seal,
+            Some(&ssh.identity),
+        )
+        .await
+        .unwrap();
+        assert_eq!(remote_finalized.readiness(), Some(ready));
+        let selected = finalize_sql_backed(
+            &config,
+            journal.plan().unwrap(),
+            participant,
+            &ready_seal,
+            &f.pool,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.readiness, *ready);
+        assert_eq!(
+            remote_finalized.selection_sha256(),
+            Some(selected.selected_sha256.as_str())
+        );
+        assert_eq!(
+            journal
+                .finalize_hosts(&config, &f.pool, Some(&ssh.identity))
+                .await
+                .unwrap(),
+            activated
+        );
+        assert!(f.journal.join("fleet-finalized.json").exists());
+        let binding: ygg::knowledge::runtime::Binding =
+            serde_json::from_slice(&std::fs::read(&runtime).unwrap()).unwrap();
+        assert!(binding.phase == ygg::knowledge::runtime::Phase::Okf);
+        assert_eq!(binding.generation, 3);
+        assert_eq!(
+            swap.inspect().unwrap(),
+            ygg::knowledge::store::DirectorySwapState::CandidateInstalled
+        );
+        let remembered = f
+            .command()
+            .args(["remember", "after fleet finalization", "--global", "--json"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            remembered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&remembered.stderr)
+        );
+        assert_eq!(
+            finalize_sql_backed(
+                &config,
+                journal.plan().unwrap(),
+                participant,
+                &ready_seal,
+                &f.pool
+            )
+            .await
+            .unwrap(),
+            selected
+        );
+        assert_eq!(
+            journal
+                .finalize_hosts(&config, &f.pool, Some(&ssh.identity))
+                .await
+                .unwrap(),
+            activated
+        );
+        let shared = ygg::knowledge::shared::SharedGit::open(
+            &config.knowledge_dir,
+            journal.plan().unwrap().plan().shared.clone(),
+        )
+        .unwrap();
+        let snapshot = shared.refresh().unwrap();
+        assert!(
+            snapshot
+                .files
+                .values()
+                .any(|bytes| String::from_utf8_lossy(bytes).contains("after fleet finalization"))
+        );
+        assert_ne!(snapshot.commit, published.commit);
+        assert!(
+            ygg::knowledge::store::KnowledgeBackup::verify_restored(
+                &candidate_backup,
+                &config.knowledge_dir
+            )
+            .is_err(),
+            "new writes must survive old readiness evidence"
+        );
+        assert!(
+            journal
+                .abort_hosts(&config, &f.pool, Some(&ssh.identity))
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("UPDATE memories SET text='forbidden'")
+                .execute(&f.pool)
+                .await
+                .is_err()
+        );
+        let baseline: i32 = sqlx::query_scalar(
+            "SELECT imported_count FROM knowledge_usage WHERE corpus_id=$1 LIMIT 1",
+        )
+        .bind(f.plan.mappings.corpus_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(baseline, 7);
+        f.pool.close().await;
+        return;
+    }
     std::fs::write(candidate.join("independent.txt"), "do not overwrite").unwrap();
     assert!(
         protocol::call_ready(&journal, participant, &published, Some(&ssh.identity))

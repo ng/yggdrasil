@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
-// Version 4 additionally requires retained directory-swap evidence.
+// Version 5 additionally requires committed-activation host finalization.
 // Older hosts must fail before the coordinator fences SQL.
-const RPC_VERSION: u32 = 4;
+const RPC_VERSION: u32 = 5;
 const MAX_REQUEST: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +20,7 @@ pub enum Action {
     InspectSql,
     AbortSql,
     ReadySql,
+    FinalizeSql,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +35,8 @@ struct Envelope {
     plan: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     publication: Option<super::journal::Publication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_sha256: Option<String>,
 }
 pub struct Request {
     envelope: Envelope,
@@ -51,6 +54,8 @@ struct Response {
     preparation: SqlPreparation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     readiness: Option<crate::knowledge::fence::SqlReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection_sha256: Option<String>,
 }
 /// This type is constructed only from the matching successful SSH exchange.
 /// It deliberately has no public deserializer or file-import constructor.
@@ -58,6 +63,7 @@ pub struct AuthenticatedPreparation {
     preparation: SqlPreparation,
     action: Action,
     readiness: Option<crate::knowledge::fence::SqlReadiness>,
+    selection_sha256: Option<String>,
 }
 impl AuthenticatedPreparation {
     pub fn preparation(&self) -> &SqlPreparation {
@@ -66,13 +72,16 @@ impl AuthenticatedPreparation {
     pub fn action(&self) -> Action {
         self.action
     }
+    pub fn selection_sha256(&self) -> Option<&str> {
+        self.selection_sha256.as_deref()
+    }
     pub fn readiness(&self) -> Option<&crate::knowledge::fence::SqlReadiness> {
         self.readiness.as_ref()
     }
 }
 impl Request {
     pub fn new(plan: &ValidatedPlan, participant: Uuid, action: Action) -> Result<Self> {
-        Self::build(plan, participant, action, None)
+        Self::build(plan, participant, action, None, None)
     }
     pub fn new_ready(
         plan: &ValidatedPlan,
@@ -84,6 +93,21 @@ impl Request {
             participant,
             Action::ReadySql,
             Some(publication.clone()),
+            None,
+        )
+    }
+    pub fn new_finalize(
+        plan: &ValidatedPlan,
+        participant: Uuid,
+        publication: &super::journal::Publication,
+        activation_sha256: &str,
+    ) -> Result<Self> {
+        Self::build(
+            plan,
+            participant,
+            Action::FinalizeSql,
+            Some(publication.clone()),
+            Some(activation_sha256.to_owned()),
         )
     }
     fn build(
@@ -91,6 +115,7 @@ impl Request {
         participant: Uuid,
         action: Action,
         publication: Option<super::journal::Publication>,
+        activation_sha256: Option<String>,
     ) -> Result<Self> {
         let bytes = serde_json::to_vec(&Envelope {
             version: RPC_VERSION,
@@ -101,6 +126,7 @@ impl Request {
             action,
             plan: plan.bytes().to_owned(),
             publication,
+            activation_sha256,
         })?;
         Self::parse(&bytes)
     }
@@ -124,9 +150,23 @@ impl Request {
             "participant request differs from complete plan"
         );
         ensure!(
-            (envelope.action == Action::ReadySql) == envelope.publication.is_some(),
-            "readiness requires an explicit publication; other actions cannot carry it"
+            matches!(envelope.action, Action::ReadySql | Action::FinalizeSql)
+                == envelope.publication.is_some(),
+            "readiness/finalization require publication; other actions cannot carry it"
         );
+        ensure!(
+            (envelope.action == Action::FinalizeSql) == envelope.activation_sha256.is_some(),
+            "finalization requires activation digest only"
+        );
+        if let Some(hash) = &envelope.activation_sha256 {
+            ensure!(
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "invalid activation digest"
+            );
+        }
         if let Some(publication) = &envelope.publication {
             publication.validate_plan(&plan)?;
         }
@@ -147,18 +187,34 @@ impl Request {
     /// Participant-side serialization after executing the requested host action.
     /// This does not construct authenticated coordinator-side evidence.
     pub fn respond(&self, preparation: SqlPreparation) -> Result<Vec<u8>> {
-        self.respond_with(preparation, None)
+        self.respond_with(preparation, None, None)
     }
     fn respond_ready(&self, ready: crate::knowledge::fence::SqlReadiness) -> Result<Vec<u8>> {
-        self.respond_with(ready.preparation.clone(), Some(ready))
+        self.respond_with(ready.preparation.clone(), Some(ready), None)
+    }
+    fn respond_finalized(
+        &self,
+        result: crate::knowledge::fence::SqlFinalization,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            self.envelope.activation_sha256.as_deref() == Some(result.activation_sha256.as_str()),
+            "finalization activation differs"
+        );
+        self.respond_with(
+            result.readiness.preparation.clone(),
+            Some(result.readiness),
+            Some(result.selected_sha256),
+        )
     }
     fn respond_with(
         &self,
         preparation: SqlPreparation,
         readiness: Option<crate::knowledge::fence::SqlReadiness>,
+        selection_sha256: Option<String>,
     ) -> Result<Vec<u8>> {
         self.validate_preparation(&preparation)?;
         self.validate_readiness(readiness.as_ref(), &preparation)?;
+        self.validate_selection(selection_sha256.as_deref())?;
         let result = serde_json::to_vec(&Response {
             version: RPC_VERSION,
             operation: self.envelope.operation,
@@ -168,9 +224,15 @@ impl Request {
             action: self.action(),
             preparation,
             readiness,
+            selection_sha256,
         })?;
         ensure!(
-            result.len() <= MAX_RESPONSE,
+            result.len()
+                <= if self.action() == Action::ReadySql {
+                    MAX_RESPONSE - 256
+                } else {
+                    MAX_RESPONSE
+                },
             "participant response exceeds 1 MiB"
         );
         Ok(result)
@@ -195,10 +257,19 @@ impl Request {
             .find(|p| p.id == self.participant())
             .unwrap();
         ensure!(
-            config.knowledge_dir.canonicalize()? == host.corpus
-                && config.knowledge_policy_dir.canonicalize()? == host.policy,
+            (if self.action() == Action::FinalizeSql {
+                config.knowledge_dir == host.corpus
+            } else {
+                config.knowledge_dir.canonicalize()? == host.corpus
+            }) && config.knowledge_policy_dir.canonicalize()? == host.policy,
             "participant request differs from actual host configuration"
         );
+        if self.action() == Action::PrepareSql {
+            ensure!(
+                config.knowledge_dir == host.corpus,
+                "fleet preparation requires canonical configured corpus path"
+            );
+        }
         let binding = Binding {
             version: 1,
             minimum_client: CLIENT_PROTOCOL,
@@ -213,6 +284,18 @@ impl Request {
             participant: host.id,
         };
         let result = match self.action() {
+            Action::FinalizeSql => {
+                return self.respond_finalized(
+                    fence::finalize_sql_backed(
+                        config,
+                        &self.plan,
+                        self.participant(),
+                        self.envelope.activation_sha256.as_ref().unwrap(),
+                        pool,
+                    )
+                    .await?,
+                );
+            }
             Action::ReadySql => {
                 return self.respond_ready(
                     fence::ready_sql_backed(
@@ -312,7 +395,7 @@ impl Request {
         ready: Option<&crate::knowledge::fence::SqlReadiness>,
         preparation: &SqlPreparation,
     ) -> Result<()> {
-        if self.action() != Action::ReadySql {
+        if !matches!(self.action(), Action::ReadySql | Action::FinalizeSql) {
             ensure!(ready.is_none(), "unexpected readiness receipt");
             return Ok(());
         }
@@ -361,10 +444,43 @@ impl Request {
         }
         Ok(())
     }
+    fn validate_selection(&self, selected: Option<&str>) -> Result<()> {
+        if self.action() != Action::FinalizeSql {
+            ensure!(selected.is_none(), "unexpected selection receipt");
+            return Ok(());
+        }
+        let p = self.plan.plan();
+        let host = p
+            .participants
+            .iter()
+            .find(|h| h.id == self.participant())
+            .unwrap();
+        let binding = crate::knowledge::runtime::Binding {
+            version: 1,
+            minimum_client: crate::knowledge::guard::CLIENT_PROTOCOL,
+            generation: p.source_generation + 2,
+            phase: crate::knowledge::runtime::Phase::Okf,
+            bundle: host.corpus.clone(),
+            mappings: serde_json::from_value(serde_json::to_value(&p.mappings)?)?,
+            agents: p.agents.iter().map(|a| (a.name.clone(), a.id)).collect(),
+        };
+        let expected =
+            crate::knowledge::document::digest(serde_json::to_string(&binding)?.as_bytes());
+        ensure!(
+            selected == Some(expected.as_str()),
+            "selected binding differs from requested activation"
+        );
+        Ok(())
+    }
     fn accept(&self, bytes: &[u8]) -> Result<AuthenticatedPreparation> {
         ensure!(
-            bytes.len() <= MAX_RESPONSE,
-            "participant response exceeds 1 MiB"
+            bytes.len()
+                <= if self.action() == Action::ReadySql {
+                    MAX_RESPONSE - 256
+                } else {
+                    MAX_RESPONSE
+                },
+            "participant response exceeds phase limit"
         );
         let response: Response = serde_json::from_slice(bytes)?;
         ensure!(
@@ -378,10 +494,12 @@ impl Request {
         );
         self.validate_preparation(&response.preparation)?;
         self.validate_readiness(response.readiness.as_ref(), &response.preparation)?;
+        self.validate_selection(response.selection_sha256.as_deref())?;
         Ok(AuthenticatedPreparation {
             preparation: response.preparation,
             action: response.action,
             readiness: response.readiness,
+            selection_sha256: response.selection_sha256,
         })
     }
 }
@@ -404,6 +522,17 @@ pub async fn call_ready(
     identity: Option<&Path>,
 ) -> Result<AuthenticatedPreparation> {
     let request = Request::new_ready(journal.plan()?, participant, publication)?;
+    exchange_request(journal, request, identity).await
+}
+pub async fn call_finalize(
+    journal: &Journal,
+    participant: Uuid,
+    publication: &super::journal::Publication,
+    activation_sha256: &str,
+    identity: Option<&Path>,
+) -> Result<AuthenticatedPreparation> {
+    let request =
+        Request::new_finalize(journal.plan()?, participant, publication, activation_sha256)?;
     exchange_request(journal, request, identity).await
 }
 async fn exchange_request(
@@ -484,7 +613,7 @@ mod tests {
     fn rejects_preparation_only_protocol_before_execution() {
         let request = request();
         let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             legacy["version"] = json!(version);
             assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
         }
@@ -537,6 +666,36 @@ mod tests {
         let mut missing: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
         missing.as_object_mut().unwrap().remove("publication");
         assert!(Request::parse(&serde_json::to_vec(&missing).unwrap()).is_err());
+        let final_request = Request::new_finalize(
+            &plain.plan,
+            plain.participant(),
+            &publication,
+            &"f".repeat(64),
+        )
+        .unwrap();
+        assert!(
+            Request::new_finalize(&plain.plan, plain.participant(), &publication, "invalid")
+                .is_err()
+        );
+        let ready: crate::knowledge::fence::SqlReadiness =
+            serde_json::from_value(original["readiness"].clone()).unwrap();
+        assert!(final_request.respond_ready(ready).is_err());
+        let mut wrong_selection = original.clone();
+        wrong_selection["action"] = json!(Action::FinalizeSql);
+        wrong_selection["nonce"] = json!(final_request.envelope.nonce);
+        wrong_selection["selection_sha256"] = json!("0".repeat(64));
+        assert!(
+            final_request
+                .accept(&serde_json::to_vec(&wrong_selection).unwrap())
+                .is_err()
+        );
+        let mut incomplete: Value =
+            serde_json::from_slice(&final_request.bytes().unwrap()).unwrap();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("activation_sha256");
+        assert!(Request::parse(&serde_json::to_vec(&incomplete).unwrap()).is_err());
     }
     #[test]
     fn rejects_wrong_host_evidence_and_tampered_plan_request() {

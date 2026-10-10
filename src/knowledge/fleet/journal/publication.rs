@@ -61,7 +61,7 @@ impl Publication {
     }
 }
 impl Journal {
-    fn verified_export(&self) -> Result<Manifest> {
+    pub(super) fn verified_export(&self) -> Result<Manifest> {
         self.verify()?;
         let manifest = export::verify(&self.intent.directory.join("stage"))?;
         let plan = self.plan()?.plan();

@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod activation;
+pub use activation::ActivationReceipt;
 mod publication;
 pub use publication::Publication;
 
@@ -293,7 +295,7 @@ impl Journal {
         let phase = match action {
             super::protocol::Action::PrepareSql | super::protocol::Action::InspectSql => "prepared",
             super::protocol::Action::AbortSql => "aborted",
-            super::protocol::Action::ReadySql => {
+            super::protocol::Action::ReadySql | super::protocol::Action::FinalizeSql => {
                 anyhow::bail!("readiness requires publication-bound dispatch")
             }
             super::protocol::Action::CancelSql => "cancelled",

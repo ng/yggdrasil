@@ -152,3 +152,145 @@ pub(super) async fn with_fenced_source<T>(
         .context("fleet phase outcome uncertain; resume the same journal")?;
     Ok(result)
 }
+
+#[derive(Clone)]
+pub(super) struct Activation {
+    pub ready_sha256: String,
+    pub ready_json: String,
+    pub prepared_sha256: String,
+    pub backup_sha256: String,
+}
+async fn saved_activation(
+    registration: &Registration,
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<Option<Activation>> {
+    let row: Option<(String,String,String,String)> = sqlx::query_as("SELECT ready_sha256,ready_json,prepared_sha256,backup_sha256 FROM public.knowledge_fleet_activations WHERE operation_id=$1")
+        .bind(registration.operation).fetch_optional(&mut **tx).await?;
+    Ok(row.map(
+        |(ready_sha256, ready_json, prepared_sha256, backup_sha256)| Activation {
+            ready_sha256,
+            ready_json,
+            prepared_sha256,
+            backup_sha256,
+        },
+    ))
+}
+async fn verify_activation(
+    registration: &Registration,
+    tx: &mut Transaction<'_, Postgres>,
+    saved: &Activation,
+) -> Result<()> {
+    registered(registration, tx).await?;
+    let marker = Registration::marker(tx).await?;
+    ensure!(
+        marker.0 == registration.database_id
+            && marker.1 == registration.source_generation + 2
+            && marker.2 > 0
+            && marker.2 <= CLIENT_PROTOCOL
+            && marker.3 == "okf"
+            && marker.4 == Some(registration.corpus_id),
+        "fleet activation is no longer current"
+    );
+    ensure!(
+        crate::knowledge::document::digest(saved.ready_json.as_bytes()) == saved.ready_sha256
+            && event(registration, tx, "fenced").await?
+                == Some((saved.prepared_sha256.clone(), saved.backup_sha256.clone()))
+            && event(registration, tx, "aborted").await?.is_none(),
+        "fleet activation evidence differs"
+    );
+    let payload: serde_json::Value = serde_json::from_str(&saved.ready_json)?;
+    let manifest_sha = payload["publication"]["manifest_sha256"]
+        .as_str()
+        .context("activation manifest missing")?;
+    let forwarded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_forward_receipts WHERE operation_id=$1 AND database_id=$2 AND corpus_id=$3 AND fenced_generation=$4 AND active_generation=$5 AND manifest_sha256=$6)")
+        .bind(registration.operation).bind(registration.database_id).bind(registration.corpus_id)
+        .bind(registration.source_generation+1).bind(registration.source_generation+2).bind(manifest_sha)
+        .fetch_one(&mut **tx).await?;
+    ensure!(
+        forwarded,
+        "fleet activation lacks matching forward/telemetry receipt"
+    );
+    Ok(())
+}
+pub(super) async fn activation(
+    registration: &Registration,
+    pool: &PgPool,
+) -> Result<Option<Activation>> {
+    let mut tx = Registration::transaction(pool).await?;
+    let saved = saved_activation(registration, &mut tx).await?;
+    if let Some(saved) = &saved {
+        verify_activation(registration, &mut tx, saved).await?;
+    }
+    tx.commit().await?;
+    Ok(saved)
+}
+pub(super) async fn activate(
+    registration: &Registration,
+    pool: &PgPool,
+    backup: &SourceBackup,
+    prepared_sha256: &str,
+    ready_json: &str,
+    manifest: &crate::knowledge::export::Manifest,
+    verify_publication: impl Fn() -> Result<()>,
+) -> Result<Activation> {
+    let expected = Activation {
+        ready_sha256: crate::knowledge::document::digest(ready_json.as_bytes()),
+        ready_json: ready_json.to_owned(),
+        prepared_sha256: prepared_sha256.to_owned(),
+        backup_sha256: backup.digest().to_owned(),
+    };
+    let mut tx = Registration::transaction(pool).await?;
+    registered(registration, &mut tx).await?;
+    if let Some(saved) = saved_activation(registration, &mut tx).await? {
+        verify_activation(registration, &mut tx, &saved).await?;
+        ensure!(
+            saved.ready_json == expected.ready_json
+                && saved.prepared_sha256 == expected.prepared_sha256
+                && saved.backup_sha256 == expected.backup_sha256,
+            "concurrent activation differs"
+        );
+        tx.commit().await?;
+        return Ok(saved);
+    }
+    verify_fenced(registration, &Registration::marker(&mut tx).await?)?;
+    ensure!(
+        event(registration, &mut tx, "fenced").await?
+            == Some((
+                expected.prepared_sha256.clone(),
+                expected.backup_sha256.clone()
+            ))
+            && event(registration, &mut tx, "aborted").await?.is_none(),
+        "activation requires matching fleet fence"
+    );
+    backup.verify_on(&mut tx).await?;
+    verify_publication()?;
+    ensure!(
+        crate::knowledge::forward::activate_on(&mut tx, registration.operation, manifest).await?
+            == crate::knowledge::forward::Outcome::Activated,
+        "fleet activation cannot adopt a prior private activation"
+    );
+    verify_publication()?;
+    sqlx::query("INSERT INTO public.knowledge_fleet_activations(operation_id,generation,prepared_sha256,backup_sha256,ready_sha256,ready_json) VALUES($1,$2,$3,$4,$5,$6)")
+        .bind(registration.operation).bind(registration.source_generation+2).bind(&expected.prepared_sha256).bind(&expected.backup_sha256)
+        .bind(&expected.ready_sha256).bind(&expected.ready_json).execute(&mut *tx).await?;
+    tx.commit()
+        .await
+        .context("fleet activation outcome uncertain; resume exact journal")?;
+    Ok(expected)
+}
+pub(super) async fn with_activation<T>(
+    registration: &Registration,
+    pool: &PgPool,
+    expected: &str,
+    phase: impl FnOnce(&Activation) -> Result<T>,
+) -> Result<T> {
+    let mut tx = Registration::transaction(pool).await?;
+    let saved = saved_activation(registration, &mut tx)
+        .await?
+        .context("fleet activation missing")?;
+    verify_activation(registration, &mut tx, &saved).await?;
+    ensure!(saved.ready_sha256 == expected, "fleet activation changed");
+    let result = phase(&saved)?;
+    tx.commit().await?;
+    Ok(result)
+}

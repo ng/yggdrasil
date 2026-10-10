@@ -542,12 +542,12 @@ SQL return is committed, host reconciliation depends on that immutable abort
 receipt, not remote availability; later remote edits and SQL writes survive retry.
 The native fixture covers a 42-document publication, retained remote metadata,
 idempotent publication, lost local completion, independent remote advance refusal,
-and resumed abort with the remote offline. Host activation/finalization and current-state rollback remain unimplemented.
+and resumed abort with the remote offline. Current-state fleet rollback remains unimplemented; activation/finalization orchestration is described below.
 
 
 ### Host readiness before activation
 
-`Journal::ready_hosts` obtains fresh publication-bound RPC v4 responses from every
+`Journal::ready_hosts` obtains fresh publication-bound RPC v5 responses from every
 participant and checks each against its sealed preparation. Older RPC versions
 are rejected before SQL fencing. Each host verifies its original backup, policy,
 and owned SQL fence, then stages the exact published Git snapshot beside its
@@ -601,7 +601,7 @@ qualify complete host activation or power loss between rename and directory sync
 
 
 Host readiness now captures `directory-swap.json` and binds its exact SHA-256 to
-both the authenticated RPC v4 response and the coordinator readiness seal. Retries
+both the authenticated RPC v5 response and the coordinator readiness seal. Retries
 recompute the expected directory identities and refuse changed or missing retained
 swap evidence. A new readiness receipt cannot be issued for an unsafe parent or a
 layout that has already moved. Older participant protocols fail before SQL fencing.
@@ -633,6 +633,48 @@ owner even if a runtime role has been granted INSERT.
 
 The native fixture checks these constraints using actual authenticated readiness
 and rolls back both marker and receipt after every attempt. This is schema and
-transaction qualification, not a committed fleet activation: coordinator activation
-and authenticated host finalization remain to be wired before the public command
-can be enabled.
+transaction qualification. Committed coordinator activation and authenticated host
+finalization are covered by the forward fixture described below; public command
+enablement still requires current-state fleet rollback and deployment qualification.
+
+
+The host-side `finalize_sql_backed` now consumes a committed fleet activation and
+matching forward/telemetry receipt under the selected SQL generation lease. It
+locks local selection, verifies exact retained preparation/readiness/swap evidence,
+checks the original backup and frozen candidate, and resumes either partial rename
+state without recreating a missing corpus. It publishes shared transport and then
+the active binding last. A retry after selection verifies authority and directory
+identity while preserving later knowledge writes and policy decisions.
+
+Readiness requires the configured corpus path itself to be canonical so it remains
+unambiguous while that directory is temporarily absent. After activation, the host
+does not demand that the original publication remain the remote tip: other selected
+hosts may already have written. Normal shared commands retain their refresh rules.
+The authenticated coordinator/RPC dispatch is described below. The public migration
+command remains unavailable pending current-state fleet rollback and qualification.
+
+
+At `6638497`, the [native three-platform run](https://github.com/ng/yggdrasil/actions/runs/38039524175)
+passed, including the actual Linux same-device bind-mount fixture. This closes the
+mount-boundary check's platform qualification; it does not establish immunity to
+all filesystem restrictions or power-loss behavior.
+
+
+`Journal::activate_hosts` obtains fresh RPC v5 readiness, rechecks the owned fence,
+source backup, export, and exact publication under the SQL generation lease, then
+seeds telemetry and commits the active marker and fleet receipt together. An
+uncertain commit resumes from the immutable SQL receipt; it never republishes the
+old snapshot or compares later shared writes to frozen export data. RPC v1–v4
+participants are refused before SQL fencing, and preparation rejects configured
+corpus aliases that could become unresolvable during directory recovery.
+
+`Journal::finalize_hosts` commits activation before sending any host RPC, attempts
+every reachable participant, retains individual acknowledgements, and seals the
+complete host set under the active-generation lease. Finalization requests bind
+publication, activation digest, participant and fresh nonce; responses must match
+the exact selected binding and activated readiness. Partial failures leave unresolved
+hosts fenced while later retries reconcile them. The native fixture exercises real
+SSH finalization from all three directory states, lost local activation completion,
+partial transport publication, changed candidate refusal, telemetry seeding, CLI
+writes after selection, and repeated coordinator finalization preserving those writes.
+Multi-host partial activation and current-state rollback still need qualification.

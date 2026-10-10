@@ -130,9 +130,10 @@ pub async fn ready_sql_backed(
         .find(|h| h.id == participant)
         .context("participant missing")?;
     ensure!(
-        config.knowledge_dir.canonicalize()? == declared.corpus
+        config.knowledge_dir == declared.corpus
+            && config.knowledge_dir.canonicalize()? == declared.corpus
             && config.knowledge_policy_dir.canonicalize()? == declared.policy,
-        "readiness request differs from actual host paths"
+        "readiness requires the configured canonical corpus path for crash recovery"
     );
     let binding = Binding {
         version: 1,

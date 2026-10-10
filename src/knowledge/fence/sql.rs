@@ -392,6 +392,8 @@ async fn inspection_lease(
     Ok(tx)
 }
 
+mod finalize;
+pub use finalize::{SqlFinalization, finalize_sql_backed};
 mod ready;
 pub use ready::{SqlReadiness, ready_sql_backed};
 
