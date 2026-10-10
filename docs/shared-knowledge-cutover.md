@@ -186,7 +186,7 @@ confirmed base without an extra commit.
 
 Real bare-Git tests cover 64-file atomic publication, stale-base rejection,
 independent remote edits during push, uncertain-publication reopening and limits.
-This primitive does not validate an export manifest or authorize migration. Host
+This primitive does not validate an export manifest or authorize migration. Coordinator-managed host
 preparation, authenticated evidence exchange, database activation and coordinated
 rollback above are still unimplemented; shared/fleet execution remains rejected.
 
@@ -228,3 +228,20 @@ execution of the old plan fails its generation check, including older coordinato
 The post-fence abort path retains its existing backup validation. This implements
 the database cancellation boundary; fleet host preparation/restoration is still
 unimplemented and shared/fleet execution remains rejected.
+
+## SQL-host preparation primitive
+
+`fence::prepare_sql` now retains an intent for an absent original selection before
+publishing the compatible fenced runtime binding. It binds coordinator/participant,
+source database/corpus/generation, canonical local paths and directory identities,
+and exact identity/shared-policy bytes. Retrying a different request or changed
+policy fails; resuming the original absence reuses the same intent. Independent
+selections and replaced roots are preserved and refused.
+
+This library primitive has no CLI entry point. Its caller must authenticate the
+request, back up the host configuration, and supply existing separate roots; it
+neither creates a corpus nor validates a complete migration plan. Existing SQL
+transactions still require database fencing under the advisory migration lock.
+Coordinator cancellation/activation checks, host evidence revalidation and fleet
+restoration remain required before exposing host preparation to operators. A saved
+receipt alone cannot authorize activation or local unfencing.

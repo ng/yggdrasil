@@ -600,3 +600,98 @@ fn local_fence_drains_existing_selection_readers_before_publication() {
         serde_json::from_slice(&std::fs::read(root.join("policy/runtime.json")).unwrap()).unwrap();
     assert!(current.phase == Phase::Fenced);
 }
+
+#[test]
+fn sql_host_preparation_fences_absent_selection_and_preserves_retry_evidence() {
+    use ygg::knowledge::fence::{CoordinatorBinding, prepare_sql};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let (mut binding, _, _) = fixture(root);
+    let (config, _) = ygg::config::database::KnowledgeConfig::load(BTreeMap::from([
+        ("HOME".into(), root.display().to_string()),
+        (
+            "YGG_KNOWLEDGE_DIR".into(),
+            root.join("bundle").display().to_string(),
+        ),
+        (
+            "YGG_KNOWLEDGE_POLICY_DIR".into(),
+            root.join("policy").display().to_string(),
+        ),
+    ]))
+    .unwrap();
+    let request = CoordinatorBinding {
+        migration_operation: Uuid::new_v4(),
+        participant: Uuid::new_v4(),
+    };
+    let selection = root.join("policy/runtime.json");
+    let journal = root.join("policy/sql-fence-1.json");
+    let identity_path = root.join("policy/identity.json");
+    let identity = std::fs::read(&identity_path).unwrap();
+    assert!(!selection.exists());
+    assert!(prepare_sql(&config, &binding, request).is_err());
+    assert!(!selection.exists());
+    binding.phase = Phase::Fenced;
+    binding.generation = 1;
+    let first = serde_json::to_value(prepare_sql(&config, &binding, request).unwrap()).unwrap();
+    let intent = std::fs::read(&journal).unwrap();
+    let fenced = std::fs::read(&selection).unwrap();
+    assert_eq!(first["source_generation"], 1);
+    assert_eq!(
+        first["coordinator"]["participant"],
+        request.participant.to_string()
+    );
+    assert_eq!(std::fs::read(&identity_path).unwrap(), identity);
+    let output = command(root, root)
+        .args(["must not reach SQL", "--global"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cutover is fenced"));
+    assert!(!root.join("data").exists());
+    assert_eq!(
+        serde_json::to_value(prepare_sql(&config, &binding, request).unwrap()).unwrap(),
+        first
+    );
+    for other in [
+        CoordinatorBinding {
+            migration_operation: Uuid::new_v4(),
+            ..request
+        },
+        CoordinatorBinding {
+            participant: Uuid::new_v4(),
+            ..request
+        },
+    ] {
+        assert!(prepare_sql(&config, &binding, other).is_err());
+        assert_eq!(std::fs::read(&journal).unwrap(), intent);
+        assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+    }
+    // Retained intent survives a crash before the first selection publication.
+    std::fs::remove_file(&selection).unwrap();
+    assert_eq!(
+        serde_json::to_value(prepare_sql(&config, &binding, request).unwrap()).unwrap(),
+        first
+    );
+    assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+    assert_eq!(std::fs::read(&journal).unwrap(), intent);
+    std::fs::write(&selection, "independently changed selection").unwrap();
+    assert!(prepare_sql(&config, &binding, request).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&selection).unwrap(),
+        "independently changed selection"
+    );
+    std::fs::write(&selection, &fenced).unwrap();
+    let edited_identity = format!("{}\n", String::from_utf8(identity.clone()).unwrap());
+    std::fs::write(&identity_path, &edited_identity).unwrap();
+    assert!(prepare_sql(&config, &binding, request).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&identity_path).unwrap(),
+        edited_identity
+    );
+    std::fs::write(&identity_path, identity).unwrap();
+    std::fs::rename(root.join("bundle"), root.join("original-bundle")).unwrap();
+    KnowledgeStore::open(&root.join("bundle"), true).unwrap();
+    assert!(prepare_sql(&config, &binding, request).is_err());
+    assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+    assert_eq!(std::fs::read(&journal).unwrap(), intent);
+}
