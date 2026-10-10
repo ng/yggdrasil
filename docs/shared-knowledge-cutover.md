@@ -304,8 +304,24 @@ identities, backup contents and exact configuration under its local lease.
 Validation rejects incomplete declarations, duplicate participants/names, missing
 repository mappings, mismatched corpus identity, incompatible protocols and
 invalid backup hashes. It does not authenticate hosts, inspect backups, establish
-quiescence or prove that every source row has a mapping. The durable coordinator
-journal, authenticated evidence exchange and full execution remain unfinished;
+quiescence or prove that every source row has a mapping. Authenticated evidence exchange and full execution remain unfinished;
 this parser does not enable shared migration. A native PostgreSQL regression
 confirms that source backup verification accepts subsequent fleet registration
 metadata but rejects subsequent legacy knowledge edits.
+
+## Durable coordinator request journal
+
+`fleet::journal::Journal` retains the validated request before registration. Its
+private directory holds an atomically published intent with the exact request
+bytes, SHA-256, canonical journal path and filesystem directory identity. An
+exclusive process-owned lease rejects competing coordinators; process exit
+releases the lease without deleting the durable intent. Matching preparation is
+idempotent. Resume requires the independently retained registration digest and
+rejects copied/moved journals, changed request bytes and replaced directories.
+Every plan access rechecks the live directory and exact intent bytes. Existing
+unrelated files are preserved and block initialization.
+
+This is request retention, not the full migration state machine. The execution
+layer must enforce separation from local deployment/corpus/policy/backup paths,
+authenticate participants, retain transition evidence and implement forward,
+abort and current-snapshot rollback before enabling shared migration.

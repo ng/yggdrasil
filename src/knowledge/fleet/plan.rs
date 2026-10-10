@@ -212,10 +212,10 @@ impl ValidatedPlan {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use serde_json::{Value, json};
-    fn fixture() -> Value {
+    pub(in crate::knowledge::fleet) fn fixture() -> Value {
         let corpus = Uuid::new_v4();
         json!({"version":1,"operation":Uuid::new_v4(),"source_generation":1,
             "mappings":{"database_id":Uuid::new_v4(),"corpus_id":corpus,"repos":{},"users":{"":"explicit-owner"}},

@@ -2,6 +2,8 @@
 //! digest and declared participant set; it does not authenticate hosts or prove
 //! quiescence/readiness. Shared migration execution remains unavailable.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod journal;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod plan;
 
 use super::guard::CLIENT_PROTOCOL;
