@@ -922,3 +922,116 @@ async fn native_prefence_abort_drains_sql_and_cancels_delayed_execution() {
     );
     f.pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN; starts disposable native PostgreSQL"]
+async fn native_sql_host_cancellation_requires_receipt_and_prevents_preparation_replay() {
+    use ygg::knowledge::{
+        fence::{CoordinatorBinding, cancel_sql, prepare_sql},
+        runtime::{Binding, Phase},
+        store::KnowledgeStore,
+    };
+    let server = Server::new();
+    let f = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
+    let plan_copy = serde_json::from_value(serde_json::to_value(&f.plan).unwrap()).unwrap();
+    drop(ygg::knowledge::migration::Journal::prepare(&f.journal, plan_copy, &config).unwrap());
+    let coordinator_bytes = std::fs::read(f.journal.join("migration-intent.json")).unwrap();
+    let coordinator_intent: serde_json::Value = serde_json::from_slice(&coordinator_bytes).unwrap();
+    let coordinator = CoordinatorBinding {
+        migration_operation: serde_json::from_value(coordinator_intent["operation"].clone())
+            .unwrap(),
+        participant: Uuid::new_v4(),
+    };
+    let request = ygg::knowledge::document::digest(&coordinator_bytes);
+    let host_root = tempfile::tempdir().unwrap();
+    let root = host_root.path().canonicalize().unwrap();
+    let corpus = root.join("corpus");
+    let policy = root.join("policy");
+    KnowledgeStore::open(&corpus, true).unwrap();
+    KnowledgeStore::open(&policy, true).unwrap();
+    let mut env = f.env.clone();
+    env.insert("YGG_KNOWLEDGE_DIR".into(), corpus.display().to_string());
+    env.insert(
+        "YGG_KNOWLEDGE_POLICY_DIR".into(),
+        policy.display().to_string(),
+    );
+    let (host, _) = ygg::config::database::KnowledgeConfig::load(env).unwrap();
+    let binding = Binding {
+        version: 1,
+        minimum_client: 1,
+        generation: 1,
+        phase: Phase::Fenced,
+        bundle: corpus,
+        mappings: serde_json::from_value(serde_json::to_value(&f.plan.mappings).unwrap()).unwrap(),
+        agents: BTreeMap::new(),
+    };
+    prepare_sql(&host, &binding, coordinator).unwrap();
+    let selection = policy.join("runtime.json");
+    let fenced = std::fs::read(&selection).unwrap();
+    assert!(
+        cancel_sql(&host, &binding, coordinator, &request, &f.pool)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+    assert!(!policy.join("sql-fence-1-cancelled.json").exists());
+    success(f.migrate(&server, true).await);
+    assert!(
+        cancel_sql(&host, &binding, coordinator, &"0".repeat(64), &f.pool)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&selection).unwrap(), fenced);
+    std::fs::write(&selection, "independent selection").unwrap();
+    assert!(
+        cancel_sql(&host, &binding, coordinator, &request, &f.pool)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&selection).unwrap(),
+        "independent selection"
+    );
+    // Original absence is also the state left by a crash before fence publication.
+    std::fs::remove_file(&selection).unwrap();
+    cancel_sql(&host, &binding, coordinator, &request, &f.pool)
+        .await
+        .unwrap();
+    let tombstone_path = policy.join("sql-fence-1-cancelled.json");
+    let tombstone = std::fs::read(&tombstone_path).unwrap();
+    assert!(!selection.exists());
+    assert!(prepare_sql(&host, &binding, coordinator).is_err());
+    // Resume a crash after the tombstone was fsynced but before fence removal.
+    std::fs::write(&selection, &fenced).unwrap();
+    assert!(prepare_sql(&host, &binding, coordinator).is_err());
+    cancel_sql(&host, &binding, coordinator, &request, &f.pool)
+        .await
+        .unwrap();
+    assert!(!selection.exists());
+    sqlx::query("UPDATE memories SET text='after host cancellation'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    cancel_sql(&host, &binding, coordinator, &request, &f.pool)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&tombstone_path).unwrap(), tombstone);
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "after host cancellation");
+    sqlx::query("UPDATE knowledge_storage SET generation=generation+1 WHERE singleton")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert!(
+        cancel_sql(&host, &binding, coordinator, &request, &f.pool)
+            .await
+            .is_err()
+    );
+    assert!(!selection.exists());
+    assert_eq!(std::fs::read(&tombstone_path).unwrap(), tombstone);
+    f.pool.close().await;
+}

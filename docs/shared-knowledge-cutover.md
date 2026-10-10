@@ -245,3 +245,14 @@ transactions still require database fencing under the advisory migration lock.
 Coordinator cancellation/activation checks, host evidence revalidation and fleet
 restoration remain required before exposing host preparation to operators. A saved
 receipt alone cannot authorize activation or local unfencing.
+
+`fence::cancel_sql` now supplies the matching local cancellation primitive. It
+requires the exact coordinator request digest, operation/database/source identities,
+immutable database cancellation receipt and current SQL return generation. While
+holding local selection and shared database leases it retains a local cancellation
+tombstone before removing only the exact fenced selection (or accepting original
+absence). Interrupted removal resumes from that evidence. `prepare_sql` refuses a
+tombstoned request, so delayed preparation cannot re-fence a cancelled host. Changed
+selections, receipts, policy or database generations refuse without overwriting them.
+These primitives still require coordinator authentication, census and workflow;
+they do not expose an operator CLI or enable shared/fleet migration execution.
