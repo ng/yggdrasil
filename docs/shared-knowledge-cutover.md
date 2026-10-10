@@ -325,3 +325,39 @@ This is request retention, not the full migration state machine. The execution
 layer must enforce separation from local deployment/corpus/policy/backup paths,
 authenticate participants, retain transition evidence and implement forward,
 abort and current-snapshot rollback before enabling shared migration.
+
+## Participant transport implementation contract
+
+Use OpenSSH for the initial authenticated participant channel. Bind each
+participant's endpoint (host, port, account) and explicit server public key into
+the immutable plan; changing enrollment requires a new plan. Use a dedicated
+known-hosts file and participant-specific `HostKeyAlias`, strict host-key checking,
+noninteractive public-key authentication, and no fallback to global known-hosts
+files or DNS trust. Do not accept a key learned by an unauthenticated scan as
+operator enrollment. Host-key authentication establishes the enrolled server;
+the SSH account's authorization to execute Yggdrasil remains an operator concern.
+
+Invoke a fixed participant subcommand. Send a bounded request on stdin rather
+than interpolating JSON, paths or user content into a remote shell command. Bind
+request and response to protocol version, operation, exact plan digest,
+participant, action and a fresh request nonce. Accept a response only from the
+successful authenticated subprocess for that request, never from an arbitrary
+JSON file. The returned record must additionally match retained host-local
+preparation/configuration/backup evidence. Successful SSH authentication does not
+prove editor quiescence or a complete host census.
+
+Disable connection multiplexing, forwarding and user configuration overrides
+that could substitute a different authentication policy. Bound stdin/stdout/stderr
+and total execution time. A timeout, disconnect or nonzero exit after dispatch
+has an uncertain mutation outcome: retain the journal and reconcile the same
+idempotent operation on the participant. Never interpret that failure as absence
+of a prepared fence or permission to activate other hosts.
+
+A disposable, unprivileged loopback OpenSSH probe on macOS (2026-10-10) accepted
+the matching temporary host/client keys and rejected both a wrong pinned host key
+and a wrong client key (exit 255, no remote-command output). No system SSH
+configuration or operator keys were changed; the test daemon was stopped. This
+establishes local test feasibility only. The production transport, participant
+command, nonce/bounds/fault tests and two-host migration integration remain to be
+implemented. OpenSSH's [configuration manual](https://man.openbsd.org/ssh_config.5)
+defines the host-key alias and strict-checking behavior used by this design.
