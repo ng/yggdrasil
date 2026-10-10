@@ -235,7 +235,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires local sshd/ssh-keygen; starts disposable loopback SSH server"]
     async fn authenticated_exchange_rejects_wrong_keys_and_bounds_output() {
-        let temp = tempfile::tempdir().unwrap();
+        // OpenSSH StrictModes rejects authorized keys beneath world-writable
+        // /tmp, even when the leaf directory is private. Keep strict checking.
+        let temp = tempfile::Builder::new()
+            .prefix(".ygg-fleet-transport-")
+            .tempdir_in(std::env::var_os("HOME").expect("SSH test requires user home"))
+            .unwrap();
         let root = temp.path().canonicalize().unwrap();
         for name in ["host", "client"] {
             assert!(

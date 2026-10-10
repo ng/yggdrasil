@@ -429,3 +429,16 @@ nonzero exit status. The native migration fixture exercises retry and cancellati
 through independent CLI processes, including rejection without a response after
 cancellation. This component command does not export, publish, activate or roll
 back a shared corpus. The operator-facing shared migration rejection remains.
+
+The native `native_authenticated_ssh_participant_preparation_and_cancellation`
+fixture now exercises `protocol::call` through a real pinned SSH connection, the
+built participant CLI, and disposable PostgreSQL. It verifies authentication
+failure before mutation, preparation retry, refusal to cancel without a database
+receipt, successful cancellation afterward, and retention of later SQL writes
+on retry. Temporary server/client keys and an isolated forced-command wrapper
+supply only fixture configuration; system/operator SSH settings are untouched.
+Strict ownership checks remain enabled, so authorized-key fixtures live in an
+automatically removed private directory beneath the user-owned home rather than
+world-writable `/tmp`. Native Linux CI installs OpenSSH server tools for this test.
+This proves the one-participant preparation/cancellation path, not multi-host
+cutover, shared publication, activation or current-state rollback.

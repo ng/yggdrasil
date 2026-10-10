@@ -53,7 +53,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libossp-uuid16 libxml2 liblz4-1 libzstd1
+          sudo apt-get install -y libossp-uuid16 libxml2 liblz4-1 libzstd1 openssh-server
+          sudo install -d -m 0755 /run/sshd
       - name: Fetch and verify pinned release archive
         run: python3 scripts/prepare-postgres-smoke.py --target '${{ matrix.target }}' --directory "$RUNNER_TEMP/pg-release"
       - name: Check native binary dependencies and signatures

@@ -1438,3 +1438,247 @@ async fn native_backed_participant_retries_only_its_own_policy_additions() {
     assert_eq!(text, "after backed cancellation");
     f.pool.close().await;
 }
+
+struct ParticipantSsh {
+    process: std::process::Child,
+    endpoint: ygg::knowledge::fleet::transport::Endpoint,
+    identity: PathBuf,
+    _temp: tempfile::TempDir,
+}
+impl Drop for ParticipantSsh {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "participant diagnostics: {}",
+                std::fs::read_to_string(self._temp.path().join("participant.stderr"))
+                    .unwrap_or_default()
+            );
+            eprintln!(
+                "sshd diagnostics: {}",
+                std::fs::read_to_string(self._temp.path().join("sshd.log")).unwrap_or_default()
+            );
+        }
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+impl ParticipantSsh {
+    async fn new(f: &Fixture) -> Self {
+        let temp = tempfile::Builder::new()
+            .prefix(".ygg-fleet-e2e-")
+            .tempdir_in(std::env::var_os("HOME").expect("SSH test requires user home"))
+            .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for name in ["host", "client"] {
+            success(
+                Command::new("ssh-keygen")
+                    .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                    .arg(root.join(name))
+                    .output()
+                    .unwrap(),
+            );
+        }
+        fn quote(value: &str) -> String {
+            format!("'{}'", value.replace('\'', "'\\''"))
+        }
+        let wrapper = root.join("participant.sh");
+        let environment = f
+            .env
+            .iter()
+            .map(|(key, value)| quote(&format!("{key}={value}")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(&wrapper, format!(
+            "#!/bin/sh\nset -eu\ncase \"$SSH_ORIGINAL_COMMAND\" in 'ygg knowledge fleet-participant') ;; *) exit 64 ;; esac\ncd {}\nexec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin {} {} knowledge fleet-participant 2>{}\n",
+            quote(f.temp.path().to_str().unwrap()), environment, quote(env!("CARGO_BIN_EXE_ygg")), quote(root.join("participant.stderr").to_str().unwrap()))).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let account =
+            String::from_utf8(success(Command::new("id").arg("-un").output().unwrap()).stdout)
+                .unwrap()
+                .trim()
+                .to_owned();
+        let config = root.join("sshd_config");
+        std::fs::write(&config, format!("ListenAddress 127.0.0.1\nPort {port}\nHostKey {0}/host\nPidFile {0}/sshd.pid\nAuthorizedKeysFile {0}/client.pub\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes yes\nPermitUserRC no\nForceCommand /bin/sh {0}/participant.sh\n", root.display())).unwrap();
+        let log_path = root.join("sshd.log");
+        let process = Command::new("/usr/sbin/sshd")
+            .args(["-D", "-e", "-f"])
+            .arg(config)
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log_path).unwrap())
+            .spawn()
+            .unwrap();
+        let host_key = std::fs::read_to_string(root.join("host.pub"))
+            .unwrap()
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut server = Self {
+            process,
+            endpoint: ygg::knowledge::fleet::transport::Endpoint {
+                host: "127.0.0.1".into(),
+                port,
+                account,
+                host_key,
+            },
+            identity: root.join("client"),
+            _temp: temp,
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            assert!(
+                server.process.try_wait().unwrap().is_none() && std::time::Instant::now() < until,
+                "disposable sshd failed: {}",
+                std::fs::read_to_string(&log_path).unwrap()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        server
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH server/client tools; starts disposable PG and SSH"]
+async fn native_authenticated_ssh_participant_preparation_and_cancellation() {
+    use ygg::knowledge::{
+        document::digest,
+        fleet::{
+            journal::Journal,
+            plan::ValidatedPlan,
+            protocol::{self, Action},
+        },
+        store::KnowledgeStore,
+    };
+    let server = Server::new();
+    let mut f = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
+    KnowledgeStore::open(&config.knowledge_dir, true).unwrap();
+    let identities =
+        ygg::knowledge::identity::IdentityRegistry::open(&config.knowledge_policy_dir, true)
+            .unwrap()
+            .initialize(true)
+            .unwrap();
+    f.plan.mappings.corpus_id = identities.corpus_id;
+    let backup = f.temp.path().canonicalize().unwrap().join("host-backup");
+    let manifest = ygg::db::deployment_backup::create(&config, &backup, Some(&server.bin), None)
+        .await
+        .unwrap();
+    let hash = digest(&serde_json::to_vec(&manifest).unwrap());
+    let ssh = ParticipantSsh::new(&f).await;
+    let participant = Uuid::new_v4();
+    let plan = ValidatedPlan::parse(&serde_json::json!({
+        "version":1,"operation":Uuid::new_v4(),"source_generation":1,"mappings":&f.plan.mappings,"agents":[],
+        "shared":{"version":1,"remote":"git@example.test:knowledge.git","branch":"main"},
+        "expected_remote_commit":"a".repeat(40),"source_backup":{"path":backup,"manifest_sha256":hash},
+        "all_participating_hosts_listed":true,"schema_changes_stopped":true,"session_preserving_endpoint":true,"remote_writers_stopped":true,
+        "participants":[{"id":participant,"name":"ssh-host","protocol":1,"endpoint":&ssh.endpoint,
+            "corpus":config.knowledge_dir.canonicalize().unwrap(),"policy":config.knowledge_policy_dir.canonicalize().unwrap(),
+            "identities":identities,"backup":{"path":backup,"manifest_sha256":hash},
+            "knowledge_writers_stopped":true,"external_editors_stopped":true}]
+    }).to_string()).unwrap();
+    let journal = Journal::prepare(&f.journal, plan).unwrap();
+    journal
+        .plan()
+        .unwrap()
+        .registration()
+        .register(&f.pool)
+        .await
+        .unwrap();
+    let runtime = config.knowledge_policy_dir.join("runtime.json");
+    // Wrong client key must fail before any participant authority mutation.
+    assert!(
+        protocol::call(
+            &journal,
+            participant,
+            Action::PrepareSql,
+            Some(&ssh.identity.with_file_name("host"))
+        )
+        .await
+        .is_err()
+    );
+    assert!(!runtime.exists());
+    let prepared = protocol::call(
+        &journal,
+        participant,
+        Action::PrepareSql,
+        Some(&ssh.identity),
+    )
+    .await
+    .unwrap();
+    assert!(runtime.exists());
+    let repeated = protocol::call(
+        &journal,
+        participant,
+        Action::PrepareSql,
+        Some(&ssh.identity),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        prepared.preparation().intent_sha256,
+        repeated.preparation().intent_sha256
+    );
+    assert!(
+        protocol::call(
+            &journal,
+            participant,
+            Action::CancelSql,
+            Some(&ssh.identity)
+        )
+        .await
+        .is_err()
+    );
+    assert!(runtime.exists());
+    journal
+        .plan()
+        .unwrap()
+        .registration()
+        .cancel(&f.pool)
+        .await
+        .unwrap();
+    let cancelled = protocol::call(
+        &journal,
+        participant,
+        Action::CancelSql,
+        Some(&ssh.identity),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled.action(), Action::CancelSql);
+    assert!(!runtime.exists());
+    sqlx::query("UPDATE memories SET text='after SSH cancellation'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    protocol::call(
+        &journal,
+        participant,
+        Action::CancelSql,
+        Some(&ssh.identity),
+    )
+    .await
+    .unwrap();
+    assert!(
+        protocol::call(
+            &journal,
+            participant,
+            Action::PrepareSql,
+            Some(&ssh.identity)
+        )
+        .await
+        .is_err()
+    );
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "after SSH cancellation");
+    f.pool.close().await;
+}
