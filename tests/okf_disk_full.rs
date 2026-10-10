@@ -108,10 +108,13 @@ impl FullFilesystem {
             .unwrap();
         let block: Vec<u8> = (0..65536).map(|i| ((i * 31 + 17) % 251) as u8).collect();
         let mut written = output.metadata().unwrap().len();
+        // A large append can hit ENOSPC while smaller allocations still fit.
+        // Consume the remaining filesystem blocks before testing publication.
+        let mut chunk_bytes = block.len();
         loop {
-            match output.write_all(&block) {
+            match output.write_all(&block[..chunk_bytes]) {
                 Ok(()) => {
-                    written += block.len() as u64;
+                    written += chunk_bytes as u64;
                     assert!(
                         written <= 256 * 1024 * 1024,
                         "fixture did not reach its capacity"
@@ -119,6 +122,10 @@ impl FullFilesystem {
                 }
                 Err(error) => {
                     assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+                    if chunk_bytes > 4096 {
+                        chunk_bytes = 4096;
+                        continue;
+                    }
                     break;
                 }
             }
