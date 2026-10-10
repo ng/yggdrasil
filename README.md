@@ -2,13 +2,13 @@
 
 Yggdrasil is a multi-agent coordination layer for AI coding agents. It gives fleets of Claude Code instances (or any CLI-driven agent) the infrastructure they need to work in the same codebase without colliding: resource locking, task tracking with dependency graphs, a scheduler for autonomous task execution, a real-time TUI dashboard, and inter-agent messaging. Built in Rust, backed by PostgreSQL. The CLI binary is `ygg`.
 
-> **Note (ADR 0015, 2026-06-07):** Yggdrasil started as both a coordination layer *and* a similarity-retrieved cross-session memory. The memory bet didn't pay off, so the embedding/retrieval layer (Ollama, pgvector, the `nodes` DAG, scoped memories, per-turn injection) was removed. Yggdrasil is now a focused **orchestration** layer. Durable agent rules live in Claude Code's native `CLAUDE.md` / `MEMORY.md`.
+> **Knowledge storage:** ADR 0015 removed embeddings, pgvector and similarity retrieval. `remember` and `learn` provide scoped notes and deterministic rules. The compatibility implementation supports explicit migration to authoritative Open Knowledge Format (OKF) files; existing SQL knowledge stays selected until that migration. [Implementation and release status](docs/managed-postgres-okf-status.md).
 
 ---
 
 ## Install
 
-**From source** (requires Rust 1.75+):
+**From source** (use the stable Rust toolchain, as CI does):
 
 ```bash
 cargo install --path .
@@ -16,17 +16,24 @@ cargo install --path .
 
 **From GitHub releases:** coming soon.
 
+Native CI produces [online and offline candidate bundles](src/db/README.md#native-onlineoffline-bundles)
+for macOS arm64/Intel and GNU Linux x86_64. Public release, macOS quarantine and
+clean-machine dependency qualification remain open.
+
 **Homebrew:** coming soon.
 
 ## Requirements
 
-- **Rust 1.75+** (build from source only)
-- **PostgreSQL 14+**
+- **Stable Rust** (build from source only; the crate uses edition 2024).
+- **PostgreSQL:** managed mode installs pinned PostgreSQL 16.15 during `ygg init`;
+  external mode uses your configured server. CI validates external PostgreSQL 16
+  and 18. Managed candidate platforms are macOS arm64/Intel and GNU Linux x86_64;
+  other targets must use external mode.
 
 ## Quick Start
 
 ```bash
-# 1. Bootstrap everything: Postgres check, migrations, hooks
+# 1. Initialize managed Postgres, or use your existing external configuration
 ygg init
 
 # 2. Create a task
@@ -44,6 +51,21 @@ ygg status
 # Optional: one-line status for Codex prompts, hooks, or panes
 ygg status --format codex
 ```
+
+An existing `DATABASE_URL` keeps external mode selected. Without a URL or explicit
+mode, `ygg init` installs and initializes managed PostgreSQL. Explicit managed
+mode plus an external URL is a configuration error. Connection failures never
+switch databases. Hooks may start an initialized cluster but never download or
+upgrade it.
+
+User configuration belongs in `~/.config/ygg/config.toml` and the legacy user
+`.env`, with `YGG_CONFIG_DIR` or `XDG_CONFIG_HOME` overrides. Repository `.env`
+files are not loaded. Start from [config.example.toml](config.example.toml) or
+[.env.example](.env.example); environment values override equivalent settings.
+Keep database data and knowledge outside worktrees. See the
+[database operator guide](src/db/README.md) for lifecycle, TLS, owner credentials,
+combined backups and validated deployment moves, and the
+[knowledge guide](src/knowledge/README.md) before cutover or rollback.
 
 ## Architecture
 
@@ -74,7 +96,7 @@ the same hook boundary; see [docs/codex-integration.md](docs/codex-integration.m
 - **Stop** -> `ygg run capture-outcome` + `ygg stop-check` -- records task-run outcome, blocks premature worker exit
 - **PreToolUse** -> `ygg lock` / `ygg agent-tool` -- enforces resource leases, records tool usage
 
-There is no long-running daemon other than the optional `ygg watcher` (heartbeats, lock expiry) and the `ygg scheduler`. Everything else runs as one-shot CLI invocations.
+Managed database installations also run `ygg db serve` to keep PostgreSQL alive between CLI invocations. The optional `ygg watcher` handles heartbeats and lock expiry; `ygg scheduler` dispatches work. External PostgreSQL remains operator-managed.
 
 ## Why Yggdrasil Exists
 
@@ -93,10 +115,11 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 
 | Command     | Purpose                                                                 |
 |-------------|-------------------------------------------------------------------------|
-| `init`      | Bootstrap: Postgres check, migrations, hooks.                          |
+| `init`      | Initialize managed Postgres or check external access, migrate, install hooks.                          |
 | `up`        | Launch the tmux dashboard (default when run bare).                     |
 | `dashboard` | Launch the TUI dashboard directly.                                      |
 | `status`    | Quick text output of agent + system state; `--format codex` emits one line. |
+| `db`        | Database lifecycle, diagnostics, combined backup, validated restore, deployment switching and offline verification; [operator guide](src/db/README.md#combined-operator-backups). |
 | `migrate`   | Run database migrations.                                                |
 | `spawn`     | Spawn a new agent in a tmux window, registered in the DB.               |
 | `task`      | Task tracking: `create / list / ready / claim / close / dep / show / dupes`. |
@@ -104,6 +127,8 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `scheduler` | Autonomous task-DAG scheduler: `run / tick / status / dry-run / backfill`. |
 | `lock`      | Acquire / release / list / heartbeat resource locks.                    |
 | `learn`     | Scoped learnings: deterministic rule capture matched by file glob.      |
+| `remember`  | Create, list and delete scoped notes.                                  |
+| `knowledge` | Browse OKF, inspect migration, explicitly cut over/roll back private knowledge, and recover shared drafts. |
 | `prime`     | Hook: emits agent context as Markdown.                                  |
 | `msg`/`chat`| Agent-to-agent messaging on the events bus.                             |
 | `interrupt` | Human overrides: take-over, hand-back.                                  |
@@ -144,9 +169,9 @@ docs/           prose docs + ADRs
 ## Build from Source
 
 ```bash
-docker-compose up -d             # Postgres 16
 cargo build --release            # build the ygg binary
-cargo test                       # run tests (requires Postgres)
+cargo test --lib                  # database-independent library tests
+# Full integration suite: use only an isolated test database (see CONTRIBUTING.md)
 make install                     # build + install to ~/.local/bin/ygg
 ```
 
@@ -155,6 +180,7 @@ make install                     # build + install to ~/.local/bin/ygg
 - [Orchestration runtime](docs/orchestration.md) -- scheduler, task runs, payload flow, lock integration, failure semantics.
 - [Eval benchmarks](docs/eval-benchmarks.md) -- `ygg bench` scenarios, Tier-A metrics, METR-style methodology.
 - [ADR 0015](docs/adr/0015-retrieval-scope-reduction.md) -- why the retrieval/embedding layer was removed.
+- [Managed PostgreSQL and OKF status](docs/managed-postgres-okf-status.md) -- milestone evidence and remaining release gates.
 - [Open questions](docs/open-questions.md) -- the shared-memory hypothesis, named LLM failure modes.
 - [Architecture Decision Records](docs/adr/) -- one ADR per non-obvious design choice. Some pre-0015 ADRs (0001, 0002, 0004, 0011, 0012) and design docs (`retrieval.md`, `design-principles.md`) describe the removed retrieval layer and are kept as historical records.
 

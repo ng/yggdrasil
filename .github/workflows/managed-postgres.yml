@@ -1,0 +1,138 @@
+name: Managed PostgreSQL artifacts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/managed-postgres.yml'
+      - 'scripts/prepare-postgres-smoke.py'
+      - 'scripts/*release-bundle*.py'
+      - 'scripts/clean-linux-bundle.Dockerfile'
+      - 'tests/release_bundles.py'
+      - 'LICENSE'
+      - 'Cargo.*'
+      - 'build.rs'
+      - 'src/db.rs'
+      - 'src/db/**'
+      - 'src/cli/db_cmd.rs'
+      - 'src/config/**'
+      - 'src/main.rs'
+      - 'migrations/**'
+      - 'tests/managed_*.rs'
+      - 'tests/knowledge_migration.rs'
+      - 'tests/okf_disk_full.rs'
+      - 'src/knowledge/**'
+      - 'src/cli/knowledge_cmd.rs'
+      - 'src/cli/knowledge_cmd/**'
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native PostgreSQL 16.15 (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install GNU distribution runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libossp-uuid16 libxml2 liblz4-1 libzstd1 openssh-server
+          sudo install -d -m 0755 /run/sshd
+      - name: Fetch and verify pinned release archive
+        run: python3 scripts/prepare-postgres-smoke.py --target '${{ matrix.target }}' --directory "$RUNNER_TEMP/pg-release"
+      - name: Check native binary dependencies and signatures
+        shell: bash
+        run: |
+          "$YGG_TEST_PG_BIN/postgres" --version
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --verify --strict "$YGG_TEST_PG_BIN/postgres"
+            otool -L "$YGG_TEST_PG_BIN/postgres"
+          else
+            ldd "$YGG_TEST_PG_BIN/postgres"
+            ldd "$YGG_TEST_PG_BIN/../lib/uuid-ossp.so"
+          fi
+      - name: Test release-mode installer, migrations and lifecycle
+        run: cargo test --release --test managed_packages --test managed_runtime --test managed_probe_deadline --test managed_supervisor --test external_tls --test knowledge_migration -- --include-ignored --test-threads=1
+      - name: Prepare previous patch and test explicit upgrade recovery
+        shell: bash
+        run: |
+          python3 scripts/prepare-postgres-smoke.py --upgrade-source --target '${{ matrix.target }}' --directory "$RUNNER_TEMP/pg-upgrade-source"
+      - name: Test patch upgrade and killed publication recovery
+        shell: bash
+        run: |
+          cargo build --release --locked --bin ygg
+          export YGG_TEST_YGG_BIN="$PWD/target/release/ygg"
+          cargo test --release --test managed_upgrade -- --include-ignored --nocapture --test-threads=1
+          cargo test --release --lib db::upgrade::tests::patch_publication_crashes_resume_without_losing_rows -- --include-ignored --nocapture --test-threads=1
+      - name: Prepare explicit PostgreSQL 18 restore target
+        run: python3 scripts/prepare-postgres-smoke.py --major 18 --target '${{ matrix.target }}' --directory "$RUNNER_TEMP/pg-major-target"
+      - name: Test managed restore into a new major-version directory
+        run: cargo test --release --test managed_major_restore -- --include-ignored --nocapture --test-threads=1
+      - name: Test killed bootstrap recovery
+        run: cargo test --release --lib db::runtime::bootstrap_tests -- --include-ignored --test-threads=1
+      - name: Test knowledge writes on an actually full filesystem
+        run: cargo test --release --test okf_disk_full -- --include-ignored --nocapture --test-threads=1
+      - name: Test killed deployment configuration publication
+        run: cargo test --release --lib config::switch::tests -- --test-threads=1
+      - name: Test short runtime endpoint identity and containment
+        run: cargo test --release --lib db::runtime_endpoint -- --test-threads=1
+      - name: Qualify external and managed deployment moves
+        run: cargo test --release --test managed_deployment_move -- --include-ignored --test-threads=1
+      - name: Verify release bundle integrity and publication rules
+        run: python3 tests/release_bundles.py
+      - name: Assemble online and offline native bundles
+        run: |
+          cargo build --release --locked --bin ygg
+          python3 scripts/build-release-bundles.py --binary target/release/ygg --postgres-archive "$YGG_TEST_PG_ARCHIVE" --target '${{ matrix.target }}' --output "$RUNNER_TEMP/ygg-bundles"
+      - name: Qualify bundles in a clean Ubuntu runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker build -f scripts/clean-linux-bundle.Dockerfile -t ygg-clean-runtime scripts
+          # Only source and built archives are mounted; no host libraries, tools,
+          # credentials, database, or container-engine socket enter the container.
+          for flavor in offline online; do
+            bundle=$(basename "$RUNNER_TEMP"/ygg-bundles/*-"$flavor".tar.gz)
+            network=bridge
+            extra=()
+            if [[ "$flavor" == offline ]]; then
+              network=none
+            else
+              extra+=(--allow-download)
+            fi
+            docker run --rm --read-only --network "$network" \
+              --tmpfs /tmp:rw,exec,nosuid,size=1g \
+              -v "$PWD:/source:ro" \
+              -v "$RUNNER_TEMP/ygg-bundles:/bundles:ro" \
+              ygg-clean-runtime "/bundles/$bundle" \
+              --directory "/tmp/$flavor-smoke" "${extra[@]}"
+          done
+      - name: Smoke-test extracted release bundles
+        shell: bash
+        run: |
+          python3 scripts/smoke-release-bundle.py "$RUNNER_TEMP"/ygg-bundles/*-offline.tar.gz --directory "$RUNNER_TEMP/bundle-offline-smoke"
+          python3 scripts/smoke-release-bundle.py "$RUNNER_TEMP"/ygg-bundles/*-online.tar.gz --directory "$RUNNER_TEMP/bundle-online-smoke" --allow-download
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ygg-native-bundles-${{ matrix.target }}
+          path: ${{ runner.temp }}/ygg-bundles/
+          if-no-files-found: error
+          retention-days: 14

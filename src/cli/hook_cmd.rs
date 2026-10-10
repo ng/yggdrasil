@@ -118,7 +118,7 @@ async fn handle_prompt_submit(
             return Ok(());
         }
     };
-    let pool = match crate::db::create_pool(&config.database_url).await {
+    let pool = match crate::db::connect(&config.database).await {
         Ok(p) => p,
         Err(e) => {
             warn!("hook prompt-submit: db pool error: {e}");
@@ -188,7 +188,95 @@ async fn handle_prompt_submit(
 /// 2. Heartbeat — silent
 /// 3. For Edit/Write/NotebookEdit with a file path: acquire lock, warn on conflict
 /// 4. Always exit 0
+fn print_edit_context(lines: &[String]) {
+    if !lines.is_empty() {
+        println!(
+            "{}",
+            serde_json::json!({ "hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "additionalContext": lines.join("\n")
+            }})
+        );
+    }
+}
+
 async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let file = payload
+        .get("tool_input")
+        .and_then(|v| v.get("file_path").or_else(|| v.get("path")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let select_phase = crate::knowledge::timing::Phase::start("hook_selection");
+    let mut legacy_knowledge = true;
+    let mut observed = None;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if matches!(tool, "Edit" | "Write" | "NotebookEdit") && !file.is_empty() {
+        match crate::knowledge::runtime::Context::for_edit_hook(std::env::vars().collect()) {
+            Ok(Some(context)) => {
+                legacy_knowledge = false;
+                let session = payload
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match crate::cli::learning_cmd::local::surface_for_edit(
+                    &context,
+                    file,
+                    &context.default_agent_name,
+                    session,
+                ) {
+                    Ok(emission) => {
+                        print_edit_context(&emission.lines);
+                        observed = Some((context, emission.applications));
+                    }
+                    Err(error) => eprintln!("knowledge: edit-time rules unavailable: {error}"),
+                }
+            }
+            Err(error) => {
+                legacy_knowledge = false;
+                eprintln!("knowledge: edit-time rules unavailable: {error}");
+            }
+            Ok(None) => {}
+        }
+    }
+    drop(select_phase);
+    let coordination_phase = crate::knowledge::timing::Phase::start("hook_coordination");
+    // Knowledge is emitted independently. Coordination can still acquire shared
+    // locks while healthy, but a failed query cannot indefinitely delay the hook.
+    if let Ok(Ok(Some(pool))) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pre_tool_coordination(agent_name, payload, legacy_knowledge),
+    )
+    .await
+    {
+        drop(coordination_phase);
+        let _usage_phase = crate::knowledge::timing::Phase::start("hook_usage");
+        if let Some((context, applications)) =
+            observed.filter(|(_, applications)| !applications.is_empty())
+        {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                context.storage_lease(&pool),
+            )
+            .await
+            {
+                Ok(Ok(lease)) => {
+                    crate::knowledge::usage::after_emission(&context, lease, &applications).await
+                }
+                _ => eprintln!("knowledge: optional usage telemetry unavailable"),
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn pre_tool_coordination(
+    agent_name: &str,
+    payload: &serde_json::Value,
+    legacy_knowledge: bool,
+) -> anyhow::Result<Option<sqlx::PgPool>> {
     let tool_name = payload
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -206,11 +294,11 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
     // Best-effort DB connection — if unavailable, exit silently.
     let config = match AppConfig::from_env() {
         Ok(c) => c,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(None),
     };
-    let pool = match crate::db::create_pool(&config.database_url).await {
+    let pool = match crate::db::connect(&config.database).await {
         Ok(p) => p,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(None),
     };
 
     // Record tool use for dashboard visibility (silent, ignore errors).
@@ -225,13 +313,13 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
     match tool_name {
         "Edit" | "Write" | "NotebookEdit" => {
             if file_path.is_empty() {
-                return Ok(());
+                return Ok(Some(pool));
             }
 
             let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
             let agent = match agent_repo.get_by_name(agent_name).await {
                 Ok(Some(a)) => a,
-                _ => return Ok(()),
+                _ => return Ok(Some(pool)),
             };
 
             let lock_mgr = LockManager::new(&pool, config.lock_ttl_secs, crate::db::user_id());
@@ -245,34 +333,25 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
                 }
             }
 
-            // yggdrasil-180: surface scoped learnings whose file_glob matches
-            // the file being edited, injected as a system reminder before the
-            // edit runs. Deduped per session so the same learning fires once.
-            let session_id = payload
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let lines = crate::cli::learning_cmd::surface_for_edit(
-                &pool,
-                file_path,
-                Some(agent_name),
-                session_id,
-            )
-            .await;
-            if !lines.is_empty() {
-                let out = serde_json::json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "additionalContext": lines.join("\n"),
-                    }
-                });
-                println!("{out}");
+            if legacy_knowledge {
+                let session_id = payload
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let lines = crate::cli::learning_cmd::surface_for_edit(
+                    &pool,
+                    file_path,
+                    Some(agent_name),
+                    session_id,
+                )
+                .await;
+                print_edit_context(&lines);
             }
         }
         _ => {}
     }
 
-    Ok(())
+    Ok(Some(pool))
 }
 
 // ── PreCompact ──────────────────────────────────────────────────────────────
@@ -304,7 +383,7 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
     // at the end — a transient DB failure must not silently skip the blocker
     // check that prevents premature session exits.
     let db = match AppConfig::from_env() {
-        Ok(config) => match crate::db::create_pool(&config.database_url).await {
+        Ok(config) => match crate::db::connect(&config.database).await {
             Ok(pool) => Some((pool, config)),
             Err(e) => {
                 warn!("hook stop: db pool error: {e}");

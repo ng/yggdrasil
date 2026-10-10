@@ -264,6 +264,48 @@ pub async fn delete(pool: &sqlx::PgPool, learning_id: Uuid) -> Result<(), anyhow
     Ok(())
 }
 
+/// Optional knowledge cannot undo a successful task claim. A selected or invalid
+/// binding never falls back to frozen SQL content. Keep both leases until stdout.
+pub async fn print_for_claim(
+    pool: &sqlx::PgPool,
+    repo: Uuid,
+    files: &[String],
+    agent: &str,
+    kind: &str,
+) {
+    use crate::knowledge::runtime::Context;
+    let result = async {
+        match Context::from_environment(std::env::vars().collect())? {
+            Some(context) => {
+                let (repo, lease) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    context.task_scope(pool, repo),
+                )
+                .await??;
+                let emission = local::surface_for_files(&context, repo, files, agent, kind)?;
+                for line in &emission.lines {
+                    println!("{line}");
+                }
+                crate::knowledge::usage::after_emission(&context, lease, &emission.applications)
+                    .await;
+            }
+            None => {
+                for line in
+                    surface_for_files(pool, Some(repo), files, Some(agent), Some(kind)).await?
+                {
+                    println!("{line}");
+                }
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if result.is_err() {
+        // Do not expose connection strings or credentials from driver errors.
+        eprintln!("knowledge: task rules unavailable; claim succeeded");
+    }
+}
+
 /// Surface scoped learnings whose `file_glob` matches any of the given paths
 /// (yggdrasil-82). Returns formatted lines suitable for direct stdout / hook
 /// injection. Increments each surfaced learning's `applied_count` so the
@@ -565,3 +607,6 @@ mod tests {
         assert_eq!(label, "src/*.rs · agent=foo · kind=bug");
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod local;

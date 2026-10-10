@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod executor;
 pub mod interrupt;
+pub mod knowledge;
 pub mod lock;
 pub mod maintenance;
 pub mod models;

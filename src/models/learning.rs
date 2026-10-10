@@ -58,7 +58,9 @@ impl<'a> LearningRepo<'a> {
         status: &str,
         source: &str,
     ) -> Result<Learning, sqlx::Error> {
-        sqlx::query_as::<_, Learning>(
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, true, None).await?;
+        let result = sqlx::query_as::<_, Learning>(
             r#"INSERT INTO learnings (repo_id, file_glob, rule_id, text, context, created_by, scope_tags, status, source)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                RETURNING learning_id, repo_id, file_glob, rule_id, text, context,
@@ -74,8 +76,10 @@ impl<'a> LearningRepo<'a> {
         .bind(scope_tags)
         .bind(status)
         .bind(source)
-        .fetch_one(self.pool)
-        .await
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result)
     }
 
     /// List learnings whose scope matches the filters. NULL filters act as
@@ -94,7 +98,9 @@ impl<'a> LearningRepo<'a> {
         agent_name: Option<&str>,
         task_kind: Option<&str>,
     ) -> Result<Vec<Learning>, sqlx::Error> {
-        sqlx::query_as::<_, Learning>(
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, false, None).await?;
+        let result = sqlx::query_as::<_, Learning>(
             r#"
             SELECT learning_id, repo_id, file_glob, rule_id, text, context,
                    created_by, created_at, applied_count, last_applied_at, scope_tags,
@@ -122,14 +128,18 @@ impl<'a> LearningRepo<'a> {
         .bind(rule_id)
         .bind(agent_name)
         .bind(task_kind)
-        .fetch_all(self.pool)
-        .await
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result)
     }
 
     /// List `pending` learnings (the triage queue), newest first. `repo_id`
     /// NULL lists across all repos; otherwise current-repo + global pending.
     pub async fn list_pending(&self, repo_id: Option<Uuid>) -> Result<Vec<Learning>, sqlx::Error> {
-        sqlx::query_as::<_, Learning>(
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, false, None).await?;
+        let result = sqlx::query_as::<_, Learning>(
             r#"
             SELECT learning_id, repo_id, file_glob, rule_id, text, context,
                    created_by, created_at, applied_count, last_applied_at, scope_tags,
@@ -141,8 +151,10 @@ impl<'a> LearningRepo<'a> {
             "#,
         )
         .bind(repo_id)
-        .fetch_all(self.pool)
-        .await
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result)
     }
 
     /// Promote a `pending` learning to `active`, stamping approval metadata.
@@ -153,7 +165,9 @@ impl<'a> LearningRepo<'a> {
         learning_id: Uuid,
         approved_by: Option<Uuid>,
     ) -> Result<Option<Learning>, sqlx::Error> {
-        sqlx::query_as::<_, Learning>(
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, true, None).await?;
+        let result = sqlx::query_as::<_, Learning>(
             r#"
             UPDATE learnings
             SET status = 'active', approved_at = now(), approved_by = $2
@@ -165,25 +179,33 @@ impl<'a> LearningRepo<'a> {
         )
         .bind(learning_id)
         .bind(approved_by)
-        .fetch_optional(self.pool)
-        .await
+        .fetch_optional(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result)
     }
 
     pub async fn increment_applied(&self, learning_id: Uuid) -> Result<(), sqlx::Error> {
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, true, None).await?;
         sqlx::query(
             "UPDATE learnings SET applied_count = applied_count + 1, last_applied_at = now() WHERE learning_id = $1",
         )
         .bind(learning_id)
-        .execute(self.pool)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
     pub async fn delete(&self, learning_id: Uuid) -> Result<(), sqlx::Error> {
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, true, None).await?;
         sqlx::query("DELETE FROM learnings WHERE learning_id = $1")
             .bind(learning_id)
-            .execute(self.pool)
+            .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -191,11 +213,14 @@ impl<'a> LearningRepo<'a> {
     /// delete deferred to implementation; we hard-delete). Returns true if a
     /// pending row was removed, false if none matched (active rows untouched).
     pub async fn reject(&self, learning_id: Uuid) -> Result<bool, sqlx::Error> {
+        let mut transaction =
+            crate::knowledge::guard::legacy_transaction(self.pool, true, None).await?;
         let res =
             sqlx::query("DELETE FROM learnings WHERE learning_id = $1 AND status = 'pending'")
                 .bind(learning_id)
-                .execute(self.pool)
+                .execute(&mut *transaction)
                 .await?;
+        transaction.commit().await?;
         Ok(res.rows_affected() > 0)
     }
 }

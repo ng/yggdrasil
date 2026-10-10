@@ -45,6 +45,225 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Subcommand)]
+enum KnowledgeAction {
+    /// Execute or recover an explicitly reviewed shared fleet migration
+    Fleet {
+        /// Exact forward fleet request, including backups and pinned SSH hosts
+        #[arg(long)]
+        plan: std::path::PathBuf,
+        #[arg(long)]
+        journal: std::path::PathBuf,
+        /// SHA-256 of the exact reviewed forward request bytes
+        #[arg(long)]
+        request_sha256: String,
+        #[arg(long)]
+        ssh_identity: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: ygg::cli::knowledge_cmd::fleet::Action,
+    },
+    /// Internal bounded participant protocol; no fleet activation capability
+    #[command(hide = true)]
+    FleetParticipant,
+    /// Inspect OKF documents without granting instruction eligibility
+    Browse {
+        /// Visible bundle-relative Markdown path; omit to list documents
+        path: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refresh last-known local usage counters from the selected database
+    RefreshUsage {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Audit live database client compatibility; offline hosts remain unverified
+    Clients {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drain and durably fence this host's selected OKF commands, without SQL access
+    FenceLocal {
+        #[arg(long)]
+        expected_generation: i64,
+        /// Bind preparation to this coordinator operation (requires participant)
+        #[arg(long, requires = "participant")]
+        migration_operation: Option<uuid::Uuid>,
+        /// Explicit participant ID from the coordinator's host census
+        #[arg(long, requires = "migration_operation")]
+        participant: Option<uuid::Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore current private OKF documents to SQL and deselect local OKF
+    Rollback {
+        #[arg(long)]
+        plan: std::path::PathBuf,
+        #[arg(long)]
+        journal: std::path::PathBuf,
+        /// Compatible PostgreSQL tools for external source backup
+        #[arg(long)]
+        pg_bin: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect retained rollback evidence offline; local markers are not SQL proof
+    RollbackStatus {
+        journal: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect an uncertain local publication without fetching the remote
+    Pending {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retry or archive exactly the pending commit that was inspected
+    Recover {
+        commit: String,
+        #[arg(long, conflicts_with = "discard", required_unless_present = "discard")]
+        retry: bool,
+        #[arg(long)]
+        discard: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refresh the configured shared corpus, optionally confirming an uncertain push
+    Sync {
+        #[arg(long)]
+        confirm_pending: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Assess SQL knowledge or execute/resume an explicit private migration plan
+    Migrate {
+        #[arg(long, required_unless_present = "plan", conflicts_with = "plan")]
+        dry_run: bool,
+        /// JSON database/corpus IDs, legacy repo mapping and explicit user mapping
+        #[arg(long, requires = "dry_run")]
+        mapping_file: Option<std::path::PathBuf>,
+        /// Explicit identity policy, mappings and host maintenance declarations
+        #[arg(long, requires = "journal")]
+        plan: Option<std::path::PathBuf>,
+        /// Durable operation directory; reuse with the same plan after interruption
+        #[arg(long, requires = "plan")]
+        journal: Option<std::path::PathBuf>,
+        /// Compatible PostgreSQL tools for an external database backup
+        #[arg(long, requires = "plan")]
+        pg_bin: Option<std::path::PathBuf>,
+        /// Abort this operation before activation; retains backup and export evidence
+        #[arg(long, requires = "plan")]
+        abort: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+enum DbAction {
+    /// Explicitly upgrade managed PostgreSQL to the pinned patch release
+    Upgrade {
+        /// New private directory for the verified pre-upgrade combined backup
+        #[arg(long)]
+        backup: std::path::PathBuf,
+        #[arg(long)]
+        postgres_archive: Option<std::path::PathBuf>,
+        /// Resume the exact pending operation after inspecting retained state
+        #[arg(long)]
+        resume: Option<uuid::Uuid>,
+        /// Abort before binary selection changes, retaining source and backup
+        #[arg(long, requires = "resume")]
+        abort: bool,
+        /// Assert that all application writers are stopped until completion
+        #[arg(long)]
+        quiesced: bool,
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate a restored deployment and atomically select its complete configuration
+    Switch {
+        backup: std::path::PathBuf,
+        #[arg(long)]
+        restore_dir: std::path::PathBuf,
+        #[arg(long)]
+        target_config: std::path::PathBuf,
+        /// Resume an existing switch journal after interruption
+        #[arg(long)]
+        resume: Option<uuid::Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a trusted backup into an empty external database or new managed data directory
+    Restore {
+        path: std::path::PathBuf,
+        /// New directory for restored knowledge, policy and validation receipt
+        #[arg(long)]
+        destination: std::path::PathBuf,
+        #[arg(long)]
+        pg_bin: Option<std::path::PathBuf>,
+        #[arg(long)]
+        postgres_archive: Option<std::path::PathBuf>,
+        /// Explicit target major for a new managed restore (16 or 18)
+        #[arg(long)]
+        postgres_major: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Back up database and configured knowledge into a new private directory
+    Backup {
+        destination: std::path::PathBuf,
+        #[arg(long)]
+        pg_bin: Option<std::path::PathBuf>,
+        #[arg(long)]
+        policy_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify a combined backup offline without contacting a database
+    VerifyBackup {
+        path: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect runtime privileges and session observations without starting a server
+    Diagnose {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the selected target without starting or initializing it
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start or adopt an initialized managed cluster (no download or upgrade)
+    Start {
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drain clients and stop the managed cluster; never stop external databases
+    Stop {
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run the persistent managed owner in the foreground
+    Serve {
+        #[arg(long, hide = true, requires = "cluster_id")]
+        cluster_root: Option<std::path::PathBuf>,
+        #[arg(long, hide = true, requires = "cluster_root")]
+        cluster_id: Option<uuid::Uuid>,
+    },
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Start ygg — open tmux session with dashboard (default when no command given)
@@ -55,15 +274,18 @@ enum Commands {
         /// Show command output for debugging
         #[arg(short, long)]
         verbose: bool,
-        /// Skip specific deps (pg, models, statusbar, hooks)
+        /// Skip named setup steps (pg, migrations, tmux, jq, rtk, hooks, project)
         #[arg(long, value_delimiter = ',')]
         skip: Vec<String>,
         /// Clear saved skip decisions and re-prompt everything
         #[arg(long)]
         reset: bool,
-        /// PostgreSQL connection URL (overrides DATABASE_URL)
+        /// PostgreSQL connection URL for this invocation (overrides DATABASE_URL)
         #[arg(long)]
         database_url: Option<String>,
+        /// Verified native PostgreSQL archive for offline managed installation
+        #[arg(long)]
+        postgres_archive: Option<std::path::PathBuf>,
         /// Run unattended: answer every prompt with its default (no stdin).
         /// For the install script, CI, and spawned agents.
         #[arg(short = 'y', long = "yes", visible_alias = "non-interactive")]
@@ -75,6 +297,20 @@ enum Commands {
         /// Exit 0 if up-to-date, exit 1 if pending migrations exist (no changes applied)
         #[arg(long)]
         check: bool,
+    },
+
+    /// Inspect or control an already initialized managed database
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+
+    /// Inspect knowledge migration readiness (no cutover is performed)
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Knowledge {
+        #[command(subcommand)]
+        action: KnowledgeAction,
     },
 
     /// Agent run loop + task-run lifecycle (claim, finalize, heartbeat, show)
@@ -648,8 +884,7 @@ enum LearnAction {
         json: bool,
     },
     /// List learnings whose scope matches the given filters. No filters = all
-    /// learnings visible from the current repo. Deterministic SQL match, not
-    /// similarity search. Only `active` learnings are shown.
+    /// active learnings visible from the current repo.
     List {
         /// A file path to test against each learning's file_glob
         #[arg(long)]
@@ -1142,11 +1377,12 @@ async fn main() -> anyhow::Result<()> {
             skip,
             reset,
             database_url,
+            postgres_archive,
             yes,
         } => {
             if reset {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                let skips_path = std::path::Path::new(&home).join(".config/ygg/skips.json");
+                let config_dir = ygg::config::database::config_dir(&std::env::vars().collect())?;
+                let skips_path = config_dir.join("skips.json");
                 let _ = std::fs::remove_file(&skips_path);
                 println!("Saved skip decisions cleared.");
             }
@@ -1155,39 +1391,199 @@ async fn main() -> anyhow::Result<()> {
                     std::env::set_var("DATABASE_URL", url);
                 }
             }
-            ygg::cli::init::execute_with_options(verbose, &skip, yes).await?;
+            ygg::cli::init::execute_with_options(verbose, &skip, yes, postgres_archive.as_deref())
+                .await?;
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        Commands::Db { action } => match action {
+            DbAction::Backup {
+                destination,
+                pg_bin,
+                policy_dir,
+                json,
+            } => {
+                ygg::cli::db_cmd::backup(
+                    &destination,
+                    pg_bin.as_deref(),
+                    policy_dir.as_deref(),
+                    json,
+                )
+                .await?
+            }
+            DbAction::Restore {
+                path,
+                destination,
+                pg_bin,
+                postgres_archive,
+                postgres_major,
+                json,
+            } => {
+                ygg::cli::db_cmd::restore(
+                    &path,
+                    &destination,
+                    pg_bin.as_deref(),
+                    postgres_archive.as_deref(),
+                    postgres_major,
+                    json,
+                )
+                .await?;
+            }
+            DbAction::Switch {
+                backup,
+                restore_dir,
+                target_config,
+                resume,
+                json,
+            } => {
+                ygg::cli::db_cmd::switch(&backup, &restore_dir, &target_config, resume, json)
+                    .await?;
+            }
+            DbAction::Upgrade {
+                backup,
+                postgres_archive,
+                resume,
+                abort,
+                quiesced,
+                timeout,
+                json,
+            } => {
+                ygg::cli::db_cmd::upgrade(
+                    backup,
+                    postgres_archive,
+                    resume,
+                    abort,
+                    quiesced,
+                    timeout,
+                    json,
+                )
+                .await?
+            }
+            DbAction::VerifyBackup { path, json } => ygg::cli::db_cmd::verify_backup(&path, json)?,
+            DbAction::Diagnose { json } => ygg::cli::db_cmd::diagnose(json).await?,
+            DbAction::Status { json } => ygg::cli::db_cmd::status(json).await?,
+            DbAction::Start { timeout, json } => ygg::cli::db_cmd::start(timeout, json).await?,
+            DbAction::Stop { timeout, json } => ygg::cli::db_cmd::stop(timeout, json).await?,
+            DbAction::Serve {
+                cluster_root,
+                cluster_id,
+            } => ygg::cli::db_cmd::serve(cluster_root, cluster_id).await?,
+        },
         Commands::Migrate { check } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
             if check {
+                let pool = ygg::db::connect(&config.database).await?;
                 let pending = ygg::db::pending_migrations(&pool).await?;
                 if pending.is_empty() {
                     println!("Schema is up to date.");
                 } else {
                     println!(
                         "{}",
-                        serde_json::json!({
-                            "pending_count": pending.len(),
-                            "pending": pending,
-                        })
+                        serde_json::json!({"pending_count": pending.len(), "pending": pending})
                     );
                     std::process::exit(1);
                 }
             } else {
-                let pending = ygg::db::pending_migrations(&pool).await?;
-                let count = pending.len();
-                ygg::db::run_migrations(&pool).await?;
-                if count > 0 {
-                    println!("Applied {count} migration(s).");
-                } else {
-                    println!("Schema already up to date.");
-                }
+                ygg::db::migrate_target(&config.database, config.owner_url.as_ref()).await?;
+                println!("Schema is up to date.");
             }
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        Commands::Knowledge { action } => match action {
+            KnowledgeAction::Fleet {
+                plan,
+                journal,
+                request_sha256,
+                ssh_identity,
+                json,
+                action,
+            } => {
+                ygg::cli::knowledge_cmd::fleet::run(
+                    &plan,
+                    &journal,
+                    &request_sha256,
+                    ssh_identity.as_deref(),
+                    action,
+                    json,
+                )
+                .await?;
+            }
+            KnowledgeAction::FleetParticipant => {
+                ygg::cli::knowledge_cmd::fleet_participant().await?
+            }
+            KnowledgeAction::Browse { path, json } => {
+                ygg::cli::knowledge_cmd::browse(path.as_deref(), json)?
+            }
+            KnowledgeAction::RefreshUsage { json } => {
+                ygg::cli::knowledge_cmd::refresh_usage(json).await?
+            }
+            KnowledgeAction::Pending { json } => ygg::cli::knowledge_cmd::pending(json)?,
+            KnowledgeAction::Recover {
+                commit,
+                retry,
+                discard: _,
+                json,
+            } => ygg::cli::knowledge_cmd::recover(&commit, retry, json)?,
+            KnowledgeAction::Sync {
+                confirm_pending,
+                json,
+            } => {
+                ygg::cli::knowledge_cmd::sync(confirm_pending, json)?;
+            }
+            KnowledgeAction::Rollback {
+                plan,
+                journal,
+                pg_bin,
+                json,
+            } => {
+                ygg::cli::knowledge_cmd::rollback(&plan, &journal, pg_bin.as_deref(), json).await?;
+            }
+            KnowledgeAction::RollbackStatus { journal, json } => {
+                ygg::cli::knowledge_cmd::rollback_status(&journal, json)?;
+            }
+            KnowledgeAction::FenceLocal {
+                expected_generation,
+                migration_operation,
+                participant,
+                json,
+            } => match (migration_operation, participant) {
+                (Some(operation), Some(participant)) => {
+                    ygg::cli::knowledge_cmd::fence_local_for_migration(
+                        expected_generation,
+                        operation,
+                        participant,
+                        json,
+                    )?
+                }
+                (None, None) => ygg::cli::knowledge_cmd::fence_local(expected_generation, json)?,
+                _ => anyhow::bail!("migration operation and participant must be supplied together"),
+            },
+            KnowledgeAction::Clients { json } => ygg::cli::knowledge_cmd::clients(json).await?,
+            KnowledgeAction::Migrate {
+                dry_run: _,
+                mapping_file,
+                plan,
+                journal,
+                pg_bin,
+                abort,
+                json,
+            } => {
+                if let Some(plan) = plan {
+                    ygg::cli::knowledge_cmd::migrate(
+                        &plan,
+                        journal.as_deref().expect("clap requires journal"),
+                        pg_bin.as_deref(),
+                        abort,
+                        json,
+                    )
+                    .await?;
+                } else {
+                    ygg::cli::knowledge_cmd::dry_run(mapping_file.as_deref(), json).await?;
+                }
+            }
+        },
         Commands::Run { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 RunAction::Claim { task_ref, agent } => {
                     let agent = resolve_agent_arg(agent);
@@ -1229,27 +1625,27 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Spawn { task, name } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::spawn::execute(&pool, &config, &task, name.as_deref()).await?;
         }
         Commands::Dashboard => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::dashboard_cmd::execute(&pool, &config).await?;
         }
         Commands::Recover { stale_secs } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::recover::execute(&pool, Some(stale_secs)).await?;
         }
         Commands::Watcher { once } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::watcher_cmd::execute(&pool, &config, once).await?;
         }
         Commands::Lock { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 LockAction::Acquire { resource, agent } => {
                     let agent = resolve_agent_arg(agent);
@@ -1266,7 +1662,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Interrupt { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 InterruptAction::TakeOver { agent } => {
                     ygg::cli::interrupt_cmd::execute_take_over(&pool, &config, &agent).await?;
@@ -1282,7 +1678,7 @@ async fn main() -> anyhow::Result<()> {
             format,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::status_cmd::execute(&pool, agent.as_deref(), all_users, &format).await?;
         }
         Commands::Logs {
@@ -1293,7 +1689,7 @@ async fn main() -> anyhow::Result<()> {
             session,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let kinds: Vec<String> = kind
                 .map(|k| {
                     k.split(',')
@@ -1320,7 +1716,7 @@ async fn main() -> anyhow::Result<()> {
             body,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let from_name = from.unwrap_or_else(|| {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -1335,7 +1731,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Msg { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let default_agent = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -1396,7 +1792,7 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| "ygg".to_string())
                 });
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::stop_check::execute(&pool, &agent_name).await?;
         }
         Commands::Reap {
@@ -1407,7 +1803,7 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
         } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             // Default to everything when no specific flag is set.
             let all = !(locks || sessions || agents);
             let mut total: i64 = 0;
@@ -1493,7 +1889,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Agent { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let repo = ygg::models::agent::AgentRepo::new(&pool, &user_id);
             match action {
                 AgentAction::List { all } => {
@@ -1593,7 +1989,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Task { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let default_agent = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -1950,7 +2346,7 @@ async fn main() -> anyhow::Result<()> {
                 seed,
             } => {
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 let baseline: ygg::bench::Baseline =
                     baseline.parse().map_err(|e: String| anyhow::anyhow!(e))?;
                 let parallelism = parallelism.unwrap_or_else(|| {
@@ -1965,7 +2361,7 @@ async fn main() -> anyhow::Result<()> {
                 let id = uuid::Uuid::parse_str(&run_id)
                     .map_err(|e| anyhow::anyhow!("invalid run-id: {e}"))?;
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 ygg::cli::bench_cmd::report(&pool, id).await?;
             }
             BenchAction::Diff { a, b } => {
@@ -1974,20 +2370,20 @@ async fn main() -> anyhow::Result<()> {
                 let b = uuid::Uuid::parse_str(&b)
                     .map_err(|e| anyhow::anyhow!("invalid run-id b: {e}"))?;
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 ygg::cli::bench_cmd::diff(&pool, a, b).await?;
             }
             BenchAction::Ci { tier } => {
                 let tier: ygg::bench::Tier =
                     tier.parse().map_err(|e: String| anyhow::anyhow!(e))?;
                 let config = ygg::config::AppConfig::from_env()?;
-                let pool = ygg::db::create_pool(&config.database_url).await?;
+                let pool = ygg::db::connect(&config.database).await?;
                 ygg::cli::bench_cmd::ci(&pool, tier).await?;
             }
         },
         Commands::Scheduler { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 SchedulerAction::Run => {
                     ygg::cli::scheduler_cmd::run(pool, &config).await?;
@@ -2009,12 +2405,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Bar => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             ygg::cli::bar_cmd::execute(&pool).await?;
         }
         Commands::Plan { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let default_agent = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -2098,7 +2494,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Worktree { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             // Mirrors the task-cmd resolver so `ygg worktree ensure ygg-abcd`
             // or `yggdrasil-42` both work.
             async fn resolve_id(pool: &sqlx::PgPool, r: &str) -> Result<uuid::Uuid, anyhow::Error> {
@@ -2167,7 +2563,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Rollup { days, repo, format } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let fmt = match format.as_str() {
                 "text" | "txt" => ygg::cli::rollup_cmd::Format::Text,
                 "json" => ygg::cli::rollup_cmd::Format::Json,
@@ -2176,8 +2572,107 @@ async fn main() -> anyhow::Result<()> {
             ygg::cli::rollup_cmd::execute(&pool, days, repo.as_deref(), fmt).await?;
         }
         Commands::Learn { action } => {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if let Some(local) =
+                ygg::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
+            {
+                use ygg::{
+                    cli::learning_cmd,
+                    knowledge::service::{Creation, RuleInput},
+                };
+                let uuid = |id: &str| {
+                    uuid::Uuid::parse_str(id).map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))
+                };
+                match action {
+                    LearnAction::Create {
+                        text,
+                        global,
+                        file_glob,
+                        rule_id,
+                        context,
+                        agent,
+                        scope,
+                        pending,
+                        json,
+                    } => {
+                        let scope_tags =
+                            serde_json::from_value(learning_cmd::parse_scope_tags(&scope)?)?;
+                        learning_cmd::local::create(
+                            &local,
+                            RuleInput {
+                                text,
+                                file_glob,
+                                rule_id,
+                                context,
+                                scope_tags,
+                                ..RuleInput::default()
+                            },
+                            global,
+                            agent.as_deref(),
+                            if pending {
+                                Creation::ManualPending
+                            } else {
+                                Creation::ManualActive
+                            },
+                            json,
+                        )?;
+                    }
+                    LearnAction::Propose {
+                        text,
+                        global,
+                        file_glob,
+                        rule_id,
+                        context,
+                        agent,
+                        scope,
+                        json,
+                    } => {
+                        let scope_tags =
+                            serde_json::from_value(learning_cmd::parse_scope_tags(&scope)?)?;
+                        learning_cmd::local::create(
+                            &local,
+                            RuleInput {
+                                text,
+                                file_glob,
+                                rule_id,
+                                context,
+                                scope_tags,
+                                ..RuleInput::default()
+                            },
+                            global,
+                            agent.as_deref(),
+                            Creation::Proposal,
+                            json,
+                        )?;
+                    }
+                    LearnAction::Pending { all, json } => {
+                        learning_cmd::local::list(&local, None, None, all, true, json)?
+                    }
+                    LearnAction::List {
+                        file,
+                        rule_id,
+                        all,
+                        json,
+                    } => learning_cmd::local::list(
+                        &local,
+                        file.as_deref(),
+                        rule_id.as_deref(),
+                        all,
+                        false,
+                        json,
+                    )?,
+                    LearnAction::Approve { id, agent } => {
+                        learning_cmd::local::approve(&local, uuid(&id)?, agent.as_deref())?
+                    }
+                    LearnAction::Reject { id, reason } => {
+                        learning_cmd::local::reject(&local, uuid(&id)?, reason.as_deref())?
+                    }
+                    LearnAction::Delete { id } => learning_cmd::local::delete(&local, uuid(&id)?)?,
+                }
+                return Ok(());
+            }
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let agent_name_default = || {
                 std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -2288,8 +2783,20 @@ async fn main() -> anyhow::Result<()> {
             agent,
             json,
         } => {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if let Some(context) =
+                ygg::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
+            {
+                if list {
+                    ygg::cli::remember_cmd::list_local(&context, all || global, limit, json)?;
+                } else {
+                    let name = agent.as_deref().unwrap_or(&context.default_agent_name);
+                    ygg::cli::remember_cmd::remember_local(&context, &text, global, name, json)?;
+                }
+                return Ok(());
+            }
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             if list {
                 ygg::cli::remember_cmd::list(&pool, all || global, limit, json).await?;
             } else {
@@ -2306,7 +2813,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Handoff { action } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             match action {
                 HandoffAction::Save { text, agent, json } => {
                     let agent_name = resolve_agent_arg(agent);
@@ -2333,7 +2840,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::AgentTool { tool, agent } => {
             let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::create_pool(&config.database_url).await?;
+            let pool = ygg::db::connect(&config.database).await?;
             let agent_name = agent
                 .clone()
                 .or_else(|| std::env::var("YGG_AGENT_NAME").ok())

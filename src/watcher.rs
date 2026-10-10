@@ -20,13 +20,10 @@ const WATCHER_LOCK_ID: i64 = 0x4347_5743_4800; // "GGWC"
 /// Try to become the singleton watcher. Returns the held connection on
 /// success (drop it to release the lock), or None if another watcher already
 /// holds it. Non-blocking — never waits on the lock.
-async fn try_acquire_singleton(pool: &PgPool) -> Result<Option<sqlx::PgConnection>, anyhow::Error> {
-    let mut conn = pool.acquire().await?.detach();
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-        .bind(WATCHER_LOCK_ID)
-        .fetch_one(&mut conn)
-        .await?;
-    if acquired { Ok(Some(conn)) } else { Ok(None) }
+async fn try_acquire_singleton(
+    pool: &PgPool,
+) -> Result<Option<crate::db::singleton::SingletonGuard>, anyhow::Error> {
+    crate::db::singleton::SingletonGuard::try_acquire(pool, WATCHER_LOCK_ID).await
 }
 
 /// Background watcher daemon.
@@ -63,8 +60,8 @@ impl Watcher {
     /// supervises the fleet, one caller at a time keeps workers reaped.
     pub async fn run_once(&self) -> Result<bool, anyhow::Error> {
         match try_acquire_singleton(&self.pool).await? {
-            Some(_conn) => {
-                self.tick().await?;
+            Some(mut guard) => {
+                guard.supervise(self.tick()).await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -76,7 +73,7 @@ impl Watcher {
         // Singleton guard: a second watcher on the same database would race
         // the first on tmux probes and worker-state writes. Hold the lock for
         // the process lifetime; drop on return releases it.
-        let _guard = match try_acquire_singleton(&self.pool).await? {
+        let mut guard = match try_acquire_singleton(&self.pool).await? {
             Some(conn) => conn,
             None => {
                 tracing::info!(
@@ -91,6 +88,10 @@ impl Watcher {
             }
         };
 
+        guard.supervise(self.run_owned()).await
+    }
+
+    async fn run_owned(&self) -> Result<(), anyhow::Error> {
         let interval = Duration::from_secs(self.config.watcher_interval_secs);
         tracing::info!(
             interval_secs = self.config.watcher_interval_secs,

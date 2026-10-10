@@ -164,7 +164,7 @@ async fn test_crash_recovery() {
 async fn test_msg_send_inbox_mark_read() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL required");
     let pool = ygg::db::create_pool(&db_url).await.unwrap();
-    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, "test");
+    let agent_repo = ygg::models::agent::AgentRepo::new(&pool, ygg::db::user_id());
 
     sqlx::query("DELETE FROM events WHERE agent_name IN ('test-msg-sender', 'test-msg-recipient')")
         .execute(&pool)
@@ -178,22 +178,25 @@ async fn test_msg_send_inbox_mark_read() {
     agent_repo.register("test-msg-sender").await.unwrap();
     agent_repo.register("test-msg-recipient").await.unwrap();
 
+    // Exercise inbox persistence without spawning tmux workers or Git worktrees.
     // Send two messages; inbox returns both; mark_read drains.
-    ygg::cli::msg_cmd::send(
+    ygg::cli::msg_cmd::send_inner(
         &pool,
         "test-msg-sender",
         "test-msg-recipient",
         "hello 1",
         false,
+        true,
     )
     .await
     .unwrap();
-    ygg::cli::msg_cmd::send(
+    ygg::cli::msg_cmd::send_inner(
         &pool,
         "test-msg-sender",
         "test-msg-recipient",
         "hello 2",
         false,
+        true,
     )
     .await
     .unwrap();

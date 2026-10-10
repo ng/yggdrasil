@@ -1,9 +1,16 @@
+pub mod database;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod snapshot;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod switch;
+
 use std::env;
 
 /// Application configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub database_url: String,
+    pub database: database::DatabaseTarget,
+    pub owner_url: Option<database::MigrationOwnerUrl>,
     pub context_limit_tokens: usize,
     pub context_hard_cap_tokens: usize,
     pub lock_ttl_secs: u64,
@@ -14,39 +21,59 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, crate::YggError> {
-        // Only load from ~/.config/ygg/.env — never from local .env
-        // Local .env files cause stale config issues
-        if let Ok(home) = env::var("HOME") {
-            let config_env = std::path::Path::new(&home).join(".config/ygg/.env");
-            if config_env.exists() {
-                dotenvy::from_path(&config_env).ok();
-            }
-        }
+        // Preserve legacy user .env knobs consumed directly by older modules
+        // (YGG_USER, YGG_DB_POOL, scheduler/hook options). Never search cwd.
+        let inputs = env::vars().collect();
+        let config = Self::from_environment(inputs)?;
+        let dir = database::config_dir(&env::vars().collect())?;
+        dotenvy::from_path(dir.join(".env")).ok();
+        Ok(config)
+    }
 
+    /// Resolve all settings from one environment snapshot without process-wide
+    /// mutation. Repository-local .env files are never inputs.
+    pub fn from_environment(env: database::Environment) -> Result<Self, crate::YggError> {
+        let dir = database::config_dir(&env)?;
+        let env = database::user_environment(env)?;
+        let deployment = database::DeploymentConfig::from_user_environment(&env, &dir)?;
         Ok(Self {
-            database_url: env::var("DATABASE_URL")
-                .map_err(|_| crate::YggError::Config("DATABASE_URL not set".into()))?,
-            context_limit_tokens: env::var("CONTEXT_LIMIT_TOKENS")
-                .unwrap_or_else(|_| "250000".into())
+            database: deployment.database,
+            owner_url: deployment.owner_url,
+            context_limit_tokens: env
+                .get("CONTEXT_LIMIT_TOKENS")
+                .map(String::as_str)
+                .unwrap_or("250000")
                 .parse()
                 .unwrap_or(250_000),
-            context_hard_cap_tokens: env::var("CONTEXT_HARD_CAP_TOKENS")
-                .unwrap_or_else(|_| "300000".into())
+            context_hard_cap_tokens: env
+                .get("CONTEXT_HARD_CAP_TOKENS")
+                .map(String::as_str)
+                .unwrap_or("300000")
                 .parse()
                 .unwrap_or(300_000),
-            lock_ttl_secs: env::var("LOCK_TTL_SECS")
-                .unwrap_or_else(|_| "300".into())
+            lock_ttl_secs: env
+                .get("LOCK_TTL_SECS")
+                .map(String::as_str)
+                .unwrap_or("300")
                 .parse()
                 .unwrap_or(300),
-            heartbeat_interval_secs: env::var("HEARTBEAT_INTERVAL_SECS")
-                .unwrap_or_else(|_| "60".into())
+            heartbeat_interval_secs: env
+                .get("HEARTBEAT_INTERVAL_SECS")
+                .map(String::as_str)
+                .unwrap_or("60")
                 .parse()
                 .unwrap_or(60),
-            watcher_interval_secs: env::var("WATCHER_INTERVAL_SECS")
-                .unwrap_or_else(|_| "30".into())
+            watcher_interval_secs: env
+                .get("WATCHER_INTERVAL_SECS")
+                .map(String::as_str)
+                .unwrap_or("30")
                 .parse()
                 .unwrap_or(30),
-            rtk_binary_path: env::var("RTK_BINARY_PATH").unwrap_or_else(|_| "rtk".into()),
+            rtk_binary_path: env
+                .get("RTK_BINARY_PATH")
+                .map(String::as_str)
+                .unwrap_or("rtk")
+                .into(),
         })
     }
 }

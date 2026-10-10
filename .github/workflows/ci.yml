@@ -31,12 +31,18 @@ jobs:
       - run: cargo check --all-targets
 
   test:
-    name: cargo test
+    name: cargo test (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        # Docker official image mirror avoids shared-runner Docker Hub pull limits.
+        # https://gallery.ecr.aws/docker/library/postgres
+        image: public.ecr.aws/docker/library/postgres:${{ matrix.postgres }}
         env:
           POSTGRES_DB: ygg
           POSTGRES_USER: postgres
@@ -74,11 +80,20 @@ jobs:
           cargo build --release --bin ygg
           ./target/release/ygg migrate
 
-      - name: Run library tests
-        run: cargo test --lib --quiet
+      - name: Install test runtime tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux pgbouncer
+          tmux new-session -d -s ygg-test-runtime
 
-      - name: Run integration tests
-        run: cargo test --test integration --quiet -- --test-threads=1
+      - name: Run all tests against isolated Postgres
+        run: cargo test --quiet -- --test-threads=1
+
+      - name: Verify session and transaction pool diagnostics
+        env:
+          YGG_TEST_PGBOUNCER_BIN: /usr/sbin/pgbouncer
+          YGG_TEST_PGBOUNCER_PASSWORD: postgres
+        run: cargo test --test database_diagnostics pgbouncer_session -- --include-ignored --test-threads=1
 
   clippy:
     name: clippy

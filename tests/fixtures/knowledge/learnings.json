@@ -1,0 +1,263 @@
+{
+  "rows": [
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000001",
+      "repo_id": null,
+      "file_glob": null,
+      "rule_id": null,
+      "text": "Rule 1: preserve Unicode λ and trailing newline.\n",
+      "context": null,
+      "created_by": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "applied_count": 0,
+      "last_applied_at": null,
+      "scope_tags": {},
+      "status": "active",
+      "source": "manual",
+      "approved_at": null,
+      "approved_by": null
+    },
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000002",
+      "repo_id": "00000000-0000-0000-0000-000000000100",
+      "file_glob": "src/*.rs",
+      "rule_id": null,
+      "text": "Rule 2: preserve Unicode λ and trailing newline.\n",
+      "context": null,
+      "created_by": null,
+      "created_at": "2026-01-02T00:00:00Z",
+      "applied_count": 0,
+      "last_applied_at": null,
+      "scope_tags": {},
+      "status": "active",
+      "source": "manual",
+      "approved_at": null,
+      "approved_by": null
+    },
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000003",
+      "repo_id": "00000000-0000-0000-0000-000000000100",
+      "file_glob": "src/?.rs",
+      "rule_id": "R1",
+      "text": "Rule 3: preserve Unicode λ and trailing newline.\n",
+      "context": "",
+      "created_by": null,
+      "created_at": "2026-01-03T00:00:00Z",
+      "applied_count": 7,
+      "last_applied_at": "2026-02-01T00:00:00Z",
+      "scope_tags": {
+        "agent": "worker",
+        "kind": "bug"
+      },
+      "status": "active",
+      "source": "proposed",
+      "approved_at": "2026-01-04T00:00:00Z",
+      "approved_by": null
+    },
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000004",
+      "repo_id": "00000000-0000-0000-0000-000000000200",
+      "file_glob": "src/%.rs",
+      "rule_id": "R1",
+      "text": "Rule 4: preserve Unicode λ and trailing newline.\n",
+      "context": null,
+      "created_by": null,
+      "created_at": "2026-01-04T00:00:00Z",
+      "applied_count": 0,
+      "last_applied_at": null,
+      "scope_tags": {},
+      "status": "active",
+      "source": "manual",
+      "approved_at": null,
+      "approved_by": null
+    },
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000005",
+      "repo_id": "00000000-0000-0000-0000-000000000100",
+      "file_glob": "src/_.rs",
+      "rule_id": null,
+      "text": "Rule 5: preserve Unicode λ and trailing newline.\n",
+      "context": null,
+      "created_by": null,
+      "created_at": "2026-01-05T00:00:00Z",
+      "applied_count": 0,
+      "last_applied_at": null,
+      "scope_tags": {
+        "agent": null
+      },
+      "status": "active",
+      "source": "manual",
+      "approved_at": null,
+      "approved_by": null
+    },
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000006",
+      "repo_id": "00000000-0000-0000-0000-000000000100",
+      "file_glob": null,
+      "rule_id": "R1",
+      "text": "Rule 6: preserve Unicode λ and trailing newline.\n",
+      "context": null,
+      "created_by": null,
+      "created_at": "2026-01-06T00:00:00Z",
+      "applied_count": 0,
+      "last_applied_at": null,
+      "scope_tags": {},
+      "status": "pending",
+      "source": "proposed",
+      "approved_at": null,
+      "approved_by": null
+    },
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000007",
+      "repo_id": "00000000-0000-0000-0000-000000000100",
+      "file_glob": "src/literal\\%.rs",
+      "rule_id": null,
+      "text": "Rule 7: preserve Unicode λ and trailing newline.\n",
+      "context": null,
+      "created_by": null,
+      "created_at": "2026-01-07T00:00:00Z",
+      "applied_count": 0,
+      "last_applied_at": null,
+      "scope_tags": {},
+      "status": "active",
+      "source": "manual",
+      "approved_at": null,
+      "approved_by": null
+    },
+    {
+      "learning_id": "00000000-0000-0000-0000-000000000008",
+      "repo_id": "00000000-0000-0000-0000-000000000100",
+      "file_glob": "src/*",
+      "rule_id": null,
+      "text": "Rule 8: preserve Unicode λ and trailing newline.\n",
+      "context": null,
+      "created_by": null,
+      "created_at": "2026-01-08T00:00:00Z",
+      "applied_count": 0,
+      "last_applied_at": null,
+      "scope_tags": {
+        "kind": "feature"
+      },
+      "status": "active",
+      "source": "manual",
+      "approved_at": null,
+      "approved_by": null
+    }
+  ],
+  "cases": [
+    {
+      "name": "null filters search every repo, active only",
+      "repo": null,
+      "file": null,
+      "rule": null,
+      "agent": null,
+      "kind": null,
+      "ids": [
+        4,
+        3,
+        8,
+        7,
+        5,
+        2,
+        1
+      ]
+    },
+    {
+      "name": "repo scope, specificity then recency",
+      "repo": "00000000-0000-0000-0000-000000000100",
+      "file": "src/x.rs",
+      "rule": null,
+      "agent": "worker",
+      "kind": "bug",
+      "ids": [
+        3,
+        5,
+        2,
+        1
+      ]
+    },
+    {
+      "name": "rule filter excludes null rules",
+      "repo": "00000000-0000-0000-0000-000000000100",
+      "file": null,
+      "rule": "R1",
+      "agent": null,
+      "kind": null,
+      "ids": [
+        3
+      ]
+    },
+    {
+      "name": "wrong agent excludes constrained rule",
+      "repo": "00000000-0000-0000-0000-000000000100",
+      "file": "src/x.rs",
+      "rule": "R1",
+      "agent": "other",
+      "kind": "bug",
+      "ids": []
+    },
+    {
+      "name": "wildcards cross directories",
+      "repo": "00000000-0000-0000-0000-000000000100",
+      "file": "src/deep/mod.rs",
+      "rule": null,
+      "agent": null,
+      "kind": null,
+      "ids": [
+        8,
+        2,
+        1
+      ]
+    },
+    {
+      "name": "escaped percent is literal",
+      "repo": "00000000-0000-0000-0000-000000000100",
+      "file": "src/literal%.rs",
+      "rule": null,
+      "agent": null,
+      "kind": null,
+      "ids": [
+        8,
+        7,
+        2,
+        1
+      ]
+    },
+    {
+      "name": "underscore and question match one unicode character",
+      "repo": "00000000-0000-0000-0000-000000000100",
+      "file": "src/λ.rs",
+      "rule": null,
+      "agent": "worker",
+      "kind": "feature",
+      "ids": [
+        8,
+        5,
+        2,
+        1
+      ]
+    },
+    {
+      "name": "global rule still applies to unknown repo",
+      "repo": "00000000-0000-0000-0000-000000000300",
+      "file": "docs/a.md",
+      "rule": null,
+      "agent": null,
+      "kind": null,
+      "ids": [
+        1
+      ]
+    },
+    {
+      "name": "matching is case sensitive",
+      "repo": "00000000-0000-0000-0000-000000000100",
+      "file": "SRC/x.rs",
+      "rule": null,
+      "agent": null,
+      "kind": null,
+      "ids": [
+        1
+      ]
+    }
+  ]
+}
