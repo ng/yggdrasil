@@ -7,6 +7,7 @@ on:
       - '.github/workflows/managed-postgres.yml'
       - 'scripts/prepare-postgres-smoke.py'
       - 'scripts/*release-bundle*.py'
+      - 'scripts/clean-linux-bundle.Dockerfile'
       - 'tests/release_bundles.py'
       - 'LICENSE'
       - 'Cargo.*'
@@ -97,6 +98,29 @@ jobs:
         run: |
           cargo build --release --locked --bin ygg
           python3 scripts/build-release-bundles.py --binary target/release/ygg --postgres-archive "$YGG_TEST_PG_ARCHIVE" --target '${{ matrix.target }}' --output "$RUNNER_TEMP/ygg-bundles"
+      - name: Qualify bundles in a clean Ubuntu runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker build -f scripts/clean-linux-bundle.Dockerfile -t ygg-clean-runtime scripts
+          # Only source and built archives are mounted; no host libraries, tools,
+          # credentials, database, or container-engine socket enter the container.
+          for flavor in offline online; do
+            bundle=$(basename "$RUNNER_TEMP"/ygg-bundles/*-"$flavor".tar.gz)
+            network=bridge
+            extra=()
+            if [[ "$flavor" == offline ]]; then
+              network=none
+            else
+              extra+=(--allow-download)
+            fi
+            docker run --rm --read-only --network "$network" \
+              --tmpfs /tmp:rw,exec,nosuid,size=1g \
+              -v "$PWD:/source:ro" \
+              -v "$RUNNER_TEMP/ygg-bundles:/bundles:ro" \
+              ygg-clean-runtime "/bundles/$bundle" \
+              --directory "/tmp/$flavor-smoke" "${extra[@]}"
+          done
       - name: Smoke-test extracted release bundles
         shell: bash
         run: |

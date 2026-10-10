@@ -166,3 +166,16 @@ Operational follow-ups already noted in the component guides include cache/sessi
 and archived-draft retention, Git-history resource bounds and broader refresh
 policy. They remain visible here; they do not replace the original milestone
 acceptance criteria or justify claiming completion early.
+
+### Clean Linux bundle qualification
+
+The native workflow now also runs assembled online/offline Linux bundles in a
+minimal Ubuntu 24.04 runtime container (`scripts/clean-linux-bundle.Dockerfile`).
+It installs explicit distribution runtime libraries and Python/Git/curl for the
+smoke harness, but no system PostgreSQL, Rust, or Docker tools. A non-root user
+runs with read-only source/artifact mounts and a writable temporary filesystem;
+the offline test has networking disabled. Both modes exercise initialization,
+persistent identity, archive-free reuse, backup verification and owned shutdown.
+This qualifies candidate bundles on that distribution only. Execution is pending
+CI; the local Docker daemon was unavailable. Published artifacts, macOS signing
+and broader distribution qualification remain open.
