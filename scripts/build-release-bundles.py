@@ -143,8 +143,16 @@ The skip list avoids optional dependency installers and hook/project changes.
 Other Yggdrasil commands remain available through ./bin/ygg; keep this directory
 at a stable path while its managed supervisor is running.
 
-GNU Linux needs libossp-uuid, libxml2, liblz4, libzstd and distribution runtime
-libraries. macOS binaries retain their supplied signatures. This package does not
+GNU Linux runtime qualification covers Ubuntu 24.04 x86_64. Before setup,
+an administrator can install the tested prerequisites (no PostgreSQL package):
+  sudo apt-get update
+  sudo apt-get install -y ca-certificates curl git libossp-uuid16 libxml2 liblz4-1 libzstd1 libssl3t64 libgssapi-krb5-2 zlib1g
+Run ./initialize as an ordinary user, not root. Offline deployments must provision
+these OS packages before disconnecting; the offline bundle includes PostgreSQL,
+not the distribution libraries. Python is needed only for the optional smoke
+harness, not to run the bundle. Other GNU distributions need separate qualification.
+
+macOS binaries retain their supplied signatures. This package does not
 claim Developer ID signing, notarization or quarantine qualification. Never clear
 quarantine automatically. Existing release gates must pass before distribution.
 

@@ -244,6 +244,26 @@ clean-machine OS dependencies remain separate gates. No unsigned macOS quarantin
 bypass is built into the launcher. Linux still needs the distribution libraries
 listed by the native workflow.
 
+#### Ubuntu 24.04 prerequisites
+
+The clean-runtime container in [run 38017240665](https://github.com/ng/yggdrasil/actions/runs/38017240665/job/114110131143)
+passed both online and offline candidate bundles at `fc281cf`. It contains no
+system PostgreSQL, Rust toolchain or Docker engine. The offline container has no
+network; both run as an ordinary user with read-only source/artifact mounts.
+
+For Ubuntu 24.04 x86_64, provision the tested OS prerequisites before initialization:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git libossp-uuid16 libxml2 liblz4-1 libzstd1 libssl3t64 libgssapi-krb5-2 zlib1g
+```
+
+Run `./initialize` as an ordinary user. The offline bundle supplies PostgreSQL,
+but not these OS libraries; install them before disconnecting an offline host.
+Python is required only for the optional smoke harness. Other distributions and
+published release artifacts still need their own qualification. This result does
+not qualify macOS signing or quarantine handling.
+
 To test an offline archive locally:
 
 ```sh
