@@ -100,7 +100,13 @@ and usage baselines; retries do not replay committed mutations or overwrite late
 writes. Shared transport uses confirmed Git snapshots, conditional non-force
 pushes and a 60-second automatic-injection freshness limit. Retained pending
 commits support explicit inspection/recovery. Shared reverse-capture primitives
-exist, but there is no complete shared/fleet migration command.
+exist, but there is no complete shared/fleet migration command. The fleet journal
+now captures current shared documents and SQL usage only after the authenticated
+fleet fence commits. It retains immutable intent, paired coordinator cache/policy
+archives, and a lossless reverse candidate; retries require identical evidence.
+Capture leaves SQL fenced and does not apply the candidate or return hosts to SQL.
+The two-host fixture covers post-cutover writes, exact retry, lost completion
+record recovery, and refusal of independent policy or remote changes.
 
 ### Faults, performance and packaging
 

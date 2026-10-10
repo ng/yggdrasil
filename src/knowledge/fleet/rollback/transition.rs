@@ -129,3 +129,25 @@ impl RollbackPlan {
         Ok(result)
     }
 }
+
+impl RollbackPlan {
+    /// Retain the owned reverse fence across capture/import. Host RPCs must have
+    /// finished before acquiring this transaction.
+    pub(in crate::knowledge::fleet) async fn fenced_transaction(
+        &self,
+        pool: &sqlx::PgPool,
+        hosts_sha256: &str,
+    ) -> Result<Transaction<'static, Postgres>> {
+        let mut tx = Registration::transaction(pool).await?;
+        self.registered_on(&mut tx).await?;
+        let saved = self
+            .host_phase_on(&mut tx)
+            .await?
+            .context("committed reverse fence required")?;
+        ensure!(
+            saved.hosts_sha256 == hosts_sha256,
+            "reverse fence census changed"
+        );
+        Ok(tx)
+    }
+}

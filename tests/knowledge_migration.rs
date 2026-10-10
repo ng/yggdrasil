@@ -3372,6 +3372,53 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool) {
             .await
             .is_err()
     );
+    // Capture current shared writes, retaining identical evidence across retries.
+    let capture = journal
+        .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap();
+    let retained = serde_json::to_value(&capture).unwrap();
+    let notes = serde_json::to_string(&capture.candidate.notes).unwrap();
+    for text in [
+        "write during partial fleet finalization",
+        "write after fleet recovery",
+    ] {
+        assert!(notes.contains(text), "current note missing: {text}");
+    }
+    assert_eq!(capture.fenced_generation, 4);
+    assert_eq!(capture.shared_commit, winner.expected_remote_commit());
+    assert_eq!(first.marker().await, (4, "fenced".into()));
+    let repeated = journal
+        .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap();
+    assert_eq!(serde_json::to_value(repeated).unwrap(), retained);
+    // Losing the completion record must recover from the retained paired archives.
+    std::fs::remove_file(first.journal.join(format!("{prefix}-capture.json"))).unwrap();
+    let repeated = journal
+        .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))
+        .await
+        .unwrap();
+    assert_eq!(serde_json::to_value(repeated).unwrap(), retained);
+    let policy_drift = config
+        .knowledge_policy_dir
+        .join("independent-capture-policy.json");
+    std::fs::write(&policy_drift, b"independent policy").unwrap();
+    assert!(
+        journal
+            .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&policy_drift).unwrap(), b"independent policy");
+    std::fs::remove_file(&policy_drift).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(first.journal.join(format!("{prefix}-capture.json"))).unwrap()
+        )
+        .unwrap(),
+        retained
+    );
     // Independent remote changes cannot be reset or adopted on a later retry.
     git(
         &seed,
@@ -3390,6 +3437,12 @@ async fn partial_fleet_finalization_fixture(complete_reverse: bool) {
         ],
     );
     let advanced = git(&seed, &["rev-parse", "HEAD"]);
+    assert!(
+        journal
+            .capture_rollback(winner, &config, &first.pool, Some(&ssh2.identity))
+            .await
+            .is_err()
+    );
     assert!(
         journal
             .fence_rollback_hosts(winner, &first.pool, Some(&ssh2.identity))

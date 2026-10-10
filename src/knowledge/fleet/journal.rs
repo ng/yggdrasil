@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod capture;
+pub use capture::RollbackCapture;
 mod rollback;
 pub use rollback::RollbackFenceReceipt;
 mod activation;
