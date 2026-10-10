@@ -94,6 +94,8 @@ jobs:
         run: cargo test --release --lib config::switch::tests -- --test-threads=1
       - name: Test short runtime endpoint identity and containment
         run: cargo test --release --lib db::runtime_endpoint -- --test-threads=1
+      - name: Qualify external and managed deployment moves
+        run: cargo test --release --test managed_deployment_move -- --include-ignored --test-threads=1
       - name: Verify release bundle integrity and publication rules
         run: python3 tests/release_bundles.py
       - name: Assemble online and offline native bundles

@@ -253,3 +253,20 @@ and [native qualification on all three platforms](https://github.com/ng/yggdrasi
 CI's strict clippy step uses `continue-on-error: true` while existing warnings are
 addressed; a green job does not establish a warning-free build. Local non-strict
 clippy, all-target checking and formatting passed.
+
+## Cross-mode deployment move qualification
+
+`tests/managed_deployment_move.rs` exercises both external→managed and
+managed→external PostgreSQL 16 moves through the public backup, restore and switch
+commands. Each disposable fixture retains the source database and corpus, checks
+database/corpus identity and exact document revisions, preserves task assignee,
+current attempt, run state and idempotency key, rejects restore over an existing
+target, and verifies that switch retry preserves a later target write without
+changing the source. Native CI runs both directions on all three supported targets.
+
+These fixtures use local Unix-socket servers for the external endpoints; the
+external CLI receives only a connection URL. They do not qualify a hosted provider,
+remote TLS/credential rotation, deployment-wide writer quiescence or a real operator
+move. Both directions passed locally against pinned PostgreSQL 16.15 in 104.79
+seconds; the new target compile, formatting and whitespace checks passed. The
+three-platform CI result remains pending.
