@@ -176,6 +176,83 @@ mod tests {
         assert!(Journal::resume(&dir, &hash).is_err());
     }
     #[test]
+    fn child_journal_owner() {
+        let Some(directory) = std::env::var_os("YGG_FLEET_JOURNAL_TEST_CHILD") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        let bytes = std::fs::read_to_string(directory.join("request.json")).unwrap();
+        let journal = Journal::prepare(
+            &directory.join("journal"),
+            ValidatedPlan::parse(&bytes).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("ready"),
+            journal
+                .plan()
+                .unwrap()
+                .registration()
+                .request_sha256
+                .as_bytes(),
+        )
+        .unwrap();
+        // The parent owns this pipe and kills us while the exclusive lease is held.
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        drop(journal);
+    }
+
+    #[test]
+    fn killed_coordinator_releases_lease_and_retains_exact_request() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let request = plan();
+        let hash = request.registration().request_sha256.clone();
+        std::fs::write(temp.path().join("request.json"), request.bytes()).unwrap();
+        let mut child = Child(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "knowledge::fleet::journal::tests::child_journal_owner",
+                    "--nocapture",
+                ])
+                .env("YGG_FLEET_JOURNAL_TEST_CHILD", temp.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let ready = temp.path().join("ready");
+        while !ready.exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before retaining journal"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "child journal preparation timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let directory = temp.path().join("journal");
+        assert!(Journal::resume(&directory, &hash).is_err());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let resumed = Journal::resume(&directory, &hash).unwrap();
+        assert_eq!(resumed.plan().unwrap().bytes(), request.bytes());
+    }
+
+    #[test]
     fn refuses_nonempty_directory_without_intent() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("journal");
