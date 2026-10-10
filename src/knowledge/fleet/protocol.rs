@@ -1,4 +1,4 @@
-//! Typed preparation/cancellation exchange. A matching authenticated receipt is
+//! Typed preparation, inspection and recovery exchange. A matching authenticated receipt is
 //! evidence of that host operation, not permission to activate the fleet.
 use super::{journal::Journal, plan::ValidatedPlan, transport};
 use crate::knowledge::fence::SqlPreparation;
@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
+// Version 2 requires owned-fence inspection and post-fence abort support.
+// A preparation-only v1 host must fail before the coordinator fences SQL.
+const RPC_VERSION: u32 = 2;
 const MAX_REQUEST: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +17,8 @@ const MAX_RESPONSE: usize = 1024 * 1024;
 pub enum Action {
     PrepareSql,
     CancelSql,
+    InspectSql,
+    AbortSql,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +64,7 @@ impl AuthenticatedPreparation {
 impl Request {
     pub fn new(plan: &ValidatedPlan, participant: Uuid, action: Action) -> Result<Self> {
         let bytes = serde_json::to_vec(&Envelope {
-            version: 1,
+            version: RPC_VERSION,
             operation: plan.plan().operation,
             participant,
             request_sha256: plan.registration().request_sha256.clone(),
@@ -77,7 +82,7 @@ impl Request {
         let envelope: Envelope = serde_json::from_slice(bytes)?;
         let plan = ValidatedPlan::parse(&envelope.plan)?;
         ensure!(
-            envelope.version == 1
+            envelope.version == RPC_VERSION
                 && !envelope.nonce.is_nil()
                 && envelope.operation == plan.plan().operation
                 && envelope.request_sha256 == plan.registration().request_sha256
@@ -107,7 +112,7 @@ impl Request {
     pub fn respond(&self, preparation: SqlPreparation) -> Result<Vec<u8>> {
         self.validate_preparation(&preparation)?;
         let result = serde_json::to_vec(&Response {
-            version: 1,
+            version: RPC_VERSION,
             operation: self.envelope.operation,
             participant: self.participant(),
             request_sha256: self.envelope.request_sha256.clone(),
@@ -183,6 +188,31 @@ impl Request {
                 )
                 .await?
             }
+            Action::InspectSql => {
+                fence::inspect_sql_backed(
+                    config,
+                    &binding,
+                    coordinator,
+                    &self.envelope.request_sha256,
+                    &host.backup.path,
+                    &host.backup.manifest_sha256,
+                    &plan.source_backup.manifest_sha256,
+                    pool,
+                )
+                .await?
+            }
+            Action::AbortSql => {
+                fence::abort_sql_backed(
+                    config,
+                    &binding,
+                    coordinator,
+                    &self.envelope.request_sha256,
+                    &host.backup.path,
+                    &host.backup.manifest_sha256,
+                    pool,
+                )
+                .await?
+            }
         };
         self.respond(result)
     }
@@ -223,7 +253,7 @@ impl Request {
         );
         let response: Response = serde_json::from_slice(bytes)?;
         ensure!(
-            response.version == 1
+            response.version == RPC_VERSION
                 && response.operation == self.envelope.operation
                 && response.participant == self.participant()
                 && response.request_sha256 == self.envelope.request_sha256
@@ -302,7 +332,7 @@ mod tests {
         ] {
             let mut changed = source.clone();
             changed[field] = match field {
-                "version" => json!(2),
+                "version" => json!(1),
                 "request_sha256" => json!("0".repeat(64)),
                 "action" => json!("cancel_sql"),
                 _ => json!(Uuid::new_v4()),
@@ -314,6 +344,13 @@ mod tests {
                 "{field}"
             );
         }
+    }
+    #[test]
+    fn rejects_preparation_only_protocol_before_execution() {
+        let request = request();
+        let mut legacy: Value = serde_json::from_slice(&request.bytes().unwrap()).unwrap();
+        legacy["version"] = json!(1);
+        assert!(Request::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
     }
     #[test]
     fn rejects_wrong_host_evidence_and_tampered_plan_request() {

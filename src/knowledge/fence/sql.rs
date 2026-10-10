@@ -1,5 +1,5 @@
-//! Participant preparation primitive for the future fleet coordinator. There is
-//! deliberately no CLI entry point until authenticated activation/abort exists.
+//! Host-local SQL preparation, inspection and conditional recovery. Authenticated
+//! coordinator RPC dispatch supplies the registered plan and backup evidence.
 use super::{CoordinatorBinding, identity};
 use crate::{
     config::database::KnowledgeConfig,
@@ -271,6 +271,7 @@ pub async fn cancel_sql_backed(
         request_sha256,
         pool,
         true,
+        false,
         || {
             verify_host_backup(
                 &host,
@@ -283,6 +284,92 @@ pub async fn cancel_sql_backed(
         },
     )
     .await
+}
+
+/// Remove this prepared fence only after the fleet-owned post-fence abort.
+pub async fn abort_sql_backed(
+    config: &crate::config::database::DeploymentConfig,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    request_sha256: &str,
+    backup_path: &std::path::Path,
+    backup_sha256: &str,
+    pool: &sqlx::PgPool,
+) -> Result<SqlPreparation> {
+    let local = local_config(config);
+    let host = Host::open(&local, binding, coordinator)?;
+    let name = host.cancellation_name();
+    let cancellation = serde_json::to_string(&Cancellation {
+        version: 1,
+        intent_sha256: digest(host.bytes.as_bytes()),
+        coordinator_request_sha256: request_sha256.to_owned(),
+        target_generation: binding.generation + 2,
+    })?;
+    cancel_with_host(
+        &host,
+        &local,
+        binding,
+        coordinator,
+        request_sha256,
+        pool,
+        false,
+        true,
+        || {
+            verify_host_backup(
+                &host,
+                config,
+                binding,
+                backup_path,
+                backup_sha256,
+                Some((&name, &cancellation)),
+            )
+        },
+    )
+    .await
+}
+
+/// Revalidate an already-prepared host after the coordinator committed its SQL
+/// fence. This reads local controls; it never repairs or republishes a selection.
+pub async fn inspect_sql_backed(
+    config: &crate::config::database::DeploymentConfig,
+    binding: &Binding,
+    coordinator: CoordinatorBinding,
+    request_sha256: &str,
+    backup_path: &std::path::Path,
+    backup_sha256: &str,
+    source_backup_sha256: &str,
+    pool: &sqlx::PgPool,
+) -> Result<SqlPreparation> {
+    let local = local_config(config);
+    let host = Host::open(&local, binding, coordinator)?;
+    host.verify(&local)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(1497843531,1)")
+        .execute(&mut *tx)
+        .await?;
+    let owns: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.knowledge_fleet_operations r JOIN public.knowledge_fleet_events e USING(operation_id) CROSS JOIN public.knowledge_storage s WHERE r.operation_id=$1 AND r.request_sha256=$2 AND r.database_id=$3 AND r.source_generation=$4 AND r.corpus_id=$5 AND $6=ANY(r.participants) AND e.step='fenced' AND e.backup_sha256=$7 AND s.singleton AND s.database_id=r.database_id AND s.generation=r.source_generation+1 AND s.backend='fenced' AND s.corpus_id=r.corpus_id AND s.minimum_client BETWEEN 1 AND $8 AND NOT EXISTS(SELECT 1 FROM public.knowledge_fleet_events a WHERE a.operation_id=r.operation_id AND a.step='aborted') AND NOT EXISTS(SELECT 1 FROM public.knowledge_migration_cancellations c WHERE c.operation_id=r.operation_id))")
+        .bind(coordinator.migration_operation).bind(request_sha256).bind(binding.mappings.database_id)
+        .bind(binding.generation).bind(binding.mappings.corpus_id).bind(coordinator.participant)
+        .bind(source_backup_sha256).bind(CLIENT_PROTOCOL).fetch_one(&mut *tx).await?;
+    ensure!(
+        owns,
+        "inspection requires this operation's current fleet-owned SQL fence"
+    );
+    ensure!(
+        host.policy
+            .read_artifact(&host.cancellation_name())?
+            .is_none()
+            && host.policy.read_control(SELECTION_FILE)?.as_deref()
+                == Some(host.desired.fenced.as_str()),
+        "prepared host fence is absent, changed or cancelled"
+    );
+    verify_host_backup(&host, config, binding, backup_path, backup_sha256, None)?;
+    host.verify(&local)?;
+    tx.commit().await?;
+    Ok(host.report(binding))
 }
 
 async fn prepare_at_source(
@@ -401,6 +488,7 @@ pub async fn cancel_sql(
         coordinator_request_sha256,
         pool,
         false,
+        false,
         || Ok(()),
     )
     .await
@@ -413,6 +501,7 @@ async fn cancel_with_host(
     coordinator_request_sha256: &str,
     pool: &sqlx::PgPool,
     allow_unprepared: bool,
+    aborted: bool,
     verify: impl Fn() -> Result<()>,
 ) -> Result<SqlPreparation> {
     ensure!(
@@ -441,7 +530,7 @@ async fn cancel_with_host(
     let marker: (uuid::Uuid, i64, i32, String, Option<uuid::Uuid>) = sqlx::query_as(
         "SELECT database_id,generation,minimum_client,backend,corpus_id FROM public.knowledge_storage WHERE singleton"
     ).fetch_one(&mut *tx).await?;
-    let target = binding.generation + 1;
+    let target = binding.generation + if aborted { 2 } else { 1 };
     ensure!(
         marker.0 == binding.mappings.database_id
             && marker.1 == target
@@ -451,9 +540,16 @@ async fn cancel_with_host(
             && marker.4.is_none(),
         "SQL cancellation generation is not current"
     );
-    let receipt: Option<(String, uuid::Uuid, i64, i64)> = sqlx::query_as(
-        "SELECT request_sha256,database_id,source_generation,target_generation FROM public.knowledge_migration_cancellations WHERE operation_id=$1"
-    ).bind(coordinator.migration_operation).fetch_optional(&mut *tx).await?;
+    let receipt_query = if aborted {
+        "SELECT r.request_sha256,r.database_id,r.source_generation,r.source_generation+2 FROM public.knowledge_fleet_operations r JOIN public.knowledge_fleet_events a USING(operation_id) JOIN public.knowledge_fleet_events f USING(operation_id) WHERE r.operation_id=$1 AND a.step='aborted' AND f.step='fenced' AND a.prepared_sha256=f.prepared_sha256 AND a.backup_sha256=f.backup_sha256 AND $2=ANY(r.participants)"
+    } else {
+        "SELECT request_sha256,database_id,source_generation,target_generation FROM public.knowledge_migration_cancellations WHERE operation_id=$1 AND $2::uuid IS NOT NULL"
+    };
+    let receipt: Option<(String, uuid::Uuid, i64, i64)> = sqlx::query_as(receipt_query)
+        .bind(coordinator.migration_operation)
+        .bind(coordinator.participant)
+        .fetch_optional(&mut *tx)
+        .await?;
     ensure!(
         receipt
             == Some((

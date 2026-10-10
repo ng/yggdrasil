@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 mod sql;
 pub use sql::{
-    SqlPreparation, cancel_sql, cancel_sql_backed, prepare_sql, prepare_sql_at_source,
-    prepare_sql_backed,
+    SqlPreparation, abort_sql_backed, cancel_sql, cancel_sql_backed, inspect_sql_backed,
+    prepare_sql, prepare_sql_at_source, prepare_sql_backed,
 };
 
 /// Request identity only; authenticated transport and a complete participant

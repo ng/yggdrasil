@@ -461,3 +461,43 @@ and current SQL return generation. It records intent plus cancellation tombstone
 without publishing a fence. A partial or uncertain attempt remains resumable;
 there is no implicit success for an unavailable host. These coordinator methods
 still stop before database fencing, export, publication or activation.
+
+
+### Owned SQL fence and pre-activation abort
+
+`Journal::fence_hosts` obtains fresh authenticated preparation from every declared
+host before taking the exclusive database generation lease. Under that lease it
+rechecks the exact journal/seal, registered plan, compatible clients, original
+schema/legacy rows and backup. SQL changes to the fenced source generation +1
+atomically with a fleet-specific immutable event binding the complete preparation
+seal and source backup. Private migration events cannot establish fleet ownership.
+
+Participant RPC version 2 requires inspection and post-fence abort support;
+preparation-only version 1 peers are refused before database fencing.
+
+Resume uses an authenticated read-only `InspectSql` exchange: every host must
+still have its exact original preparation, local fence and backup, and the database
+must retain this operation's current fleet fence. Missing local selection is an
+error; inspection never republishes it. No SSH exchange runs under the exclusive
+SQL lease, avoiding deadlock with participant shared generation leases.
+
+`Journal::abort_hosts` applies only to that still-current fleet fence. It verifies
+source parity before atomically returning SQL to generation +2 and recording abort.
+Retries require the same immutable evidence and current SQL return generation;
+they do not replay or compare frozen legacy rows over later SQL writes. Host
+`AbortSql` requests require the matching fleet abort receipt and conditionally
+remove only their own prepared fence, retaining a generation-bound tombstone.
+Unreachable hosts remain fenced while reachable hosts reconcile; the complete
+abort seal appears only after every host acknowledges. Pre-fence cancellation
+remains a separate source +1 operation.
+
+These library/RPC components do not yet export or publish the shared snapshot,
+activate hosts, or roll back current shared data after activation. The public
+shared migration command remains unavailable.
+
+The native `native_fleet_owned_fence_resume_and_abort` fixture verifies the SQL
+writer drain, pre-fence recovery refusal, post-fence resume, read-only rejection of
+a missing local fence, changed preparation evidence, interrupted host recovery,
+and preservation of SQL writes made after abort. It uses real SSH and disposable
+PostgreSQL; multi-host activation and current-state rollback still need their own
+end-to-end and crash-boundary qualification.

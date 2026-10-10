@@ -117,6 +117,15 @@ impl Journal {
         pool: &sqlx::PgPool,
         ssh_identity: Option<&Path>,
     ) -> Result<String> {
+        self.source_backup(config)?;
+        self.plan.registration().register(pool).await?;
+        self.visit_hosts(super::protocol::Action::PrepareSql, ssh_identity)
+            .await
+    }
+    fn source_backup(
+        &self,
+        config: &crate::config::database::DeploymentConfig,
+    ) -> Result<crate::knowledge::source_backup::SourceBackup> {
         use crate::knowledge::source_backup::SourceBackup;
         let plan = self.plan()?.plan();
         for path in [
@@ -143,8 +152,65 @@ impl Journal {
         );
         backup.verify()?;
         backup.verify_configuration(config)?;
-        self.plan.registration().register(pool).await?;
-        self.visit_hosts(super::protocol::Action::PrepareSql, ssh_identity)
+        Ok(backup)
+    }
+    fn verify_prepared(&self, expected: &str) -> Result<()> {
+        self.verify()?;
+        let bytes = self
+            .store
+            .read_artifact("fleet-prepared.json")?
+            .context("complete fleet preparation evidence missing")?;
+        ensure!(
+            crate::knowledge::document::digest(bytes.as_bytes()) == expected,
+            "complete fleet preparation evidence changed"
+        );
+        Ok(())
+    }
+    /// Recontact every host before taking the exclusive SQL generation lease.
+    /// On resume, inspection requires this operation's committed fleet fence.
+    /// No SSH call runs under the exclusive database lease.
+    pub async fn fence_hosts(
+        &self,
+        config: &crate::config::database::DeploymentConfig,
+        pool: &sqlx::PgPool,
+        ssh_identity: Option<&Path>,
+    ) -> Result<i64> {
+        let backup = self.source_backup(config)?;
+        let registration = self.plan()?.registration();
+        let prepared = if super::transition::has_fence(registration, pool).await? {
+            self.visit_hosts(super::protocol::Action::InspectSql, ssh_identity)
+                .await?
+        } else {
+            self.prepare_hosts(config, pool, ssh_identity).await?
+        };
+        super::transition::fence(registration, pool, &backup, &prepared, || {
+            self.verify_prepared(&prepared)
+        })
+        .await
+    }
+    /// Return only this operation's still-fenced SQL source to generation +2,
+    /// then reconcile hosts. After activation, use current-state rollback instead.
+    pub async fn abort_hosts(
+        &self,
+        config: &crate::config::database::DeploymentConfig,
+        pool: &sqlx::PgPool,
+        ssh_identity: Option<&Path>,
+    ) -> Result<String> {
+        let backup = self.source_backup(config)?;
+        let bytes = self
+            .store
+            .read_artifact("fleet-prepared.json")?
+            .context("complete fleet preparation evidence missing")?;
+        let prepared = crate::knowledge::document::digest(bytes.as_bytes());
+        super::transition::abort(
+            self.plan()?.registration(),
+            pool,
+            &backup,
+            &prepared,
+            || self.verify_prepared(&prepared),
+        )
+        .await?;
+        self.visit_hosts(super::protocol::Action::AbortSql, ssh_identity)
             .await
     }
     /// Cancel the SQL source generation first, then reconcile all declared hosts,
@@ -165,7 +231,8 @@ impl Journal {
     ) -> Result<String> {
         use crate::knowledge::document::digest;
         let phase = match action {
-            super::protocol::Action::PrepareSql => "prepared",
+            super::protocol::Action::PrepareSql | super::protocol::Action::InspectSql => "prepared",
+            super::protocol::Action::AbortSql => "aborted",
             super::protocol::Action::CancelSql => "cancelled",
         };
         let mut records = Vec::new();
@@ -174,8 +241,13 @@ impl Journal {
             let response =
                 match super::protocol::call(self, participant.id, action, ssh_identity).await {
                     Ok(response) => response,
-                    Err(error) if action == super::protocol::Action::CancelSql => {
-                        // Cancellation has already committed in SQL. Reconcile later
+                    Err(error)
+                        if matches!(
+                            action,
+                            super::protocol::Action::CancelSql | super::protocol::Action::AbortSql
+                        ) =>
+                    {
+                        // SQL recovery has already committed. Reconcile later
                         // reachable hosts even if this host needs a subsequent retry.
                         // A changed local journal still stops the operation immediately.
                         self.verify()?;
@@ -185,8 +257,15 @@ impl Journal {
                     Err(error) => return Err(error),
                 };
             self.verify()?;
+            // Inspection revalidates the original preparation bytes; its fresh
+            // nonce belongs only to the live authenticated exchange.
+            let record_action = if action == super::protocol::Action::InspectSql {
+                super::protocol::Action::PrepareSql
+            } else {
+                action
+            };
             let record = serde_json::json!({"version":1,"operation":self.plan.plan().operation,
-                "request_sha256":self.intent.request_sha256,"action":action,"receipt":response.preparation()});
+                "request_sha256":self.intent.request_sha256,"action":record_action,"receipt":response.preparation()});
             let bytes = serde_json::to_string(&record)?;
             self.store.retain_artifact(
                 &format!("{phase}-{}.json", participant.id),
@@ -198,7 +277,7 @@ impl Journal {
         self.verify()?;
         ensure!(
             failures.is_empty(),
-            "fleet cancellation incomplete; retry the same journal: {}",
+            "fleet {phase} reconciliation incomplete; retry the same journal: {}",
             failures.join("; ")
         );
         let bytes = serde_json::to_string(&records)?;

@@ -1852,3 +1852,235 @@ async fn native_partial_fleet_cancellation_includes_unprepared_host() {
     assert_eq!(text, "after partial fleet cancellation");
     first.pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires YGG_TEST_PG_BIN and OpenSSH; disposable fleet fence/abort qualification"]
+async fn native_fleet_owned_fence_resume_and_abort() {
+    use ygg::knowledge::{
+        document::digest,
+        fleet::{
+            journal::Journal,
+            plan::ValidatedPlan,
+            protocol::{self, Action},
+        },
+        store::KnowledgeStore,
+    };
+    let server = Server::new();
+    let mut f = Fixture::new(&server).await;
+    let config = ygg::config::database::DeploymentConfig::load(f.env.clone()).unwrap();
+    KnowledgeStore::open(&config.knowledge_dir, true).unwrap();
+    let identities =
+        ygg::knowledge::identity::IdentityRegistry::open(&config.knowledge_policy_dir, true)
+            .unwrap()
+            .initialize(true)
+            .unwrap();
+    f.plan.mappings.corpus_id = identities.corpus_id;
+    let backup = f.temp.path().canonicalize().unwrap().join("host-backup");
+    let manifest = ygg::db::deployment_backup::create(&config, &backup, Some(&server.bin), None)
+        .await
+        .unwrap();
+    let hash = digest(&serde_json::to_vec(&manifest).unwrap());
+    let ssh = ParticipantSsh::new(&f).await;
+    let participant = Uuid::new_v4();
+    let plan = ValidatedPlan::parse(&serde_json::json!({
+        "version":1,"operation":Uuid::new_v4(),"source_generation":1,"mappings":&f.plan.mappings,"agents":[],
+        "shared":{"version":1,"remote":"git@example.test:knowledge.git","branch":"main"},
+        "expected_remote_commit":"a".repeat(40),"source_backup":{"path":backup,"manifest_sha256":hash},
+        "all_participating_hosts_listed":true,"schema_changes_stopped":true,"session_preserving_endpoint":true,"remote_writers_stopped":true,
+        "participants":[{"id":participant,"name":"ssh-host","protocol":1,"endpoint":&ssh.endpoint,
+            "corpus":config.knowledge_dir.canonicalize().unwrap(),"policy":config.knowledge_policy_dir.canonicalize().unwrap(),
+            "identities":identities,"backup":{"path":backup,"manifest_sha256":hash},
+            "knowledge_writers_stopped":true,"external_editors_stopped":true}]
+    }).to_string()).unwrap();
+    let request_hash = plan.registration().request_sha256.clone();
+    let journal = Journal::prepare(&f.journal, plan).unwrap();
+    let runtime = config.knowledge_policy_dir.join("runtime.json");
+    journal
+        .prepare_hosts(&config, &f.pool, Some(&ssh.identity))
+        .await
+        .unwrap();
+    assert!(
+        journal
+            .abort_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(
+        protocol::call(
+            &journal,
+            participant,
+            Action::InspectSql,
+            Some(&ssh.identity)
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        protocol::call(&journal, participant, Action::AbortSql, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(runtime.exists());
+    use sqlx::Connection;
+    let mut writer_connection = sqlx::PgConnection::connect_with(&f.pool.connect_options())
+        .await
+        .unwrap();
+    let mut observer = sqlx::PgConnection::connect_with(&f.pool.connect_options())
+        .await
+        .unwrap();
+    ygg::knowledge::clients::register(&mut writer_connection)
+        .await
+        .unwrap();
+    ygg::knowledge::clients::register(&mut observer)
+        .await
+        .unwrap();
+    let mut writer = writer_connection.begin().await.unwrap();
+    sqlx::query("UPDATE memories SET text=text")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    {
+        let pending = journal.fence_hosts(&config, &f.pool, Some(&ssh.identity));
+        tokio::pin!(pending);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            tokio::select! {
+                result = &mut pending => panic!("fence finished before SQL writer drained: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1497843531 AND objid=1 AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))")
+                .fetch_one(&mut observer).await.unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "coordinator did not reach the SQL generation lease"
+            );
+        }
+        writer.commit().await.unwrap();
+        assert_eq!(pending.await.unwrap(), 2);
+    }
+    assert!(
+        sqlx::query("UPDATE memories SET text='must be fenced'")
+            .execute(&f.pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        journal
+            .cancel_hosts(&f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(
+        protocol::call(
+            &journal,
+            participant,
+            Action::PrepareSql,
+            Some(&ssh.identity)
+        )
+        .await
+        .is_err()
+    );
+    drop(journal);
+    let journal = Journal::resume(&f.journal, &request_hash).unwrap();
+    assert_eq!(
+        journal
+            .fence_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        2
+    );
+    let original_runtime = std::fs::read(&runtime).unwrap();
+    std::fs::remove_file(&runtime).unwrap();
+    assert!(
+        journal
+            .fence_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(
+        !runtime.exists(),
+        "inspection must not republish an absent host fence"
+    );
+    std::fs::write(&runtime, &original_runtime).unwrap();
+    let seal_path = f.journal.join("fleet-prepared.json");
+    let seal = std::fs::read(&seal_path).unwrap();
+    std::fs::write(&seal_path, "[]").unwrap();
+    assert!(
+        journal
+            .abort_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(runtime.exists());
+    std::fs::write(&seal_path, seal).unwrap();
+    // Commit SQL abort but fail host authentication. Resume must restore this
+    // host without replaying the source dump over writes made after SQL reopened.
+    assert!(
+        journal
+            .abort_hosts(&config, &f.pool, Some(&ssh.identity.with_file_name("host")))
+            .await
+            .is_err()
+    );
+    assert!(runtime.exists());
+    assert!(!f.journal.join("fleet-aborted.json").exists());
+    let state: (String, i64) =
+        sqlx::query_as("SELECT backend,generation FROM knowledge_storage WHERE singleton")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, ("sql".into(), 3));
+    sqlx::query("UPDATE memories SET text='after fleet abort'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    drop(journal);
+    let journal = Journal::resume(&f.journal, &request_hash).unwrap();
+    let aborted = journal
+        .abort_hosts(&config, &f.pool, Some(&ssh.identity))
+        .await
+        .unwrap();
+    assert!(!runtime.exists());
+    assert_eq!(
+        journal
+            .abort_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .unwrap(),
+        aborted
+    );
+    assert!(
+        journal
+            .fence_hosts(&config, &f.pool, Some(&ssh.identity))
+            .await
+            .is_err()
+    );
+    assert!(
+        protocol::call(
+            &journal,
+            participant,
+            Action::PrepareSql,
+            Some(&ssh.identity)
+        )
+        .await
+        .is_err()
+    );
+    let text: String = sqlx::query_scalar("SELECT text FROM memories LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "after fleet abort");
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_fleet_events")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(events, 2);
+    assert!(
+        sqlx::query("DELETE FROM knowledge_fleet_events")
+            .execute(&f.pool)
+            .await
+            .is_err()
+    );
+    f.pool.close().await;
+}
