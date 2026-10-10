@@ -512,3 +512,13 @@ blocks completion; retry never overwrites such edits. Aborted operations cannot
 resume export, and their private staging evidence remains available. This is not
 Git publication or activation authority: subsequent phases must revalidate the
 current stage, host bindings and exact remote base before publishing.
+
+
+The transport's `resume_snapshot` recovery verifies the exact desired tree and
+original parent/base, then pushes only the retained pending commit. It never
+creates a replacement commit on retry. Confirmation requires that commit to be
+the current remote tip; being an ancestor of a later independent commit is
+insufficient. Without a matching pending record, recovery can only confirm the
+current tip and cannot push. Local Git fixtures cover pre-push interruption,
+changed desired bytes, lost responses, repeated confirmation and independent
+remote advances. Coordinator publication-intent wiring remains outstanding.

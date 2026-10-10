@@ -789,7 +789,7 @@ impl SharedGit {
     ) -> Result<Receipt> {
         self.replace_snapshot_at(expected_commit, desired, &mut |_| Ok(()))
     }
-    fn replace_snapshot_at(
+    pub(crate) fn replace_snapshot_at(
         &self,
         expected_commit: &str,
         desired: &BTreeMap<String, Vec<u8>>,
@@ -851,6 +851,85 @@ impl SharedGit {
             })
             .collect();
         self.change_locked(&changes, Some(expected_commit), prepared)
+    }
+
+    /// Recover the exact retained whole-snapshot commit, never synthesize a new
+    /// commit or accept mere reachability from a changed branch tip. A missing
+    /// pending record permits read-only confirmation, not another push.
+    pub fn resume_snapshot(
+        &self,
+        expected_base: &str,
+        expected_commit: &str,
+        desired: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<Receipt> {
+        ensure!(
+            oid(expected_base.as_bytes())? == expected_base
+                && oid(expected_commit.as_bytes())? == expected_commit,
+            "full snapshot base and publication commit IDs required"
+        );
+        let _lease = self.control.bounded_lock(".shared.lock")?;
+        let pending = self.pending()?;
+        if let Some(pending) = &pending {
+            ensure!(
+                pending.exact_base
+                    && pending.base == expected_base
+                    && pending.commit == expected_commit,
+                "pending snapshot differs from retained publication intent"
+            );
+        }
+        ensure!(
+            self.files(expected_commit)? == *desired,
+            "retained publication commit differs from complete desired snapshot"
+        );
+        if expected_commit != expected_base {
+            let parents = self.checked(
+                &["rev-list", "--parents", "-n", "1", expected_commit],
+                &[],
+                None,
+            )?;
+            ensure!(
+                std::str::from_utf8(&parents)?
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    == [expected_commit, expected_base],
+                "publication commit is not the expected base's direct child"
+            );
+        }
+        let mut remote = self.fetch()?;
+        if remote != expected_commit {
+            ensure!(
+                pending.is_some() && remote == expected_base && expected_commit != expected_base,
+                "snapshot remote changed or no retained push intent remains"
+            );
+            // The hook and receive-pack CAS both use the original base. Even a
+            // rejected/uncertain push cannot rebase or manufacture a new commit.
+            let _pushed = self.run_with_expected(
+                &[
+                    "push",
+                    "--porcelain",
+                    "--",
+                    &self.config.remote,
+                    &format!("{expected_commit}:refs/heads/{}", self.config.branch),
+                ],
+                &[],
+                None,
+                Some(expected_base),
+            );
+            remote = self.fetch().map_err(|_| {
+                anyhow!("snapshot publication uncertain; retained exact pending commit")
+            })?;
+        }
+        ensure!(
+            remote == expected_commit,
+            "exact publication tip is not confirmed; retained pending evidence"
+        );
+        self.publish_cache(remote, Utc::now())?;
+        if pending.is_some() {
+            self.clear(expected_commit)?;
+        }
+        Ok(Receipt {
+            commit: expected_commit.to_owned(),
+        })
     }
 
     pub fn change(&self, changes: &[Change]) -> Result<Receipt> {
@@ -1351,6 +1430,117 @@ mod tests {
             .unwrap();
         assert!(transport.recovery_snapshot(&saved).is_err());
         saved.verify_sources().unwrap();
+    }
+
+    #[test]
+    fn whole_snapshot_resume_pushes_exact_commit_and_rejects_changed_tip() {
+        let (temp, config) = fixture();
+        let root = temp.path().join("cache");
+        let transport = SharedGit::open(&root, config.clone()).unwrap();
+        let base = transport.refresh().unwrap().commit;
+        let desired = bulk_files();
+        assert!(
+            transport
+                .replace_snapshot_at(&base, &desired, &mut |_| {
+                    bail!("interrupted after durable pending commit, before push")
+                })
+                .is_err()
+        );
+        let pending = transport.pending().unwrap().unwrap();
+        assert_eq!(transport.refresh().unwrap().commit, base);
+        let mut wrong = desired.clone();
+        wrong.insert("unrelated.md".into(), b"must not push".to_vec());
+        assert!(
+            transport
+                .resume_snapshot(&base, &pending.commit, &wrong)
+                .is_err()
+        );
+        assert!(transport.pending().unwrap().is_some());
+        drop(transport);
+        let transport = SharedGit::open(&root, config.clone()).unwrap();
+        let receipt = transport
+            .resume_snapshot(&base, &pending.commit, &desired)
+            .unwrap();
+        assert_eq!(receipt.commit, pending.commit);
+        assert!(transport.pending().unwrap().is_none());
+        assert_eq!(
+            transport
+                .resume_snapshot(&base, &pending.commit, &desired)
+                .unwrap()
+                .commit,
+            pending.commit
+        );
+        let remote = PathBuf::from(&config.remote);
+        assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "2");
+        // Once pending intent is cleared, even a rewind to the original base
+        // cannot authorize another push of the old publication.
+        git(&remote, &["update-ref", "refs/heads/knowledge", &base]);
+        assert!(
+            transport
+                .resume_snapshot(&base, &pending.commit, &desired)
+                .is_err()
+        );
+        assert_eq!(git(&remote, &["rev-parse", "knowledge"]), base);
+        git(
+            &remote,
+            &["update-ref", "refs/heads/knowledge", &pending.commit],
+        );
+        let other = SharedGit::open(&temp.path().join("other"), config).unwrap();
+        let later = other
+            .change(&[Change {
+                path: "later.md".into(),
+                expected: None,
+                replacement: Some(b"independent later edit".to_vec()),
+            }])
+            .unwrap();
+        assert!(
+            transport
+                .resume_snapshot(&base, &pending.commit, &desired)
+                .is_err()
+        );
+        assert_eq!(other.refresh().unwrap().commit, later.commit);
+        assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "3");
+    }
+
+    #[test]
+    fn whole_snapshot_resume_confirms_lost_response_without_republishing() {
+        let (temp, config) = fixture();
+        let root = temp.path().join("cache");
+        let transport = SharedGit::open(&root, config.clone()).unwrap();
+        let base = transport.refresh().unwrap().commit;
+        let desired = bulk_files();
+        let remote = PathBuf::from(&config.remote);
+        let offline = temp.path().join("offline.git");
+        assert!(
+            transport
+                .replace_snapshot_at(&base, &desired, &mut |commit| {
+                    transport.checked(
+                        &[
+                            "push",
+                            &config.remote,
+                            &format!("{commit}:refs/heads/knowledge"),
+                        ],
+                        &[],
+                        None,
+                    )?;
+                    std::fs::rename(&remote, &offline)?;
+                    Ok(())
+                })
+                .is_err()
+        );
+        let pending = transport.pending().unwrap().unwrap();
+        drop(transport);
+        std::fs::rename(&offline, &remote).unwrap();
+        let transport = SharedGit::open(&root, config).unwrap();
+        assert_eq!(
+            transport
+                .resume_snapshot(&base, &pending.commit, &desired)
+                .unwrap()
+                .commit,
+            pending.commit
+        );
+        assert_eq!(transport.refresh().unwrap().files, desired);
+        assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "2");
     }
 
     #[test]
