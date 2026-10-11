@@ -2,18 +2,19 @@
 
 ## Goal status
 
-**PAUSED by the user. Do not resume implementation until explicitly asked.**
-The full goal is **not complete**: implement
+**Resumed 2026-10-11** via `/goal complete HANDOFF-PR122.md`. The full goal is
+**still not complete**: implement
 `/Users/ng/.codex/plans/yggdrasil/embedded-postgres-okf.md` using existing
-[PR #122](https://github.com/ng/yggdrasil/pull/122).
-Writing this handoff does not resume the goal.
+[PR #122](https://github.com/ng/yggdrasil/pull/122). Remaining items 1 and 2
+below are done; items 3 through 7 are **blocked on user inputs and elapsed
+time** (see "Missing inputs").
 
 ## Workspace
 
 - Primary repository: `/Users/ng/Documents/GitHub/yggdrasil`
 - Worktree: `/Users/ng/Documents/GitHub/yggdrasil/.codex/worktrees/embedded-pg-okf-plan`
 - Branch: `docs/embedded-pg-okf-plan`
-- Last implementation HEAD: `ca5038f`, pushed.
+- Last implementation HEAD: `ca5038f`, pushed. Later commits are docs/ledger only.
 - Worktree was clean and up to date before creating this handoff.
 - Agent: `YGG_AGENT_NAME=embedded-pg-okf-plan`
 - Detailed local handoff: `/tmp/ygg-pr122-current-handoff.txt`
@@ -82,12 +83,12 @@ Raw committed measurements:
 
 ## Remaining work after explicit resume
 
-1. Inspect final CI results for `ca5038f`:
-   - Standard: `38055774671`
-   - Native: `38055774673`
-   Both were still running at the last successful inspection. Do not assume their
-   present status from that historical observation.
-2. Address actual failures; do not repeat completed tests without cause.
+1. **Done 2026-10-11.** Final CI results for `ca5038f`:
+   - Standard `38055774671`: success (PG16/PG18 tests, check, clippy, rustfmt).
+   - Native `38055774673`: success on Linux, Apple Silicon and Intel macOS.
+   Recorded in `docs/managed-postgres-okf-status.md` ("Latest head
+   qualification"); "Next release work" item 1 is marked done.
+2. **Done.** No failures to address. No tests were rerun.
 3. Complete published-artifact and positive macOS signing/notarization/quarantine
    qualification. Candidate bundles do not satisfy released-artifact gates.
 4. Establish the actual deployment target, compatible-client inventory,
@@ -103,10 +104,15 @@ Raw committed measurements:
 - Which Developer ID signing/notarization setup to use.
 - Which installation/profile should receive the compatibility release and dogfood.
 
-These were asked asynchronously but no answer was received. The last check found
-only an Apple Development identity locally and no repository secret names. Do not
-treat that identity as Developer ID distribution signing. Request setup names or
-locations, not secret values.
+These were asked asynchronously but no answer was received. Re-checked
+2026-10-11 on resume: still only an Apple Development identity locally, zero
+Developer ID Application identities, and `gh secret list` / `gh variable list`
+return nothing. Do not treat that identity as Developer ID distribution signing.
+Request setup names or locations, not secret values.
+
+Items 3–5 cannot start without these answers; item 6 additionally needs 14
+elapsed days after deployment; item 7 is gated on all of them. No fixture or
+local evidence substitutes for any of these gates.
 
 ## Operational boundaries
 
@@ -119,8 +125,8 @@ locations, not secret values.
   signing qualification or elapsed dogfood time.
 - Four superseded CI runs were deliberately cancelled: `38055499019`,
   `38055313404`, `38055194504`, `38054227159`. Preserve the latest runs.
-- The October 11 resume check was interrupted when the user paused the goal.
-  Its tool call was aborted, so it yielded no verified new CI status and may have
-  partially executed read-only commands.
-- Saving this file is a separate documentation request. The implementation goal
-  remains paused.
+- The first October 11 resume check was interrupted when the user paused the
+  goal. The second (this one) completed read-only CI inspection; see item 1.
+- The docs-only handoff commit `aea8575` also triggered CI; its standard run
+  `38173420624` passed and native run `38173420682` was in progress at the time
+  of writing. It changes no source and needs no action unless it fails.

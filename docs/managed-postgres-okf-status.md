@@ -181,9 +181,9 @@ timeouts are not test failures or reasons to restart a running job.
 
 ## Next release work
 
-1. Qualify the updated lifecycle timing smoke on all three native platforms; the
-   public fleet CLI and external↔managed move tests already passed all three
-   platforms at `6d49d51` (run `38053885160`).
+1. Done: the updated lifecycle timing smoke passed on all three native platforms
+   at `ca5038f` (run `38055774673`); the public fleet CLI and external↔managed
+   move tests already passed all three platforms at `6d49d51` (run `38053885160`).
 2. Produce and smoke-test the final released artifacts on every advertised target,
    including positive macOS signing/quarantine evidence. Candidate CI bundles do
    not satisfy published-artifact qualification.
@@ -357,3 +357,20 @@ cargo test --test okf_shared_performance -- --ignored --test-threads=1
 Native run `38053885160` has now completed successfully on Intel macOS as well as
 Apple Silicon and Linux. This supersedes earlier pending-Intel notes for
 `6d49d51`; it does not qualify later smoke-script changes or a public release.
+
+### Latest head qualification
+
+At `ca5038f` (the authenticated shared-SSH benchmark head, which also carries the
+`a593cde` lifecycle smoke changes),
+[standard CI 38055774671](https://github.com/ng/yggdrasil/actions/runs/38055774671)
+passed PostgreSQL 16 and 18 tests, `cargo check`, clippy and rustfmt, and
+[native run 38055774673](https://github.com/ng/yggdrasil/actions/runs/38055774673)
+passed on Intel macOS, Apple Silicon macOS and Linux. Both runs were observed to a
+terminal state on 2026-10-11; no run was cancelled or restarted. This qualifies
+the updated smoke script on the candidate platform matrix only.
+
+A repeat read-only inventory on 2026-10-11 again found zero Developer ID
+Application identities and no repository secrets or variables. Published-artifact
+smoke, positive macOS signing/notarization/quarantine qualification, the actual
+deployment inventory, writer quiescence, identity mapping, cutover/rollback
+rehearsal, the 14-day dogfood window and M7 remain open and unstarted.
