@@ -114,7 +114,10 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
                 .await
                 .unwrap();
         assert!(!exists);
-        assert!(!temp.path().join("external-data").exists());
+        // External mode never creates a managed cluster; it does create the
+        // OKF knowledge corpus under the data directory.
+        assert!(!temp.path().join("external-data/postgres").exists());
+        assert!(temp.path().join("external-data/knowledge-policy/runtime.json").exists());
         // Concurrent explicit provisioning must converge on the same roles and
         // schema. Re-running must preserve database/knowledge identities.
         let (first, second) = tokio::join!(
@@ -355,8 +358,10 @@ async fn pinned_offline_package_runs_migrations_and_refuses_modified_installatio
             ygg::knowledge::identity::IdentityRegistry::open(&policy_path, false).unwrap(),
             "portable-move-user".into(),
         ).unwrap().create_note(None, "retained across deployment move".into(), None, chrono::Utc::now()).unwrap();
-        sqlx::query("UPDATE knowledge_storage SET backend='fenced', generation=generation+1, corpus_id=$1").bind(corpus).execute(&pool).await.unwrap();
-        sqlx::query("UPDATE knowledge_storage SET backend='okf', generation=generation+1").execute(&pool).await.unwrap();
+        // `ygg init` may already have bound this database to its bootstrap
+        // corpus; an active corpus can only change through the fenced phase.
+        sqlx::query("UPDATE knowledge_storage SET backend='fenced', generation=generation+1, corpus_id=COALESCE(corpus_id,$1)").bind(corpus).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE knowledge_storage SET backend='okf', generation=generation+1, corpus_id=$1").bind(corpus).execute(&pool).await.unwrap();
         let (source_database, source_generation): (uuid::Uuid, i64) = sqlx::query_as("SELECT database_id, generation FROM knowledge_storage").fetch_one(&pool).await.unwrap();
         let binding = ygg::knowledge::runtime::Binding {
             version: 1, minimum_client: ygg::knowledge::guard::CLIENT_PROTOCOL,
@@ -775,7 +780,8 @@ async fn real_init_installs_offline_converges_and_reuses_cluster_without_archive
             String::from_utf8_lossy(&backup.stderr)
         );
         let manifest = ygg::db::deployment_backup::verify(&backup_path).unwrap();
-        assert!(manifest.knowledge.is_none());
+        // `ygg init` bootstraps the OKF corpus, so combined backups carry it.
+        assert!(manifest.knowledge.is_some());
         assert_eq!(cluster.status().await.unwrap(), status);
         supervisor::stop(&cluster, Duration::from_secs(15))
             .await
