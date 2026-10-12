@@ -443,3 +443,10 @@ marker is not `okf`, so an installation that never cut over keeps its data and
 must use a pre-M7 release to migrate. Opt-in native suites (`managed_supervisor`,
 which now exercises `knowledge init` on a fresh managed cluster) run in the
 native CI workflow for this head.
+
+At the M7 head `8d70c0b`, [standard CI 38213926103](https://github.com/ng/yggdrasil/actions/runs/38213926103)
+passed PostgreSQL 16 and 18 tests, check, clippy and rustfmt, and
+[native run 38213926106](https://github.com/ng/yggdrasil/actions/runs/38213926106)
+passed on Linux, Apple Silicon and Intel macOS, including the fresh managed-cluster
+`knowledge init` bootstrap, both bundle flavors, upgrade, major restore,
+disk-full and deployment-move suites.

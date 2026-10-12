@@ -5,7 +5,7 @@
 **Resumed 2026-10-11** via `/goal complete HANDOFF-PR122.md`. Operator decision
 the same day: **drop the macOS signing/notarization gate and the 14-day dogfood
 window** (single-operator deployment); cut over this machine now; then implement
-M7 immediately. All items below are done as of 2026-10-12.
+M7 immediately. All items below are done as of 2026-10-12; CI is green at `8d70c0b` (standard 38213926103, native 38213926106). PR #122 is ready to merge.
 
 ## Workspace
 
