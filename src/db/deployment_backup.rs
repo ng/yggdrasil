@@ -215,21 +215,6 @@ pub(crate) fn configuration_bytes(
     Snapshot::decode(&bytes)?;
     Ok(bytes)
 }
-pub(crate) fn read_configuration(
-    path: &Path,
-    manifest: &Manifest,
-) -> Result<Option<crate::config::snapshot::Snapshot>> {
-    manifest
-        .configuration
-        .as_ref()
-        .map(|expected| {
-            crate::config::snapshot::Snapshot::decode(&configuration_bytes(
-                &path.join("configuration.json"),
-                expected,
-            )?)
-        })
-        .transpose()
-}
 
 pub async fn create(
     config: &DeploymentConfig,

@@ -234,6 +234,11 @@ async fn real_cli_supervises_adopts_recovers_and_drains_without_restarting_after
         // explicit migrate selects the owner even before runtime DB exists.
         success(app(&data).arg("migrate")).await;
         success(app(&data).args(["migrate", "--check"])).await;
+        // Fresh installs bootstrap the OKF corpus without any legacy mapping.
+        let initialized = success(app(&data).args(["knowledge", "init", "--json"])).await;
+        assert!(initialized.contains("\"created\": true"), "{initialized}");
+        let again = success(app(&data).args(["knowledge", "init", "--json"])).await;
+        assert!(again.contains("\"created\": false"), "{again}");
         success(app(&data).args(["remember", "runtime CLI note", "--global"])).await;
         let notes = success(app(&data).args(["remember", "--list", "--global", "--json"])).await;
         assert!(notes.contains("runtime CLI note"));

@@ -146,10 +146,12 @@ impl Mappings {
             .map(|(legacy, _)| *legacy)
             .collect();
         ensure!(
-            candidates.len() == 1,
+            candidates.len() <= 1,
             "portable repository needs one explicit legacy mapping for this output"
         );
-        Ok(Some(candidates[0]))
+        // Repositories bound after cutover have no legacy row: the portable ID
+        // is the database identity.
+        Ok(Some(candidates.first().copied().unwrap_or(portable)))
     }
 }
 

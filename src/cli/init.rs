@@ -388,6 +388,23 @@ async fn init(
         if !skipping(&all_skips, "migrations") {
             ok("migrations", "applied");
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            head("knowledge");
+            let env: crate::config::database::Environment = std::env::vars().collect();
+            let pool = db::maintenance_pool(&deployment).await?;
+            let result = crate::knowledge::bootstrap::initialize(&deployment, &env, &pool).await;
+            pool.close().await;
+            let report = result?;
+            ok(
+                "knowledge",
+                if report.created {
+                    "initialized"
+                } else {
+                    "ready"
+                },
+            );
+        }
     }
 
     // ── hooks + status bar ──

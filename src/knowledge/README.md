@@ -1,8 +1,12 @@
 # OKF engine implementation
 
 The document, matching and local-store modules operate without a database
-connection. Command dispatch still uses legacy SQL until the guarded cutover is
-implemented. These primitives alone do not complete ADR 0019.
+connection. OKF is the only knowledge backend (ADR 0019, M7): `remember`,
+`learn`, `prime`, hooks and task-claim injection read and write the selected
+corpus, and the legacy `memories`/`learnings` tables no longer exist
+(`migrations/20261012000001_remove_legacy_knowledge.sql`). The SQL→OKF cutover,
+fleet and rollback tooling that performed the 2026-10-11 operator migration was
+removed with M7; its history is in the release ledger and in Git.
 
 `document` parses bounded OKF 0.2 Markdown/YAML, retains unknown metadata, and
 checks digest-bound Yggdrasil activation. `matching` preserves the legacy SQL
@@ -172,11 +176,10 @@ files: the listing is an inspection, not a transactional corpus snapshot.
 
 ## Remaining engine work
 
-The SQL-relative hook latency gate remains unfinished. Explicit browsing snapshots scan the Yggdrasil
-layout directly; rule/prime candidate lookup uses the disposable index below. Approval must still be revalidated immediately
-before injection; never treat a previously read document as current authority.
-Shared Git transport, migration and CLI integration build on this
-layer and remain separate release gates.
+Explicit browsing snapshots scan the Yggdrasil layout directly; rule/prime
+candidate lookup uses the disposable index below. Approval must still be
+revalidated immediately before injection; never treat a previously read
+document as current authority. Shared Git transport builds on this layer.
 
 ## Reproducible local read measurement
 
@@ -412,8 +415,9 @@ optimizing these remaining costs and integrating actual commands.
 
 ## Legacy model adapters
 
-`legacy` converts existing `Memory` / `Learning` models to OKF and back without a
-database connection. Import requires explicit database/corpus IDs plus source
+`legacy` converts the `Memory` / `Learning` JSON models to OKF and back without a
+database connection; the output adapters are the CLI's JSON contract and the import
+adapters remain for fixture round trips. Import requires explicit database/corpus IDs plus source
 repo-to-portable-repo and source-user-to-current-user mappings. An empty legacy
 user needs its own explicit mapping; unmapped scope or ownership never becomes
 global/current-user data. UUIDs, exact text, timestamps, nullable context/creator,
@@ -479,361 +483,6 @@ That integration and the cutover's fenced baseline manifest remain unfinished.
 The SQL tests use private schemas in the isolated test database and cover 20-client
 races, seed conflicts, corpus isolation, failed-update rollback and wide totals.
 
-## Compatibility guard and legacy write fence
-
-Migration `20261008000002_knowledge_storage_guard.sql` creates one database identity,
-monotonic storage generation, minimum client protocol and `sql`/`fenced`/`okf` phase.
-It starts in `sql` without changing the selected backend. Memory and learning
-repositories check protocol/phase inside a transaction and retain the shared
-advisory lease through the query and commit. The dashboard's direct learning count
-uses the same guard, separately from coordination counts.
-
-`fenced` permits compatible SQL reads but rejects knowledge writes; `okf` rejects
-legacy reads and writes through the compatibility guard. Statement triggers fence
-INSERT, UPDATE, DELETE and TRUNCATE on the old content tables, including ordinary
-older clients that do not call the guard. Phase changes acquire an exclusive lease
-before marker row locks and wait for existing operations. Row-locking marker reads
-reject stale repeatable-read snapshots after a committed transition. Marker changes
-require the next generation, stable database ID and nondecreasing protocol; direct
-SQL-to-OKF and OKF-to-SQL switches are rejected. Deletion/truncation of the marker
-is rejected. Guard functions use fixed qualified objects and a fixed search path;
-security-definer access permits read-only clients to lock/read the marker without
-granting them permission to update it.
-
-This is a compatibility foundation, not a ready-to-run cutover. SQL remains the
-default; an explicitly selected local binding routes knowledge to OKF. Switching
-only the database marker cannot publish that binding. Guarded repository calls
-discover the current generation; `guard::legacy_transaction` also accepts an
-expected generation. Export/publication and owner-only reverse-apply primitives
-exist, but fleet compatibility inventory, complete backup/parity evidence and
-coordinated configuration/generation publication still need the cutover workflow.
-Never manually switch the marker as a substitute for those steps.
-
-`ygg knowledge clients [--json]` reports the current database's live client
-connections, excluding its own inspector. Application pools register each physical
-connection after migration `20261009000003_knowledge_clients.sql`; the server
-binds protocol, binary version and process UUID to its own PID and authenticated
-role. Audit joins the declared backend start time to the actual server lifetime.
-Missing registrations and protocols below the marker's minimum are blockers and
-produce a nonzero command exit, with JSON observations still printed. Connections
-opened before this migration remain unregistered until restarted. Runtime roles
-have function execution permission, not direct registry write permission. Each
-registration removes rows for ended connections and stale reuse of its own PID.
-
-The audit requires READ COMMITTED so a reused snapshot cannot hide a generation
-change. The CLI uses a dedicated read-only operator transaction, never application pool
-registration or managed startup. External deployments use `YGG_DATABASE_OWNER_URL`
-when configured, validate that it names the runtime endpoint, and require registry
-SELECT permission plus `pg_read_all_stats` or superuser visibility. Managed mode
-uses its existing private cluster's bootstrap connection only for this read-only
-inspection. Insufficient statistics visibility fails; hidden sessions are not
-silently omitted. Reports omit query text, network addresses and arbitrary
-application names.
-
-Registrations are client compatibility declarations, not signed executable
-attestations. A clean live report does not account for disconnected/offline hosts,
-external editors, clients that connect later or transaction-pool backend reuse.
-Verify session affinity and the complete participating-host inventory separately,
-then recheck under the migration lease before transition. Registration is
-independent of that lease so coordination connections remain available during
-knowledge cutover (forward migration `20261009000004`). The lease stabilizes the
-knowledge phase; it does not prevent new client connections. Connection admission
-and the complete host inventory need separate operator verification. Offline
-local-fence evidence and full fleet cutover orchestration remain required.
-
-Unaware older binaries can still SELECT frozen legacy tables: upgrade or retire
-them before cutover, as required by the plan. These triggers also do not constrain
-an administrator who disables triggers or changes table/function ownership. The
-old-client tests cover ordinary SQL writes, including stale transaction snapshots;
-they do not prove fleet upgrade, filesystem publication or lossless rollback.
-
-## Migration dry run
-
-`ygg knowledge migrate --dry-run --json` inventories all SQL notes and learnings
-from one repeatable-read snapshot under the compatibility guard. It reports the
-source database identity/generation/phase, source owners and repositories, row
-fingerprints, proposed paths/document digests and unresolved issues. It reads all
-row fields but reports fingerprints rather than copying private text into the
-report. No bundle is created, counters seeded or storage marker changed.
-
-Migration requires `SHOW server_encoding` to return `UTF8`. A UTF-8 client
-connection alone is insufficient: SQL_ASCII treats the UTF-8 bytes of a character
-as separate characters for `LIKE '_'`, changing rule scope after conversion.
-Dry runs, exports, forward activation and reverse import reject other server
-encodings with an explicit diagnostic before changing knowledge state. The SQL
-guards also reject activation and fenced reverse writes on incompatible databases.
-Ordinary legacy SQL access and pre-activation abort remain available; no automatic
-encoding conversion occurs. Managed clusters are initialized with UTF-8. Encoding
-preservation and admission across deployment backup/restore/move remain a separate
-qualification requirement.
-
-Supply `--mapping-file /absolute/path/mapping.json` to verify conversions. The
-JSON object has exactly these fields:
-
-```json
-{
-  "database_id": "SOURCE-DATABASE-UUID-FROM-REPORT",
-  "corpus_id": "EXPLICIT-TARGET-CORPUS-UUID",
-  "repos": {"LEGACY-REPO-UUID": "PORTABLE-REPO-UUID"},
-  "users": {"": "EXPLICIT-OWNER-FOR-EMPTY-LEGACY-IDS", "alice": "alice"}
-}
-```
-
-Replace the placeholder UUIDs with actual IDs. The mapping file is bounded to
-1 MiB; duplicate source keys and unknown fields are rejected. Database identity
-must match the selected source; an already fenced source must also match the
-target corpus. Unmapped owners/repositories, unsupported SQL fields, cross-table
-UUID collisions, parser limits or failed field-by-field round trips make the
-report unresolved. UUIDs, nullable fields, pending/approval state, arbitrary JSONB
-tags and usage totals are checked via the same legacy adapters.
-
-JSON output remains on stdout even when row verification fails; exit status is
-nonzero for unresolved reports. Choose `--dry-run` for assessment or an explicit
-`--plan` and `--journal` for execution. `rows_verified: true` only proves this snapshot's rows passed
-conversion; it does not establish fleet upgrade, frozen writes, backups, semantic
-scope-fixture parity, filesystem publication or rollback readiness. A later fenced
-export must reread and validate its own manifest rather than trusting this report.
-The CLI tests create/drop their own database in the disposable PostgreSQL cluster
-and verify that neither the knowledge directory nor storage mode is changed.
-
-## Fenced export staging
-
-`export::stage` prepares a separate private directory from an already fenced SQL
-source. It first verifies the complete inventory and every adapter round trip,
-then durably records `.export-plan.json` before writing documents. The immutable
-plan binds database identity, generation, target corpus, full explicit mappings,
-source/document digests, document keys and separate usage baselines. Artifacts are
-bounded to 64 MiB; exceeding that limit is an error before staging begins.
-
-A second guarded snapshot must match the planned generation, phase, row set and
-each source/document/usage record. Missing staged documents are written through
-the conditional durable store; matching files are retained and independently
-changed files are never overwritten. An OS export lock serializes cooperating
-exporters. A new or empty private directory can start an export; unrelated existing
-contents without a matching intent are rejected. Leftover store temporary files
-from an interrupted initial control-file write do not prevent resumption.
-
-After rereading the staged inventory and all document digests, the exporter writes
-`.export-complete.json` bound to the plan digest. `export::verify` checks the current
-files, unique UUIDs, keys, saved mapping identities and usage identities each time;
-receipt presence alone cannot validate an edited stage. A repeated identical
-export is idempotent. Different source generations or manifests cannot reuse a
-stage, even when the document bodies happen to match. Partial stages retain their
-intent and existing data for resumption or explicit operator inspection.
-
-`export::publish` revalidates every current SQL source row, document digest and
-usage baseline against the completed manifest in one repeatable-read transaction.
-It requires the same fenced database, generation and corpus, and retains that
-transaction's shared generation lease through publication. A one-connection pool
-works because inventory and publication use the same transaction.
-
-Publication captures a retained exact-byte recovery archive. Its complete file
-inventory must contain only manifest-listed documents and the exact plan/receipt;
-unlisted files are rejected. Validation never opens mutable document readers or
-creates lock files inside the immutable archive. The existing descriptor-anchored
-restore path then copies, syncs and exclusively publishes the complete bundle into
-an absent destination. Retries verify the retained archive and exact existing
-destination; independently edited bytes are never replaced. A final database query
-and transaction completion are required before acknowledgment. If that connection
-fails, the unselected published directory and archive remain for inspection.
-
-These are library operations pending the validated cutover command; the public
-migration CLI still requires `--dry-run`. Publication does not select OKF, seed
-telemetry, alter the SQL phase or configure trust. Fleet upgrade, source database
-backup, scope-fixture parity, local generation/configuration activation and reverse
-import remain required. Tests cover a one-connection pool, archive-only resumption,
-unlisted files, independent target edits, incomplete archives and changed source
-generations. They do not substitute for full killed-process migration, coordinated
-configuration publication or rollback release gates.
-
-## Transactional forward activation
-
-`forward::activate_on` performs the database half of cutover on the coordinator's
-existing READ COMMITTED transaction. The migration owner takes an exclusive
-generation lease, rejects unregistered/outdated live clients, checks the source
-column inventory even for empty tables, and revalidates every manifest row,
-document digest and usage baseline. It seeds imported telemetry without changing
-observed applications, advances the fenced marker to the next OKF generation,
-and inserts an immutable receipt bound to the operation UUID and manifest digest.
-The receipt and all database changes commit together. A savepoint removes partial
-seeding even if the caller commits its outer transaction after a validation error.
-
-After an uncertain commit, the same operation/manifest returns
-`PreviouslyActivated` only when the receipt, selected generation, complete frozen
-source and imported baselines still match. Retry does not reseed missing or changed
-baselines, reset post-cutover observations, or reactivate a later fenced generation.
-Source-table locks allow a queued legacy writer to finish waiting on the generation
-fence and fail, without inverting advisory/table lock order.
-
-This is a library transaction step, not an operator cutover command. Its caller
-must persist the operation ID before sending SQL, validate retained publication
-and backup evidence, and retain filesystem/selection leases through commit.
-The live audit is neither a full participating-host census nor an admission
-barrier. Durable workflow resumption, offline-host quiescence, schema/constraint
-parity beyond column names, local binding/trust publication and complete forward/
-reverse rehearsals remain required before enabling the migration CLI.
-
-## Durable private-host forward completion
-
-`cutover::PrivateJournal` connects retained publication evidence, transactional SQL
-activation and atomic host-local binding publication. Preparation requires a
-published private export, paired corpus/policy archives and an explicitly prepared
-fenced `runtime.json` with validated corpus/repository identities. It retains the
-exact original/selected binding bytes, canonical paths, root identities, revisions,
-manifest and operation UUID in a synced journal before any database activation.
-Identical preparation reuses the UUID; preparation never waits for a busy journal
-while holding source leases. Journal relocation and conflicting evidence fail.
-
-Activation drains the local selection lease and reacquires the paired source
-leases before calling `forward::activate_on`. It rechecks evidence before commit.
-After commit it acquires a shared lease on the selected SQL generation before
-publishing the saved binding; a transition during that gap leaves local access
-fenced. Binding publication retains both filesystem writer leases and revalidates
-the complete inventories with only the intended selection change permitted.
-An uncertain SQL commit or interrupted local publication resumes the same journal.
-The journal operation UUID names the publication temporary before it is created.
-A partial temporary, including incomplete UTF-8, is recoverable only when it is a
-byte prefix of the exact intended binding and every other source file still
-matches its archive. A conflicting temporary or unrelated edit remains untouched;
-recovery never ignores arbitrary temporary files.
-
-If the exact selected binding already exists, recovery requires the matching SQL
-receipt and generation. It does not restore or compare current OKF documents to
-the frozen export: legitimate edits made after activation remain authoritative.
-Local selected bytes without a SQL receipt cannot authorize activation. The
-returned outcome describes the SQL step; `PreviouslyActivated` can also accompany
-successful completion of a previously interrupted local publication.
-
-This is one host's private-corpus completion path, not the fleet migration CLI.
-The caller still must capture/validate source-database backup evidence, fence SQL,
-verify full schema/scope parity, prepare identity/trust explicitly and coordinate
-all hosts and external editors. Shared transport is rejected by preparation;
-shared publication, remote admission/quiescence, reverse backend activation and
-complete process-kill rehearsals remain orchestration work. Tests reconstruct the
-committed-SQL/fenced-local crash boundary, resume through the receipt, make an
-actual offline `remember` write and verify later retries preserve its bytes.
-
-## Reverse-import candidate validation
-
-`reverse::build` constructs SQL row candidates from the **current** complete corpus
-snapshot, not from the frozen export. It compares UUIDs against the saved export to
-list deletions, accepts new documents, preserves current text and matching scope,
-and requires explicit current usage for every rule. Totals below the recorded
-migration baseline, missing usage, duplicate UUIDs, changed document kinds and
-snapshot diagnostics block the candidate. No missing counter becomes zero.
-
-The strict reverse adapters convert each row back into an OKF document and compare
-its modeled content. Exact body, nullable fields, owner, scope, source, state and
-approval actor/time must survive. They normalize the generated legacy provenance,
-original repository hint and activation representation; current scope still needs
-an unambiguous saved identity mapping. Manual creation evidence is retained in SQL
-approval columns instead of being omitted as in the display-only JSON adapter.
-Unknown document/profile/provenance/approval metadata, unsupported note fields and
-invalid active approvals block rollback rather than disappearing or being silently
-downgraded. Current edits must be reviewed or explicitly pending before reversal.
-
-A candidate records current document revisions and the original export digest.
-It is not an authorization or an applied rollback. The migration workflow must
-capture authoritative current usage, retain the exact current bundle as recovery
-evidence, quiesce writers, revalidate revisions under its leases, use the restricted
-SQL migration bypass, validate restored rows and then publish the storage/config
-transition. The complete orchestration and rollback rehearsal remain open.
-
-`reverse::capture_on` builds a candidate using committed database usage in the
-caller's READ COMMITTED transaction. It verifies the expected fenced generation,
-holds the exclusive migration lease and a SHARE lock on the usage table through
-transaction completion, and verifies each imported baseline against the export.
-Missing or conflicting imported baselines block capture. A new rule with no usage
-row receives zero only after the table lock proves that absence; unexpected
-imported baselines on new rules and totals outside the legacy integer range fail.
-It never reads the local usage cache. Keep the same transaction for `apply_on`;
-the caller still owns filesystem quiescence, recovery evidence and activation.
-These totals reflect recorded deliveries only: offline deliveries were not queued
-and cannot be reconstructed during rollback.
-
-`KnowledgeStore::backup_pair_retained` captures the corpus and separate policy
-while retaining both writer/export leases (and shared transport leases when
-present). The returned `PairedBackup` rechecks both complete source inventories
-against the retained evidence without reacquiring locks. Destinations must be
-outside both sources and separate from one another. Dropping the guard releases
-the leases. Independent editors still require explicit quiescence.
-`reverse::capture_recovery_on` parses the guarded private corpus, captures database
-usage and rechecks both inventories before returning the candidate. Hold the
-selection lease before capture and retain the backup guard through apply/commit.
-Shared cache roots are rejected by the private helper. Shared rollback uses
-`SharedGit::recovery_snapshot` and `reverse::capture_shared_recovery_on`: refresh
-before capturing the transport/policy backup, then retain its leases while reading
-the saved confirmed Git objects. Recovery checks the root identity, requires no
-pending draft, rejects blocked/superseded local state and verifies the exact branch
-tip with a live read-only remote request. It never fetches into the saved object
-store or falls back during remote failure. Parsing uses the ordinary shared-read
-inventory over the exact commit blobs; disposable views are not recovery evidence.
-The shared candidate includes its commit ID. Recheck `verify_recovery` before
-committing SQL and keep all remote writers quiesced: a local lease and repeated
-remote checks cannot prevent another host from publishing after the check.
-Neither helper publishes configuration or handles an uncertain database commit;
-those remain orchestrator responsibilities.
-
-`reverse::apply_on` and the owner-only `ygg_knowledge_reverse_import` function
-provide the SQL apply layer. The function takes an exclusive generation lease,
-requires the exact database/corpus/fenced generation and supported protocol,
-validates complete row schemas and types, deletes absent UUIDs, upserts current
-rows and compares the complete resulting tables with normalized typed input.
-JSONB `null` tags remain JSONB values rather than becoming SQL NULL. Unknown
-columns/fields, duplicate UUIDs, constraint violations and timestamp precision
-beyond PostgreSQL's microseconds fail atomically. The strict candidate adapters
-also reject excess timestamp precision before SQL apply. This is a representability
-check; it does not silently round existing document timestamps. New CLI note/rule
-creation and approval timestamps use microsecond precision so ordinary new records
-remain representable during rollback.
-
-The bypass is transaction-local and requires an authenticated migration-owner
-session; setting its flag as a runtime user cannot open the fence. Function EXECUTE
-is revoked from PUBLIC and an explicit owner check still rejects runtime users if
-EXECUTE is accidentally granted. Catalog references are qualified and function
-search paths put temporary objects last; a runtime-owned temporary `pg_class` cannot
-forge ownership. Successful calls restore the prior flag and leave
-the storage marker fenced. Caller rollback undoes all row changes. This layer does
-not capture source evidence or activate SQL, and must be enclosed by the complete
-quiesced rollback workflow. Tests use disposable databases and distinct runtime
-credentials to verify privilege boundaries, exact row results and failure rollback.
-
-`reverse::apply_once_on` adds an operation receipt to that same SQL transaction.
-The migration workflow must durably save the operation UUID, candidate and
-`RecoveryEvidence` before sending it. Evidence binds the candidate digest, exact
-corpus/policy backup revisions and optional shared commit. The owner-only function
-holds the exclusive migration lease, requires READ COMMITTED and the exact fenced
-generation, and hashes the complete request and restored rows. A retry waits for
-any earlier transaction to finish; an identical committed operation returns
-`PreviouslyApplied` after verifying row hashes, without repeating the import.
-Conflicting operation IDs or changed restored rows fail. Rolling back removes
-both row changes and receipt. Receipts cannot be updated, deleted or truncated;
-runtime credentials cannot insert them even with an accidental table grant.
-The returned outcome remains provisional until commit. Receipts prove the SQL
-apply, not filesystem quiescence, schema parity or configuration activation; the
-complete resume/activation workflow remains required.
-
-`rollback::Journal::prepare` durably saves the operation UUID, complete candidate,
-original export, fenced generation, recovery revisions and exact source directory
-identities before SQL application. Identical preparation reuses the UUID; a
-different request cannot overwrite it. Journal and archives must remain separate
-from both source directories. Preparation refuses a busy journal without waiting
-while holding source leases. Resume holds the journal lease, reacquires local
-selection and source leases, verifies retained archives and current source bytes,
-recaptures authoritative usage and shared Git evidence, and applies the saved
-operation. A missing local apply record after SQL commit is safe to retry: the
-database receipt verifies the existing rows without importing them again.
-
-`ygg knowledge rollback-status JOURNAL --json` inspects this saved intent offline.
-Its `local_apply_recorded` field is only a local hint; resume must verify the
-database receipt and current rows. Changed sources, archives, directory identities
-or journal bytes fail without replacing recovery evidence. Quiesce external
-editors and remote hosts before preparation/resume. This component requires the
-exact fenced SQL generation, preserves local selection, and does not activate a
-backend or certify fleet compatibility. The private rollback command below adds
-source backup/schema checks, final SQL activation and local deselection. Shared
-and fleet orchestration remain pending.
-
 ## Corpus backup component
 
 `KnowledgeStore::backup` creates an immutable snapshot directory containing
@@ -892,50 +541,42 @@ separate registry's identity/trust, reject tampering, and keep reading the held 
 
 ### Local command selection
 
-`remember` now has an offline OKF adapter using the same note JSON contract.
+`remember` uses an offline OKF adapter with the same note JSON contract.
 Knowledge paths resolve independently of database validity, with the same profile,
-user configuration and environment precedence as deployment commands. Existing
-installations without a policy `runtime.json` continue using guarded SQL.
+user configuration and environment precedence as deployment commands.
 
-A selected context requires a versioned OKF binding with a positive storage
-generation, supported minimum client protocol, canonical bundle path, corpus
-UUID, explicit source user/repository mappings and optional agent-name mappings.
-Repository bindings must agree with the identity registry. Each command holds a
-shared `.selection.lock` lease in the policy directory. Cutover/rollback
-publication takes its exclusive lease while changing selection.
-Malformed, fenced, unsupported or mismatched bindings fail without SQL fallback.
-The selection lease is disposable and excluded from corpus/policy backups.
+A selected context requires a versioned OKF binding (`runtime.json` in the policy
+directory) with a positive storage generation, supported minimum client protocol,
+canonical bundle path, corpus UUID, optional legacy user/repository mappings and
+optional agent-name mappings. Repository bindings must agree with the identity
+registry. Each command holds a shared `.selection.lock` lease in the policy
+directory. Malformed, fenced, unsupported or mismatched bindings fail; an absent
+binding means knowledge is uninitialized and every knowledge command reports
+`run ygg init`. There is no SQL fallback. The selection lease is disposable and
+excluded from corpus/policy backups.
 
-`ygg knowledge fence-local --expected-generation GENERATION [--json]` drains
-compatible commands using this policy directory and durably fences their selected
-OKF generation without a database connection. It saves the exact original and
-fenced bindings, operation UUID and source directory identities in
-`local-fence-GENERATION.json` before publishing the fence. A retry resumes the same
-operation only when the selection is exactly the saved original or fenced bytes;
-conflicting edits and replaced directories fail without overwriting them. This
-leaves the generation unchanged: it is the last selected OKF generation, not proof
-of a PostgreSQL transition. Take policy recovery backups after local fencing;
-rollback preparation rejects a live or mismatched local selection. The command
-does not stop external editors or other hosts, and does not provide an unfence
-shortcut. Activation still requires the complete validated migration workflow.
+`ygg init` (and `ygg knowledge init [--json]`) mint the selection for a fresh
+installation: they create the private corpus and policy directories, initialize
+`identity.json` with a new trusted corpus, advance the database's
+`knowledge_storage` marker from `sql` through `fenced` to `okf` bound to that
+corpus (migration-owner rights), and write `runtime.json` with no legacy
+mappings and the current user mapped to itself. Re-running verifies the existing
+selection and changes nothing. A database already bound to another corpus is
+refused: restore that corpus's backup instead.
 
-This checkpoint does **not** expose a command for minting a selection or enable
-OKF by default. The validated migration/cutover publisher remains required;
-hand-writing `runtime.json` is not a supported migration. Tests construct bindings
-only in disposable fixtures. The binding is local authority during database
-outages, not a fleet-wide revocation mechanism. Fleet quiescence and generation
-publication remain migration requirements, and deployment moves must explicitly
-rebind its canonical bundle path before enabling the target.
+The runtime user (`YGG_USER`, else `whoami`) is its own portable identity unless
+the binding maps it explicitly. A checkout that resolves to no repository binding
+is bound on first use (worktrees and clones of a bound repository share its ID; a
+changed origin or contradictory URL/path still requires explicit repair). Notes and
+rules written in a repository without a legacy mapping report the portable
+repository UUID as `repo_id`; connected task claims accept a task whose database
+`repo_id` is that portable ID. An unmapped/non-Git cwd is never silently promoted
+to global scope; use `--global` deliberately.
 
 Offline note creation preserves UUID/provenance fields and uses explicit agent
 bindings without querying PostgreSQL; unknown agents retain null provenance.
-Repo-scoped commands require a mapped Git identity, including shared worktree
-identity. An unmapped/non-Git cwd is never silently promoted to global scope;
-use `--global` deliberately. New repo notes require an unambiguous legacy output
-mapping before writing. Listing retains the `count`/`results` JSON envelope,
-reports malformed-document diagnostics separately, and performs no telemetry or
-database access. `prime`, hooks and UI dispatch still require integration.
-
+Listing retains the `count`/`results` JSON envelope, reports malformed-document
+diagnostics separately, and performs no telemetry or database access.
 
 ### Offline learning commands
 
@@ -1159,95 +800,3 @@ confirmed bytes for offline browsing. Deployment restore rebases the runtime's
 canonical bundle path with retained evidence; shared/fleet move qualification
 remains open. Automatic Git/cache
 retention cleanup and a supported cutover/configuration publisher remain unfinished.
-
-
-## Private single-host migration command
-
-`ygg knowledge migrate --plan /absolute/plan.json --journal /absolute/operation`
-executes or resumes a private migration. External PostgreSQL also requires
-`--pg-bin /absolute/compatible-postgres/bin` when creating the initial backup.
-`--json` prints the resulting operation ID, source/corpus IDs, generation, state
-and retained journal path. Missing mode arguments remain an error.
-
-The version-1 plan contains `transport: "private"`, `source_generation`, the
-`mappings` object shown above, explicit `identities` (the identity.json format),
-`agents` (agent names to UUIDs), `execution_host`,
-`all_participating_hosts_listed: true`, and one `hosts` entry. That entry contains
-`name`, `protocol: 1`, and explicit true declarations for
-`knowledge_writers_stopped`, `external_editors_stopped`, `schema_changes_stopped`,
-and `session_preserving_endpoint`. These are operator assertions about the whole
-deployment, including offline clients; live session inspection cannot prove them.
-The command rejects shared transports and multiple hosts. It does not discover
-participants, stop writers, configure admission rules, or infer identity/trust.
-
-Before fencing, the command checks ownership, the compatible SQL generation,
-installed legacy write/marker guards, live registered clients and complete row
-conversion. It captures a consistent PostgreSQL dump plus existing configured
-knowledge/policy files, seals the backup manifest digest, and compares recorded
-schema, legacy knowledge rows and migration checksums at cutover. The schema
-comparison uses backup catalog evidence; it does not certify arbitrary external
-DDL or replace the schema-quiescence declaration. An immutable SQL event records
-which operation owns the fence. The command then exports/publishes the frozen
-rows, installs the exact explicit policy and fenced binding, retains a paired
-recovery archive, and completes the private activation journal. Existing target
-files must match the export exactly; independently edited files are never replaced.
-
-Retry with the same plan, paths and journal. Completed SQL activation uses its
-receipt and frozen source evidence without restoring old OKF documents, preserving
-acknowledged post-cutover edits. Interrupted paired captures verify every retained
-archive and create only missing archives. The native regression test kills the
-actual CLI while blocked at local selection after fencing/publication, then
-resumes it using the original dump. This is one tested interruption boundary,
-not exhaustive power-loss or disk-full qualification.
-
-`--abort` supports only this operation's original pre-activation fence. It checks
-retained source evidence, records the next SQL generation, and clears only its
-exact prepared fenced binding while holding local selection and database leases.
-Retry after an acknowledged abort preserves later SQL writes. All backup, stage,
-unselected export and policy evidence remains for inspection. Once OKF is active,
-abort is refused: rollback must import the current bundle, including later edits
-and deletions. The private rollback command below completes reverse import and
-local activation. Shared/fleet execution, rollout and release gates remain unfinished.
-
-## Private current-bundle rollback command
-
-`ygg knowledge rollback --plan /absolute/rollback.json --journal /absolute/recovery`
-restores the current private OKF corpus to SQL. Use `--pg-bin` for an external
-source backup and `--json` for the operation report. The journal must be separate
-from the corpus, policy, and original export. The version-1 plan contains
-`transport: "private"`, `source_generation` (the currently selected OKF generation),
-`original_export` (the original retained staging export, for example the forward
-journal's `stage` directory), `execution_host`,
-`all_participating_hosts_listed: true`, and the same single-host maintenance
-assertions used by the forward plan. It uses the saved original mappings and
-requires the current local binding to match them. It does not infer identities,
-stop hosts/editors, or certify fleet admission.
-
-The operation saves its request before changes and captures a consistent database
-plus current corpus/policy backup. Before permanently fencing either store, it
-holds the source leases and validates current document conversion, committed usage,
-SQL field types and constraints inside a transaction that is rolled back. Unknown
-metadata, unsupported SQL columns and unrepresentable values leave OKF selected.
-The retained backup is not overwritten; after correcting source files, prepare a
-fresh journal to capture the corrected state.
-
-After successful preflight, the command drains/fences local OKF operations,
-records ownership of the next SQL fence, retains a fresh paired recovery archive,
-and saves the complete reverse candidate. The current documents determine edits,
-deletions, new rows, approvals and pending state; the old frozen SQL rows never
-serve as the rollback payload. Reverse import, its immutable receipt, final SQL
-generation and activation event commit together. Local deselection then occurs
-under the local selection lease and a renewed SQL generation lease. Until that
-unlink, the local CLI remains fenced.
-
-Retry with the same plan and journal. A committed activation event proves which
-operation selected SQL; retry finishes deselection without replaying the saved
-candidate over later SQL writes. A later generation or changed selection refuses
-recovery. All source dumps, original exports, current corpus/policy archives and
-journals remain retained. The opt-in native fixture kills the actual CLI after
-SQL activation commits while its renewal lease is blocked, then verifies that
-resumption preserves a SQL edit accepted in the gap and creates no second import
-receipt. Round-trip fixtures also cover current note edits/deletions, approval
-changes, pending rules and imported usage totals. These private single-host
-checks do not replace shared/fleet recovery, representative scope-result parity,
-full deployment-move rehearsal, disk-full qualification or the 14-day dogfood gate.

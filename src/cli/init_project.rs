@@ -127,8 +127,8 @@ ygg logs --follow                           # Live event stream
 - **For recurring engineering corrections** → `ygg learn add` with a file
   glob. Learnings re-fire deterministically when an agent touches a
   matching file — use for "every time someone edits X, also check Y"
-  rules. Retrieval is SQL predicates on (repo, file_glob, rule_id), not
-  similarity.
+  rules. Retrieval is deterministic predicates on (repo, file_glob,
+  rule_id) over the OKF corpus, not similarity.
 
 ## Session Completion
 

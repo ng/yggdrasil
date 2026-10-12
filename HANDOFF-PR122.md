@@ -5,7 +5,7 @@
 **Resumed 2026-10-11** via `/goal complete HANDOFF-PR122.md`. Operator decision
 the same day: **drop the macOS signing/notarization gate and the 14-day dogfood
 window** (single-operator deployment); cut over this machine now; then implement
-M7 immediately. Items 1–6 below are done; M7 (item 7) is in progress.
+M7 immediately. All items below are done as of 2026-10-12.
 
 ## Workspace
 
@@ -17,7 +17,7 @@ M7 immediately. Items 1–6 below are done; M7 (item 7) is in progress.
 - Agent: `YGG_AGENT_NAME=embedded-pg-okf-plan`
 - Detailed local handoff: `/tmp/ygg-pr122-current-handoff.txt`
 - Release ledger: `docs/managed-postgres-okf-status.md`
-- Tracking task: `yggdrasil-5`, not closed.
+- Tracking task: `yggdrasil-5` (closed with M7); follow-up `yggdrasil-7` largely moot after machinery removal.
 
 Read `CLAUDE.md` and `AGENTS.md`; use Yggdrasil coordination and locks. Preserve
 unrelated changes and worktrees. Revalidate current local and remote state before
@@ -96,8 +96,10 @@ Raw committed measurements:
    rollback rehearsal (generation 5). Details in the ledger's "Operator cutover".
    Backups: `~/.local/share/ygg-backups/2026-10-11-{pre,post}-okf`.
 6. **Dropped** (operator decision): no 14-day window.
-7. **In progress:** M7 forward removal migration for `memories`/`learnings`,
-   SQL knowledge repository removal, OKF-by-default initialization, docs.
+7. **Done 2026-10-12.** M7: removal migration, SQL repository and cutover
+   machinery removal, `ygg init`/`ygg knowledge init` bootstrap, auto-binding,
+   docs; full suite 571 passed / 0 failed; applied to this machine; backup
+   restore rehearsal passed. See ledger "M7 verification".
 
 ## Missing inputs
 

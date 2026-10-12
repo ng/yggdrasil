@@ -19,12 +19,12 @@ to repository evidence and explicitly identifies missing implementation or proof
 | --- | --- | --- |
 | M0: contracts | ADR 0019; `tests/database_config.rs`, `knowledge_contracts.rs`, `okf_documents.rs`, and `fixtures/knowledge/`; pinned OKF specification and deterministic profile/digest fixtures. | Keep contracts and operator examples aligned with subsequent changes. |
 | M1: managed runtime | `src/db/runtime.rs`, `supervisor.rs`, `package.rs`; native installer/lifecycle fixtures, 20-process startup race, surviving-server adoption, killed bootstrap recovery and committed-row preservation. Native candidate bundles pass on three platforms; clean Ubuntu 24.04 runtime qualification is recorded below. | Public released-artifact qualification and macOS quarantine/signing path. |
-| M2: integration | `src/config/database.rs`, `src/db.rs`, init and `db` commands; common connection resolver, existing URL preservation, no fallback on external failure, no hook download/init/upgrade. | Clean-machine operator qualification using the final released artifacts. Default knowledge rollout remains M7. |
+| M2: integration | `src/config/database.rs`, `src/db.rs`, init and `db` commands; common connection resolver, existing URL preservation, no fallback on external failure, no hook download/init/upgrade. | Clean-machine operator qualification using the final released artifacts. Default knowledge rollout landed with M7 (`ygg init` creates the OKF corpus). |
 | M3: hosted/lifecycle | PG16/18 CI; runtime/owner role separation; wrong-CA/hostname rejection; pooling/singleton-loss diagnostics; combined backup/restore/switch preserving database/knowledge IDs and task claims. Patch 16.14→16.15 and major 16→18 native recovery fixtures pass on all three platforms at `9ad3fd7`. Both external↔managed move directions pass locally and on all three native platforms at `6d49d51`. | Published-artifact and actual deployment/credential recovery evidence remain distinct from local fixture results. |
 | M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation, offline fixtures and real-disk-full tests on all three native platforms. | Two uninstrumented local repeats at `ba7aff6` pass the SQL-relative latency threshold (−61.51 ms and 4.86 ms added p95); the stricter SQL→OKF→SQL fixture passes twice at 17.61 ms and 16.01 ms worst added p95, meeting the local measured target. Historical variance, including the prior 108.57 ms failure, remains documented; these runs do not establish a universal latency bound. See `docs/performance/okf-latency-investigation.md`. Broader filesystem fault qualification remains open. |
 | M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures; bounded complete-snapshot publication with exact remote-base checks. | Shared remote credential/provider and resource/latency qualification; deployed shared cutover and rollback rehearsal. Component fixtures do not prove a deployed fleet. |
 | M6: cutover/dogfood | Database generation/write guards, client registration and lossless export; private and public fleet forward/abort/current-state rollback commands, immutable journals, backup evidence, apply-once receipts, reverse cancellation and descendant reconciliation. All 23 native migration tests pass, including three real two-host CLI flows. | Establish compatibility and writer quiescence for the actual deployment, perform its inventory and rollback rehearsal, then record the required dogfood window. Fixture declarations alone do not demonstrate a deployed fleet. |
-| M7: removal/default rollout | Operator cutover and rollback rehearsal completed 2026-10-11 (see "Operator cutover"). | Forward removal migration, SQL repository removal, installer/default changes and final restore/coordination qualification. The original 14-day dogfood window was dropped by the operator on 2026-10-11 (single-operator deployment). |
+| M7: removal/default rollout | Operator cutover and rollback rehearsal completed 2026-10-11 (see "Operator cutover"). `migrations/20261012000001_remove_legacy_knowledge.sql` drops `memories`/`learnings`, their write fence and reverse-import functions (refusing while unexported rows exist). SQL knowledge repositories, the SQL fallback in `remember`/`learn`/`prime`/hooks/task claims, and the cutover/fleet/rollback machinery are removed. `ygg init` / `ygg knowledge init` mint the OKF selection and bind the marker; unmapped checkouts auto-bind; the runtime user is its own identity. | Final restore/coordination qualification is recorded under "M7 verification". The original 14-day dogfood window was dropped by the operator on 2026-10-11 (single-operator deployment). |
 
 ## Requirements and evidence boundaries
 
@@ -190,9 +190,9 @@ timeouts are not test failures or reasons to restart a running job.
    the passing local warm-hook benchmark; retain the documented variance limits.
 4. Done 2026-10-11: operator deployment cutover and current-data rollback
    rehearsal (see "Operator cutover").
-5. Implement M7's forward removal migration, remove the SQL knowledge repositories,
-   change installer/default behavior, and verify final restore and coordination.
-   The 14-day window is dropped (operator decision 2026-10-11).
+5. Done 2026-10-12: M7 removal migration, SQL repository removal, OKF-by-default
+   initialization (see "M7 verification"). The 14-day window is dropped
+   (operator decision 2026-10-11).
 
 Operational follow-ups already noted in the component guides include cache/session
 and archived-draft retention, Git-history resource bounds and broader refresh
@@ -368,10 +368,9 @@ terminal state on 2026-10-11; no run was cancelled or restarted. This qualifies
 the updated smoke script on the candidate platform matrix only.
 
 A repeat read-only inventory on 2026-10-11 again found zero Developer ID
-Application identities and no repository secrets or variables. Published-artifact
-smoke, positive macOS signing/notarization/quarantine qualification, the actual
-deployment inventory, writer quiescence, identity mapping, cutover/rollback
-rehearsal, the 14-day dogfood window and M7 remain open and unstarted.
+Application identities and no repository secrets or variables. At that point
+published-artifact smoke, the deployment cutover and M7 remained open; the
+operator cutover and M7 sections below record their completion.
 
 ## Operator cutover
 
@@ -417,3 +416,30 @@ The installation stays in external mode, which the plan permits for existing
 installations. Live hooks from other Claude sessions caused several transient
 "live clients block" refusals; each was retried or aborted without data loss.
 Plan, mapping and journal evidence: `~/.local/share/ygg-okf/`.
+
+## M7 verification
+
+M7 landed on 2026-10-12 (PR #122). Code: `migrations/20261012000001_remove_legacy_knowledge.sql`;
+`src/knowledge/bootstrap.rs` (`ygg knowledge init`, invoked by `ygg init`);
+`runtime.rs` identity-user fallback, first-use checkout binding and task-scope
+resolution for repositories registered after cutover; removal of
+`src/knowledge/{forward,inventory,source_backup,reverse,rollback,reverse_migration,migration,cutover,fence,fleet,recovery_event,export}`,
+the `knowledge fleet/migrate/rollback/rollback-status/fence-local` commands,
+`MemoryRepo`/`LearningRepo` and every SQL fallback (about 22,500 lines removed).
+
+| Check | Result |
+| --- | --- |
+| Full suite against disposable UTF-8/C PostgreSQL 18.3 (`cargo test --no-fail-fast -- --test-threads=1`) | 85 result groups, **571 passed, 0 failed, 25 opt-in ignored** |
+| `cargo check --all-targets`, `cargo fmt --check`, whitespace | clean; clippy reports nothing in M7 files (pre-existing TUI/run_cmd warnings remain) |
+| Fresh database: migrations from scratch | `memories`/`learnings` absent; marker starts `sql`; `ygg knowledge init` advances it to `okf` at generation 3 bound to the new corpus; second run reports `created: false` |
+| Fresh install, unmapped checkout | `remember`, `remember --list`, `learn create`, `learn list`, `prime` all work; `identity.json` gains one binding; JSON `repo_id` is the portable ID (`tests/okf_bootstrap.rs`) |
+| Task claim for a repository registered after cutover | rules injected via the registered checkout (`tests/okf_bootstrap.rs`) |
+| Uninitialized knowledge | every knowledge command fails with `run ygg init`; prime/hooks degrade with a diagnostic and no SQL access |
+| Operator machine | `make install`; `ygg migrate` dropped both tables and the fence/reverse functions (marker stayed `okf`, generation 19); `knowledge init` reports already initialized; `remember`/`learn list`/`prime` unchanged; a previously unbindable repository (`adversarial-review`) now binds and stores a note |
+| Backup restores state and knowledge | `~/.local/share/ygg-backups/2026-10-12-post-m7` verified; restored into an empty locale-matched external database: 486 tasks, 369 agents, 46 repos, marker `okf`/19/corpus `77e2258a…`, 403 documents, no legacy tables |
+
+The removal migration refuses to run while unexported legacy rows exist and the
+marker is not `okf`, so an installation that never cut over keeps its data and
+must use a pre-M7 release to migrate. Opt-in native suites (`managed_supervisor`,
+which now exercises `knowledge init` on a fresh managed cluster) run in the
+native CI workflow for this head.

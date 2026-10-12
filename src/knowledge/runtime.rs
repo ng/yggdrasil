@@ -1,5 +1,6 @@
-//! Offline command context selected by a durable local cutover binding. Absence
-//! preserves legacy SQL behavior; malformed/fenced selections never fall back.
+//! Offline command context selected by a durable local binding written by
+//! `ygg init` / `ygg knowledge init` (or a historical cutover). Absence means
+//! knowledge is uninitialized; malformed/fenced selections never fall back.
 use super::{
     identity::{GitIdentity, IdentityRegistry},
     legacy::Mappings,
@@ -38,7 +39,7 @@ pub struct Binding {
     pub agents: BTreeMap<String, Uuid>,
 }
 
-fn configured_user(env: &Environment) -> String {
+pub(super) fn configured_user(env: &Environment) -> String {
     env.get("YGG_USER")
         .filter(|value| !value.is_empty())
         .cloned()
@@ -107,13 +108,14 @@ impl Selection {
                 "knowledge repository mapping differs from policy"
             );
         }
-        let user = binding
-            .mappings
-            .users
-            .get(legacy_user)
-            .filter(|u| !u.trim().is_empty())
-            .ok_or_else(|| anyhow!("explicit knowledge user mapping required"))?
-            .clone();
+        // A legacy owner that was explicitly mapped keeps that mapping; any
+        // other non-empty runtime user is its own portable identity.
+        let user = match binding.mappings.users.get(legacy_user) {
+            Some(mapped) if !mapped.trim().is_empty() => mapped.clone(),
+            Some(_) => return Err(anyhow!("explicit knowledge user mapping required")),
+            None if !legacy_user.trim().is_empty() => legacy_user.to_owned(),
+            None => return Err(anyhow!("explicit knowledge user mapping required")),
+        };
         Ok(Some(Self {
             policy,
             lease,
@@ -338,11 +340,17 @@ impl Context {
                 Ok((serde_json::to_string(&cached)?, ()))
             })
     }
+    /// Resolve the checkout's portable repository, binding a newly observed
+    /// checkout on first use. Worktrees and clones of a bound repository keep
+    /// its ID; a changed origin or contradictory URL/path still needs explicit
+    /// repair and is reported rather than silently rebound.
     pub fn repo(&self, cwd: &Path) -> Result<Uuid> {
         let identity = GitIdentity::discover(cwd)?;
         let _phase = super::timing::Phase::start("identity_registry");
-        self.registry.resolve(&identity)?
-            .ok_or_else(|| anyhow!("repository has no explicit knowledge binding; use --global only for intentional global scope"))
+        match self.registry.resolve(&identity)? {
+            Some(repo) => Ok(repo),
+            None => self.registry.bind(&identity),
+        }
     }
     /// Connected task claims use the task's database scope, never checkout scope.
     /// Hold both this context and the returned transaction through emission.
@@ -351,15 +359,57 @@ impl Context {
         pool: &sqlx::PgPool,
         legacy_repo: Uuid,
     ) -> Result<(Uuid, sqlx::Transaction<'static, sqlx::Postgres>)> {
-        let transaction = self.storage_lease(pool).await?;
-        let repo = self
+        let mut transaction = self.storage_lease(pool).await?;
+        if let Ok(repo) = self
             .registry
-            .from_legacy(self.mappings.database_id, legacy_repo)?;
-        ensure!(
-            self.mappings.repos.get(&legacy_repo) == Some(&repo),
-            "task repository has no matching selection binding"
-        );
-        Ok((repo, transaction))
+            .from_legacy(self.mappings.database_id, legacy_repo)
+        {
+            ensure!(
+                self.mappings.repos.get(&legacy_repo) == Some(&repo),
+                "task repository has no matching selection binding"
+            );
+            return Ok((repo, transaction));
+        }
+        // Repositories registered after cutover carry no legacy mapping. The
+        // database row may be the portable identity itself (see
+        // `legacy::Mappings::repo`); otherwise resolve the row's registered
+        // checkouts and origin against the identity registry, binding an
+        // existing checkout on first use.
+        let (identities, _) = self.registry.read()?;
+        if identities.repos.iter().any(|r| r.id == legacy_repo) {
+            return Ok((legacy_repo, transaction));
+        }
+        let row: Option<(Option<String>, Vec<String>)> = sqlx::query_as(
+            "SELECT canonical_url, local_paths FROM public.repos WHERE repo_id = $1",
+        )
+        .bind(legacy_repo)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let (url, paths) = row.ok_or_else(|| anyhow!("task repository is not registered"))?;
+        if let Some(origin) = url
+            .as_deref()
+            .and_then(|u| super::identity::canonical_url(u, Path::new("/")).ok())
+        {
+            let probe = GitIdentity {
+                common_dir: PathBuf::from("/"),
+                origin: Some(origin),
+            };
+            if let Some(repo) = self.registry.resolve(&probe)? {
+                return Ok((repo, transaction));
+            }
+        }
+        for path in paths.iter().map(Path::new).filter(|p| p.is_dir()) {
+            if let Ok(identity) = GitIdentity::discover(path) {
+                let repo = match self.registry.resolve(&identity)? {
+                    Some(repo) => repo,
+                    None => self.registry.bind(&identity)?,
+                };
+                return Ok((repo, transaction));
+            }
+        }
+        Err(anyhow!(
+            "task repository has no knowledge binding yet; run a knowledge command inside its checkout first"
+        ))
     }
     /// Optional connected observations must target this exact selected generation.
     pub async fn storage_lease(
@@ -378,11 +428,12 @@ impl Context {
         self.agents.get(name).copied()
     }
     /// New rows have no legacy provenance to disambiguate duplicate repo IDs.
-    /// Validate output compatibility before acknowledging any filesystem write.
+    /// Validate output compatibility before acknowledging any filesystem write:
+    /// a portable repository must map to at most one legacy ID.
     pub fn writable_repo(&self, cwd: &Path) -> Result<Uuid> {
         let id = self.repo(cwd)?;
         ensure!(
-            self.mappings.repos.values().filter(|v| **v == id).count() == 1,
+            self.mappings.repos.values().filter(|v| **v == id).count() <= 1,
             "new knowledge requires one explicit legacy repository mapping"
         );
         Ok(id)

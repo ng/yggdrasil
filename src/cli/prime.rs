@@ -5,7 +5,6 @@ use crate::{
     models::{
         agent::AgentRepo,
         handoff::{Handoff, HandoffRepo},
-        memory::{Memory, MemoryRepo},
         repo::{RepoRepo, detect_git_repo, slugify},
         task::{Task, TaskRepo},
     },
@@ -20,16 +19,12 @@ pub async fn execute(agent_name: &str, transcript_path: Option<&str>) -> Result<
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let knowledge =
         crate::knowledge::runtime::Context::from_environment(std::env::vars().collect());
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let legacy_notes = matches!(&knowledge, Ok(None));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let legacy_notes = true;
 
     // Bound the whole coordination read, not just TCP connection setup. A hung
     // database query must not indefinitely suppress local knowledge or hooks.
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        try_with_db(agent_name, transcript_path, legacy_notes),
+        try_with_db(agent_name, transcript_path),
     )
     .await
     .unwrap_or_else(|_| Err(anyhow::anyhow!("coordination read timed out")));
@@ -41,13 +36,13 @@ pub async fn execute(agent_name: &str, transcript_path: Option<&str>) -> Result<
             Err(error) => eprintln!("ygg prime: local knowledge unavailable: {error}"),
         },
         Err(error) => eprintln!("ygg prime: local knowledge unavailable: {error}"),
-        Ok(None) => {}
+        Ok(None) => eprintln!(
+            "ygg prime: knowledge is not initialized; run `ygg init` to create the OKF corpus"
+        ),
     }
     match outcome {
         Ok(mut ctx) => {
-            if !legacy_notes {
-                ctx.notes = local_notes;
-            }
+            ctx.notes = local_notes;
             print_rich(agent_name, &ctx);
         }
         Err(error) => {
@@ -65,15 +60,6 @@ struct PrimeNote {
     text: String,
     global: bool,
 }
-impl From<Memory> for PrimeNote {
-    fn from(note: Memory) -> Self {
-        Self {
-            text: note.text,
-            global: note.repo_id.is_none(),
-        }
-    }
-}
-
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn local_prime_notes(
     context: &crate::knowledge::runtime::Context,
@@ -126,7 +112,6 @@ struct PrimeContext {
 async fn try_with_db(
     agent_name: &str,
     transcript_path: Option<&str>,
-    legacy_notes: bool,
 ) -> Result<PrimeContext, anyhow::Error> {
     let config = AppConfig::from_env()?;
     let pool = db::connect(&config.database).await?;
@@ -163,8 +148,7 @@ async fn try_with_db(
         transcript_path.and_then(|p| std::fs::metadata(p).ok().map(|m| (m.len() / 10) as i64));
 
     // Best-effort: detect current repo, surface a few ready tasks + recent notes.
-    let (repo_label, repo_id, ready_tasks, open_count, notes) =
-        resolve_repo_context(&pool, legacy_notes).await;
+    let (repo_label, repo_id, ready_tasks, open_count) = resolve_repo_context(&pool).await;
 
     // Resume note from a prior session of this agent in this repo (`ygg handoff`).
     let handoff_result = tokio::time::timeout(
@@ -192,7 +176,7 @@ async fn try_with_db(
         repo_label,
         ready_tasks,
         open_count,
-        notes: notes.into_iter().map(PrimeNote::from).collect(),
+        notes: Vec::new(),
         handoff_unavailable,
         handoff,
         pending_migrations,
@@ -201,20 +185,9 @@ async fn try_with_db(
 
 async fn resolve_repo_context(
     pool: &sqlx::PgPool,
-    legacy_notes: bool,
-) -> (Option<String>, Option<Uuid>, Vec<Task>, i64, Vec<Memory>) {
-    // Recent global notes show even outside a known repo.
-    let global_notes = || async {
-        if !legacy_notes {
-            return Vec::new();
-        }
-        MemoryRepo::new(pool)
-            .list(None, false, 5)
-            .await
-            .unwrap_or_default()
-    };
+) -> (Option<String>, Option<Uuid>, Vec<Task>, i64) {
     let Ok(cwd) = std::env::current_dir() else {
-        return (None, None, vec![], 0, global_notes().await);
+        return (None, None, vec![], 0);
     };
     let repo_repo = RepoRepo::new(pool);
 
@@ -235,26 +208,17 @@ async fn resolve_repo_context(
     };
 
     let Some(repo) = repo_opt else {
-        return (None, None, vec![], 0, global_notes().await);
+        return (None, None, vec![], 0);
     };
     let task_repo = TaskRepo::new(pool);
     let ready = task_repo.ready(repo.repo_id).await.unwrap_or_default();
     let stats = task_repo.stats(Some(repo.repo_id)).await.ok();
     let open_count = stats.map(|s| s.open + s.in_progress).unwrap_or(0);
-    let notes = if legacy_notes {
-        MemoryRepo::new(pool)
-            .list(Some(repo.repo_id), false, 5)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
     (
         Some(format!("{} ({})", repo.name, repo.task_prefix)),
         Some(repo.repo_id),
         ready,
         open_count,
-        notes,
     )
 }
 

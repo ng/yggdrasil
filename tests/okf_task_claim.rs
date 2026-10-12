@@ -169,10 +169,8 @@ async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
                 rule_id: rule.map(str::to_owned), scope_tags, ..Default::default() }, creation, chrono::Utc::now()).unwrap();
             documents.insert(text, created.key.id);
         }
-        sqlx::query("INSERT INTO learnings(text, user_id) VALUES ('SQL_SENTINEL', 'legacy-user')")
-            .execute(&f.pool).await.unwrap();
-        // Even while SQL remains selected on the server, a local selection cannot
-        // silently mix or fall back to it.
+        // While the server marker is not yet bound to this corpus, a local
+        // selection emits nothing rather than guessing.
         let mismatch = claim(&f, root, b, true).await;
         assert!(!mismatch.contains("[ygg learning"), "{mismatch}");
         sqlx::query("UPDATE public.knowledge_storage SET backend='fenced', corpus_id=$1, generation=2")
@@ -183,7 +181,7 @@ async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
         for expected in ["TASK_B_GENERAL", "GLOBAL_GENERAL", "MATCH_B_FILES", "RULE_ID_ONLY"] {
             assert_eq!(text.matches(expected).count(), 1, "{text}");
         }
-        for excluded in ["CHECKOUT_A_ONLY", "WRONG_AGENT", "WRONG_KIND", "PENDING_RULE", "SQL_SENTINEL"] {
+        for excluded in ["CHECKOUT_A_ONLY", "WRONG_AGENT", "WRONG_KIND", "PENDING_RULE"] {
             assert!(!text.contains(excluded), "{text}");
         }
         let usage = ygg::knowledge::telemetry::Telemetry::new(&f.pool);
@@ -310,9 +308,9 @@ async fn claims_use_database_task_scope_and_never_fall_back_after_selection() {
         okf::select(root, &binding);
         assert!(claim(&f, root, b, true).await.contains("MATCH_B_FILES"));
 
-        // An absent local selection still cannot read SQL once its DB is cut over.
+        // An absent local selection emits no rules at all.
         std::fs::remove_file(root.join("policy/runtime.json")).unwrap();
-        assert!(!claim(&f, root, b, true).await.contains("SQL_SENTINEL"));
+        assert!(!claim(&f, root, b, true).await.contains("[ygg learning"));
         okf::select(root, &binding);
         // Server-side fencing is independently enforced too.
         sqlx::query("UPDATE public.knowledge_storage SET generation=generation+1, backend='fenced'")

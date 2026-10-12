@@ -105,38 +105,6 @@ SELECT definition FROM objects ORDER BY definition COLLATE "C"
     Ok(schema)
 }
 
-/// Same canonical, length-framed row digest as the source backup. Call within a
-/// transaction that pins or fences the requested table and uses UTC formatting.
-pub(crate) async fn table_evidence(
-    connection: &mut PgConnection,
-    schema: &str,
-    table: &str,
-) -> Result<(i64, String)> {
-    sqlx::query("SET LOCAL timezone = 'UTC'")
-        .execute(&mut *connection)
-        .await?;
-    sqlx::query("SET LOCAL extra_float_digits = 3")
-        .execute(&mut *connection)
-        .await?;
-    let name = format!("{}.{}", identifier(schema), identifier(table));
-    let query = format!("SELECT to_jsonb(t)::text COLLATE \"C\" FROM {name} AS t ORDER BY 1");
-    let mut rows = sqlx::query_scalar::<_, String>(&query).fetch(connection);
-    let mut hash = Sha256::new();
-    let mut count = 0;
-    while let Some(row) = rows.try_next().await? {
-        hash.update((row.len() as u64).to_be_bytes());
-        hash.update(row.as_bytes());
-        count += 1;
-    }
-    Ok((
-        count,
-        hash.finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    ))
-}
-
 // Reuse the database tuple in version-1 schema evidence. A missing or ambiguous
 // tuple cannot establish compatibility; never infer defaults from the target.
 fn database_properties(evidence: &Evidence) -> Result<serde_json::Value> {

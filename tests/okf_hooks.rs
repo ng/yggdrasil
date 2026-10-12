@@ -266,7 +266,7 @@ fn session_cache_failure_cannot_hide_rules_or_escape_policy_directory() {
 }
 
 #[tokio::test]
-async fn local_rule_injection_preserves_database_locks_without_sql_knowledge_fallback() {
+async fn local_rule_injection_preserves_database_locks() {
     let database = std::env::var("DATABASE_URL").expect("isolated DATABASE_URL required");
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -287,9 +287,6 @@ async fn local_rule_injection_preserves_database_locks_without_sql_knowledge_fal
     let pool = ygg::db::create_pool(&database).await.unwrap();
     let agent = format!("hook-fixture-{}", Uuid::new_v4());
     let file = format!("src/{}.rs", Uuid::new_v4());
-    let sentinel = format!("frozen-rule-{}", Uuid::new_v4());
-    let rule: Uuid = sqlx::query_scalar("INSERT INTO learnings(text,file_glob,user_id) VALUES($1,'src/*.rs','legacy-user') RETURNING learning_id")
-        .bind(&sentinel).fetch_one(&pool).await.unwrap();
     let invoke = || {
         let mut child = okf::app(root, &root.join("repo"))
             .env("DATABASE_URL", &database)
@@ -322,11 +319,6 @@ async fn local_rule_injection_preserves_database_locks_without_sql_knowledge_fal
     let fenced = invoke();
     sqlx::query("DELETE FROM locks WHERE resource_key=$1 AND agent_id IN (SELECT agent_id FROM agents WHERE agent_name=$2 AND user_id='legacy-user')")
         .bind(&file).bind(&agent).execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM learnings WHERE learning_id=$1")
-        .bind(rule)
-        .execute(&pool)
-        .await
-        .unwrap();
     let agent_id: Uuid = sqlx::query_scalar(
         "SELECT agent_id FROM agents WHERE agent_name=$1 AND user_id='legacy-user'",
     )
@@ -359,7 +351,6 @@ async fn local_rule_injection_preserves_database_locks_without_sql_knowledge_fal
             .unwrap()
             .contains("local-healthy-visible")
     );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(&sentinel));
     assert!(fenced.status.success());
-    assert!(fenced.stdout.is_empty(), "fenced selection used SQL rules");
+    assert!(fenced.stdout.is_empty(), "fenced selection emitted rules");
 }

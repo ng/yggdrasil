@@ -1,6 +1,6 @@
 # ADR 0019 — Managed Postgres and OKF knowledge storage
 
-**Status:** implementation in progress; release gates open
+**Status:** accepted; implemented through M7 (legacy SQL knowledge removed 2026-10-12)
 **Date:** 2026-10-08
 **Relates to:** [ADR 0008](0008-shared-db-across-repos.md),
 [ADR 0014](0014-scoped-memories.md),
@@ -92,4 +92,6 @@ described in ADR 0014, while preserving ADR 0015's retrieval limits and ADR 0017
 approval gate. Detailed implementation plans remain local and untracked. The
 [implementation ledger](../managed-postgres-okf-status.md) records delivered code,
 fixture evidence and remaining milestone/release gates. This ADR records the
-architectural decision; default rollout and legacy-table removal remain gated.
+architectural decision. M7 completed the rollout: `ygg init` creates the OKF
+corpus by default, the `memories`/`learnings` tables and the cutover tooling
+were removed, and combined backups restore both database state and knowledge.

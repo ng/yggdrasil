@@ -4,7 +4,7 @@ This project **is** Yggdrasil — a multi-agent coordination layer. We dogfood i
 
 ## Working in This Repo (Dogfooded Coordination)
 
-The SessionStart, UserPromptSubmit, Stop, PreCompact, and PreToolUse hooks are active. They prime agent context, deliver agent-to-agent messages, record token stats, enforce locks, and track state in Postgres. You will see prime output at the top of each session (`<!-- ygg:prime -->`). (ADR 0015: the similarity-retrieval / embedding layer was removed — there is no longer a `[ygg memory | ...]` injection. `ygg remember` was later re-added as a plain, non-embedding note store; see below.)
+The SessionStart, UserPromptSubmit, Stop, PreCompact, and PreToolUse hooks are active. They prime agent context, deliver agent-to-agent messages, record token stats, enforce locks, and track state in Postgres. You will see prime output at the top of each session (`<!-- ygg:prime -->`). (ADR 0015: the similarity-retrieval / embedding layer was removed — there is no longer a `[ygg memory | ...]` injection. `ygg remember` was later re-added as a plain, non-embedding note store; since ADR 0019 notes and learnings live in the OKF file corpus under the user data directory, created by `ygg init`.)
 
 ### Quick Reference
 
@@ -281,8 +281,8 @@ ygg logs --follow                           # Live event stream
 - **For recurring engineering corrections** → `ygg learn add` with a file
   glob. Learnings re-fire deterministically when an agent touches a
   matching file — use for "every time someone edits X, also check Y"
-  rules. Retrieval is SQL predicates on (repo, file_glob, rule_id), not
-  similarity.
+  rules. Retrieval is deterministic predicates on (repo, file_glob,
+  rule_id) over the OKF corpus, not similarity.
 
 ## Session Completion
 

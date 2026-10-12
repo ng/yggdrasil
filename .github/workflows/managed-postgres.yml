@@ -19,7 +19,6 @@ on:
       - 'src/main.rs'
       - 'migrations/**'
       - 'tests/managed_*.rs'
-      - 'tests/knowledge_migration.rs'
       - 'tests/okf_disk_full.rs'
       - 'src/knowledge/**'
       - 'src/cli/knowledge_cmd.rs'
@@ -70,7 +69,7 @@ jobs:
             ldd "$YGG_TEST_PG_BIN/../lib/uuid-ossp.so"
           fi
       - name: Test release-mode installer, migrations and lifecycle
-        run: cargo test --release --test managed_packages --test managed_runtime --test managed_probe_deadline --test managed_supervisor --test external_tls --test knowledge_migration -- --include-ignored --test-threads=1
+        run: cargo test --release --test managed_packages --test managed_runtime --test managed_probe_deadline --test managed_supervisor --test external_tls -- --include-ignored --test-threads=1
       - name: Prepare previous patch and test explicit upgrade recovery
         shell: bash
         run: |

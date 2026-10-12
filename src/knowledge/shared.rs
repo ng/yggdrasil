@@ -1,7 +1,7 @@
 //! Explicit private Git transport. Remote commits are authoritative; cached
 //! snapshots and unconfirmed local commits never imply successful publication.
 use super::{document::digest, store::KnowledgeStore};
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -527,16 +527,6 @@ impl SharedGit {
         let commit = self.fetch()?;
         self.publish_cache(commit, Utc::now())
     }
-    /// Read a retained immutable tree for a coordinator's exact-base comparison.
-    /// This neither fetches nor establishes that the commit is still current.
-    pub(crate) fn snapshot_files(&self, commit: &str) -> Result<BTreeMap<String, Vec<u8>>> {
-        ensure!(
-            oid(commit.as_bytes())? == commit,
-            "full snapshot commit ID required"
-        );
-        let _lease = self.control.bounded_lock(".shared.lock")?;
-        self.files(commit)
-    }
     pub fn cached(&self) -> Result<Snapshot> {
         let state: State = serde_json::from_str(
             &self
@@ -603,48 +593,6 @@ impl SharedGit {
             "remote branch changed since recovery capture"
         );
         Ok(())
-    }
-    /// Verify ancestry in the already fetched object graph; never change refs.
-    pub(crate) fn verify_ancestor(&self, ancestor: &str, descendant: &str) -> Result<()> {
-        oid(ancestor.as_bytes())?;
-        oid(descendant.as_bytes())?;
-        let _lease = self.control.bounded_lock(".shared.lock")?;
-        self.checked(
-            &["merge-base", "--is-ancestor", ancestor, descendant],
-            &[],
-            None,
-        )
-        .context("reconciliation must preserve predecessor Git history")?;
-        Ok(())
-    }
-    /// Inspect immutable local evidence without claiming the remote is unchanged.
-    pub(crate) fn verify_retained_snapshot(&self, expected_commit: &str) -> Result<Snapshot> {
-        let _lease = self.control.bounded_lock(".shared.lock")?;
-        ensure!(
-            self.pending()?.is_none(),
-            "retained cache contains an unconfirmed publication"
-        );
-        let snapshot = self.cached()?;
-        ensure!(
-            snapshot.is_current && snapshot.commit == expected_commit,
-            "retained cache differs from expected snapshot"
-        );
-        Ok(snapshot)
-    }
-    /// Check a frozen staging cache without fetching or rewriting its receipts.
-    pub(crate) fn verify_current_snapshot(&self, expected_commit: &str) -> Result<Snapshot> {
-        let _lease = self.control.bounded_lock(".shared.lock")?;
-        ensure!(
-            self.pending()?.is_none(),
-            "staging cache contains an unconfirmed publication"
-        );
-        let snapshot = self.cached()?;
-        ensure!(
-            snapshot.is_current && snapshot.commit == expected_commit,
-            "staging cache differs from expected publication"
-        );
-        self.verify_remote_tip(expected_commit)?;
-        Ok(snapshot)
     }
 
     /// Refresh before taking the paired backup. Afterward this reads only its
@@ -1598,76 +1546,6 @@ mod tests {
         );
         assert_eq!(transport.refresh().unwrap().files, desired);
         assert_eq!(git(&remote, &["rev-list", "--count", "knowledge"]), "2");
-    }
-
-    #[test]
-    fn staged_cache_survives_relocation_and_preserves_later_remote_writes() {
-        use crate::knowledge::store::KnowledgeBackup;
-        use std::os::unix::fs::MetadataExt;
-        let (temp, config) = fixture();
-        let staging = temp.path().join("staging");
-        std::fs::create_dir(&staging).unwrap();
-        let candidate = staging.join("candidate");
-        let selected = temp.path().join("corpus");
-        let original = staging.join("original");
-        std::fs::create_dir(&selected).unwrap();
-        std::fs::write(selected.join("original.txt"), "retain original").unwrap();
-        let cache = SharedGit::open(&candidate, config.clone()).unwrap();
-        let published = cache.refresh().unwrap();
-        let archive = staging.join("candidate-backup");
-        let backup = KnowledgeStore::open(&candidate, false)
-            .unwrap()
-            .backup(&archive)
-            .unwrap();
-        let identity = std::fs::metadata(&candidate).unwrap();
-        drop(cache);
-
-        // Match finalization's intended layout, including a restart after each
-        // rename. This qualifies cache relocation, not the future swap protocol.
-        std::fs::rename(&selected, &original).unwrap();
-        assert!(!selected.exists());
-        KnowledgeBackup::verify_restored(&archive, &candidate).unwrap();
-        std::fs::rename(&candidate, &selected).unwrap();
-        let moved = std::fs::metadata(&selected).unwrap();
-        assert_eq!((identity.dev(), identity.ino()), (moved.dev(), moved.ino()));
-        assert_eq!(
-            KnowledgeBackup::verify_restored(&archive, &selected)
-                .unwrap()
-                .revision,
-            backup.revision
-        );
-        let reopened = SharedGit::open(&selected, config.clone()).unwrap();
-        assert_eq!(
-            reopened
-                .verify_current_snapshot(&published.commit)
-                .unwrap()
-                .files,
-            published.files
-        );
-        KnowledgeBackup::verify_restored(&archive, &selected).unwrap();
-        let receipt = reopened
-            .change(&[edit(b"after selection\n", b"original\n")])
-            .unwrap();
-        drop(reopened);
-        let restarted = SharedGit::open(&selected, config.clone()).unwrap();
-        let current = restarted.refresh().unwrap();
-        assert_eq!(current.commit, receipt.commit);
-        assert_eq!(current.files["rule.md"], b"after selection\n");
-        // Old readiness cannot justify restoring its frozen candidate after
-        // selection. The current cache and remote preserve the newer write.
-        assert!(KnowledgeBackup::verify_restored(&archive, &selected).is_err());
-        assert!(
-            restarted
-                .verify_current_snapshot(&published.commit)
-                .is_err()
-        );
-        let peer = SharedGit::open(&temp.path().join("peer"), config).unwrap();
-        assert_eq!(peer.refresh().unwrap().files, current.files);
-        assert_eq!(
-            std::fs::read_to_string(original.join("original.txt")).unwrap(),
-            "retain original"
-        );
-        assert!(!candidate.exists());
     }
 
     #[test]

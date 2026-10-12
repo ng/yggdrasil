@@ -4,7 +4,8 @@
 
 Yggdrasil partitions data by user identity so multiple humans sharing a
 Postgres instance get isolated namespaces for agents, tasks, locks, nodes,
-memories, and events. Cross-user visibility is opt-in.
+and events. Cross-user visibility is opt-in. Knowledge (notes and learnings)
+lives in each user's own OKF corpus on disk (ADR 0019), not in shared tables.
 
 ## Identity Resolution
 
@@ -33,9 +34,7 @@ Migration: `20260428000001_multi_user.sql`
 | `nodes` | `user_id TEXT NOT NULL DEFAULT ''` | |
 | `sessions` | `user_id TEXT NOT NULL DEFAULT ''` | |
 | `events` | `user_id TEXT NOT NULL DEFAULT ''` | |
-| `memories` | `user_id TEXT NOT NULL DEFAULT ''` | |
 | `workers` | `user_id TEXT NOT NULL DEFAULT ''` | |
-| `learnings` | `user_id TEXT NOT NULL DEFAULT ''` | |
 
 Child tables (`task_deps`, `task_labels`, `task_events`, `task_seq`,
 `agent_stats`, `bench_*`) inherit scoping via FK and need no column.
@@ -51,7 +50,7 @@ Child tables (`task_deps`, `task_labels`, `task_events`, `task_seq`,
 ### Indexes
 
 Filtered indexes on `user_id` for agents, tasks, locks, nodes, repos,
-memories, sessions, events, and workers.
+sessions, events, and workers.
 
 ## Isolation Model
 

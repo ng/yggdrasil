@@ -40,36 +40,6 @@ pub struct PairedBackup {
 }
 
 impl PairedBackup {
-    pub(crate) fn verify_paths(&self, corpus: &Path, policy: &Path) -> Result<()> {
-        for (root, path) in [(&self.corpus_root, corpus), (&self.policy_root, policy)] {
-            let expected = root.metadata()?;
-            let actual = std::fs::symlink_metadata(path)?;
-            ensure!(
-                actual.is_dir() && actual.dev() == expected.dev() && actual.ino() == expected.ino(),
-                "recovery source path changed"
-            );
-        }
-        self.verify_sources()
-    }
-
-    pub(crate) fn require_outside_sources(&self, destination: &Path) -> Result<()> {
-        let a = self.corpus_root.metadata()?;
-        let b = self.policy_root.metadata()?;
-        for ancestor in destination.ancestors() {
-            let metadata = match std::fs::metadata(ancestor) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let identity = (metadata.dev(), metadata.ino());
-            ensure!(
-                identity != (a.dev(), a.ino()) && identity != (b.dev(), b.ino()),
-                "rollback journal must be outside corpus and policy"
-            );
-        }
-        Ok(())
-    }
-
     pub(crate) fn verify_corpus_root(&self, source: &KnowledgeStore, path: &Path) -> Result<()> {
         let expected = self.corpus_root.metadata()?;
         for actual in [source.root.metadata()?, std::fs::symlink_metadata(path)?] {
@@ -78,121 +48,6 @@ impl PairedBackup {
                 "recovery backup belongs to a different corpus root"
             );
         }
-        self.verify_sources()
-    }
-
-    /// Publish the cutover selection while retaining both writer leases. Consume
-    /// the guard because the policy intentionally ceases to match its old backup.
-    pub(crate) fn publish_selection(
-        self,
-        operation: Uuid,
-        expected: &str,
-        selected: &str,
-    ) -> Result<()> {
-        self.verify_sources()?;
-        let name = crate::knowledge::runtime::SELECTION_FILE;
-        ensure!(
-            KnowledgeStore::read_at(&self.policy_root, name)?.as_deref() == Some(expected),
-            "selection changed before activation"
-        );
-        ensure!(
-            selected.len() <= MAX_DOCUMENT_BYTES,
-            "selection exceeds byte limit"
-        );
-        let temporary = format!(".cutover-{operation}.tmp");
-        ensure!(
-            !self.policy.entries.contains_key(&temporary),
-            "cutover temporary name conflicts with retained policy"
-        );
-        // The durable journal names this file before it can be created. A kill
-        // during write therefore leaves identifiable, bounded recovery evidence.
-        let mut file = child(
-            &self.policy_root,
-            &temporary,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            0o600,
-        )?;
-        file.write_all(selected.as_bytes())?;
-        file.sync_all()?;
-        let old = CString::new(temporary)?;
-        let new = CString::new(name)?;
-        if unsafe {
-            libc::renameat(
-                self.policy_root.as_raw_fd(),
-                old.as_ptr(),
-                self.policy_root.as_raw_fd(),
-                new.as_ptr(),
-            )
-        } < 0
-        {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        self.policy_root.sync_all()?;
-        for (root, mut expected_entries, policy) in [
-            (&self.corpus_root, self.corpus.entries.clone(), false),
-            (&self.policy_root, self.policy.entries.clone(), true),
-        ] {
-            if policy {
-                expected_entries.insert(
-                    name.into(),
-                    BackupEntry::File {
-                        bytes: selected.len() as u64,
-                        sha256: digest(selected.as_bytes()),
-                    },
-                );
-            }
-            let mut actual = BTreeMap::new();
-            inventory(root, None, "", 0, true, &mut actual, &mut 0)?;
-            ensure!(
-                actual == expected_entries,
-                "source changed during selection publication"
-            );
-        }
-        Ok(())
-    }
-
-    fn recover_selection_temporary(&self, operation: Uuid, selected: &str) -> Result<()> {
-        let name = format!(".cutover-{operation}.tmp");
-        ensure!(
-            !self.policy.entries.contains_key(&name),
-            "cutover temporary name conflicts with retained policy"
-        );
-        let file = match child(&self.policy_root, &name, libc::O_RDONLY, 0) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return self.verify_sources();
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let metadata = file.metadata()?;
-        ensure!(
-            metadata.is_file() && metadata.nlink() == 1 && metadata.len() <= selected.len() as u64,
-            "invalid interrupted selection temporary"
-        );
-        let mut partial = Vec::new();
-        file.take(selected.len() as u64 + 1)
-            .read_to_end(&mut partial)?;
-        ensure!(
-            selected.as_bytes().starts_with(&partial),
-            "interrupted selection temporary conflicts with intent"
-        );
-        // Verify all other bytes before removing even this named, matching prefix.
-        for (root, expected, policy) in [
-            (&self.corpus_root, &self.corpus.entries, false),
-            (&self.policy_root, &self.policy.entries, true),
-        ] {
-            let mut actual = BTreeMap::new();
-            inventory(root, None, "", 0, true, &mut actual, &mut 0)?;
-            if policy {
-                actual.remove(&name);
-            }
-            ensure!(
-                &actual == expected,
-                "source changed beside interrupted selection temporary"
-            );
-        }
-        unlink(&self.policy_root, &name)?;
-        self.policy_root.sync_all()?;
         self.verify_sources()
     }
 
@@ -453,28 +308,6 @@ impl KnowledgeStore {
         Ok(saved)
     }
 
-    /// Resume only the deterministic temporary named by an already durable
-    /// cutover intent. Never ignore arbitrary temporary or independently edited files.
-    pub(crate) fn resume_selection_pair(
-        &self,
-        other: &Self,
-        archive: &Path,
-        policy_archive: &Path,
-        operation: Uuid,
-        selected: &str,
-    ) -> Result<PairedBackup> {
-        let leases = self.pair_leases(other)?;
-        let saved = PairedBackup {
-            corpus: KnowledgeBackup::verify(archive)?,
-            policy: KnowledgeBackup::verify(policy_archive)?,
-            corpus_root: self.root.try_clone()?,
-            policy_root: other.root.try_clone()?,
-            _leases: leases,
-        };
-        saved.recover_selection_temporary(operation, selected)?;
-        Ok(saved)
-    }
-
     /// Snapshot exact bytes, unknown files, empty directories and policy/identity
     /// data. Never overwrite a destination. Retain incomplete private staging on
     /// failure. Cooperative writers/exporters are excluded; external editors must
@@ -524,17 +357,6 @@ impl KnowledgeStore {
         other_destination: &Path,
     ) -> Result<PairedBackup> {
         self.capture_pair(other, destination, other_destination, false)
-    }
-
-    /// Complete an interrupted pair without replacing either published archive.
-    /// Every retained archive must still match its corresponding source exactly.
-    pub(crate) fn complete_pair_retained(
-        &self,
-        other: &Self,
-        destination: &Path,
-        other_destination: &Path,
-    ) -> Result<PairedBackup> {
-        self.capture_pair(other, destination, other_destination, true)
     }
 
     fn capture_pair(
@@ -680,45 +502,6 @@ impl KnowledgeBackup {
         Ok(expected)
     }
 
-    /// Compare a SQL participant's policy while allowing only exact newly
-    /// created control files. Existing archived files can never be exempted.
-    pub(crate) fn verify_restored_with_new_controls(
-        path: &Path,
-        restored: &Path,
-        additions: &BTreeMap<String, String>,
-    ) -> Result<()> {
-        let expected = Self::verify(path)?;
-        let restored = KnowledgeStore::open(restored, false)?;
-        let mut entries = BTreeMap::new();
-        inventory(&restored.root, None, "", 0, true, &mut entries, &mut 0)?;
-        for (name, bytes) in additions {
-            ensure!(
-                !name.is_empty()
-                    && name != "."
-                    && name != ".."
-                    && !name.contains('/')
-                    && !name.contains('\\')
-                    && !expected.entries.contains_key(name),
-                "new control cannot replace an archived policy entry"
-            );
-            if let Some(actual) = entries.remove(name) {
-                ensure!(
-                    actual
-                        == BackupEntry::File {
-                            bytes: bytes.len() as u64,
-                            sha256: crate::knowledge::document::digest(bytes.as_bytes()),
-                        },
-                    "new participant control differs from expected bytes"
-                );
-            }
-        }
-        ensure!(
-            entries == expected.entries,
-            "participant policy differs from backup"
-        );
-        Ok(())
-    }
-
     /// Permit only the independently derived runtime binding bytes to differ.
     pub(crate) fn verify_restored_rebased_selection(
         path: &Path,
@@ -833,38 +616,6 @@ impl KnowledgeBackup {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn complete_partial_pair_preserves_archives_and_refuses_changed_sources() {
-        for changed in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
-            let corpus_path = temp.path().join("corpus");
-            let policy_path = temp.path().join("policy");
-            let corpus = KnowledgeStore::open(&corpus_path, true).unwrap();
-            let policy = KnowledgeStore::open(&policy_path, true).unwrap();
-            std::fs::write(corpus_path.join("retained"), "original bytes").unwrap();
-            std::fs::write(policy_path.join("identity"), "explicit policy").unwrap();
-            let a = temp.path().join("a");
-            let b = temp.path().join("b");
-            let original = corpus.backup(&a).unwrap();
-            if changed {
-                std::fs::write(corpus_path.join("retained"), "independent edit").unwrap();
-            }
-            let result = corpus.complete_pair_retained(&policy, &a, &b);
-            assert_eq!(result.is_err(), changed);
-            drop(result);
-            assert_eq!(
-                KnowledgeBackup::verify(&a).unwrap().revision,
-                original.revision
-            );
-            if !changed {
-                let pair = corpus.complete_pair_retained(&policy, &a, &b).unwrap();
-                pair.verify_sources().unwrap();
-                assert!(corpus.try_export_lease().is_err());
-                assert!(policy.try_export_lease().is_err());
-            }
-        }
-    }
 
     #[test]
     fn changed_source_refuses_publication_and_holds_writer_and_export_leases() {

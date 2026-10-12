@@ -1,10 +1,12 @@
-# Shared knowledge cutover protocol
+# Shared knowledge cutover protocol (historical)
 
-The public `ygg knowledge fleet` command implements shared forward cutover,
-recovery and current-state SQL return. The protocol and implementation history below
-record the incremental work in PR #122; earlier statements about unavailable phases
-are historical. Deployment qualification and the original release gates remain open.
-The private `migration::Plan` path still rejects shared/multi-host execution.
+**Removed in M7 (2026-10-11).** The `ygg knowledge fleet`, `migrate`,
+`rollback`, `rollback-status` and `fence-local` commands and the SQL
+`memories`/`learnings` tables they migrated no longer exist; OKF is the only
+knowledge backend and fresh installations are initialized by `ygg init`. This
+document records the protocol as implemented in PR #122 and used for the
+2026-10-11 single-operator cutover (see the release ledger). It is retained as
+design history for any future shared multi-host cutover, not as an operator guide.
 
 ## Operator command workflow
 

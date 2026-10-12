@@ -301,18 +301,6 @@ impl KnowledgeStore {
         self.operation_lock(".writer.lock")
     }
 
-    /// Preparation already holds source leases, so it must never wait for a
-    /// journal owner that may be acquiring those same source leases.
-    pub(super) fn try_export_lease(&self) -> Result<File> {
-        let file = lock_file(&self.root, ".export.lock")?;
-        ensure!(
-            file.metadata()?.is_file(),
-            "knowledge lock is not a regular file"
-        );
-        file.try_lock_exclusive()?;
-        Ok(file)
-    }
-
     pub(super) fn operation_lock(&self, name: &str) -> Result<File> {
         ensure!(
             !name.contains('/') && !name.contains('\\') && name != "..",
@@ -355,33 +343,6 @@ impl KnowledgeStore {
             "invalid artifact filename"
         );
         Self::read_limited(&self.root, name, 64 * 1024 * 1024)
-    }
-
-    pub(super) fn retain_artifact(&self, name: &str, text: &str, initializing: bool) -> Result<()> {
-        ensure!(
-            text.len() <= 64 * 1024 * 1024,
-            "export artifact exceeds 64 MiB limit"
-        );
-        let _lock = self.lock()?;
-        if let Some(current) = self.read_artifact(name)? {
-            ensure!(
-                current == text,
-                "export artifact conflict; preserve staging and choose a new destination"
-            );
-        } else {
-            if initializing {
-                ensure!(
-                    names(&self.root)?.iter().all(|n| n == ".writer.lock"
-                        || n == ".export.lock"
-                        || n.strip_prefix('.')
-                            .and_then(|s| s.strip_suffix(".tmp"))
-                            .is_some_and(|s| Uuid::parse_str(s).is_ok())),
-                    "staging directory is not empty and has no matching export intent"
-                );
-            }
-            Self::replace_at(&self.root, name, text)?;
-        }
-        Ok(())
     }
 
     fn parent(&self, key: Key, create: bool) -> Result<File> {
@@ -556,16 +517,6 @@ impl KnowledgeStore {
         update: impl FnOnce(Option<&str>) -> Result<(String, T)>,
     ) -> Result<T> {
         self.update_control_locked(name, update, self.lock()?, Self::replace_at)
-    }
-
-    pub(crate) fn remove_control(&self, name: &str, expected: &str) -> Result<()> {
-        let _lease = self.lock()?;
-        if let Some(current) = self.read_control(name)? {
-            ensure!(current == expected, "control changed; refusing removal");
-            unlink(&self.root, name)?;
-        }
-        self.root.sync_all()?;
-        Ok(())
     }
 
     /// Optional state cannot hold up a hook indefinitely behind a paused process.

@@ -48,26 +48,6 @@ struct Cli {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Subcommand)]
 enum KnowledgeAction {
-    /// Execute or recover an explicitly reviewed shared fleet migration
-    Fleet {
-        /// Exact forward fleet request, including backups and pinned SSH hosts
-        #[arg(long)]
-        plan: std::path::PathBuf,
-        #[arg(long)]
-        journal: std::path::PathBuf,
-        /// SHA-256 of the exact reviewed forward request bytes
-        #[arg(long)]
-        request_sha256: String,
-        #[arg(long)]
-        ssh_identity: Option<std::path::PathBuf>,
-        #[arg(long)]
-        json: bool,
-        #[command(subcommand)]
-        action: ygg::cli::knowledge_cmd::fleet::Action,
-    },
-    /// Internal bounded participant protocol; no fleet activation capability
-    #[command(hide = true)]
-    FleetParticipant,
     /// Inspect OKF documents without granting instruction eligibility
     Browse {
         /// Visible bundle-relative Markdown path; omit to list documents
@@ -82,37 +62,6 @@ enum KnowledgeAction {
     },
     /// Audit live database client compatibility; offline hosts remain unverified
     Clients {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Drain and durably fence this host's selected OKF commands, without SQL access
-    FenceLocal {
-        #[arg(long)]
-        expected_generation: i64,
-        /// Bind preparation to this coordinator operation (requires participant)
-        #[arg(long, requires = "participant")]
-        migration_operation: Option<uuid::Uuid>,
-        /// Explicit participant ID from the coordinator's host census
-        #[arg(long, requires = "migration_operation")]
-        participant: Option<uuid::Uuid>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Restore current private OKF documents to SQL and deselect local OKF
-    Rollback {
-        #[arg(long)]
-        plan: std::path::PathBuf,
-        #[arg(long)]
-        journal: std::path::PathBuf,
-        /// Compatible PostgreSQL tools for external source backup
-        #[arg(long)]
-        pg_bin: Option<std::path::PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Inspect retained rollback evidence offline; local markers are not SQL proof
-    RollbackStatus {
-        journal: std::path::PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -138,25 +87,8 @@ enum KnowledgeAction {
         #[arg(long)]
         json: bool,
     },
-    /// Assess SQL knowledge or execute/resume an explicit private migration plan
-    Migrate {
-        #[arg(long, required_unless_present = "plan", conflicts_with = "plan")]
-        dry_run: bool,
-        /// JSON database/corpus IDs, legacy repo mapping and explicit user mapping
-        #[arg(long, requires = "dry_run")]
-        mapping_file: Option<std::path::PathBuf>,
-        /// Explicit identity policy, mappings and host maintenance declarations
-        #[arg(long, requires = "journal")]
-        plan: Option<std::path::PathBuf>,
-        /// Durable operation directory; reuse with the same plan after interruption
-        #[arg(long, requires = "plan")]
-        journal: Option<std::path::PathBuf>,
-        /// Compatible PostgreSQL tools for an external database backup
-        #[arg(long, requires = "plan")]
-        pg_bin: Option<std::path::PathBuf>,
-        /// Abort this operation before activation; retains backup and export evidence
-        #[arg(long, requires = "plan")]
-        abort: bool,
+    /// Initialize the OKF knowledge corpus and bind it to the selected database
+    Init {
         #[arg(long)]
         json: bool,
     },
@@ -1489,27 +1421,6 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Commands::Knowledge { action } => match action {
-            KnowledgeAction::Fleet {
-                plan,
-                journal,
-                request_sha256,
-                ssh_identity,
-                json,
-                action,
-            } => {
-                ygg::cli::knowledge_cmd::fleet::run(
-                    &plan,
-                    &journal,
-                    &request_sha256,
-                    ssh_identity.as_deref(),
-                    action,
-                    json,
-                )
-                .await?;
-            }
-            KnowledgeAction::FleetParticipant => {
-                ygg::cli::knowledge_cmd::fleet_participant().await?
-            }
             KnowledgeAction::Browse { path, json } => {
                 ygg::cli::knowledge_cmd::browse(path.as_deref(), json)?
             }
@@ -1529,57 +1440,8 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 ygg::cli::knowledge_cmd::sync(confirm_pending, json)?;
             }
-            KnowledgeAction::Rollback {
-                plan,
-                journal,
-                pg_bin,
-                json,
-            } => {
-                ygg::cli::knowledge_cmd::rollback(&plan, &journal, pg_bin.as_deref(), json).await?;
-            }
-            KnowledgeAction::RollbackStatus { journal, json } => {
-                ygg::cli::knowledge_cmd::rollback_status(&journal, json)?;
-            }
-            KnowledgeAction::FenceLocal {
-                expected_generation,
-                migration_operation,
-                participant,
-                json,
-            } => match (migration_operation, participant) {
-                (Some(operation), Some(participant)) => {
-                    ygg::cli::knowledge_cmd::fence_local_for_migration(
-                        expected_generation,
-                        operation,
-                        participant,
-                        json,
-                    )?
-                }
-                (None, None) => ygg::cli::knowledge_cmd::fence_local(expected_generation, json)?,
-                _ => anyhow::bail!("migration operation and participant must be supplied together"),
-            },
             KnowledgeAction::Clients { json } => ygg::cli::knowledge_cmd::clients(json).await?,
-            KnowledgeAction::Migrate {
-                dry_run: _,
-                mapping_file,
-                plan,
-                journal,
-                pg_bin,
-                abort,
-                json,
-            } => {
-                if let Some(plan) = plan {
-                    ygg::cli::knowledge_cmd::migrate(
-                        &plan,
-                        journal.as_deref().expect("clap requires journal"),
-                        pg_bin.as_deref(),
-                        abort,
-                        json,
-                    )
-                    .await?;
-                } else {
-                    ygg::cli::knowledge_cmd::dry_run(mapping_file.as_deref(), json).await?;
-                }
-            }
+            KnowledgeAction::Init { json } => ygg::cli::knowledge_cmd::init(json).await?,
         },
         Commands::Run { action } => {
             let config = ygg::config::AppConfig::from_env()?;
@@ -2671,108 +2533,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::connect(&config.database).await?;
-            let agent_name_default = || {
-                std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .unwrap_or_else(|| "ygg".to_string())
-                })
-            };
-            match action {
-                LearnAction::Create {
-                    text,
-                    global,
-                    file_glob,
-                    rule_id,
-                    context,
-                    agent,
-                    scope,
-                    pending,
-                    json,
-                } => {
-                    let agent_name = agent.unwrap_or_else(agent_name_default);
-                    let scope_tags = ygg::cli::learning_cmd::parse_scope_tags(&scope)?;
-                    let status = if pending { "pending" } else { "active" };
-                    ygg::cli::learning_cmd::create(
-                        &pool,
-                        &text,
-                        global,
-                        file_glob.as_deref(),
-                        rule_id.as_deref(),
-                        context.as_deref(),
-                        &agent_name,
-                        &scope_tags,
-                        status,
-                        "manual",
-                        json,
-                    )
-                    .await?;
-                }
-                LearnAction::Propose {
-                    text,
-                    global,
-                    file_glob,
-                    rule_id,
-                    context,
-                    agent,
-                    scope,
-                    json,
-                } => {
-                    let agent_name = agent.unwrap_or_else(agent_name_default);
-                    let scope_tags = ygg::cli::learning_cmd::parse_scope_tags(&scope)?;
-                    ygg::cli::learning_cmd::create(
-                        &pool,
-                        &text,
-                        global,
-                        file_glob.as_deref(),
-                        rule_id.as_deref(),
-                        context.as_deref(),
-                        &agent_name,
-                        &scope_tags,
-                        "pending",
-                        "proposed",
-                        json,
-                    )
-                    .await?;
-                }
-                LearnAction::Pending { all, json } => {
-                    ygg::cli::learning_cmd::pending(&pool, all, json).await?;
-                }
-                LearnAction::Approve { id, agent } => {
-                    let uuid = uuid::Uuid::parse_str(&id)
-                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
-                    let agent_name = agent.unwrap_or_else(agent_name_default);
-                    ygg::cli::learning_cmd::approve(&pool, uuid, &agent_name).await?;
-                }
-                LearnAction::Reject { id, reason } => {
-                    let uuid = uuid::Uuid::parse_str(&id)
-                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
-                    ygg::cli::learning_cmd::reject(&pool, uuid, reason.as_deref()).await?;
-                }
-                LearnAction::List {
-                    file,
-                    rule_id,
-                    all,
-                    json,
-                } => {
-                    ygg::cli::learning_cmd::list(
-                        &pool,
-                        file.as_deref(),
-                        rule_id.as_deref(),
-                        all,
-                        json,
-                    )
-                    .await?;
-                }
-                LearnAction::Delete { id } => {
-                    let uuid = uuid::Uuid::parse_str(&id)
-                        .map_err(|_| anyhow::anyhow!("invalid uuid: {id}"))?;
-                    ygg::cli::learning_cmd::delete(&pool, uuid).await?;
-                }
-            }
+            let _ = action;
+            anyhow::bail!(
+                "knowledge is not initialized; run `ygg init` (or `ygg knowledge init`) to create the OKF corpus"
+            );
         }
         Commands::Remember {
             text,
@@ -2795,21 +2559,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            let config = ygg::config::AppConfig::from_env()?;
-            let pool = ygg::db::connect(&config.database).await?;
-            if list {
-                ygg::cli::remember_cmd::list(&pool, all || global, limit, json).await?;
-            } else {
-                let agent_name = agent.unwrap_or_else(|| {
-                    std::env::var("YGG_AGENT_NAME").ok().unwrap_or_else(|| {
-                        std::env::current_dir()
-                            .ok()
-                            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                            .unwrap_or_else(|| "ygg".to_string())
-                    })
-                });
-                ygg::cli::remember_cmd::remember(&pool, &text, global, &agent_name, json).await?;
-            }
+            let _ = (text, list, global, all, limit, agent, json);
+            anyhow::bail!(
+                "knowledge is not initialized; run `ygg init` (or `ygg knowledge init`) to create the OKF corpus"
+            );
         }
         Commands::Handoff { action } => {
             let config = ygg::config::AppConfig::from_env()?;

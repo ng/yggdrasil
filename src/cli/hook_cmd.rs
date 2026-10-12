@@ -210,13 +210,11 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let select_phase = crate::knowledge::timing::Phase::start("hook_selection");
-    let mut legacy_knowledge = true;
     let mut observed = None;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if matches!(tool, "Edit" | "Write" | "NotebookEdit") && !file.is_empty() {
         match crate::knowledge::runtime::Context::for_edit_hook(std::env::vars().collect()) {
             Ok(Some(context)) => {
-                legacy_knowledge = false;
                 let session = payload
                     .get("session_id")
                     .and_then(|v| v.as_str())
@@ -235,10 +233,11 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
                 }
             }
             Err(error) => {
-                legacy_knowledge = false;
                 eprintln!("knowledge: edit-time rules unavailable: {error}");
             }
-            Ok(None) => {}
+            Ok(None) => {
+                eprintln!("knowledge: not initialized; run `ygg init` to create the OKF corpus")
+            }
         }
     }
     drop(select_phase);
@@ -247,7 +246,7 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
     // locks while healthy, but a failed query cannot indefinitely delay the hook.
     if let Ok(Ok(Some(pool))) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        pre_tool_coordination(agent_name, payload, legacy_knowledge),
+        pre_tool_coordination(agent_name, payload),
     )
     .await
     {
@@ -275,7 +274,6 @@ async fn handle_pre_tool_use(agent_name: &str, payload: &serde_json::Value) -> a
 async fn pre_tool_coordination(
     agent_name: &str,
     payload: &serde_json::Value,
-    legacy_knowledge: bool,
 ) -> anyhow::Result<Option<sqlx::PgPool>> {
     let tool_name = payload
         .get("tool_name")
@@ -331,21 +329,6 @@ async fn pre_tool_coordination(
                         eprintln!("ygg: {msg}");
                     }
                 }
-            }
-
-            if legacy_knowledge {
-                let session_id = payload
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let lines = crate::cli::learning_cmd::surface_for_edit(
-                    &pool,
-                    file_path,
-                    Some(agent_name),
-                    session_id,
-                )
-                .await;
-                print_edit_context(&lines);
             }
         }
         _ => {}
