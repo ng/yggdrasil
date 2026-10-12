@@ -2,12 +2,10 @@
 
 ## Goal status
 
-**Resumed 2026-10-11** via `/goal complete HANDOFF-PR122.md`. The full goal is
-**still not complete**: implement
-`/Users/ng/.codex/plans/yggdrasil/embedded-postgres-okf.md` using existing
-[PR #122](https://github.com/ng/yggdrasil/pull/122). Remaining items 1 and 2
-below are done; items 3 through 7 are **blocked on user inputs and elapsed
-time** (see "Missing inputs").
+**Resumed 2026-10-11** via `/goal complete HANDOFF-PR122.md`. Operator decision
+the same day: **drop the macOS signing/notarization gate and the 14-day dogfood
+window** (single-operator deployment); cut over this machine now; then implement
+M7 immediately. Items 1–6 below are done; M7 (item 7) is in progress.
 
 ## Workspace
 
@@ -89,30 +87,22 @@ Raw committed measurements:
    Recorded in `docs/managed-postgres-okf-status.md` ("Latest head
    qualification"); "Next release work" item 1 is marked done.
 2. **Done.** No failures to address. No tests were rerun.
-3. Complete published-artifact and positive macOS signing/notarization/quarantine
-   qualification. Candidate bundles do not satisfy released-artifact gates.
-4. Establish the actual deployment target, compatible-client inventory,
-   writer quiescence, identity mappings and recoverable backups.
-5. Perform actual deployment and current-data rollback rehearsal.
-6. Record **14 days of real dogfooding**.
-7. Only after those prerequisites, implement M7: forward legacy-table removal,
-   SQL knowledge repository removal, default OKF/installer changes, and final
-   restore/coordination verification.
+3. **Dropped** (operator decision 2026-10-11): no Developer ID signing or
+   notarization. Published-artifact smoke on Linux remains a release item.
+4. **Done.** Deployment target is this machine's external Homebrew PostgreSQL 18
+   (`~/.config/ygg/.env`), 28 repos, owner `ng`. Client audit clean. Plan and
+   mapping in `~/.local/share/ygg-okf/`.
+5. **Done.** Cutover at generation 19 (401 OKF documents) after a successful
+   rollback rehearsal (generation 5). Details in the ledger's "Operator cutover".
+   Backups: `~/.local/share/ygg-backups/2026-10-11-{pre,post}-okf`.
+6. **Dropped** (operator decision): no 14-day window.
+7. **In progress:** M7 forward removal migration for `memories`/`learnings`,
+   SQL knowledge repository removal, OKF-by-default initialization, docs.
 
 ## Missing inputs
 
-- Which Developer ID signing/notarization setup to use.
-- Which installation/profile should receive the compatibility release and dogfood.
-
-These were asked asynchronously but no answer was received. Re-checked
-2026-10-11 on resume: still only an Apple Development identity locally, zero
-Developer ID Application identities, and `gh secret list` / `gh variable list`
-return nothing. Do not treat that identity as Developer ID distribution signing.
-Request setup names or locations, not secret values.
-
-Items 3–5 cannot start without these answers; item 6 additionally needs 14
-elapsed days after deployment; item 7 is gated on all of them. No fixture or
-local evidence substitutes for any of these gates.
+None. Both prior questions were answered on 2026-10-11: signing is not needed,
+and the dogfood target is this machine.
 
 ## Operational boundaries
 

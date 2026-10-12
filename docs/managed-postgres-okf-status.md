@@ -8,8 +8,8 @@ Candidate bundles and passing fixtures do not authorize default OKF rollout or
 legacy-table removal.
 
 Audit basis: the 2026-10-08 managed PostgreSQL/OKF implementation plan, tracked by
-`yggdrasil-3`, SHA-256
-`ba46868ba5c93c620a2f29bcbd156c83da63b8a6df15454d3cb3aaede9a62dca`.
+`yggdrasil-3`, revised 2026-10-11 (signing gate and 14-day window removed), SHA-256
+`a0dea9b6685441fa084d1c3ccab68633e22dedef580bac8e9d66bba667a5e6e4`.
 The plan is maintained outside the repository. This ledger maps its requirements
 to repository evidence and explicitly identifies missing implementation or proof.
 
@@ -24,7 +24,7 @@ to repository evidence and explicitly identifies missing implementation or proof
 | M4: OKF engine | Parser, identities, approval, matching, conditional store, browsing and disposable indexes; unknown metadata, null/legacy identity preservation, stale-revision conflicts, live eligibility revalidation, offline fixtures and real-disk-full tests on all three native platforms. | Two uninstrumented local repeats at `ba7aff6` pass the SQL-relative latency threshold (−61.51 ms and 4.86 ms added p95); the stricter SQL→OKF→SQL fixture passes twice at 17.61 ms and 16.01 ms worst added p95, meeting the local measured target. Historical variance, including the prior 108.57 ms failure, remains documented; these runs do not establish a universal latency bound. See `docs/performance/okf-latency-investigation.md`. Broader filesystem fault qualification remains open. |
 | M5: integration/shared transport | Offline `remember`/`learn`, independent prime/hook knowledge, task-claim injection, linked-worktree scope, SQL/OKF ordered JSON parity; real bare-Git conflict, reachability, freshness/revocation, outage and draft-recovery fixtures; bounded complete-snapshot publication with exact remote-base checks. | Shared remote credential/provider and resource/latency qualification; deployed shared cutover and rollback rehearsal. Component fixtures do not prove a deployed fleet. |
 | M6: cutover/dogfood | Database generation/write guards, client registration and lossless export; private and public fleet forward/abort/current-state rollback commands, immutable journals, backup evidence, apply-once receipts, reverse cancellation and descendant reconciliation. All 23 native migration tests pass, including three real two-host CLI flows. | Establish compatibility and writer quiescence for the actual deployment, perform its inventory and rollback rehearsal, then record the required dogfood window. Fixture declarations alone do not demonstrate a deployed fleet. |
-| M7: removal/default rollout | Deliberately deferred; legacy tables/repositories remain available for the compatibility/recovery window. | **14 days of dogfooding plus successful rollback rehearsal**, preceding milestone gates, then a new forward removal migration, repository removal, installer/default changes and final restore/coordination qualification. |
+| M7: removal/default rollout | Operator cutover and rollback rehearsal completed 2026-10-11 (see "Operator cutover"). | Forward removal migration, SQL repository removal, installer/default changes and final restore/coordination qualification. The original 14-day dogfood window was dropped by the operator on 2026-10-11 (single-operator deployment). |
 
 ## Requirements and evidence boundaries
 
@@ -141,7 +141,7 @@ The public CLI workflow is documented in [shared cutover](shared-knowledge-cutov
 | Warm hook latency | Actual release CLI, 10,000 documents, 20 clients and 100 samples per SQL→OKF→SQL phase: two uninstrumented bracketed runs pass with worst added p95 **17.61 ms** and **16.01 ms**, below the **50 ms** target. Ordered output and all 2,400 OKF observations pass. Raw reports: `docs/performance/okf-hooks-2026-10-10-bracketed*.json`. The earlier 108.57 ms failure remains historical variance evidence; these local measurements do not establish a universal bound. |
 | Separate latency cases | Shared-network, database cold-start, broader scope distributions and cross-platform qualification remain. Warm local measurements cannot stand in for these cases. |
 | Native bundles | Online/offline assembler, manifests, license retention, deterministic checksums, bounded extraction and extracted-binary lifecycle/backup smoke passed on all three target platforms at `b3153a7` in [run 37991943961](https://github.com/ng/yggdrasil/actions/runs/37991943961). CI candidates are not public release artifacts. |
-| Final distribution | Release publication and macOS quarantine/Developer ID/notarization workflow remain; clean Ubuntu runtime candidate qualification is recorded below. |
+| Final distribution | Release publication remains. macOS Developer ID/notarization/quarantine qualification was removed from scope by the operator on 2026-10-11: binaries are installed locally via `make install` or CI artifact download and are never quarantined. Clean Ubuntu runtime candidate qualification is recorded below. |
 
 A separate local debug-build initialization, running alongside the full suite,
 hit the 30-second `postgres --version` bootstrap deadline for newly extracted
@@ -184,17 +184,15 @@ timeouts are not test failures or reasons to restart a running job.
 1. Done: the updated lifecycle timing smoke passed on all three native platforms
    at `ca5038f` (run `38055774673`); the public fleet CLI and external↔managed
    move tests already passed all three platforms at `6d49d51` (run `38053885160`).
-2. Produce and smoke-test the final released artifacts on every advertised target,
-   including positive macOS signing/quarantine evidence. Candidate CI bundles do
-   not satisfy published-artifact qualification.
+2. Produce and smoke-test the final released artifacts on every advertised target.
+   macOS signing/notarization is out of scope (operator decision 2026-10-11).
 3. Keep database cold-start and shared-remote latency measurements separate from
    the passing local warm-hook benchmark; retain the documented variance limits.
-4. Qualify the actual deployment's client compatibility, writer quiescence,
-   inventory and identity mappings, then rehearse cutover and current-data rollback
-   with recoverable backups and credentials.
-5. Record **14 days of dogfooding and a successful rollback rehearsal**. Only then
-   implement M7's forward removal migration, remove the SQL knowledge repositories,
+4. Done 2026-10-11: operator deployment cutover and current-data rollback
+   rehearsal (see "Operator cutover").
+5. Implement M7's forward removal migration, remove the SQL knowledge repositories,
    change installer/default behavior, and verify final restore and coordination.
+   The 14-day window is dropped (operator decision 2026-10-11).
 
 Operational follow-ups already noted in the component guides include cache/session
 and archived-draft retention, Git-history resource bounds and broader refresh
@@ -374,3 +372,48 @@ Application identities and no repository secrets or variables. Published-artifac
 smoke, positive macOS signing/notarization/quarantine qualification, the actual
 deployment inventory, writer quiescence, identity mapping, cutover/rollback
 rehearsal, the 14-day dogfood window and M7 remain open and unstarted.
+
+## Operator cutover
+
+The operator's own installation (external Homebrew PostgreSQL 18.3, database
+`ygg`, 398 notes and 2 learnings across 28 repositories) was cut over to OKF on
+2026-10-11 with the branch binary installed via `make install`.
+
+1. The branch binary and 19 pending migrations were applied. The live database
+   carried migration `20260615000009_watcher_heartbeat` from the unmerged
+   `feat/hook-watcher-self-heal` branch; sqlx refuses to migrate while an applied
+   version is missing, so the byte-identical file was added to this branch.
+2. Pre-cutover combined backup: `~/.local/share/ygg-backups/2026-10-11-pre-okf`
+   (database only, 47.5 MB dump, verified).
+3. `ygg knowledge clients` reported zero live blockers; the mapped dry run verified
+   all 400 rows. The private plan mapped the empty legacy owner and the runtime
+   user `ng` to `ng`, reused legacy repo UUIDs as portable IDs, and bound Git
+   common directories and canonical GitHub aliases.
+4. First forward migration activated at generation 3 but every knowledge command
+   then failed with "explicit knowledge user mapping required" because the plan
+   mapped only the empty legacy owner, not the runtime user. This was repaired by
+   the rollback rehearsal below rather than by editing policy files.
+5. **Rollback rehearsal:** `ygg knowledge rollback` with the retained original
+   export returned SQL to authority at generation 5 with all 398 notes and 2
+   learnings present, including a note written by another live session during
+   the window.
+6. Re-migration with the corrected mapping succeeded at generation 19 (401
+   documents, including the note written during the rehearsal) after two operator
+   steps the tooling does not perform: the deselected first-cutover corpus and
+   policy directories had to be moved aside, because publication refuses an
+   existing destination that does not match the new export and backup refuses a
+   policy directory without a corpus. Interrupted operations in between were
+   cleanly aborted with `--abort` (generations 6 through 17).
+7. `ygg knowledge refresh-usage` was required before `ygg learn list` would run,
+   because the forward migration writes no `usage-baseline.json`.
+8. Post-cutover combined backup with knowledge and policy:
+   `~/.local/share/ygg-backups/2026-10-11-post-okf` (verified). `ygg remember`,
+   `ygg remember --list`, `ygg learn list`, `ygg knowledge browse` and `ygg prime`
+   all operate on OKF.
+
+The database was not moved to the managed runtime: the Homebrew cluster uses
+`en_US.UTF-8` collation and managed restore requires an exact `C`-locale match.
+The installation stays in external mode, which the plan permits for existing
+installations. Live hooks from other Claude sessions caused several transient
+"live clients block" refusals; each was retried or aborted without data loss.
+Plan, mapping and journal evidence: `~/.local/share/ygg-okf/`.
