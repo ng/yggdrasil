@@ -6,6 +6,11 @@ Yggdrasil partitions data by user identity so multiple humans sharing a
 Postgres instance get isolated namespaces for agents, tasks, locks, nodes,
 and events. Cross-user visibility is opt-in. Knowledge (notes and learnings)
 lives in each user's own OKF corpus on disk (ADR 0019), not in shared tables.
+A coordination database binds to exactly one corpus (`knowledge_storage` is a
+singleton): the first `ygg init` against a shared database claims it, and a
+second user's `ygg init` still installs hooks but reports the knowledge binding
+as failed. Per-user corpora on one shared database are not supported yet; give
+each user their own database, or share the one corpus through the Git transport.
 
 ## Identity Resolution
 

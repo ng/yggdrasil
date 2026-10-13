@@ -82,6 +82,30 @@ fn bad(label: &str, state: &str) {
     println!("  {BR}│{X}  {label} {D}{d}{X} {R}{state}{X}");
 }
 
+/// Deployment switching and upgrade journals require the configuration
+/// directory to carry no group/other permission bits. Create new directories
+/// private; only diagnose an existing directory, never chmod a user's.
+async fn ensure_private_config_dir(config_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    match tokio::fs::symlink_metadata(config_dir).await {
+        Ok(meta) => {
+            if meta.is_dir() && meta.permissions().mode() & 0o077 != 0 {
+                hint(&format!(
+                    "{} is group/other accessible; `chmod 700` it before `ygg db switch` or upgrades",
+                    config_dir.display()
+                ));
+            }
+        }
+        Err(_) => {
+            if tokio::fs::create_dir_all(config_dir).await.is_ok() {
+                let _ =
+                    tokio::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))
+                        .await;
+            }
+        }
+    }
+}
+
 fn hint(msg: &str) {
     println!("  {BR}│{X}  {D}{msg}{X}");
 }
@@ -143,7 +167,8 @@ fn prompt_skip(name: &str) -> bool {
     let skip = a.is_empty() || a == "y" || a == "yes";
     if skip {
         // Save the decision — use sync write since we're in a sync fn
-        let Ok(config_dir) = crate::config::database::config_dir(&std::env::vars().collect())
+        let Ok(config_dir) =
+            crate::config::database::config_dir(&crate::config::database::process_environment())
         else {
             return skip;
         };
@@ -255,7 +280,9 @@ async fn init(
     NON_INTERACTIVE.store(yes, Ordering::Relaxed);
 
     // Resolve before writing config or invoking dependency installers.
-    let deployment = crate::config::database::DeploymentConfig::load(std::env::vars().collect())?;
+    let deployment = crate::config::database::DeploymentConfig::load(
+        crate::config::database::process_environment(),
+    )?;
     anyhow::ensure!(
         postgres_archive.is_none()
             || matches!(
@@ -265,8 +292,9 @@ async fn init(
         "--postgres-archive requires managed mode"
     );
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let config_dir = crate::config::database::config_dir(&std::env::vars().collect())?;
-    tokio::fs::create_dir_all(&config_dir).await.ok();
+    let config_dir =
+        crate::config::database::config_dir(&crate::config::database::process_environment())?;
+    ensure_private_config_dir(&config_dir).await;
 
     // Merge CLI skips with saved skips
     let saved_skips = load_saved_skips(&config_dir).await;
@@ -389,21 +417,42 @@ async fn init(
             ok("migrations", "applied");
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        {
+        if skipping(&all_skips, "migrations") {
+            // Bootstrap binds the knowledge_storage marker, which the skipped
+            // migrations create; on a pre-M7 database it would also flip an
+            // unexported SQL selection. Never run it against an unmigrated schema.
             head("knowledge");
-            let env: crate::config::database::Environment = std::env::vars().collect();
-            let pool = db::maintenance_pool(&deployment).await?;
-            let result = crate::knowledge::bootstrap::initialize(&deployment, &env, &pool).await;
-            pool.close().await;
-            let report = result?;
-            ok(
-                "knowledge",
-                if report.created {
-                    "initialized"
-                } else {
-                    "ready"
-                },
-            );
+            hint("skipped with migrations; run `ygg knowledge init` after `ygg migrate`");
+        } else {
+            head("knowledge");
+            let env = crate::config::database::process_environment();
+            let result = match db::maintenance_pool(&deployment).await {
+                Ok(pool) => {
+                    let result =
+                        crate::knowledge::bootstrap::initialize(&deployment, &env, &pool).await;
+                    pool.close().await;
+                    result
+                }
+                Err(error) => Err(error),
+            };
+            // A database already bound to another corpus (one corpus per
+            // database) must not block hook installation; knowledge commands
+            // report the binding problem themselves.
+            match result {
+                Ok(report) => ok(
+                    "knowledge",
+                    if report.created {
+                        "initialized"
+                    } else {
+                        "ready"
+                    },
+                ),
+                Err(error) => {
+                    bad("knowledge", "not initialized");
+                    hint(&format!("{error:#}"));
+                    hint("fix the binding, then run `ygg knowledge init`");
+                }
+            }
         }
     }
 

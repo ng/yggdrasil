@@ -242,7 +242,7 @@ enum Commands {
         action: DbAction,
     },
 
-    /// Inspect knowledge migration readiness (no cutover is performed)
+    /// Initialize, inspect and synchronize the OKF knowledge corpus
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Knowledge {
         #[command(subcommand)]
@@ -1317,7 +1317,9 @@ async fn main() -> anyhow::Result<()> {
             yes,
         } => {
             if reset {
-                let config_dir = ygg::config::database::config_dir(&std::env::vars().collect())?;
+                let config_dir = ygg::config::database::config_dir(
+                    &ygg::config::database::process_environment(),
+                )?;
                 let skips_path = config_dir.join("skips.json");
                 let _ = std::fs::remove_file(&skips_path);
                 println!("Saved skip decisions cleared.");
@@ -2441,9 +2443,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Learn { action } => {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            if let Some(local) =
-                ygg::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
-            {
+            if let Some(local) = ygg::knowledge::runtime::Context::from_environment(
+                ygg::config::database::process_environment(),
+            )? {
                 use ygg::{
                     cli::learning_cmd,
                     knowledge::service::{Creation, RuleInput},
@@ -2554,9 +2556,9 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            if let Some(context) =
-                ygg::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
-            {
+            if let Some(context) = ygg::knowledge::runtime::Context::from_environment(
+                ygg::config::database::process_environment(),
+            )? {
                 if list {
                     ygg::cli::remember_cmd::list_local(&context, all || global, limit, json)?;
                 } else {

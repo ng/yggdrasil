@@ -57,6 +57,8 @@ a rule. Material changes to approved content or scope require renewed approval.
 Knowledge location is independent of database location. Default to a private local
 corpus; shared delivery is explicitly configured and must define conflicts,
 freshness, and trust. Selecting hosted Postgres must not publish private knowledge.
+One database binds to one corpus; multiple users sharing a database share that
+binding rather than each holding a private corpus.
 No Google service, embeddings, or automatic knowledge generation is required.
 
 Replace the source of truth through a verified, reversible cutover. Preserve IDs,

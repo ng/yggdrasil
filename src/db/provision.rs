@@ -29,6 +29,7 @@ pub(crate) const TABLES: &[&str] = &[
     "bench_task_results",
     "bench_metrics",
     "handoffs",
+    "watcher_heartbeat",
     "knowledge_usage",
     "knowledge_applications",
 ];

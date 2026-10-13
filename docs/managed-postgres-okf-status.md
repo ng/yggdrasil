@@ -7,6 +7,13 @@ M7 completed the default OKF rollout and legacy-table removal on 2026-10-12:
 SQL `memories`/`learnings` tables no longer exist. Remaining release gates are
 tracked below.
 
+**Upgrade bridge for populated pre-M7 installations.** The removal migration
+refuses to drop unexported SQL knowledge, and `ygg knowledge init` refuses to
+bind an OKF corpus while such rows exist. The last revision that ships the
+SQL→OKF cutover tooling (`ygg knowledge migrate`) is tagged `okf-bridge`
+(commit 071f1be): build that tag, run its cutover, then upgrade. No release
+carries the bridge, so the tag must remain.
+
 Audit basis: the 2026-10-08 managed PostgreSQL/OKF implementation plan, tracked by
 `yggdrasil-3`, revised 2026-10-11 (signing gate and 14-day window removed), SHA-256
 `a0dea9b6685441fa084d1c3ccab68633e22dedef580bac8e9d66bba667a5e6e4`.

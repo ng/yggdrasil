@@ -17,8 +17,9 @@ use uuid::Uuid;
 /// Gracefully degrades when the DB is unavailable.
 pub async fn execute(agent_name: &str, transcript_path: Option<&str>) -> Result<(), anyhow::Error> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let knowledge =
-        crate::knowledge::runtime::Context::from_environment(std::env::vars().collect());
+    let knowledge = crate::knowledge::runtime::Context::from_environment(
+        crate::config::database::process_environment(),
+    );
 
     // Bound the whole coordination read, not just TCP connection setup. A hung
     // database query must not indefinitely suppress local knowledge or hooks.

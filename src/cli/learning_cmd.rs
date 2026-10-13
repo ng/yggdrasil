@@ -49,7 +49,7 @@ pub async fn print_for_claim(
 ) {
     use crate::knowledge::runtime::Context;
     let result = async {
-        match Context::from_environment(std::env::vars().collect())? {
+        match Context::from_environment(crate::config::database::process_environment())? {
             Some(context) => {
                 let (repo, lease) = tokio::time::timeout(
                     std::time::Duration::from_secs(3),

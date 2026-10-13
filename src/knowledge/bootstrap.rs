@@ -62,6 +62,16 @@ pub async fn initialize(
             binding.phase == Phase::Okf,
             "knowledge cutover is fenced; resume or abort it with the release that started it"
         );
+        ensure!(
+            binding.bundle == bundle,
+            "existing knowledge selection names bundle {}, not the configured {}",
+            binding.bundle.display(),
+            bundle.display()
+        );
+        ensure!(
+            binding.minimum_client > 0 && binding.minimum_client <= super::guard::CLIENT_PROTOCOL,
+            "existing knowledge selection requires a newer client"
+        );
         // The local selection alone proves nothing about the connected database:
         // a different or restored DATABASE_URL must be reported here, not as a
         // later lease failure on every claim.
@@ -153,6 +163,35 @@ async fn bind_marker(pool: &PgPool, corpus: Uuid) -> Result<(Uuid, i64)> {
         }
         "fenced" => bail!("knowledge cutover is in progress on this database"),
         "sql" => {
+            // A fresh-install marker is not evidence that existing SQL knowledge
+            // was exported. Lock the legacy tables (when present) so a concurrent
+            // legacy writer cannot slip rows in after the count, then refuse to
+            // flip the marker while any unexported row remains: the removal
+            // migration would otherwise drop them on its next run.
+            let mut legacy_rows: i64 = 0;
+            for table in ["memories", "learnings"] {
+                let exists: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+                    .bind(format!("public.{table}"))
+                    .fetch_one(&mut *tx)
+                    .await?;
+                if exists.is_none() {
+                    continue;
+                }
+                sqlx::query(&format!(
+                    "LOCK TABLE public.{table} IN ACCESS EXCLUSIVE MODE"
+                ))
+                .execute(&mut *tx)
+                .await?;
+                let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM public.{table}"))
+                    .fetch_one(&mut *tx)
+                    .await?;
+                legacy_rows += rows;
+            }
+            ensure!(
+                legacy_rows == 0,
+                "{legacy_rows} legacy SQL knowledge rows have not been exported; \
+                 cut over with the pre-M7 bridge revision (tag okf-bridge) before initializing OKF"
+            );
             // The marker trigger requires sql -> fenced -> okf, one generation
             // per step, and the check constraint requires a corpus once fenced.
             for next_backend in ["fenced", "okf"] {

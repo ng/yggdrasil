@@ -1051,17 +1051,25 @@ impl SharedGit {
             self.files(&commit)?;
             let pending = Pending {
                 commit: commit.clone(),
-                base,
+                base: base.clone(),
                 exact_base: exact_base.is_some(),
             };
             self.control.update_control("pending.json", |_| {
                 Ok((serde_json::to_string(&Some(&pending))?, ()))
             })?;
             prepared(&commit)?;
+            // A plain fast-forward push would silently republish history that a
+            // concurrent rewind removed. The lease pins the fetched base; its
+            // stale rejection is reported as `[rejected]` like any other.
+            let lease = format!(
+                "--force-with-lease=refs/heads/{}:{base}",
+                self.config.branch
+            );
             let pushed = self.run_with_expected(
                 &[
                     "push",
                     "--porcelain",
+                    &lease,
                     "--",
                     &self.config.remote,
                     &format!("{commit}:refs/heads/{}", self.config.branch),

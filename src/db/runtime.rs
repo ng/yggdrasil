@@ -599,14 +599,20 @@ impl ManagedCluster {
             _ => {
                 // A crashed postmaster can leave a PID file. Let PostgreSQL
                 // perform its own stale-lock recovery only when the recorded
-                // positive PID demonstrably does not exist. Never unlink it.
+                // positive PID demonstrably is not our postmaster: it does not
+                // exist, or it belongs to another user (a postmaster for this
+                // data directory always runs as its owner). PostgreSQL applies
+                // the same ESRCH/EPERM rule to its lock file. Never unlink it.
                 let text = read(&pid_file)?;
                 let lines: Vec<_> = text.lines().collect();
                 if lines.len() >= 2 && Path::new(lines[1]) == self.root.join("data") {
                     if let Ok(pid) = lines[0].parse::<i32>() {
                         if pid > 1
                             && unsafe { libc::kill(pid, 0) } == -1
-                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                            && matches!(
+                                std::io::Error::last_os_error().raw_os_error(),
+                                Some(libc::ESRCH) | Some(libc::EPERM)
+                            )
                         {
                             return Ok(Status::Stopped);
                         }

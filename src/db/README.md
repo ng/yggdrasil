@@ -274,6 +274,17 @@ YGG_TEST_PG_ARCHIVE=/absolute/postgresql-16.15.0-aarch64-apple-darwin.tar.gz \
 Set `YGG_TEST_PG_DOWNLOAD=1` too to exercise the explicit HTTPS downloader. The test
 creates only disposable private clusters and never reads `DATABASE_URL`.
 
+## Stale postmaster.pid recovery
+
+`ManagedCluster::status` reports `Stopped` only when the recorded postmaster PID
+does not exist (`ESRCH`) or belongs to another user (`EPERM`; a postmaster for
+this data directory always runs as its owner), mirroring PostgreSQL's own lock
+file rule. If an unclean shutdown leaves `data/postmaster.pid` and the PID has
+since been reused by a process of the same user, `status` stays `Unverified`
+and every command waits out the start timeout. Recovery is manual: confirm with
+`ps -p <pid>` that the process is not a postmaster for this data directory, then
+remove `data/postmaster.pid` and run `ygg db start`.
+
 ## Session-lock authority
 
 Scheduler and watcher daemons use `singleton::SingletonGuard` on a detached
