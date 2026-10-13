@@ -58,7 +58,13 @@ pub fn list_local(
     let repo = if all {
         None
     } else {
-        Some(context.repo(&std::env::current_dir()?)?)
+        match context.repo(&std::env::current_dir()?) {
+            Ok(repo) => Some(repo),
+            Err(error) => {
+                eprintln!("knowledge: repository knowledge omitted: {error}");
+                None
+            }
+        }
     };
     let snapshot = context.service.notes(repo, all, limit.try_into()?)?;
     for diagnostic in snapshot.diagnostics {

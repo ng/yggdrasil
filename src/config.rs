@@ -4,8 +4,6 @@ pub mod snapshot;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod switch;
 
-use std::env;
-
 /// Application configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -23,9 +21,9 @@ impl AppConfig {
     pub fn from_env() -> Result<Self, crate::YggError> {
         // Preserve legacy user .env knobs consumed directly by older modules
         // (YGG_USER, YGG_DB_POOL, scheduler/hook options). Never search cwd.
-        let inputs = env::vars().collect();
+        let inputs = database::process_environment();
+        let dir = database::config_dir(&inputs)?;
         let config = Self::from_environment(inputs)?;
-        let dir = database::config_dir(&env::vars().collect())?;
         dotenvy::from_path(dir.join(".env")).ok();
         Ok(config)
     }

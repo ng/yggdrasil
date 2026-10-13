@@ -2,7 +2,7 @@
 
 Yggdrasil is a multi-agent coordination layer for AI coding agents. It gives fleets of Claude Code instances (or any CLI-driven agent) the infrastructure they need to work in the same codebase without colliding: resource locking, task tracking with dependency graphs, a scheduler for autonomous task execution, a real-time TUI dashboard, and inter-agent messaging. Built in Rust, backed by PostgreSQL. The CLI binary is `ygg`.
 
-> **Knowledge storage:** ADR 0015 removed embeddings, pgvector and similarity retrieval. `remember` and `learn` provide scoped notes and deterministic rules. The compatibility implementation supports explicit migration to authoritative Open Knowledge Format (OKF) files; existing SQL knowledge stays selected until that migration. [Implementation and release status](docs/managed-postgres-okf-status.md).
+> **Knowledge storage:** ADR 0015 removed embeddings, pgvector and similarity retrieval. `remember` and `learn` provide scoped notes and deterministic rules. Since ADR 0019 (M7) authoritative Open Knowledge Format (OKF) files are the only knowledge backend; `ygg init` initializes the corpus on fresh installations. [Implementation and release status](docs/managed-postgres-okf-status.md).
 
 ---
 
@@ -128,7 +128,7 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `lock`      | Acquire / release / list / heartbeat resource locks.                    |
 | `learn`     | Scoped learnings: deterministic rule capture matched by file glob.      |
 | `remember`  | Create, list and delete scoped notes.                                  |
-| `knowledge` | Browse OKF, inspect migration, explicitly cut over/roll back private knowledge, and recover shared drafts. |
+| `knowledge` | Browse OKF, initialize the corpus, refresh usage, sync the shared corpus, and inspect/recover pending drafts. |
 | `prime`     | Hook: emits agent context as Markdown.                                  |
 | `msg`/`chat`| Agent-to-agent messaging on the events bus.                             |
 | `interrupt` | Human overrides: take-over, hand-back.                                  |

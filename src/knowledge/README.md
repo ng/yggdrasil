@@ -204,28 +204,14 @@ warm-hook p95 target. The SQL hook baseline, actual CLI/hook overhead, rendering
 telemetry, concurrent writes and shared-remote latency require separate runs.
 Do not compare debug-build timings or run this concurrently with other tests.
 
-The SQL-relative edit-hook qualification uses the actual release CLI:
+The SQL-relative edit-hook qualification (`okf_hook_performance`,
+`sql_relative_edit_hook_p95`) was removed with the SQL knowledge backend in M7;
+its recorded results remain under `docs/performance/`. It drove a private
+10,000-document corpus (8,000 notes and 2,000 rules) with twenty agents editing
+distinct paths, measured five synchronized rounds per mode through the release
+CLI, and failed when OKF p95 exceeded SQL p95 by more than 50 ms.
 
-```sh
-DATABASE_URL=postgres://.../isolated_test_database \
-YGG_HOOK_BENCH_REPORT=/absolute/path/hook-latency.json \
-cargo test --release --test okf_hook_performance sql_relative_edit_hook_p95 -- --ignored --nocapture --test-threads=1
-```
-
-It creates and drops its own migrated database and private 10,000-document corpus
-(8,000 notes and 2,000 rules). Twenty agents modify distinct file paths; every
-request uses a new session and must emit the same 20 ordered rules in both modes.
-Each mode warms all clients, then measures five synchronized rounds (100 samples).
-Timing includes CLI startup, selection/revalidation, output, coordination and
-telemetry. The SQL phase precedes OKF selection; this fixture selection is not a
-migration rehearsal. The JSON report retains every sample and computes OKF p95
-minus SQL p95. The test fails when added p95 exceeds 50 ms, and preserves the report
-at the optional path even on a threshold failure. Child deadlines and fixture
-cleanup apply on failures. Run it without other local tests/builds; it does not
-qualify shared-remote latency, cold database startup, task-claim correctness,
-concurrent document mutation or every possible scope distribution.
-
-Set `YGG_HOOK_BENCH_PHASES=1` for diagnostic tracing in that benchmark. Ordinary
+`YGG_HOOK_BENCH_PHASES=1` enabled diagnostic tracing in that benchmark. Ordinary
 commands can enable `RUST_LOG=ygg::knowledge::timing=debug`. Timings contain only
 static phase names and elapsed microseconds, never document text, paths, session
 IDs or credentials. The report retains per-request phases alongside total samples.

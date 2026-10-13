@@ -2,10 +2,10 @@
 
 This is the release-gate ledger for [PR #122](https://github.com/ng/yggdrasil/pull/122),
 task `yggdrasil-5`, and [ADR 0019](adr/0019-managed-postgres-and-okf-knowledge.md).
-The full implementation remains in progress. Existing installations keep their
-configured database and SQL knowledge until an explicit validated cutover.
-Candidate bundles and passing fixtures do not authorize default OKF rollout or
-legacy-table removal.
+M7 completed the default OKF rollout and legacy-table removal on 2026-10-12:
+`ygg init` initializes the corpus, OKF is the only knowledge backend, and the
+SQL `memories`/`learnings` tables no longer exist. Remaining release gates are
+tracked below.
 
 Audit basis: the 2026-10-08 managed PostgreSQL/OKF implementation plan, tracked by
 `yggdrasil-3`, revised 2026-10-11 (signing gate and 14-day window removed), SHA-256

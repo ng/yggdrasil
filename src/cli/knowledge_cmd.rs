@@ -1,8 +1,9 @@
 use anyhow::{Result, ensure};
 
 pub fn sync(confirm_pending: bool, json: bool) -> Result<()> {
-    let access =
-        crate::knowledge::runtime::SharedAccess::from_environment(std::env::vars().collect())?;
+    let access = crate::knowledge::runtime::SharedAccess::from_environment(
+        crate::config::database::process_environment(),
+    )?;
     if confirm_pending {
         access.transport.confirm_pending()?;
     }
@@ -19,8 +20,9 @@ pub fn sync(confirm_pending: bool, json: bool) -> Result<()> {
 }
 
 pub fn pending(json: bool) -> Result<()> {
-    let access =
-        crate::knowledge::runtime::SharedAccess::from_environment(std::env::vars().collect())?;
+    let access = crate::knowledge::runtime::SharedAccess::from_environment(
+        crate::config::database::process_environment(),
+    )?;
     let pending = access.transport.pending_info()?;
     if json {
         println!("{}", serde_json::to_string_pretty(&pending)?);
@@ -41,8 +43,9 @@ pub fn pending(json: bool) -> Result<()> {
 }
 pub fn recover(commit: &str, retry: bool, json: bool) -> Result<()> {
     use crate::knowledge::shared::{RecoveryAction, RecoveryOutcome};
-    let access =
-        crate::knowledge::runtime::SharedAccess::from_environment(std::env::vars().collect())?;
+    let access = crate::knowledge::runtime::SharedAccess::from_environment(
+        crate::config::database::process_environment(),
+    )?;
     let result = access.transport.recover(
         commit,
         if retry {
@@ -100,8 +103,10 @@ pub async fn clients(json: bool) -> Result<()> {
 }
 
 pub async fn refresh_usage(json: bool) -> Result<()> {
-    let context = crate::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
-        .ok_or_else(|| anyhow::anyhow!("usage refresh requires selected OKF storage"))?;
+    let context = crate::knowledge::runtime::Context::from_environment(
+        crate::config::database::process_environment(),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("usage refresh requires selected OKF storage"))?;
     let config = crate::config::AppConfig::from_env()?;
     let report = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let pool = crate::db::connect(&config.database).await?;
@@ -128,8 +133,10 @@ pub async fn refresh_usage(json: bool) -> Result<()> {
 
 /// Explicit inspection uses the selected private/shared corpus without SQL.
 pub fn browse(path: Option<&str>, json: bool) -> Result<()> {
-    let context = crate::knowledge::runtime::Context::from_environment(std::env::vars().collect())?
-        .ok_or_else(|| anyhow::anyhow!("no selected OKF corpus"))?;
+    let context = crate::knowledge::runtime::Context::from_environment(
+        crate::config::database::process_environment(),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("no selected OKF corpus"))?;
     let report = context.service.browse_documents(path)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -160,7 +167,7 @@ pub fn browse(path: Option<&str>, json: bool) -> Result<()> {
 
 /// Create (or verify) the OKF corpus and bind the selected database to it.
 pub async fn init(json: bool) -> Result<()> {
-    let env: crate::config::database::Environment = std::env::vars().collect();
+    let env: crate::config::database::Environment = crate::config::database::process_environment();
     let config = crate::config::database::DeploymentConfig::load_maintenance(env.clone())?;
     let pool = crate::db::maintenance_pool(&config).await?;
     let result = crate::knowledge::bootstrap::initialize(&config, &env, &pool).await;

@@ -50,14 +50,17 @@ pub fn release() -> Result<Release> {
     release_for_major(16)
 }
 
-/// Explicit major selection; ordinary installation continues to use PG16.
-pub fn release_for_major(major: u32) -> Result<Release> {
-    let bytes = match major {
+fn catalog_for_major(major: u32) -> Result<&'static str> {
+    Ok(match major {
         16 => include_str!("packages.json"),
         18 => include_str!("packages-18.json"),
         _ => anyhow::bail!("managed PostgreSQL major must be 16 or 18"),
-    };
-    let release: Release = serde_json::from_str(bytes)?;
+    })
+}
+
+/// Explicit major selection; ordinary installation continues to use PG16.
+pub fn release_for_major(major: u32) -> Result<Release> {
+    let release: Release = serde_json::from_str(catalog_for_major(major)?)?;
     ensure!(
         release.postgres_version.split('.').next() == Some(major.to_string().as_str()),
         "package manifest major differs from selection"
@@ -380,7 +383,7 @@ pub(super) fn publish(stage: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install(base: &Path, package: &Package, bytes: &[u8]) -> Result<PathBuf> {
+fn install(base: &Path, package: &Package, bytes: &[u8], major: u32) -> Result<PathBuf> {
     verify_bytes(package, bytes)?; // Before creating any destination state.
     ensure!(base.is_absolute(), "absolute package directory required");
     private_dir(base, true)?;
@@ -425,7 +428,7 @@ fn install(base: &Path, package: &Package, bytes: &[u8]) -> Result<PathBuf> {
         .create_new(true)
         .mode(0o600)
         .open(stage.join("YGG-RELEASE.json"))?;
-    provenance.write_all(include_bytes!("packages.json"))?;
+    provenance.write_all(catalog_for_major(major)?.as_bytes())?;
     provenance.sync_all()?;
     let expected = inventory(&stage)?;
     let receipt = serde_json::to_vec(&(package, &expected))?;
@@ -482,7 +485,7 @@ pub fn install_offline(base: &Path, archive: &Path) -> Result<PathBuf> {
 pub fn install_offline_for_major(base: &Path, archive: &Path, major: u32) -> Result<PathBuf> {
     let package = package_for_major(current_target()?, major)?;
     let bytes = archive_bytes(archive, &package)?;
-    install(base, &package, &bytes)
+    install(base, &package, &bytes, major)
 }
 
 /// Explicit online installation only; curl is not required for offline packages.
@@ -527,7 +530,7 @@ pub async fn install_download_for_major(base: &Path, major: u32) -> Result<PathB
     verify_bytes(&package, &bytes)?;
     ensure!(child.wait().await?.success(), "package download failed");
     let base = base.to_path_buf();
-    tokio::task::spawn_blocking(move || install(&base, &package, &bytes)).await?
+    tokio::task::spawn_blocking(move || install(&base, &package, &bytes, major)).await?
 }
 
 #[cfg(test)]

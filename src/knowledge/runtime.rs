@@ -359,7 +359,15 @@ impl Context {
         pool: &sqlx::PgPool,
         legacy_repo: Uuid,
     ) -> Result<(Uuid, sqlx::Transaction<'static, sqlx::Postgres>)> {
-        let mut transaction = self.storage_lease(pool).await?;
+        // Resolve (and possibly bind) the repository before taking the shared
+        // advisory lease: binding waits synchronously on the exclusive
+        // `.writer.lock`, which must never happen while the lease and its
+        // transaction are held.
+        let repo = self.task_repo(pool, legacy_repo).await?;
+        let transaction = self.storage_lease(pool).await?;
+        Ok((repo, transaction))
+    }
+    async fn task_repo(&self, pool: &sqlx::PgPool, legacy_repo: Uuid) -> Result<Uuid> {
         if let Ok(repo) = self
             .registry
             .from_legacy(self.mappings.database_id, legacy_repo)
@@ -368,7 +376,7 @@ impl Context {
                 self.mappings.repos.get(&legacy_repo) == Some(&repo),
                 "task repository has no matching selection binding"
             );
-            return Ok((repo, transaction));
+            return Ok(repo);
         }
         // Repositories registered after cutover carry no legacy mapping. The
         // database row may be the portable identity itself (see
@@ -377,13 +385,13 @@ impl Context {
         // existing checkout on first use.
         let (identities, _) = self.registry.read()?;
         if identities.repos.iter().any(|r| r.id == legacy_repo) {
-            return Ok((legacy_repo, transaction));
+            return Ok(legacy_repo);
         }
         let row: Option<(Option<String>, Vec<String>)> = sqlx::query_as(
             "SELECT canonical_url, local_paths FROM public.repos WHERE repo_id = $1",
         )
         .bind(legacy_repo)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(pool)
         .await?;
         let (url, paths) = row.ok_or_else(|| anyhow!("task repository is not registered"))?;
         if let Some(origin) = url
@@ -395,16 +403,15 @@ impl Context {
                 origin: Some(origin),
             };
             if let Some(repo) = self.registry.resolve(&probe)? {
-                return Ok((repo, transaction));
+                return Ok(repo);
             }
         }
         for path in paths.iter().map(Path::new).filter(|p| p.is_dir()) {
             if let Ok(identity) = GitIdentity::discover(path) {
-                let repo = match self.registry.resolve(&identity)? {
-                    Some(repo) => repo,
-                    None => self.registry.bind(&identity)?,
+                return match self.registry.resolve(&identity)? {
+                    Some(repo) => Ok(repo),
+                    None => self.registry.bind(&identity),
                 };
-                return Ok((repo, transaction));
             }
         }
         Err(anyhow!(

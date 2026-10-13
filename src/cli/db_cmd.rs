@@ -9,7 +9,7 @@ use std::{path::PathBuf, time::Duration};
 use uuid::Uuid;
 
 fn target() -> Result<DatabaseTarget> {
-    Ok(DeploymentConfig::load(std::env::vars().collect())?.database)
+    Ok(DeploymentConfig::load(crate::config::database::process_environment())?.database)
 }
 
 pub async fn upgrade(
@@ -21,7 +21,7 @@ pub async fn upgrade(
     seconds: u64,
     json: bool,
 ) -> Result<()> {
-    let config = DeploymentConfig::load(std::env::vars().collect())?;
+    let config = DeploymentConfig::load(crate::config::database::process_environment())?;
     let executable = std::env::current_exe()?;
     let receipt = crate::db::upgrade::patch(
         &config,
@@ -180,7 +180,8 @@ pub async fn backup(
     policy_dir: Option<&std::path::Path>,
     json: bool,
 ) -> Result<()> {
-    let config = DeploymentConfig::load_maintenance(std::env::vars().collect())?;
+    let config =
+        DeploymentConfig::load_maintenance(crate::config::database::process_environment())?;
     let manifest =
         crate::db::deployment_backup::create(&config, destination, pg_bin, policy_dir).await?;
     if json {
@@ -211,7 +212,7 @@ pub async fn restore(
     accept_locale_change: bool,
     json: bool,
 ) -> Result<()> {
-    let config = DeploymentConfig::load(std::env::vars().collect())?;
+    let config = DeploymentConfig::load(crate::config::database::process_environment())?;
     let receipt = crate::db::deployment_restore::run_with_options(
         &config,
         path,
@@ -245,7 +246,7 @@ pub async fn switch(
         backup,
         restored,
         target_config,
-        std::env::vars().collect(),
+        crate::config::database::process_environment(),
         resume,
     )
     .await?;

@@ -62,6 +62,28 @@ pub async fn initialize(
             binding.phase == Phase::Okf,
             "knowledge cutover is fenced; resume or abort it with the release that started it"
         );
+        // The local selection alone proves nothing about the connected database:
+        // a different or restored DATABASE_URL must be reported here, not as a
+        // later lease failure on every claim.
+        let (database_id, generation, backend, bound): (Uuid, i64, String, Option<Uuid>) =
+            sqlx::query_as(
+                "SELECT database_id, generation, backend, corpus_id \
+                 FROM public.knowledge_storage WHERE singleton",
+            )
+            .fetch_one(pool)
+            .await?;
+        ensure!(
+            database_id == binding.mappings.database_id
+                && generation == binding.generation
+                && backend == "okf"
+                && bound == Some(identities.corpus_id),
+            "existing knowledge selection is bound to a different database or generation \
+             (selected {}@{}, connected {}@{} backend {backend})",
+            binding.mappings.database_id,
+            binding.generation,
+            database_id,
+            generation
+        );
         return Ok(Report {
             created: false,
             corpus_id: identities.corpus_id,

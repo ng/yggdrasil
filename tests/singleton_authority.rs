@@ -134,7 +134,7 @@ async fn scheduler_and_watcher_exit_when_their_lock_backend_dies() {
         }
     }).catch_unwind().await;
     pool.close().await;
-    sqlx::query(&format!("DROP DATABASE {name}"))
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
         .execute(&admin)
         .await
         .unwrap();

@@ -1,12 +1,15 @@
 # Shared knowledge cutover protocol (historical)
 
-**Removed in M7 (2026-10-11).** The `ygg knowledge fleet`, `migrate`,
+**Removed in M7 (2026-10-12).** The `ygg knowledge fleet`, `migrate`,
 `rollback`, `rollback-status` and `fence-local` commands and the SQL
 `memories`/`learnings` tables they migrated no longer exist; OKF is the only
 knowledge backend and fresh installations are initialized by `ygg init`. This
 document records the protocol as implemented in PR #122 and used for the
 2026-10-11 single-operator cutover (see the release ledger). It is retained as
 design history for any future shared multi-host cutover, not as an operator guide.
+Statements below that a command or workflow "remains rejected", "remains
+unavailable" or is "unfinished" describe the state at the time of the cutover;
+the entire protocol and every command it names were removed in M7.
 
 ## Operator command workflow
 

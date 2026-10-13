@@ -55,6 +55,15 @@ pub struct UserSettings {
 /// This also permits deterministic configuration tests without unsafe set_var.
 pub type Environment = BTreeMap<String, String>;
 
+/// Snapshot the process environment, skipping entries whose key or value is not
+/// valid Unicode. `std::env::vars()` panics on such entries, and hooks inherit
+/// arbitrary parent environments.
+pub fn process_environment() -> Environment {
+    std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct MigrationOwnerUrl(String);
 

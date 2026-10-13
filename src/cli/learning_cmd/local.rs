@@ -80,7 +80,13 @@ pub fn list(
     let repo = if all {
         None
     } else {
-        Some(context.repo(&std::env::current_dir()?)?)
+        match context.repo(&std::env::current_dir()?) {
+            Ok(repo) => Some(repo),
+            Err(error) => {
+                eprintln!("knowledge: repository knowledge omitted: {error}");
+                None
+            }
+        }
     };
     let snapshot = if pending {
         context.service.pending(repo)?
