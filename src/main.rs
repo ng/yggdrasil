@@ -144,6 +144,10 @@ enum DbAction {
         /// Explicit target major for a new managed restore (16 or 18)
         #[arg(long)]
         postgres_major: Option<u32>,
+        /// Accept a target encoding/collation that differs from the backup
+        /// (e.g. en_US.UTF-8 into a managed C cluster); text ordering changes
+        #[arg(long)]
+        accept_locale_change: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1348,6 +1352,7 @@ async fn main() -> anyhow::Result<()> {
                 pg_bin,
                 postgres_archive,
                 postgres_major,
+                accept_locale_change,
                 json,
             } => {
                 ygg::cli::db_cmd::restore(
@@ -1356,6 +1361,7 @@ async fn main() -> anyhow::Result<()> {
                     pg_bin.as_deref(),
                     postgres_archive.as_deref(),
                     postgres_major,
+                    accept_locale_change,
                     json,
                 )
                 .await?;

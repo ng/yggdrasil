@@ -212,7 +212,13 @@ pub async fn run(
             }
         };
         let checked = async {
-            super::restore::validate(&owner, &manifest.database).await?;
+            // Honor an explicitly accepted locale change recorded by the restore.
+            super::restore::validate_with(
+                &owner,
+                &manifest.database,
+                receipt.locale_change_accepted,
+            )
+            .await?;
             runtime_access(&runtime).await?;
             // Reread filesystem/config inputs after the database scan. Changes
             // refuse publication rather than silently selecting a mixed revision.

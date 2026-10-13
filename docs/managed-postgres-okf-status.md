@@ -450,3 +450,19 @@ passed PostgreSQL 16 and 18 tests, check, clippy and rustfmt, and
 passed on Linux, Apple Silicon and Intel macOS, including the fresh managed-cluster
 `knowledge init` bootstrap, both bundle flavors, upgrade, major restore,
 disk-full and deployment-move suites.
+
+### Operator move to the managed runtime
+
+On 2026-10-12 the operator installation moved from external Homebrew PostgreSQL
+18.3 (`en_US.UTF-8`) to a managed PostgreSQL 18.6 cluster under
+`~/Library/Application Support/ygg-managed`, with knowledge relocated to
+`~/Library/Application Support/ygg-managed-files`. The earlier blocker was the
+exact encoding/locale match in restore, not UTF-8 itself: managed clusters are
+initialized with the C locale. `ygg db restore --accept-locale-change` now opts
+into that difference explicitly (database-properties evidence excluded from the
+schema comparison; contents, counts and C-collation row hashes still exact;
+`locale_change_accepted` recorded in the receipt and honored by `ygg db switch`).
+Backup `~/.local/share/ygg-backups/2026-10-12-pre-managed`; switch operation
+`fbfc77ab`. The Homebrew cluster and the previous corpus remain untouched;
+reverting is restoring `~/.config/ygg/.env.external-2026-10-12` and removing
+`config.toml`.

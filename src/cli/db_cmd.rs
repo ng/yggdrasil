@@ -208,16 +208,18 @@ pub async fn restore(
     pg_bin: Option<&std::path::Path>,
     postgres_archive: Option<&std::path::Path>,
     postgres_major: Option<u32>,
+    accept_locale_change: bool,
     json: bool,
 ) -> Result<()> {
     let config = DeploymentConfig::load(std::env::vars().collect())?;
-    let receipt = crate::db::deployment_restore::run_with_major(
+    let receipt = crate::db::deployment_restore::run_with_options(
         &config,
         path,
         destination,
         pg_bin,
         postgres_archive,
         postgres_major,
+        accept_locale_change,
     )
     .await
     .context("restore incomplete on failure; inspect retained target before retrying")?;

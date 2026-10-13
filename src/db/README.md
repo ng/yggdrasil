@@ -472,7 +472,12 @@ sessions. Before importing, restore compares the target database encoding, local
 provider, collation and character classification against the recorded source
 properties. A mismatch or missing/ambiguous source evidence rejects the restore
 before creating database objects. Use matching database encoding and locale; managed destinations use UTF-8
-and the pinned initializer’s C locale. Supply an owner credential with the required schema/extension privileges;
+and the pinned initializer’s C locale. `--accept-locale-change` is an explicit
+opt-in for moving, for example, a Homebrew `en_US.UTF-8` database into a managed
+`C` cluster: the database-properties record is excluded from the schema
+comparison and the receipt records `locale_change_accepted`; contents, counts and
+C-collation row hashes are still verified exactly, but text sort order and index
+order follow the target collation. Supply an owner credential with the required schema/extension privileges;
 external runtime grants remain the operator's responsibility.
 
 ```sh

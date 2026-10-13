@@ -156,7 +156,27 @@ async fn restore_evidence_matches(
     mut actual: Evidence,
     expected: &Evidence,
     source_major: i32,
+    accept_locale_change: bool,
 ) -> Result<bool> {
+    // An explicitly accepted collation/locale change differs only in the
+    // database-properties record; row hashes are framed under C collation.
+    let owned_expected;
+    let expected = if accept_locale_change {
+        let is_database = |entry: &String| entry.starts_with("[\"database\",");
+        actual.schema.retain(|entry| !is_database(entry));
+        owned_expected = Evidence {
+            schema: expected
+                .schema
+                .iter()
+                .filter(|entry| !is_database(entry))
+                .cloned()
+                .collect(),
+            ..expected.clone()
+        };
+        &owned_expected
+    } else {
+        expected
+    };
     let target_major: i32 =
         sqlx::query_scalar("SELECT current_setting('server_version_num')::int / 10000")
             .fetch_one(&mut *connection)
@@ -220,6 +240,16 @@ WHERE c.contype='n' AND c.contypid=0 AND r.relkind='r'
 }
 
 pub async fn validate(options: &PgConnectOptions, expected: &DatabaseSnapshot) -> Result<()> {
+    validate_with(options, expected, false).await
+}
+
+/// `accept_locale_change` tolerates a target whose encoding/collation/ctype
+/// differ from the backup; everything else stays exact.
+pub async fn validate_with(
+    options: &PgConnectOptions,
+    expected: &DatabaseSnapshot,
+    accept_locale_change: bool,
+) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(1800), async {
         let mut connection = PgConnection::connect_with(options).await.map_err(|_| anyhow::anyhow!("restore validation connection failed"))?;
         sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut connection).await?;
@@ -230,7 +260,7 @@ pub async fn validate(options: &PgConnectOptions, expected: &DatabaseSnapshot) -
         let (actual, counts) = evidence(&mut connection).await?;
         ensure!(counts == expected.table_rows, "restored table inventory or counts differ");
         let source = expected.validation.as_ref().ok_or_else(|| anyhow::anyhow!("backup lacks restore evidence"))?;
-        ensure!(restore_evidence_matches(&mut connection, actual, source, expected.server_major).await?, "restored content or schema differs from backup");
+        ensure!(restore_evidence_matches(&mut connection, actual, source, expected.server_major, accept_locale_change).await?, "restored content or schema differs from backup");
         sqlx::query("ROLLBACK").execute(&mut connection).await?;
         connection.close().await?;
         Ok(())
@@ -246,6 +276,20 @@ pub async fn database(
     options: &PgConnectOptions,
     archive: &mut File,
     expected: &DatabaseSnapshot,
+) -> Result<()> {
+    database_with(bin, options, archive, expected, false).await
+}
+
+/// `accept_locale_change` lets an operator restore into a target whose
+/// encoding/collation/ctype differ from the source (for example Homebrew
+/// `en_US.UTF-8` into a managed `C` cluster). Text sort order and index
+/// order change; contents, counts and row hashes are still verified.
+pub async fn database_with(
+    bin: &Path,
+    options: &PgConnectOptions,
+    archive: &mut File,
+    expected: &DatabaseSnapshot,
+    accept_locale_change: bool,
 ) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(1800), async {
         ensure!(bin.is_absolute(), "absolute PostgreSQL binary directory required");
@@ -272,7 +316,7 @@ pub async fn database(
         ensure!(locked, "another restore holds the target lease");
         let major: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int / 10000").fetch_one(&mut lease).await?;
         ensure!(major >= expected.server_major && tool_major >= expected.server_major, "restore cannot downgrade PostgreSQL major version");
-        require_database_properties(&mut lease, &properties).await?;
+        if !accept_locale_change { require_database_properties(&mut lease, &properties).await?; }
         let empty: bool = sqlx::query_scalar(r#"SELECT NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema','public') AND nspname !~ '^pg_toast' AND nspname !~ '^pg_temp') AND NOT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql')"#).fetch_one(&mut lease).await?;
         ensure!(empty, "restore target must be empty; existing objects are never removed");
         let others: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND pid<>pg_backend_pid()").fetch_one(&mut lease).await?;
@@ -286,7 +330,7 @@ pub async fn database(
         tokio::select! {
             result = async {
                 backup::run(command, false).await?;
-                validate(options, expected).await
+                validate_with(options, expected, accept_locale_change).await
             } => result?,
             result = async {
                 loop {
@@ -344,20 +388,32 @@ mod tests {
         legacy.schema.retain(|entry| !added.contains(entry));
         for source_major in [16, 17] {
             assert!(
-                restore_evidence_matches(&mut connection, original.clone(), &legacy, source_major)
-                    .await
-                    .unwrap()
+                restore_evidence_matches(
+                    &mut connection,
+                    original.clone(),
+                    &legacy,
+                    source_major,
+                    false
+                )
+                .await
+                .unwrap()
             );
         }
         for source_major in [15, 18, 19] {
             assert!(
-                !restore_evidence_matches(&mut connection, original.clone(), &legacy, source_major)
-                    .await
-                    .unwrap()
+                !restore_evidence_matches(
+                    &mut connection,
+                    original.clone(),
+                    &legacy,
+                    source_major,
+                    false
+                )
+                .await
+                .unwrap()
             );
         }
         assert!(
-            restore_evidence_matches(&mut connection, original.clone(), &original, 18)
+            restore_evidence_matches(&mut connection, original.clone(), &original, 18, false)
                 .await
                 .unwrap()
         );
@@ -382,7 +438,7 @@ mod tests {
                 .unwrap();
             let (changed, _) = evidence(&mut connection).await.unwrap();
             assert!(
-                !restore_evidence_matches(&mut connection, changed, &legacy, 16)
+                !restore_evidence_matches(&mut connection, changed, &legacy, 16, false)
                     .await
                     .unwrap(),
                 "accepted {change}"
@@ -400,7 +456,7 @@ mod tests {
         .unwrap();
         let (renamed, _) = evidence(&mut connection).await.unwrap();
         assert!(
-            !restore_evidence_matches(&mut connection, renamed, &original, 18)
+            !restore_evidence_matches(&mut connection, renamed, &original, 18, false)
                 .await
                 .unwrap()
         );

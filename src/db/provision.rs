@@ -141,11 +141,19 @@ pub(crate) async fn restore(
     cluster: &ManagedCluster,
     archive: &mut std::fs::File,
     expected: &super::backup::DatabaseSnapshot,
+    accept_locale_change: bool,
 ) -> Result<()> {
     let (admin, owner) = prepare(cluster).await?;
     owner.close().await?;
     let options = cluster.admin_options().username(OWNER).database(DATABASE);
-    super::restore::database(cluster.bin(), &options, archive, expected).await?;
+    super::restore::database_with(
+        cluster.bin(),
+        &options,
+        archive,
+        expected,
+        accept_locale_change,
+    )
+    .await?;
     let mut owner = PgConnection::connect_with(&options).await?;
     grant_runtime(&mut owner).await?;
     owner.close().await?;

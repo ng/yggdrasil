@@ -32,6 +32,10 @@ pub struct Receipt {
     pub selection_rebase: Option<crate::knowledge::relocation::SelectionRebase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_configuration_sha256: Option<String>,
+    /// The operator accepted a target encoding/collation that differs from the
+    /// backup; text ordering may differ from the source deployment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locale_change_accepted: bool,
 }
 
 fn absent(path: &Path) -> Result<()> {
@@ -59,6 +63,27 @@ pub async fn run_with_major(
     pg_bin: Option<&Path>,
     postgres_archive: Option<&Path>,
     postgres_major: Option<u32>,
+) -> Result<Receipt> {
+    run_with_options(
+        config,
+        source,
+        destination,
+        pg_bin,
+        postgres_archive,
+        postgres_major,
+        false,
+    )
+    .await
+}
+
+pub async fn run_with_options(
+    config: &DeploymentConfig,
+    source: &Path,
+    destination: &Path,
+    pg_bin: Option<&Path>,
+    postgres_archive: Option<&Path>,
+    postgres_major: Option<u32>,
+    accept_locale_change: bool,
 ) -> Result<Receipt> {
     let major = postgres_major.unwrap_or(16);
     let manifest = deployment_backup::verify(source)?;
@@ -186,7 +211,14 @@ pub async fn run_with_major(
         .open(source.join("database.dump"))?;
     match external {
         Some((bin, options)) => {
-            super::restore::database(bin, &options, &mut archive, &manifest.database).await?
+            super::restore::database_with(
+                bin,
+                &options,
+                &mut archive,
+                &manifest.database,
+                accept_locale_change,
+            )
+            .await?
         }
         None => {
             let DatabaseTarget::ManagedLocal { data_dir } = &config.database else {
@@ -197,8 +229,13 @@ pub async fn run_with_major(
             std::fs::DirBuilder::new().mode(0o700).create(data_dir)?;
             super::initialize::run_for_major(data_dir, postgres_archive, false, major).await?;
             let cluster = ManagedCluster::open(&data_dir.join("postgres"))?;
-            let restored =
-                super::provision::restore(&cluster, &mut archive, &manifest.database).await;
+            let restored = super::provision::restore(
+                &cluster,
+                &mut archive,
+                &manifest.database,
+                accept_locale_change,
+            )
+            .await;
             let stopped = super::supervisor::stop(&cluster, Duration::from_secs(30)).await;
             restored.context("managed restore failed; target retained for inspection")?;
             stopped.context(
@@ -237,6 +274,7 @@ pub async fn run_with_major(
         configuration_switched: false,
         selection_rebase: selection.map(|selection| selection.evidence),
         source_configuration_sha256: manifest.configuration.as_ref().map(|c| c.sha256.clone()),
+        locale_change_accepted: accept_locale_change,
     };
     let mut output = OpenOptions::new()
         .write(true)
