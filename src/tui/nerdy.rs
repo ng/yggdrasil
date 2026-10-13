@@ -444,7 +444,7 @@ async fn collect(pool: &PgPool) -> NerdyStats {
         WITH wanted AS (
           SELECT unnest(ARRAY[
             'tasks', 'task_runs', 'events',
-            'agent_stats', 'learnings',
+            'agent_stats',
             'task_deps', 'locks'
           ]) AS name
         )

@@ -634,7 +634,7 @@ pub async fn claim(
 
     // yggdrasil-82: surface scoped learnings whose file_glob matches any
     // file path mentioned in the task's text fields, plus repo-wide and
-    // global learnings. Best-effort — silent on Postgres hiccups.
+    // global learnings. Knowledge failures do not undo coordination.
     let mut text = t.title.clone();
     if !t.description.is_empty() {
         text.push('\n');
@@ -654,19 +654,7 @@ pub async fn claim(
     }
     let files = crate::cli::learning_cmd::extract_file_mentions(&text);
     let kind_str = t.kind.to_string();
-    if let Ok(lines) = crate::cli::learning_cmd::surface_for_files(
-        pool,
-        Some(t.repo_id),
-        &files,
-        Some(agent_name),
-        Some(&kind_str),
-    )
-    .await
-    {
-        for line in lines {
-            println!("{line}");
-        }
-    }
+    crate::cli::learning_cmd::print_for_claim(pool, t.repo_id, &files, agent_name, &kind_str).await;
 
     Ok(())
 }

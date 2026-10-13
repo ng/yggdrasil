@@ -113,14 +113,18 @@ pub async fn tick(pool: &PgPool, cfg: &SchedulerConfig) -> Result<TickStats, any
 /// Run the scheduler loop until shutdown. Holds the singleton advisory lock
 /// for the lifetime of the connection.
 pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error> {
-    let _guard = acquire_advisory_lock(&pool).await?;
+    let mut guard = acquire_advisory_lock(&pool).await?;
+    guard.supervise(run_owned(&pool, &cfg)).await
+}
+
+async fn run_owned(pool: &PgPool, cfg: &SchedulerConfig) -> Result<(), anyhow::Error> {
     tracing::info!(
         tick_ms = cfg.tick_interval.as_millis() as u64,
         max_concurrent = cfg.max_concurrent,
         "scheduler started"
     );
     emit_simple_event(
-        &pool,
+        pool,
         EventKind::SchedulerTick,
         serde_json::json!({
             "started": true,
@@ -144,7 +148,7 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
             _ = &mut sleep => {}
         }
 
-        match tick(&pool, &cfg).await {
+        match tick(pool, cfg).await {
             Ok(stats) => {
                 let total = stats.finalized
                     + stats.scheduled
@@ -164,7 +168,7 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
                         poisoned = stats.poisoned,
                         "scheduler tick"
                     );
-                    emit_simple_event(&pool, EventKind::SchedulerTick, serde_json::json!(stats))
+                    emit_simple_event(pool, EventKind::SchedulerTick, serde_json::json!(stats))
                         .await
                         .ok();
                 }
@@ -172,7 +176,7 @@ pub async fn run(pool: PgPool, cfg: SchedulerConfig) -> Result<(), anyhow::Error
             Err(err) => {
                 tracing::warn!(error = %err, "scheduler tick failed");
                 emit_simple_event(
-                    &pool,
+                    pool,
                     EventKind::SchedulerError,
                     serde_json::json!({
                         "error": err.to_string(),
@@ -1220,22 +1224,12 @@ async fn emit_simple_event(
 /// Acquire the singleton advisory lock. Returned guard auto-releases on drop
 /// (which closes the connection it holds). A second instance fails fast.
 pub async fn acquire_advisory_lock(pool: &PgPool) -> Result<AdvisoryLockGuard, anyhow::Error> {
-    let mut conn = pool.acquire().await?.detach();
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-        .bind(SCHEDULER_LOCK_ID)
-        .fetch_one(&mut conn)
-        .await?;
-    if !acquired {
-        anyhow::bail!(
-            "another ygg scheduler is already running on this database (advisory lock {SCHEDULER_LOCK_ID:#x} held)"
-        );
-    }
-    Ok(AdvisoryLockGuard { _conn: conn })
+    crate::db::singleton::SingletonGuard::try_acquire(pool, SCHEDULER_LOCK_ID)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("another ygg scheduler is already running on this database (advisory lock {SCHEDULER_LOCK_ID:#x} held)"))
 }
 
-pub struct AdvisoryLockGuard {
-    _conn: sqlx::PgConnection,
-}
+pub type AdvisoryLockGuard = crate::db::singleton::SingletonGuard;
 
 #[cfg(test)]
 mod tests {
@@ -1271,7 +1265,8 @@ mod tests {
     #[test]
     fn config_defaults_reasonable() {
         let app = AppConfig {
-            database_url: "test".into(),
+            owner_url: None,
+            database: crate::config::database::DatabaseTarget::External { url: "test".into() },
             context_limit_tokens: 250_000,
             context_hard_cap_tokens: 300_000,
             lock_ttl_secs: 300,

@@ -64,11 +64,10 @@ pub struct DashboardView {
     /// Live session count per agent, refreshed with the rest of the state.
     pub live_sessions_by_agent: HashMap<Uuid, i64>,
 
-    /// Corpus totals for the system-pulse DB line. Refreshed every tick —
+    /// Coordination totals for the system-pulse DB line. Refreshed every tick —
     /// cheap COUNTs on indexed tables.
     pub db_tasks_open: i64,
     pub db_tasks_total: i64,
-    pub db_learnings: i64,
     pub db_locks_active: i64,
 
     /// Inline rename buffer on the agents panel. When `Some`, typed keys
@@ -220,7 +219,6 @@ impl DashboardView {
             live_sessions_by_agent: HashMap::new(),
             db_tasks_open: 0,
             db_tasks_total: 0,
-            db_learnings: 0,
             db_locks_active: 0,
             rename: None,
             msg: None,
@@ -579,24 +577,21 @@ impl DashboardView {
         self.cache_total_24h = ch24 + cc24;
         self.redactions_24h = r24;
 
-        // DB corpus totals for the pulse footer line. Single roundtrip —
-        // cheap at current scale (all target tables indexed). locks_active
+        // Coordination totals do not query knowledge content.
+        // All target tables are indexed. locks_active
         // excludes expired rows since a held lock is ttl-bound, not just a
         // row existence.
-        let (tasks_open, tasks_total, learnings, locks_active): (i64, i64, i64, i64) =
-            sqlx::query_as(
-                r#"SELECT
+        let (tasks_open, tasks_total, locks_active): (i64, i64, i64) = sqlx::query_as(
+            r#"SELECT
                  (SELECT COUNT(*) FROM tasks WHERE status <> 'closed'),
                  (SELECT COUNT(*) FROM tasks),
-                 (SELECT COUNT(*) FROM learnings),
                  (SELECT COUNT(*) FROM locks WHERE expires_at > now())"#,
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap_or((0, 0, 0, 0));
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0, 0, 0));
         self.db_tasks_open = tasks_open;
         self.db_tasks_total = tasks_total;
-        self.db_learnings = learnings;
         self.db_locks_active = locks_active;
 
         // Prompts per hour sparkline, 24h — global across agents.

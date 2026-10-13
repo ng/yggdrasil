@@ -1,0 +1,13 @@
+[
+  {"toml":"", "env":{}, "target":"managed"},
+  {"toml":"", "env":{"DATABASE_URL":"postgres://existing/db"}, "target":"external", "url":"postgres://existing/db"},
+  {"toml":"[database]\nmode='external'", "env":{}, "target":"error"},
+  {"toml":"", "env":{"YGG_DB_MODE":"external"}, "target":"error"},
+  {"toml":"[database]\nmode='managed'", "env":{"DATABASE_URL":"postgres://existing/db"}, "target":"error"},
+  {"toml":"[database]\nurl='postgres://configured/db'", "env":{"YGG_DB_MODE":"managed"}, "target":"error"},
+  {"toml":"[database]\nmode='managed'\nurl='postgres://configured/db'", "env":{"YGG_DB_MODE":"external"}, "target":"external", "url":"postgres://configured/db"},
+  {"toml":"[database]\nmode='external'\nurl='postgres://configured/db'", "env":{"DATABASE_URL":"postgres://override/db"}, "target":"external", "url":"postgres://override/db"},
+  {"toml":"[database]\nmode='external'", "env":{"YGG_DB_MODE":"managed"}, "target":"managed"},
+  {"toml":"", "env":{"YGG_DB_MODE":"auto"}, "target":"error"},
+  {"toml":"[database]\nurl='postgres://configured/db'", "env":{"DATABASE_URL":""}, "target":"error"}
+]

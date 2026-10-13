@@ -5,7 +5,6 @@ use crate::{
     models::{
         agent::AgentRepo,
         handoff::{Handoff, HandoffRepo},
-        memory::{Memory, MemoryRepo},
         repo::{RepoRepo, detect_git_repo, slugify},
         task::{Task, TaskRepo},
     },
@@ -17,17 +16,83 @@ use uuid::Uuid;
 /// Accepts an optional transcript path to estimate context pressure from file size.
 /// Gracefully degrades when the DB is unavailable.
 pub async fn execute(agent_name: &str, transcript_path: Option<&str>) -> Result<(), anyhow::Error> {
-    let outcome = try_with_db(agent_name, transcript_path).await;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let knowledge = crate::knowledge::runtime::Context::from_environment(
+        crate::config::database::process_environment(),
+    );
 
+    // Bound the whole coordination read, not just TCP connection setup. A hung
+    // database query must not indefinitely suppress local knowledge or hooks.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        try_with_db(agent_name, transcript_path),
+    )
+    .await
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("coordination read timed out")));
+    let mut local_notes = Vec::new();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    match &knowledge {
+        Ok(Some(context)) => match local_prime_notes(context) {
+            Ok(notes) => local_notes = notes,
+            Err(error) => eprintln!("ygg prime: local knowledge unavailable: {error}"),
+        },
+        Err(error) => eprintln!("ygg prime: local knowledge unavailable: {error}"),
+        Ok(None) => eprintln!(
+            "ygg prime: knowledge is not initialized; run `ygg init` to create the OKF corpus"
+        ),
+    }
     match outcome {
-        Ok(ctx) => print_rich(agent_name, &ctx),
-        Err(e) => print_degraded(agent_name, &e),
+        Ok(mut ctx) => {
+            ctx.notes = local_notes;
+            print_rich(agent_name, &ctx);
+        }
+        Err(error) => {
+            print_degraded(agent_name, &error);
+            print_notes(&local_notes);
+        }
     }
 
     Ok(())
 }
 
 // ── internals ────────────────────────────────────────────────────────────────
+
+struct PrimeNote {
+    text: String,
+    global: bool,
+}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn local_prime_notes(
+    context: &crate::knowledge::runtime::Context,
+) -> anyhow::Result<Vec<PrimeNote>> {
+    // An unknown repo cannot inherit another repo's notes. Explicit globals are
+    // still available; the diagnostic distinguishes this from a mapped checkout.
+    let repo = match context.repo(&std::env::current_dir()?) {
+        Ok(repo) => Some(repo),
+        Err(error) => {
+            eprintln!("ygg prime: repository knowledge omitted: {error}");
+            None
+        }
+    };
+    let selected = context.service.prime_notes(repo, Utc::now())?;
+    for diagnostic in selected.diagnostics {
+        eprintln!("knowledge: {diagnostic}");
+    }
+    let current = context
+        .service
+        .revalidate_notes(&selected.documents, repo, Utc::now())?;
+    for diagnostic in current.diagnostics {
+        eprintln!("knowledge: {diagnostic}");
+    }
+    Ok(current
+        .documents
+        .into_iter()
+        .map(|doc| PrimeNote {
+            text: doc.document.body,
+            global: doc.key.repo.is_none(),
+        })
+        .collect())
+}
 
 struct PrimeContext {
     state: String,
@@ -39,7 +104,8 @@ struct PrimeContext {
     repo_label: Option<String>,
     ready_tasks: Vec<Task>,
     open_count: i64,
-    notes: Vec<Memory>,
+    notes: Vec<PrimeNote>,
+    handoff_unavailable: bool,
     handoff: Option<Handoff>,
     pending_migrations: usize,
 }
@@ -49,7 +115,7 @@ async fn try_with_db(
     transcript_path: Option<&str>,
 ) -> Result<PrimeContext, anyhow::Error> {
     let config = AppConfig::from_env()?;
-    let pool = db::create_pool(&config.database_url).await?;
+    let pool = db::connect(&config.database).await?;
     let agent_repo = AgentRepo::new(&pool, crate::db::user_id());
     // Register (or touch) this agent so it exists in the DB. Persona from
     // $YGG_AGENT_PERSONA forms a compound key with agent_name — same cwd,
@@ -83,14 +149,18 @@ async fn try_with_db(
         transcript_path.and_then(|p| std::fs::metadata(p).ok().map(|m| (m.len() / 10) as i64));
 
     // Best-effort: detect current repo, surface a few ready tasks + recent notes.
-    let (repo_label, repo_id, ready_tasks, open_count, notes) = resolve_repo_context(&pool).await;
+    let (repo_label, repo_id, ready_tasks, open_count) = resolve_repo_context(&pool).await;
 
     // Resume note from a prior session of this agent in this repo (`ygg handoff`).
-    let handoff = HandoffRepo::new(&pool)
-        .latest(repo_id, Some(agent.agent_id))
-        .await
-        .ok()
-        .flatten();
+    let handoff_result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        HandoffRepo::new(&pool).latest(repo_id, Some(agent.agent_id)),
+    )
+    .await;
+    let (handoff, handoff_unavailable) = match handoff_result {
+        Ok(Ok(handoff)) => (handoff, false),
+        _ => (None, true),
+    };
 
     let pending_migrations = db::pending_migrations(&pool)
         .await
@@ -107,7 +177,8 @@ async fn try_with_db(
         repo_label,
         ready_tasks,
         open_count,
-        notes,
+        notes: Vec::new(),
+        handoff_unavailable,
         handoff,
         pending_migrations,
     })
@@ -115,16 +186,9 @@ async fn try_with_db(
 
 async fn resolve_repo_context(
     pool: &sqlx::PgPool,
-) -> (Option<String>, Option<Uuid>, Vec<Task>, i64, Vec<Memory>) {
-    // Recent global notes show even outside a known repo.
-    let global_notes = || async {
-        MemoryRepo::new(pool)
-            .list(None, false, 5)
-            .await
-            .unwrap_or_default()
-    };
+) -> (Option<String>, Option<Uuid>, Vec<Task>, i64) {
     let Ok(cwd) = std::env::current_dir() else {
-        return (None, None, vec![], 0, global_notes().await);
+        return (None, None, vec![], 0);
     };
     let repo_repo = RepoRepo::new(pool);
 
@@ -145,22 +209,17 @@ async fn resolve_repo_context(
     };
 
     let Some(repo) = repo_opt else {
-        return (None, None, vec![], 0, global_notes().await);
+        return (None, None, vec![], 0);
     };
     let task_repo = TaskRepo::new(pool);
     let ready = task_repo.ready(repo.repo_id).await.unwrap_or_default();
     let stats = task_repo.stats(Some(repo.repo_id)).await.ok();
     let open_count = stats.map(|s| s.open + s.in_progress).unwrap_or(0);
-    let notes = MemoryRepo::new(pool)
-        .list(Some(repo.repo_id), false, 5)
-        .await
-        .unwrap_or_default();
     (
         Some(format!("{} ({})", repo.name, repo.task_prefix)),
         Some(repo.repo_id),
         ready,
         open_count,
-        notes,
     )
 }
 
@@ -211,6 +270,10 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
         println!("{}", h.text);
         println!();
         println!("*(supersede with `ygg handoff save`, dismiss with `ygg handoff clear`)*");
+    }
+
+    if ctx.handoff_unavailable {
+        println!("\n**handoff** unavailable; local knowledge is independent.");
     }
 
     if ctx.pending_migrations > 0 {
@@ -269,18 +332,7 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
         }
     }
 
-    if !ctx.notes.is_empty() {
-        println!();
-        println!("**notes** (`ygg remember`)");
-        for n in &ctx.notes {
-            let scope = if n.repo_id.is_none() {
-                " · global"
-            } else {
-                ""
-            };
-            println!("  - {}{scope}", note_snippet(&n.text));
-        }
-    }
+    print_notes(&ctx.notes);
 
     println!();
     println!("### When to use `ygg`");
@@ -307,20 +359,26 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
     println!("Do **not** use `bd` / beads in this project — `ygg task` replaces it.");
 }
 
-fn print_degraded(agent_name: &str, err: &anyhow::Error) {
-    println!("<!-- ygg:prime:degraded -->");
-    println!();
+fn print_notes(notes: &[PrimeNote]) {
+    if notes.is_empty() {
+        return;
+    }
+    println!("\n**notes** (`ygg remember`)");
+    for note in notes {
+        println!(
+            "  - {}{}",
+            note_snippet(&note.text),
+            if note.global { " · global" } else { "" }
+        );
+    }
+}
+
+fn print_degraded(agent_name: &str, _err: &anyhow::Error) {
+    println!("<!-- ygg:prime:degraded -->\n");
     println!("**Yggdrasil** · agent `{agent_name}`");
-    println!("**db** unavailable ({err})");
-    println!();
+    println!("**db** unavailable — coordination state and handoff could not be loaded.");
     println!(
-        "Hooks are active (file locks, context injection). \
-        Run `ygg init` if the database is not configured."
-    );
-    println!();
-    println!(
-        "Once the DB is reachable, `ygg prime` emits agent-coordination rules — for now, \
-        coordinate via `ygg lock acquire/release`, `ygg spawn`, `ygg status`. Do not use `bd` / beads."
+        "Restore the configured database connection to use shared locks, tasks and agent status."
     );
 }
 

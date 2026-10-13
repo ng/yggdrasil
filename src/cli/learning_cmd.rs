@@ -5,8 +5,6 @@
 //! tuples are `(repo_id, file_glob, rule_id)`; lookups are SQL predicates,
 //! not cosine thresholds.
 
-use crate::cli::task_cmd::resolve_cwd_repo;
-use crate::models::learning::LearningRepo;
 use uuid::Uuid;
 
 pub fn parse_scope_tags(scopes: &[String]) -> Result<serde_json::Value, anyhow::Error> {
@@ -40,364 +38,42 @@ pub fn parse_scope_tags(scopes: &[String]) -> Result<serde_json::Value, anyhow::
     Ok(serde_json::Value::Object(map))
 }
 
-/// `ygg learn create` / `propose`. `status`/`source` carry the ADR 0017
-/// lifecycle: `("active","manual")` is today's immediately-firing create,
-/// `("pending","manual")` is `create --pending`, `("pending","proposed")`
-/// is `propose`.
-#[allow(clippy::too_many_arguments)]
-pub async fn create(
+/// Optional knowledge cannot undo a successful task claim. A selected or invalid
+/// binding never falls back to frozen SQL content. Keep both leases until stdout.
+pub async fn print_for_claim(
     pool: &sqlx::PgPool,
-    text: &str,
-    global: bool,
-    file_glob: Option<&str>,
-    rule_id: Option<&str>,
-    context: Option<&str>,
-    agent_name: &str,
-    scope_tags: &serde_json::Value,
-    status: &str,
-    source: &str,
-    json: bool,
-) -> Result<(), anyhow::Error> {
-    let repo_id = if global {
-        None
-    } else {
-        Some(resolve_cwd_repo(pool).await?.repo_id)
-    };
-    let created_by: Option<Uuid> =
-        sqlx::query_scalar("SELECT agent_id FROM agents WHERE agent_name = $1")
-            .bind(agent_name)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-
-    let learning = LearningRepo::new(pool)
-        .create(
-            repo_id, file_glob, rule_id, text, context, created_by, scope_tags, status, source,
-        )
-        .await?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&learning)?);
-        return Ok(());
-    }
-    let scope = format_scope_label(repo_id, file_glob, rule_id, scope_tags);
-    // `proposed` and `--pending` learnings land in the gate, not the live
-    // corpus — say so, and point at the triage verb.
-    if status == "pending" {
-        let verb = if source == "proposed" {
-            "Proposed"
-        } else {
-            "Pending"
-        };
-        println!(
-            "{} [{}] {}\n  id {} — approve with `ygg learn approve {}`",
-            verb,
-            scope,
-            short(text, 100),
-            learning.learning_id,
-            learning.learning_id,
-        );
-    } else {
-        println!("Learned [{}] {}", scope, short(text, 100));
-    }
-    Ok(())
-}
-
-/// `ygg learn pending` — the triage queue (status='pending'), newest first.
-pub async fn pending(
-    pool: &sqlx::PgPool,
-    all_repos: bool,
-    json: bool,
-) -> Result<(), anyhow::Error> {
-    let repo_id = if all_repos {
-        None
-    } else {
-        resolve_cwd_repo(pool).await.ok().map(|r| r.repo_id)
-    };
-    let rows = LearningRepo::new(pool).list_pending(repo_id).await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "count": rows.len(),
-                "results": rows,
-            }))?
-        );
-        return Ok(());
-    }
-    if rows.is_empty() {
-        println!("No pending learnings.");
-        return Ok(());
-    }
-    for r in &rows {
-        let scope = format_scope_label(
-            r.repo_id,
-            r.file_glob.as_deref(),
-            r.rule_id.as_deref(),
-            &r.scope_tags,
-        );
-        println!(
-            "  · {} [{} · {}] {}",
-            r.learning_id,
-            scope,
-            r.source,
-            short(&r.text, 100)
-        );
-    }
-    println!("\napprove: `ygg learn approve <id>` · reject: `ygg learn reject <id>`");
-    Ok(())
-}
-
-/// `ygg learn approve <id>` — promote a pending learning to active.
-pub async fn approve(
-    pool: &sqlx::PgPool,
-    learning_id: Uuid,
-    agent_name: &str,
-) -> Result<(), anyhow::Error> {
-    let approver: Option<Uuid> =
-        sqlx::query_scalar("SELECT agent_id FROM agents WHERE agent_name = $1")
-            .bind(agent_name)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    match LearningRepo::new(pool)
-        .approve(learning_id, approver)
-        .await?
-    {
-        Some(l) => {
-            let scope = format_scope_label(
-                l.repo_id,
-                l.file_glob.as_deref(),
-                l.rule_id.as_deref(),
-                &l.scope_tags,
-            );
-            println!(
-                "approved {learning_id} → active [{scope}] {}",
-                short(&l.text, 80)
-            );
-        }
-        None => {
-            anyhow::bail!(
-                "no pending learning with id {learning_id} (already active, rejected, or unknown)"
-            );
-        }
-    }
-    Ok(())
-}
-
-/// `ygg learn reject <id>` — drop a pending proposal.
-pub async fn reject(
-    pool: &sqlx::PgPool,
-    learning_id: Uuid,
-    reason: Option<&str>,
-) -> Result<(), anyhow::Error> {
-    if LearningRepo::new(pool).reject(learning_id).await? {
-        match reason {
-            Some(r) => println!("rejected {learning_id} — {r}"),
-            None => println!("rejected {learning_id}"),
-        }
-    } else {
-        anyhow::bail!(
-            "no pending learning with id {learning_id} (active rows are removed with `ygg learn delete`)"
-        );
-    }
-    Ok(())
-}
-
-pub async fn list(
-    pool: &sqlx::PgPool,
-    file_path: Option<&str>,
-    rule_id: Option<&str>,
-    all_repos: bool,
-    json: bool,
-) -> Result<(), anyhow::Error> {
-    let repo_id = if all_repos {
-        None
-    } else {
-        resolve_cwd_repo(pool).await.ok().map(|r| r.repo_id)
-    };
-    let rows = LearningRepo::new(pool)
-        .list_matching(repo_id, file_path, rule_id, None, None)
-        .await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "count": rows.len(),
-                "results": rows,
-            }))?
-        );
-        return Ok(());
-    }
-    if rows.is_empty() {
-        println!("No learnings match.");
-        return Ok(());
-    }
-    for r in &rows {
-        let scope = format_scope_label(
-            r.repo_id,
-            r.file_glob.as_deref(),
-            r.rule_id.as_deref(),
-            &r.scope_tags,
-        );
-        let applied = if r.applied_count > 0 {
-            let last = r
-                .last_applied_at
-                .map(|t| format!(", last {}", t.format("%Y-%m-%d")))
-                .unwrap_or_default();
-            format!(" [×{}{}]", r.applied_count, last)
-        } else {
-            String::new()
-        };
-        println!("  · [{}]{} {}", scope, applied, short(&r.text, 100));
-    }
-    Ok(())
-}
-
-pub async fn delete(pool: &sqlx::PgPool, learning_id: Uuid) -> Result<(), anyhow::Error> {
-    LearningRepo::new(pool).delete(learning_id).await?;
-    println!("deleted {learning_id}");
-    Ok(())
-}
-
-/// Surface scoped learnings whose `file_glob` matches any of the given paths
-/// (yggdrasil-82). Returns formatted lines suitable for direct stdout / hook
-/// injection. Increments each surfaced learning's `applied_count` so the
-/// usage telemetry reflects real hits, not just creation.
-pub async fn surface_for_files(
-    pool: &sqlx::PgPool,
-    repo_id: Option<Uuid>,
+    repo: Uuid,
     files: &[String],
-    agent_name: Option<&str>,
-    task_kind: Option<&str>,
-) -> Result<Vec<String>, anyhow::Error> {
-    let mut out = Vec::new();
-    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
-    let repo = LearningRepo::new(pool);
-
-    for f in files {
-        let rows = repo
-            .list_matching(repo_id, Some(f), None, agent_name, task_kind)
-            .await?;
-        for l in rows {
-            if !seen.insert(l.learning_id) {
-                continue;
-            }
-            out.push(format_learning_line(&l));
-            let _ = repo.increment_applied(l.learning_id).await;
-        }
-    }
-
-    if files.is_empty() {
-        let rows = repo
-            .list_matching(repo_id, None, None, agent_name, task_kind)
-            .await?;
-        for l in rows {
-            if l.file_glob.is_some() || l.rule_id.is_some() {
-                continue;
-            }
-            if !seen.insert(l.learning_id) {
-                continue;
-            }
-            out.push(format_learning_line(&l));
-            let _ = repo.increment_applied(l.learning_id).await;
-        }
-    }
-
-    Ok(out)
-}
-
-/// Surface learnings matching a single file path an agent is about to edit
-/// (yggdrasil-180). Resolves the repo from cwd, queries the deterministic
-/// `list_matching` predicate, and dedups per session so the same learning is
-/// not re-injected on every edit. Returns formatted lines for newly-surfaced
-/// learnings and bumps each one's `applied_count` / `last_applied_at`.
-///
-/// Only file-scoped learnings (`file_glob IS NOT NULL`) fire here — repo-wide
-/// and global no-glob learnings are general rules already surfaced at session
-/// start (prime) and task claim, so re-injecting them on every edit is noise.
-/// Best-effort — any DB or filesystem hiccup yields an empty Vec, never an
-/// error to the hook caller.
-pub async fn surface_for_edit(
-    pool: &sqlx::PgPool,
-    file_path: &str,
-    agent_name: Option<&str>,
-    session_id: &str,
-) -> Vec<String> {
-    let repo_id = resolve_cwd_repo(pool).await.ok().map(|r| r.repo_id);
-    let repo = LearningRepo::new(pool);
-    let rows = match repo
-        .list_matching(repo_id, Some(file_path), None, agent_name, None)
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    if rows.is_empty() {
-        return Vec::new();
-    }
-
-    // Per-session dedup via a best-effort flat file under /tmp/ygg.
-    // Sanitize session_id before embedding in a path: only [a-zA-Z0-9_-] allowed,
-    // everything else becomes '_', preventing path-traversal via crafted session IDs.
-    let seen_path = (!session_id.is_empty()).then(|| {
-        let safe: String = session_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
+    agent: &str,
+    kind: &str,
+) {
+    use crate::knowledge::runtime::Context;
+    let result = async {
+        match Context::from_environment(crate::config::database::process_environment())? {
+            Some(context) => {
+                let (repo, lease) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    context.task_scope(pool, repo),
+                )
+                .await??;
+                let emission = local::surface_for_files(&context, repo, files, agent, kind)?;
+                for line in &emission.lines {
+                    println!("{line}");
                 }
-            })
-            .collect();
-        std::path::PathBuf::from(format!("/tmp/ygg/learnings-{safe}.seen"))
-    });
-    let mut seen: std::collections::HashSet<String> = seen_path
-        .as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.lines().map(|l| l.to_string()).collect())
-        .unwrap_or_default();
-
-    let mut out = Vec::new();
-    let mut fresh = Vec::new();
-    for l in &rows {
-        // Edit-time injection is for file-scoped rules only.
-        if l.file_glob.is_none() {
-            continue;
-        }
-        let id = l.learning_id.to_string();
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        out.push(format_learning_line(l));
-        fresh.push(id);
-        let _ = repo.increment_applied(l.learning_id).await;
-    }
-
-    if let Some(p) = seen_path {
-        if !fresh.is_empty() {
-            if let Some(dir) = p.parent() {
-                std::fs::create_dir_all(dir).ok();
+                crate::knowledge::usage::after_emission(&context, lease, &emission.applications)
+                    .await;
             }
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&p)
-            {
-                for id in &fresh {
-                    let _ = writeln!(f, "{id}");
-                }
+            None => {
+                eprintln!("knowledge: not initialized; run `ygg init` to create the OKF corpus");
             }
         }
+        Ok::<(), anyhow::Error>(())
     }
-
-    out
+    .await;
+    if result.is_err() {
+        // Do not expose connection strings or credentials from driver errors.
+        eprintln!("knowledge: task rules unavailable; claim succeeded");
+    }
 }
 
 /// Best-effort file-path extractor for free-text task fields.
@@ -451,16 +127,6 @@ fn format_scope_label(
     }
     parts.extend(scope_tag_fragments(scope_tags));
     parts.join(" · ")
-}
-
-fn format_learning_line(l: &crate::models::learning::Learning) -> String {
-    let scope = format_scope_label(
-        l.repo_id,
-        l.file_glob.as_deref(),
-        l.rule_id.as_deref(),
-        &l.scope_tags,
-    );
-    format!("[ygg learning · {scope}] {}", short(&l.text, 200))
 }
 
 fn short(s: &str, max: usize) -> String {
@@ -565,3 +231,6 @@ mod tests {
         assert_eq!(label, "src/*.rs · agent=foo · kind=bug");
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod local;

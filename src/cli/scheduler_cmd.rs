@@ -16,7 +16,8 @@ pub async fn run(pool: PgPool, app_cfg: &AppConfig) -> Result<(), anyhow::Error>
 /// spinning up the daemon. Prints the stats to stdout in JSON for scriptability.
 pub async fn tick(pool: &PgPool, app_cfg: &AppConfig) -> Result<(), anyhow::Error> {
     let cfg = SchedulerConfig::from_app(app_cfg);
-    let stats = scheduler::tick(pool, &cfg).await?;
+    let mut guard = scheduler::acquire_advisory_lock(pool).await?;
+    let stats = guard.supervise(scheduler::tick(pool, &cfg)).await?;
     println!("{}", serde_json::to_string(&stats)?);
     Ok(())
 }
