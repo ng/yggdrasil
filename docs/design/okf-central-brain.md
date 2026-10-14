@@ -62,9 +62,14 @@ Adding a remote later becomes a config change, not a migration.
 **What.**
 
 - `ygg knowledge init` creates a local bare repository beside the corpus
-  (`<data_dir>/knowledge-remote.git`) and writes `shared.json` with a `file://` remote
-  pointing at it. The transport already accepts absolute local paths, so pending,
-  confirm, recover and sync work unchanged with no network.
+  (`<data_dir>/knowledge-remote.git`) and writes `shared.json` into the selected
+  policy store's control directory, the location `Context::open_with_refresh` reads
+  with `read_control("shared.json")`. The file follows `shared::Config` exactly:
+  `version: 1`, `remote` set to the `file://` URL of the bare repo, `branch`. Today's
+  initializer writes only the selection binding, so this write is the one addition
+  that enables the Git path. `SharedGit::open` already accepts the `file://` remote and
+  passes it to Git unchanged, so pending, confirm, recover and sync work with no
+  network.
 - `ygg knowledge init --adopt` imports an existing plain-directory corpus as the
   initial commit. The author's current corpus is the first test case.
 - `ygg knowledge remote set <url>` pushes existing history to the new remote, rewrites
@@ -216,8 +221,15 @@ Keep one corpus per user, outside any project checkout. Reasons:
 Visibility fixes that do not move the corpus:
 
 - change the default to `~/.ygg/knowledge` on every platform; it is discoverable and
-  sits where per-repo `.ygg/` scratch already trains people to look. Existing installs
-  keep working through `YGG_KNOWLEDGE_DIR` / settings, which already take precedence
+  sits where per-repo `.ygg/` scratch already trains people to look. Explicit
+  `YGG_KNOWLEDGE_DIR` / settings overrides keep taking precedence. Installs that rely on
+  the old default must not lose their corpus: when no override is set and
+  `~/.ygg/knowledge` does not exist but `<data_dir>/knowledge` does, resolve to the
+  legacy path and print a one-time hint naming `ygg knowledge relocate`. The relocate
+  command moves both `knowledge` and `knowledge-policy` and rewrites the selection
+  binding. Acceptance: an install created on the old default, upgraded with no config
+  change, still lists the same documents with identical revisions in
+  `ygg knowledge browse`
 - add `ygg knowledge path`
 - optional, gitignored, per-project symlink `.ygg/knowledge -> <corpus>/repos/<uuid>`;
   opt-in because it re-exposes the files to agents
