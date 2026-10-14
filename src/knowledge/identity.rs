@@ -164,6 +164,37 @@ pub struct RepoBinding {
     pub databases: BTreeMap<Uuid, BTreeSet<Uuid>>,
 }
 
+impl RepoBinding {
+    /// Short human label for display: `owner/name` from the first origin
+    /// alias, else the first bound checkout's directory name, else the ID
+    /// prefix. Never used for identity, only for rendering.
+    pub fn label(&self) -> String {
+        if let Some(alias) = self.aliases.iter().next() {
+            let trimmed = alias.trim_end_matches('/').trim_end_matches(".git");
+            let mut tail: Vec<&str> = trimmed
+                .rsplit(['/', ':'])
+                .filter(|part| !part.is_empty())
+                .take(2)
+                .collect();
+            if !tail.is_empty() {
+                tail.reverse();
+                return tail.join("/");
+            }
+        }
+        if let Some(dir) = self.common_dirs.iter().next() {
+            let base = if dir.file_name().is_some_and(|name| name == ".git") {
+                dir.parent()
+            } else {
+                Some(dir.as_path())
+            };
+            if let Some(name) = base.and_then(|path| path.file_name()) {
+                return name.to_string_lossy().into_owned();
+            }
+        }
+        self.id.to_string()[..8].to_string()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Identities {
     pub version: u32,
@@ -354,5 +385,45 @@ impl IdentityRegistry {
             })
             .map(|r| r.id)
             .ok_or_else(|| anyhow::anyhow!("unmapped legacy repository; explicit mapping required"))
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    fn binding(aliases: &[&str], dirs: &[&str]) -> RepoBinding {
+        RepoBinding {
+            id: Uuid::nil(),
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
+            common_dirs: dirs.iter().map(PathBuf::from).collect(),
+            databases: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn label_prefers_owner_name_from_alias() {
+        assert_eq!(
+            binding(&["https://github.com/ng/yggdrasil.git"], &[]).label(),
+            "ng/yggdrasil"
+        );
+        assert_eq!(
+            binding(&["git@github.com:ng/yggdrasil.git"], &[]).label(),
+            "ng/yggdrasil"
+        );
+        assert_eq!(
+            binding(&["ssh://git@host/team/repo/"], &[]).label(),
+            "team/repo"
+        );
+    }
+
+    #[test]
+    fn label_falls_back_to_checkout_dir_then_id() {
+        assert_eq!(
+            binding(&[], &["/Users/me/src/yggdrasil/.git"]).label(),
+            "yggdrasil"
+        );
+        assert_eq!(binding(&[], &["/Users/me/src/bare"]).label(), "bare");
+        assert_eq!(binding(&[], &[]).label(), "00000000");
     }
 }

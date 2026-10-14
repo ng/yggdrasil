@@ -11,6 +11,7 @@ pub mod dashboard;
 pub mod disclosure_governor;
 pub mod drill_stack;
 pub mod help;
+pub mod knowledge_view;
 pub mod lock_gantt;
 pub mod locks_view;
 pub mod log_view;

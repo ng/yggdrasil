@@ -30,6 +30,7 @@ pub enum ActiveView {
     RunGrid,
     Nerdy,
     Chat,
+    Knowledge,
 }
 
 pub struct App {
@@ -44,6 +45,7 @@ pub struct App {
     pub run_grid: RunGridView,
     pub nerdy: super::nerdy::NerdyView,
     pub chat: ChatView,
+    pub knowledge: super::knowledge_view::KnowledgeView,
     pub agent_name: String,
     /// Recent events shown in the global bottom status bar across all panes.
     pub status_tail: Vec<(String, String, String)>, // (hh:mm:ss, kind, one-line detail)
@@ -395,6 +397,7 @@ impl App {
             run_grid: RunGridView::new(),
             nerdy: super::nerdy::NerdyView::new(),
             chat: ChatView::new(),
+            knowledge: super::knowledge_view::KnowledgeView::new(),
             agent_name,
             status_tail: Vec::new(),
             ops_stats: OpsStats::default(),
@@ -798,6 +801,7 @@ impl App {
             KeyCode::Char('G') => self.set_view(ActiveView::RunGrid),
             KeyCode::Char('N') => self.set_view(ActiveView::Nerdy),
             KeyCode::Char('C') => self.set_view(ActiveView::Chat),
+            KeyCode::Char('K') => self.set_view(ActiveView::Knowledge),
             // yggdrasil-151: open the detail overlay populated from the
             // current pane's selected row. Per-pane adapters: Tasks
             // shows the full title + description + acceptance + design
@@ -943,6 +947,15 @@ impl App {
             // that consults App.scope.
             KeyCode::Char('S') => {
                 self.scope.toggle();
+                if self.active_view == ActiveView::Knowledge {
+                    self.knowledge.refresh(self.scope, false);
+                }
+            }
+            KeyCode::PageDown if self.active_view == ActiveView::Knowledge => {
+                self.knowledge.scroll_body_down(10);
+            }
+            KeyCode::PageUp if self.active_view == ActiveView::Knowledge => {
+                self.knowledge.scroll_body_up(10);
             }
             KeyCode::Char('r')
                 if self.active_view == ActiveView::Dashboard
@@ -987,6 +1000,7 @@ impl App {
                 ActiveView::Runs => self.runs.select_prev(),
                 ActiveView::RunGrid => self.run_grid.select_prev(),
                 ActiveView::Chat => self.chat.select_prev(),
+                ActiveView::Knowledge => self.knowledge.select_prev(),
                 _ => {}
             },
             KeyCode::Down => match self.active_view {
@@ -1001,6 +1015,7 @@ impl App {
                 ActiveView::Runs => self.runs.select_next(),
                 ActiveView::RunGrid => self.run_grid.select_next(),
                 ActiveView::Chat => self.chat.select_next(),
+                ActiveView::Knowledge => self.knowledge.select_next(),
                 _ => {}
             },
             KeyCode::Enter => match self.active_view {
@@ -1029,11 +1044,13 @@ impl App {
                 ActiveView::Dag => self.dag.toggle_detail(),
                 ActiveView::Logs => self.logs.toggle_detail(),
                 ActiveView::Tasks => self.tasks.toggle_detail(),
+                ActiveView::Knowledge => self.knowledge.toggle_body(),
                 _ => {}
             },
             KeyCode::Esc => match self.active_view {
                 ActiveView::Dag if self.dag.detail_open => self.dag.detail_open = false,
                 ActiveView::Tasks if self.tasks.detail_open => self.tasks.detail_open = false,
+                ActiveView::Knowledge if self.knowledge.body_open() => self.knowledge.close_body(),
                 _ => {}
             },
             _ => {}
@@ -1056,13 +1073,15 @@ impl App {
             ActiveView::Runs => ActiveView::RunGrid,
             ActiveView::RunGrid => ActiveView::Nerdy,
             ActiveView::Nerdy => ActiveView::Chat,
-            ActiveView::Chat => ActiveView::Dashboard,
+            ActiveView::Chat => ActiveView::Knowledge,
+            ActiveView::Knowledge => ActiveView::Dashboard,
         };
         self.set_view(next);
     }
     fn cycle_view_backward(&mut self) {
         let prev = match self.active_view {
-            ActiveView::Dashboard => ActiveView::Chat,
+            ActiveView::Dashboard => ActiveView::Knowledge,
+            ActiveView::Knowledge => ActiveView::Chat,
             ActiveView::Dag => ActiveView::Dashboard,
             ActiveView::Tasks => ActiveView::Dag,
             ActiveView::Logs => ActiveView::Tasks,
@@ -1144,6 +1163,7 @@ impl App {
                 ("0", ActiveView::Runs),
                 ("G", ActiveView::RunGrid),
                 ("N", ActiveView::Nerdy),
+                ("K", ActiveView::Knowledge),
             ]
             .iter()
             .map(|(k, v)| tab(k, self.active_view == *v))
@@ -1167,6 +1187,7 @@ impl App {
                     };
                     tab(&label, self.active_view == ActiveView::Chat)
                 },
+                tab("[K] Knowledge", self.active_view == ActiveView::Knowledge),
             ]
         };
         frame.render_widget(Line::from(tabs), chunks[0]);
@@ -1191,6 +1212,9 @@ impl App {
             }
             ActiveView::Nerdy => "pool / tables / hooks (read-only deep-dive)",
             ActiveView::Chat => "c=compose  ↑↓=scroll  Enter=detail/claim  /=filter",
+            ActiveView::Knowledge => {
+                "↑↓ select  ·  Enter=open/close  ·  PgUp/PgDn=scroll  ·  S=scope"
+            }
         };
         // yggdrasil-134: scope chip on the right of the help row makes
         // the current scope (repo / all) and the toggle key visible.
@@ -1222,6 +1246,7 @@ impl App {
             ActiveView::RunGrid => self.run_grid.render(frame, chunks[2]),
             ActiveView::Nerdy => self.nerdy.render(frame, chunks[2]),
             ActiveView::Chat => self.chat.render(frame, chunks[2]),
+            ActiveView::Knowledge => self.knowledge.render(frame, chunks[2]),
         }
 
         // Render any pending toasts above the persistent status strip.
@@ -1412,6 +1437,7 @@ impl App {
             ActiveView::RunGrid => "RunGrid",
             ActiveView::Nerdy => "Nerdy",
             ActiveView::Chat => "Chat",
+            ActiveView::Knowledge => "Knowledge",
         }
     }
 }
@@ -1718,7 +1744,11 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                     app.chat.refresh(pool).await?;
                     app.chat.mark_seen();
                 }
-                _ => {}
+                ActiveView::Knowledge => {
+                    // File-backed, no pool. Polls the corpus on its own
+                    // slower cadence; a view switch forces one walk.
+                    app.knowledge.refresh(app.scope, view_changed);
+                }
             }
             last_refresh = Some(Instant::now());
         }
