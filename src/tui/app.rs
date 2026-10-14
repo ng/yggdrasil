@@ -1745,12 +1745,17 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), anyhow::Error>
                     app.chat.mark_seen();
                 }
                 ActiveView::Knowledge => {
-                    // File-backed, no pool. Polls the corpus on its own
-                    // slower cadence; a view switch forces one walk.
+                    // File-backed, no pool. Walks the corpus off-thread on
+                    // its own slower cadence; a view switch forces one.
                     app.knowledge.refresh(app.scope, view_changed);
                 }
             }
             last_refresh = Some(Instant::now());
+        }
+        if app.active_view == ActiveView::Knowledge {
+            // Corpus walks and document loads run off-thread; pick up any
+            // that finished so results land without waiting for a tick.
+            app.knowledge.poll();
         }
 
         if event::poll(poll_interval)? {

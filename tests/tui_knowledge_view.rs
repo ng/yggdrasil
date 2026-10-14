@@ -49,7 +49,7 @@ fn labels(repo_a: Uuid, repo_b: Uuid) -> BTreeMap<Uuid, String> {
     ])
 }
 
-fn render(view: &KnowledgeView, width: u16, height: u16) -> String {
+fn render(view: &mut KnowledgeView, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
@@ -135,12 +135,43 @@ fn selection_skips_headers_and_clamps_at_edges() {
 }
 
 #[test]
+fn selection_stays_visible_past_the_viewport() {
+    let docs = (0..30)
+        .map(|i| {
+            doc(
+                &format!("global/notes/{i:08}-0000-0000-0000-000000000000.md"),
+                "Note",
+            )
+        })
+        .collect();
+    let mut view = KnowledgeView::new();
+    view.apply(
+        BrowseReport {
+            documents: docs,
+            ..BrowseReport::default()
+        },
+        BTreeMap::new(),
+        None,
+        Scope::All,
+    );
+    for _ in 0..25 {
+        view.select_next();
+    }
+    let stem = view.selected_doc().unwrap().path[13..21].to_string();
+    let screen = render(&mut view, 100, 10);
+    assert!(
+        screen.contains(&stem),
+        "selected {stem} scrolled off:\n{screen}"
+    );
+}
+
+#[test]
 fn renders_groups_kinds_and_open_body() {
     let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
     let mut view = KnowledgeView::new();
     view.apply(report(a, b), labels(a, b), Some(a), Scope::All);
 
-    let screen = render(&view, 120, 20);
+    let screen = render(&mut view, 120, 20);
     assert!(screen.contains("Knowledge (4 docs)"), "{screen}");
     assert!(screen.contains("shared abcdef01 (current)"), "{screen}");
     assert!(screen.contains("▾ global (1)"), "{screen}");
@@ -153,7 +184,7 @@ fn renders_groups_kinds_and_open_body() {
         "global/notes/x.md",
         "---\ntype: Note\n---\nalways run make install",
     );
-    let screen = render(&view, 120, 20);
+    let screen = render(&mut view, 120, 20);
     assert!(screen.contains("global/notes/x.md"), "{screen}");
     assert!(screen.contains("always run make install"), "{screen}");
     assert!(view.body_open());
@@ -164,11 +195,11 @@ fn renders_groups_kinds_and_open_body() {
 #[test]
 fn empty_state_explains_itself() {
     let mut view = KnowledgeView::new();
-    let screen = render(&view, 80, 6);
+    let screen = render(&mut view, 80, 6);
     assert!(screen.contains("loading"), "{screen}");
 
     view.apply(BrowseReport::default(), BTreeMap::new(), None, Scope::Repo);
-    let screen = render(&view, 80, 6);
+    let screen = render(&mut view, 80, 6);
     assert!(screen.contains("no documents in scope"), "{screen}");
 }
 
@@ -187,7 +218,7 @@ fn diagnostics_surface_in_status() {
         Scope::All,
     );
     assert_eq!(view.status, "1 diagnostics (listing incomplete)");
-    let screen = render(&view, 120, 10);
+    let screen = render(&mut view, 120, 10);
     assert!(screen.contains("1 diagnostics"), "{screen}");
 }
 
@@ -198,6 +229,7 @@ fn diagnostics_surface_in_status() {
 fn smoke_real_corpus_refresh() {
     let mut view = KnowledgeView::new();
     view.refresh(Scope::All, true);
+    wait_idle(&mut view);
     assert!(view.loaded);
     assert!(
         view.status.is_empty(),
@@ -206,8 +238,17 @@ fn smoke_real_corpus_refresh() {
     );
     assert!(view.doc_count() > 0, "no documents in the selected corpus");
     view.toggle_body();
+    wait_idle(&mut view);
     assert!(view.body_open(), "Enter should load the selected document");
-    let screen = render(&view, 140, 30);
+    let screen = render(&mut view, 140, 30);
     assert!(screen.contains("Knowledge ("), "{screen}");
     println!("{screen}");
+}
+
+fn wait_idle(view: &mut KnowledgeView) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while view.is_loading() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        view.poll();
+    }
 }

@@ -12,10 +12,11 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use uuid::Uuid;
 
 use super::app::Scope;
@@ -25,6 +26,11 @@ use crate::knowledge::store::BrowseReport;
 /// Corpus walks read every document's bytes to hash them, so poll slower
 /// than the 2 s view cadence. Scope flips and explicit actions bypass this.
 const REFRESH_EVERY: Duration = Duration::from_secs(10);
+
+/// Outcome of one off-thread corpus walk. Labels and the current repo do
+/// not depend on scope, so a walk started under one scope applies cleanly
+/// after the user toggles to the other.
+type Walk = Result<Option<(BrowseReport, BTreeMap<Uuid, String>, Option<Uuid>)>, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocRow {
@@ -73,6 +79,8 @@ pub struct KnowledgeView {
     pub rows: Vec<KnowledgeRow>,
     /// Index into `rows`; always points at a `Doc` when any exist.
     pub selected: usize,
+    /// Viewport offset for the list, so the selection stays on screen.
+    pub state: TableState,
     /// `(path, source text)` of the opened document, if any.
     pub body: Option<(String, String)>,
     pub body_scroll: u16,
@@ -87,6 +95,11 @@ pub struct KnowledgeView {
     current_repo: Option<Uuid>,
     scope: Scope,
     last_refresh: Option<Instant>,
+    /// In-flight corpus walk. Walks hash every document and may touch git,
+    /// so they run off the input thread; `poll` collects the result.
+    walk: Option<Receiver<Walk>>,
+    /// In-flight document load: the requested path and its result.
+    opening: Option<(String, Receiver<Result<String, String>>)>,
 }
 
 impl Default for KnowledgeView {
@@ -100,6 +113,7 @@ impl KnowledgeView {
         Self {
             rows: Vec::new(),
             selected: 0,
+            state: TableState::default(),
             body: None,
             body_scroll: 0,
             status: String::new(),
@@ -112,39 +126,86 @@ impl KnowledgeView {
             current_repo: None,
             scope: Scope::Repo,
             last_refresh: None,
+            walk: None,
+            opening: None,
         }
     }
 
-    /// Re-walk the corpus when the poll interval elapsed, the scope changed,
-    /// or `force` is set. Errors land in `status`; the previous rows stay so
-    /// a transient failure does not blank the pane.
+    /// Re-filter immediately when the scope changed, and start a background
+    /// corpus walk when the poll interval elapsed or `force` is set. Errors
+    /// land in `status`; the previous rows stay so a transient failure does
+    /// not blank the pane.
     pub fn refresh(&mut self, scope: Scope, force: bool) {
-        let scope_changed = scope != self.scope;
+        self.poll();
+        if scope != self.scope {
+            self.rebuild(scope);
+        }
         let due = self
             .last_refresh
             .map(|t| t.elapsed() >= REFRESH_EVERY)
             .unwrap_or(true);
-        if !force && !scope_changed && !due {
+        if !(force || due) || self.walk.is_some() {
             return;
         }
         self.last_refresh = Some(Instant::now());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(walk_corpus());
+        });
+        self.walk = Some(rx);
+    }
+
+    /// Collect finished background work without blocking. The run loop
+    /// calls this every iteration while the tab is visible.
+    pub fn poll(&mut self) {
+        match self.walk.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(walk)) => {
+                self.walk = None;
+                self.finish_walk(walk);
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.walk = None;
+                self.loaded = true;
+                self.status = "knowledge walk aborted".into();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        match self.opening.as_ref().map(|(_, rx)| rx.try_recv()) {
+            Some(Ok(result)) => {
+                let Some((path, _)) = self.opening.take() else {
+                    return;
+                };
+                match result {
+                    Ok(text) => {
+                        self.body = Some((path, text));
+                        self.body_scroll = 0;
+                    }
+                    Err(error) => self.status = format!("open failed: {error}"),
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.opening = None;
+                self.status = "open failed: loader aborted".into();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+    }
+
+    /// True while a corpus walk or document load is still running.
+    pub fn is_loading(&self) -> bool {
+        self.walk.is_some() || self.opening.is_some()
+    }
+
+    fn finish_walk(&mut self, walk: Walk) {
         self.loaded = true;
-        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-        match Context::for_browse(crate::config::database::process_environment()) {
-            Err(error) => self.status = format!("knowledge unavailable: {error}"),
+        match walk {
+            Err(error) => self.status = error,
             Ok(None) => {
                 self.status = "no selected OKF corpus — run `ygg knowledge init`".into();
                 self.all_docs.clear();
-                self.rebuild(scope);
+                self.rebuild(self.scope);
             }
-            Ok(Some(context)) => {
-                let labels = context.repo_labels().unwrap_or_default();
-                let current = context.resolve_repo(&cwd).ok().flatten();
-                match context.service.browse_documents(None) {
-                    Ok(report) => self.apply(report, labels, current, scope),
-                    Err(error) => self.status = format!("knowledge browse failed: {error}"),
-                }
-            }
+            Ok(Some((report, labels, current))) => self.apply(report, labels, current, self.scope),
         }
     }
 
@@ -335,6 +396,7 @@ impl KnowledgeView {
     pub fn close_body(&mut self) {
         self.body = None;
         self.body_scroll = 0;
+        self.opening = None;
     }
 
     pub fn scroll_body_down(&mut self, lines: u16) {
@@ -356,13 +418,12 @@ impl KnowledgeView {
             self.close_body();
             return;
         }
-        match load_text(&path) {
-            Ok(text) => {
-                self.body = Some((path, text));
-                self.body_scroll = 0;
-            }
-            Err(error) => self.status = format!("open failed: {error}"),
-        }
+        let (tx, rx) = mpsc::channel();
+        let request = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_text(&request).map_err(|error| error.to_string()));
+        });
+        self.opening = Some((path, rx));
     }
 
     /// Install a body directly. Test seam mirroring `toggle_body` without a
@@ -372,7 +433,7 @@ impl KnowledgeView {
         self.body_scroll = 0;
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let title = self.title();
         if self.rows.is_empty() {
             let msg = if !self.loaded {
@@ -487,7 +548,8 @@ impl KnowledgeView {
         let table = Table::new(rows, widths)
             .header(header)
             .block(Block::default().borders(Borders::ALL).title(title));
-        frame.render_widget(table, list_area);
+        self.state.select(Some(self.selected));
+        frame.render_stateful_widget(table, list_area, &mut self.state);
 
         if let (Some(body_area), Some((path, text))) = (body_area, &self.body) {
             let para = Paragraph::new(text.as_str())
@@ -531,6 +593,22 @@ fn parse_scope(path: &str) -> (bool, Option<Uuid>) {
         Some("repos") => (false, parts.next().and_then(|id| id.parse().ok())),
         _ => (false, None),
     }
+}
+
+fn walk_corpus() -> Walk {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let context = match Context::for_browse(crate::config::database::process_environment()) {
+        Err(error) => return Err(format!("knowledge unavailable: {error}")),
+        Ok(None) => return Ok(None),
+        Ok(Some(context)) => context,
+    };
+    let labels = context.repo_labels().unwrap_or_default();
+    let current = context.resolve_repo(&cwd).ok().flatten();
+    context
+        .service
+        .browse_documents(None)
+        .map(|report| Some((report, labels, current)))
+        .map_err(|error| format!("knowledge browse failed: {error}"))
 }
 
 fn load_text(path: &str) -> anyhow::Result<String> {
