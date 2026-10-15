@@ -19,7 +19,7 @@ pub struct KeyHint {
 /// Built-in global keymap rendered above every pane-specific section.
 pub const GLOBAL_KEYS: &[KeyHint] = &[
     KeyHint {
-        keys: "1,2,3,5,9,0,G,N,C",
+        keys: "1,2,3,5,9,0,G,N,C,K",
         effect: "switch view",
     },
     KeyHint {
@@ -203,6 +203,28 @@ pub fn pane_keys(active: &str) -> &'static [KeyHint] {
             KeyHint {
                 keys: "Esc",
                 effect: "close detail / clear filter",
+            },
+        ],
+        "Knowledge" => &[
+            KeyHint {
+                keys: "↑↓",
+                effect: "select document",
+            },
+            KeyHint {
+                keys: "Enter",
+                effect: "open / close document source",
+            },
+            KeyHint {
+                keys: "PgUp / PgDn",
+                effect: "scroll open document",
+            },
+            KeyHint {
+                keys: "S",
+                effect: "scope: global + this repo / all repos",
+            },
+            KeyHint {
+                keys: "Esc",
+                effect: "close document",
             },
         ],
         _ => &[],
