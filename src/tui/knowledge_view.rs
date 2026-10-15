@@ -360,12 +360,17 @@ impl KnowledgeView {
             })
             .unwrap_or(0);
         self.snap_to_doc(true);
-        if let Some((path, _)) = &self.body
-            && !self
-                .rows
+        let in_rows = |path: &str| {
+            self.rows
                 .iter()
-                .any(|r| matches!(r, KnowledgeRow::Doc(d) if &d.path == path))
-        {
+                .any(|r| matches!(r, KnowledgeRow::Doc(d) if d.path == path))
+        };
+        // A load still in flight for a document that just left scope must
+        // not open it when it lands.
+        if self.opening.as_ref().is_some_and(|o| !in_rows(&o.path)) {
+            self.opening = None;
+        }
+        if self.body.as_ref().is_some_and(|(path, _)| !in_rows(path)) {
             self.close_body();
         }
     }
