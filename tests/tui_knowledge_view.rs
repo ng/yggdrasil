@@ -166,6 +166,73 @@ fn selection_stays_visible_past_the_viewport() {
 }
 
 #[test]
+fn repos_sharing_a_label_stay_in_separate_groups() {
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut view = KnowledgeView::new();
+    let same = BTreeMap::from([(a, "ng/app".to_string()), (b, "ng/app".to_string())]);
+    view.apply(report(a, b), same, None, Scope::All);
+    let headers: Vec<(String, usize)> = view
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            KnowledgeRow::Header { label, count } => Some((label.clone(), *count)),
+            KnowledgeRow::Doc(_) => None,
+        })
+        .collect();
+    let app_groups: Vec<_> = headers
+        .iter()
+        .filter(|(l, _)| l.starts_with("ng/app"))
+        .collect();
+    assert_eq!(app_groups.len(), 2, "{headers:?}");
+    assert!(
+        app_groups.iter().all(|(l, n)| l.contains('…') && *n == 1),
+        "{headers:?}"
+    );
+}
+
+#[test]
+fn narrowing_scope_closes_an_out_of_scope_body() {
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut view = KnowledgeView::new();
+    view.apply(report(a, b), labels(a, b), Some(a), Scope::All);
+    let other = format!("repos/{b}/learnings/11111111-0000-0000-0000-000000000000.md");
+    view.set_body(other, "rule text");
+    view.apply(report(a, b), labels(a, b), Some(a), Scope::Repo);
+    assert!(!view.body_open());
+}
+
+#[test]
+fn page_down_stops_at_the_end_of_the_document() {
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut view = KnowledgeView::new();
+    view.apply(report(a, b), labels(a, b), Some(a), Scope::All);
+    view.set_body("global/notes/x.md", "line one\nline two\nlast line");
+    view.scroll_body_down(50);
+    let screen = render(&mut view, 120, 20);
+    assert_eq!(view.body_scroll, 0, "short body must not scroll");
+    assert!(screen.contains("last line"), "{screen}");
+
+    let long: String = (0..40).map(|i| format!("row {i}\n")).collect();
+    view.set_body("global/notes/x.md", long);
+    view.scroll_body_down(500);
+    let screen = render(&mut view, 120, 20);
+    assert!(
+        screen.contains("row 39"),
+        "end must stay visible:\n{screen}"
+    );
+    assert!(view.body_scroll > 0 && view.body_scroll < 40);
+}
+
+#[test]
+fn unresolved_repo_scope_says_it_shows_everything() {
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut view = KnowledgeView::new();
+    view.apply(report(a, b), labels(a, b), None, Scope::Repo);
+    let screen = render(&mut view, 160, 20);
+    assert!(screen.contains("repo unresolved, showing all"), "{screen}");
+}
+
+#[test]
 fn renders_groups_kinds_and_open_body() {
     let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
     let mut view = KnowledgeView::new();
@@ -218,8 +285,12 @@ fn diagnostics_surface_in_status() {
         Scope::All,
     );
     assert_eq!(view.status, "1 diagnostics (listing incomplete)");
-    let screen = render(&mut view, 120, 10);
+    let screen = render(&mut view, 120, 12);
     assert!(screen.contains("1 diagnostics"), "{screen}");
+    assert!(
+        screen.contains("browse requires a Markdown document"),
+        "diagnostic detail should be listed:\n{screen}"
+    );
 }
 
 /// Walks the operator's real selected corpus. Needs `ygg init` to have run

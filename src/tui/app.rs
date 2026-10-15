@@ -1150,7 +1150,30 @@ impl App {
             }
         };
 
-        let tabs: Vec<Span<'static>> = if narrow {
+        let wide: Vec<Span<'static>> = vec![
+            tab("[1] Dashboard", self.active_view == ActiveView::Dashboard),
+            tab("[2] DAG", self.active_view == ActiveView::Dag),
+            tab("[3] Tasks", self.active_view == ActiveView::Tasks),
+            tab("[5] Logs", self.active_view == ActiveView::Logs),
+            tab("[9] Locks", self.active_view == ActiveView::Locks),
+            tab("[0] Runs", self.active_view == ActiveView::Runs),
+            tab("[G] Grid", self.active_view == ActiveView::RunGrid),
+            tab("[N] Nerdy", self.active_view == ActiveView::Nerdy),
+            {
+                let unread = self.chat.unread_count();
+                let label = if unread > 0 && self.active_view != ActiveView::Chat {
+                    format!("[C] Chat ({unread})")
+                } else {
+                    "[C] Chat".into()
+                };
+                tab(&label, self.active_view == ActiveView::Chat)
+            },
+            tab("[K] Knowledge", self.active_view == ActiveView::Knowledge),
+        ];
+        // The full row outgrew the 100-column threshold (and grows with the
+        // unread count), so fall back to compact tabs whenever it would clip.
+        let wide_width: usize = wide.iter().map(Span::width).sum();
+        let tabs: Vec<Span<'static>> = if narrow || wide_width > chunks[0].width as usize {
             // Compact tabs: just the activator digit/letter. The full label
             // moves to the help row's pane_hint, which already shows the
             // active view's affordances.
@@ -1163,32 +1186,14 @@ impl App {
                 ("0", ActiveView::Runs),
                 ("G", ActiveView::RunGrid),
                 ("N", ActiveView::Nerdy),
+                ("C", ActiveView::Chat),
                 ("K", ActiveView::Knowledge),
             ]
             .iter()
             .map(|(k, v)| tab(k, self.active_view == *v))
             .collect()
         } else {
-            vec![
-                tab("[1] Dashboard", self.active_view == ActiveView::Dashboard),
-                tab("[2] DAG", self.active_view == ActiveView::Dag),
-                tab("[3] Tasks", self.active_view == ActiveView::Tasks),
-                tab("[5] Logs", self.active_view == ActiveView::Logs),
-                tab("[9] Locks", self.active_view == ActiveView::Locks),
-                tab("[0] Runs", self.active_view == ActiveView::Runs),
-                tab("[G] Grid", self.active_view == ActiveView::RunGrid),
-                tab("[N] Nerdy", self.active_view == ActiveView::Nerdy),
-                {
-                    let unread = self.chat.unread_count();
-                    let label = if unread > 0 && self.active_view != ActiveView::Chat {
-                        format!("[C] Chat ({unread})")
-                    } else {
-                        "[C] Chat".into()
-                    };
-                    tab(&label, self.active_view == ActiveView::Chat)
-                },
-                tab("[K] Knowledge", self.active_view == ActiveView::Knowledge),
-            ]
+            wide
         };
         frame.render_widget(Line::from(tabs), chunks[0]);
 

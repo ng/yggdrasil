@@ -47,13 +47,23 @@ fn narrow_terminal_renders_compact_tab_labels_only() {
         !row.contains("Dashboard"),
         "narrow row should NOT carry the word 'Dashboard': {row:?}"
     );
-    // All eight visible tab activators remain available in compact chrome.
-    for key in ["1", "2", "3", "5", "9", "0", "G", "N"] {
+    // Every tab activator remains available in compact chrome.
+    for key in ["1", "2", "3", "5", "9", "0", "G", "N", "C", "K"] {
         assert!(
             row.contains(key),
             "narrow row missing activator {key}: {row:?}"
         );
     }
+}
+
+#[test]
+fn tab_row_compacts_when_full_labels_would_clip() {
+    // Above the 100-column threshold but narrower than the full tab row:
+    // compact activators beat a row whose last tabs fall off the edge.
+    let buf = render_at(105);
+    let row = first_row(&buf);
+    assert!(!row.contains("Dashboard"), "{row:?}");
+    assert!(row.contains(" K "), "Knowledge activator clipped: {row:?}");
 }
 
 #[test]
@@ -92,16 +102,36 @@ fn wide_terminal_keeps_orchestration_panel() {
 
 #[test]
 fn boundary_width_99_collapses_width_100_does_not() {
-    let narrow = render_at(99);
-    let wide = render_at(100);
-    let narrow_row = first_row(&narrow);
-    let wide_row = first_row(&wide);
+    // The threshold governs the orchestration panel; the tab row picks
+    // full labels only once they fit (they need more than 100 columns).
+    let render_all = |width: u16| {
+        let buf = render_at(width);
+        let mut all = String::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                all.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            all.push('\n');
+        }
+        all
+    };
+    assert!(
+        !render_all(99).contains("orchestration"),
+        "width 99 must collapse"
+    );
+    assert!(
+        render_all(100).contains("orchestration"),
+        "width 100 must stay wide"
+    );
+
+    let narrow_row = first_row(&render_at(99));
     assert!(
         !narrow_row.contains("Dashboard"),
         "width 99 must collapse: {narrow_row:?}"
     );
+    let full_row = first_row(&render_at(120));
     assert!(
-        wide_row.contains("Dashboard"),
-        "width 100 must stay wide: {wide_row:?}"
+        full_row.contains("Dashboard") && full_row.contains("Knowledge"),
+        "full tab row must fit by 120 columns: {full_row:?}"
     );
 }

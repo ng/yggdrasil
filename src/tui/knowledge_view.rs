@@ -10,7 +10,7 @@
 //! selected document's exact source text into a right-hand pane; PgUp/PgDn
 //! scroll it; Esc closes it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -27,10 +27,21 @@ use crate::knowledge::store::BrowseReport;
 /// than the 2 s view cadence. Scope flips and explicit actions bypass this.
 const REFRESH_EVERY: Duration = Duration::from_secs(10);
 
-/// Outcome of one off-thread corpus walk. Labels and the current repo do
-/// not depend on scope, so a walk started under one scope applies cleanly
-/// after the user toggles to the other.
-type Walk = Result<Option<(BrowseReport, BTreeMap<Uuid, String>, Option<Uuid>)>, String>;
+/// Diagnostics listed under the table before the rest collapse to a count.
+const DIAGNOSTIC_ROWS: usize = 4;
+
+/// One off-thread corpus walk. Labels and the current repo do not depend on
+/// scope, so a walk started under one scope applies cleanly after the user
+/// toggles to the other.
+struct Loaded {
+    report: BrowseReport,
+    labels: BTreeMap<Uuid, String>,
+    current: Option<Uuid>,
+    /// Non-fatal lookup failures (labels, repo resolution) to surface.
+    warnings: Vec<String>,
+}
+
+type Walk = Result<Option<Loaded>, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocRow {
@@ -84,6 +95,9 @@ pub struct KnowledgeView {
     /// `(path, source text)` of the opened document, if any.
     pub body: Option<(String, String)>,
     pub body_scroll: u16,
+    /// Revision the open body was loaded at; a refresh that reports a
+    /// different revision reloads it.
+    body_revision: Option<String>,
     /// Last error or corpus summary, shown in the title / empty state.
     pub status: String,
     pub diagnostics: Vec<String>,
@@ -92,14 +106,22 @@ pub struct KnowledgeView {
     pub loaded: bool,
     all_docs: Vec<DocRow>,
     labels: BTreeMap<Uuid, String>,
+    /// Labels shared by more than one repo; those groups get an ID suffix.
+    ambiguous_labels: BTreeSet<String>,
     current_repo: Option<Uuid>,
     scope: Scope,
     last_refresh: Option<Instant>,
     /// In-flight corpus walk. Walks hash every document and may touch git,
     /// so they run off the input thread; `poll` collects the result.
     walk: Option<Receiver<Walk>>,
-    /// In-flight document load: the requested path and its result.
-    opening: Option<(String, Receiver<Result<String, String>>)>,
+    /// In-flight document load: requested path, its revision, and result.
+    opening: Option<Opening>,
+}
+
+struct Opening {
+    path: String,
+    revision: Option<String>,
+    result: Receiver<Result<String, String>>,
 }
 
 impl Default for KnowledgeView {
@@ -116,6 +138,7 @@ impl KnowledgeView {
             state: TableState::default(),
             body: None,
             body_scroll: 0,
+            body_revision: None,
             status: String::new(),
             diagnostics: Vec::new(),
             shared_commit: None,
@@ -123,6 +146,7 @@ impl KnowledgeView {
             loaded: false,
             all_docs: Vec::new(),
             labels: BTreeMap::new(),
+            ambiguous_labels: BTreeSet::new(),
             current_repo: None,
             scope: Scope::Repo,
             last_refresh: None,
@@ -170,15 +194,20 @@ impl KnowledgeView {
             }
             Some(Err(TryRecvError::Empty)) | None => {}
         }
-        match self.opening.as_ref().map(|(_, rx)| rx.try_recv()) {
+        match self.opening.as_ref().map(|o| o.result.try_recv()) {
             Some(Ok(result)) => {
-                let Some((path, _)) = self.opening.take() else {
+                let Some(opening) = self.opening.take() else {
                     return;
                 };
                 match result {
                     Ok(text) => {
-                        self.body = Some((path, text));
-                        self.body_scroll = 0;
+                        // A reload of the open document keeps the reader's place.
+                        let reload = self.body.as_ref().is_some_and(|(p, _)| *p == opening.path);
+                        if !reload {
+                            self.body_scroll = 0;
+                        }
+                        self.body = Some((opening.path, text));
+                        self.body_revision = opening.revision;
                     }
                     Err(error) => self.status = format!("open failed: {error}"),
                 }
@@ -199,13 +228,29 @@ impl KnowledgeView {
     fn finish_walk(&mut self, walk: Walk) {
         self.loaded = true;
         match walk {
-            Err(error) => self.status = error,
+            Err(error) => {
+                // Rows stay as the last good listing, but nothing vouches for
+                // the shared snapshot being current any more.
+                self.status = error;
+                self.shared_current = None;
+            }
             Ok(None) => {
                 self.status = "no selected OKF corpus — run `ygg knowledge init`".into();
                 self.all_docs.clear();
+                self.diagnostics.clear();
+                self.shared_commit = None;
+                self.shared_current = None;
                 self.rebuild(self.scope);
             }
-            Ok(Some((report, labels, current))) => self.apply(report, labels, current, self.scope),
+            Ok(Some(loaded)) => {
+                self.apply(loaded.report, loaded.labels, loaded.current, self.scope);
+                for warning in loaded.warnings {
+                    if !self.status.is_empty() {
+                        self.status.push_str(" · ");
+                    }
+                    self.status.push_str(&warning);
+                }
+            }
         }
     }
 
@@ -219,6 +264,12 @@ impl KnowledgeView {
         scope: Scope,
     ) {
         self.loaded = true;
+        let mut seen = BTreeSet::new();
+        self.ambiguous_labels = labels
+            .values()
+            .filter(|label| !seen.insert(label.as_str()))
+            .cloned()
+            .collect();
         self.labels = labels;
         self.current_repo = current_repo;
         self.diagnostics = report.diagnostics;
@@ -247,6 +298,26 @@ impl KnowledgeView {
             )
         };
         self.rebuild(scope);
+        self.reload_stale_body();
+    }
+
+    /// Reload the open document when the refreshed listing carries a newer
+    /// revision than the one on screen.
+    fn reload_stale_body(&mut self) {
+        let Some((path, _)) = &self.body else {
+            return;
+        };
+        if self.opening.is_some() {
+            return;
+        }
+        let fresh = self
+            .all_docs
+            .iter()
+            .find(|d| &d.path == path)
+            .map(|d| d.revision.clone());
+        if fresh.is_some() && fresh != self.body_revision {
+            self.start_load(path.clone(), fresh);
+        }
     }
 
     /// Group + filter `all_docs` into `rows` for the given scope, keeping the
@@ -255,33 +326,29 @@ impl KnowledgeView {
         self.scope = scope;
         let keep = self.selected_doc().map(|d| d.path.clone());
 
-        let mut docs: Vec<&DocRow> = self
+        // Group by identity (rank + repo), never by label: two repos can
+        // share a display label. Keys are computed once per doc.
+        let mut docs: Vec<(u8, String, Option<Uuid>, &DocRow)> = self
             .all_docs
             .iter()
             .filter(|d| match (scope, self.current_repo) {
                 (Scope::All, _) | (Scope::Repo, None) => true,
                 (Scope::Repo, Some(current)) => d.global || d.repo == Some(current),
             })
+            .map(|d| {
+                let repo = if d.global { None } else { d.repo };
+                (self.group_rank(d), self.group_label(d), repo, d)
+            })
             .collect();
-        docs.sort_by_cached_key(|d| (self.group_rank(d), self.group_label(d), d.path.clone()));
+        docs.sort_by(|a, b| (a.0, &a.1, a.2, &a.3.path).cmp(&(b.0, &b.1, b.2, &b.3.path)));
 
         let mut rows = Vec::with_capacity(docs.len() + 4);
-        let mut i = 0;
-        while i < docs.len() {
-            let label = self.group_label(docs[i]);
-            let start = i;
-            while i < docs.len() && self.group_label(docs[i]) == label {
-                i += 1;
-            }
+        for group in docs.chunk_by(|a, b| (a.0, a.2) == (b.0, b.2)) {
             rows.push(KnowledgeRow::Header {
-                label,
-                count: i - start,
+                label: group[0].1.clone(),
+                count: group.len(),
             });
-            rows.extend(
-                docs[start..i]
-                    .iter()
-                    .map(|d| KnowledgeRow::Doc((*d).clone())),
-            );
+            rows.extend(group.iter().map(|g| KnowledgeRow::Doc(g.3.clone())));
         }
         self.rows = rows;
 
@@ -294,9 +361,12 @@ impl KnowledgeView {
             .unwrap_or(0);
         self.snap_to_doc(true);
         if let Some((path, _)) = &self.body
-            && self.all_docs.iter().all(|d| &d.path != path)
+            && !self
+                .rows
+                .iter()
+                .any(|r| matches!(r, KnowledgeRow::Doc(d) if &d.path == path))
         {
-            self.body = None;
+            self.close_body();
         }
     }
 
@@ -316,11 +386,16 @@ impl KnowledgeView {
             return "global".into();
         }
         match d.repo {
-            Some(repo) => self
-                .labels
-                .get(&repo)
-                .cloned()
-                .unwrap_or_else(|| format!("repo {}…", &repo.to_string()[..8])),
+            Some(repo) => {
+                let short = &repo.to_string()[..8];
+                match self.labels.get(&repo) {
+                    Some(label) if self.ambiguous_labels.contains(label) => {
+                        format!("{label} ({short}…)")
+                    }
+                    Some(label) => label.clone(),
+                    None => format!("repo {short}…"),
+                }
+            }
             None => "other".into(),
         }
     }
@@ -396,6 +471,7 @@ impl KnowledgeView {
     pub fn close_body(&mut self) {
         self.body = None;
         self.body_scroll = 0;
+        self.body_revision = None;
         self.opening = None;
     }
 
@@ -411,19 +487,34 @@ impl KnowledgeView {
 
     /// Enter: open the selected document, or close it if already open.
     pub fn toggle_body(&mut self) {
-        let Some(path) = self.selected_doc().map(|d| d.path.clone()) else {
+        let Some((path, revision)) = self
+            .selected_doc()
+            .map(|d| (d.path.clone(), d.revision.clone()))
+        else {
             return;
         };
-        if self.body.as_ref().is_some_and(|(open, _)| *open == path) {
+        if self
+            .body
+            .as_ref()
+            .is_some_and(|(open_path, _)| *open_path == path)
+        {
             self.close_body();
             return;
         }
+        self.start_load(path, Some(revision));
+    }
+
+    fn start_load(&mut self, path: String, revision: Option<String>) {
         let (tx, rx) = mpsc::channel();
         let request = path.clone();
         std::thread::spawn(move || {
             let _ = tx.send(load_text(&request).map_err(|error| error.to_string()));
         });
-        self.opening = Some((path, rx));
+        self.opening = Some(Opening {
+            path,
+            revision,
+            result: rx,
+        });
     }
 
     /// Install a body directly. Test seam mirroring `toggle_body` without a
@@ -431,6 +522,7 @@ impl KnowledgeView {
     pub fn set_body(&mut self, path: impl Into<String>, text: impl Into<String>) {
         self.body = Some((path.into(), text.into()));
         self.body_scroll = 0;
+        self.body_revision = None;
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -464,6 +556,19 @@ impl KnowledgeView {
                 (chunks[0], Some(chunks[1]))
             }
             None => (area, None),
+        };
+        // Diagnostics name the documents missing from the listing; show them
+        // under the table instead of only counting them.
+        let (list_area, diag_area) = if self.diagnostics.is_empty() {
+            (list_area, None)
+        } else {
+            let shown = self.diagnostics.len().min(DIAGNOSTIC_ROWS)
+                + usize::from(self.diagnostics.len() > DIAGNOSTIC_ROWS);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(shown as u16 + 2)])
+                .split(list_area);
+            (chunks[0], Some(chunks[1]))
         };
 
         // With the source pane open the list is half-width; drop the
@@ -551,22 +656,61 @@ impl KnowledgeView {
         self.state.select(Some(self.selected));
         frame.render_stateful_widget(table, list_area, &mut self.state);
 
+        if let Some(diag_area) = diag_area {
+            let mut lines: Vec<Line> = self
+                .diagnostics
+                .iter()
+                .take(DIAGNOSTIC_ROWS)
+                .map(|d| Line::from(Span::styled(d.clone(), Style::default().fg(Color::Yellow))))
+                .collect();
+            if self.diagnostics.len() > DIAGNOSTIC_ROWS {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "+{} more — `ygg knowledge browse` lists all",
+                        self.diagnostics.len() - DIAGNOSTIC_ROWS
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            let para = Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" diagnostics "),
+            );
+            frame.render_widget(para, diag_area);
+        }
+
         if let (Some(body_area), Some((path, text))) = (body_area, &self.body) {
             let para = Paragraph::new(text.as_str())
                 .wrap(Wrap { trim: false })
-                .scroll((self.body_scroll, 0))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .title(format!(" {path}  ·  PgUp/PgDn=scroll  Esc=close ")),
                 );
-            frame.render_widget(para, body_area);
+            // Clamp to the last page of wrapped rows so PageDown stops at the
+            // end; recomputed every frame, so resizes re-clamp too.
+            let rows = para.line_count(body_area.width.saturating_sub(2));
+            let max_scroll = rows.saturating_sub(body_area.height as usize);
+            self.body_scroll = self
+                .body_scroll
+                .min(max_scroll.min(u16::MAX as usize) as u16);
+            frame.render_widget(para.scroll((self.body_scroll, 0)), body_area);
         }
     }
 
     fn title(&self) -> String {
         let mut parts = vec![format!("Knowledge ({} docs)", self.doc_count())];
-        parts.push(format!("scope: {}", self.scope.label()));
+        // Without a resolved repo the Repo filter falls back to everything;
+        // say so instead of implying the list is narrowed.
+        if self.loaded && self.scope == Scope::Repo && self.current_repo.is_none() {
+            parts.push(format!(
+                "scope: {} (repo unresolved, showing all)",
+                self.scope.label()
+            ));
+        } else {
+            parts.push(format!("scope: {}", self.scope.label()));
+        }
         if let Some(commit) = &self.shared_commit {
             let state = match self.shared_current {
                 Some(true) => "current",
@@ -602,12 +746,26 @@ fn walk_corpus() -> Walk {
         Ok(None) => return Ok(None),
         Ok(Some(context)) => context,
     };
-    let labels = context.repo_labels().unwrap_or_default();
-    let current = context.resolve_repo(&cwd).ok().flatten();
+    let mut warnings = Vec::new();
+    let labels = context.repo_labels().unwrap_or_else(|error| {
+        warnings.push(format!("repo labels unavailable: {error}"));
+        BTreeMap::new()
+    });
+    let current = context.resolve_repo(&cwd).unwrap_or_else(|error| {
+        warnings.push(format!("repo unresolved: {error}"));
+        None
+    });
     context
         .service
         .browse_documents(None)
-        .map(|report| Some((report, labels, current)))
+        .map(|report| {
+            Some(Loaded {
+                report,
+                labels,
+                current,
+                warnings,
+            })
+        })
         .map_err(|error| format!("knowledge browse failed: {error}"))
 }
 
