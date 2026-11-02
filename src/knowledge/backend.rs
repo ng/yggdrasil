@@ -94,7 +94,9 @@ impl Backend {
             match transport.refresh() {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
-                    eprintln!(
+                    // tracing, not stderr: the TUI browses through here and
+                    // routes tracing away from its alternate screen.
+                    tracing::warn!(
                         "knowledge: shared refresh unavailable; browsing last confirmed snapshot"
                     );
                     let mut snapshot = transport.cached()?;

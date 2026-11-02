@@ -170,6 +170,12 @@ impl Context {
     pub fn for_edit_hook(env: Environment) -> Result<Option<Self>> {
         Self::environment(env, false)
     }
+    /// Read-only browsing (the TUI knowledge pane) tolerates the same 60 s
+    /// snapshot reuse; it polls, so it must not fetch the shared remote on
+    /// every tick.
+    pub fn for_browse(env: Environment) -> Result<Option<Self>> {
+        Self::environment(env, false)
+    }
     fn environment(env: Environment, refresh: bool) -> Result<Option<Self>> {
         let (config, env) = KnowledgeConfig::load(env)?;
         let user = configured_user(&env);
@@ -351,6 +357,20 @@ impl Context {
             Some(repo) => Ok(repo),
             None => self.registry.bind(&identity),
         }
+    }
+    /// Resolve the checkout's repository without binding an unknown one.
+    /// Read-only surfaces (the TUI) must never mutate the identity registry.
+    pub fn resolve_repo(&self, cwd: &Path) -> Result<Option<Uuid>> {
+        self.registry.resolve(&GitIdentity::discover(cwd)?)
+    }
+    /// Display labels for every bound portable repository.
+    pub fn repo_labels(&self) -> Result<BTreeMap<Uuid, String>> {
+        let (identities, _) = self.registry.read()?;
+        Ok(identities
+            .repos
+            .iter()
+            .map(|repo| (repo.id, repo.label()))
+            .collect())
     }
     /// Connected task claims use the task's database scope, never checkout scope.
     /// Hold both this context and the returned transaction through emission.
