@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 // the [ygg memory | ...] injection narrative; Yggdrasil is now a pure
 // orchestration layer (tasks, locks, spawn, learnings). Existing
 // managed blocks pick this up on next `ygg integrate`.
-const VERSION: u32 = 4;
+// VERSION 5 (2026-11-01, ADR 0020): in-session parallel work uses the
+// native Agent tool; `ygg spawn` is for detached work only.
+const VERSION: u32 = 5;
 const BEGIN: &str = "<!-- BEGIN YGG INTEGRATION";
 const END: &str = "<!-- END YGG INTEGRATION -->";
 
@@ -23,9 +25,9 @@ const CLAUDE_BLOCK: &str = r#"## Yggdrasil Agent Coordination
 
 This project uses **Yggdrasil** (`ygg`) for resource coordination and issue
 tracking across parallel Claude Code agents. The SessionStart, UserPromptSubmit,
-Stop, PreCompact, and PreToolUse hooks are active — they prime agent context,
-deliver agent-to-agent messages, record token stats, and track state in
-Postgres. You will see prime output at the top of each session
+Stop, PreCompact, PreToolUse, SubagentStart and SubagentStop hooks are active —
+they prime agent context, deliver agent-to-agent messages, record token stats,
+track native subagents, and track state in Postgres. You will see prime output at the top of each session
 (`<!-- ygg:prime -->`).
 
 ### Quick Reference
@@ -104,7 +106,7 @@ ygg status                                  # See all agents' state, locks, rece
 ygg lock acquire <resource-key>             # Lease a shared resource before editing
 ygg lock release <resource-key>             # Release when done
 ygg lock list                               # See outstanding locks
-ygg spawn --task "..."                      # Spawn a parallel agent in a new tmux window
+ygg spawn --task "..."                      # Detached agent in a tmux window (outlives this session)
 ygg interrupt take-over --agent <name>      # Take over / steer another agent
 ygg logs --follow                           # Live event stream
 ```
@@ -112,7 +114,7 @@ ygg logs --follow                           # Live event stream
 ### Rules
 
 - **Before editing a resource another agent might touch** (shared file, branch, migration, config), acquire a lock: `ygg lock acquire <path-or-key>`. Release when done. This is Yggdrasil's core contract — bypassing it defeats the coordination layer.
-- **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock coordination.
+- **For parallel work** inside this session, use Claude Code's native Agent tool: run it in the background, with `isolation: "worktree"` when it edits files. Yggdrasil records each subagent under your agent in `ygg status` and the dashboard. Use `ygg spawn` only for detached work that must outlive this session; the scheduler also dispatches through it.
 - **Before assuming you're alone**, check `ygg status`. Other agents may hold locks or be mid-task on related work.
 - **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in a native TodoList; cross-session work lives in `ygg task`.
 - **Do NOT** use `bd` / beads. This project uses `ygg task` instead.
@@ -177,7 +179,7 @@ ygg task dupes [--all]                      # Probable duplicate pairs (string s
 
 ygg status                                  # Agents + outstanding locks
 ygg lock acquire <key> / release <key> / list
-ygg spawn --task "..."                      # Parallel agent in a new tmux window
+ygg spawn --task "..."                      # Detached agent in a tmux window (outlives the session)
 ygg interrupt take-over --agent <name>      # Take over another agent
 ygg logs --follow                           # Live event stream
 ```
@@ -185,7 +187,7 @@ ygg logs --follow                           # Live event stream
 ### Rules
 
 - Acquire a lock before editing a resource another agent might touch. Release when done.
-- Prefer `ygg spawn` over a native Task/Agent tool for parallel work.
+- For parallel work inside a session, use the native subagent (Agent) tool, in the background and with worktree isolation when it edits files. Use `ygg spawn` only for detached work that must outlive the session.
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking.
 - Before `ygg task create`, run `ygg task dupes` to surface near-dups.

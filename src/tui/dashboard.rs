@@ -11,8 +11,10 @@ use uuid::Uuid;
 
 use crate::lock::LockManager;
 use crate::models::agent::{AgentRepo, AgentWorkflow};
+use crate::models::subagent::{Subagent, SubagentRepo};
 
 const PRESSURE_TTL: Duration = Duration::from_secs(5);
+const SUBAGENT_RECENT_SECS: i64 = 15 * 60;
 
 use super::ctx_usage::{
     BAR_REF, HARD_DANGER, SOFT_HARD_WARN, agent_context_usage, ctx_color, humanize_tokens,
@@ -25,6 +27,9 @@ pub struct DashboardView {
     locks: Vec<crate::lock::ResourceLock>,
     selected: usize,
     agent_name_by_id: HashMap<Uuid, String>,
+    /// Native subagents (ADR 0020) per parent agent: running, or finished
+    /// within `SUBAGENT_RECENT_SECS`. Rendered as child rows, not selectable.
+    subagents_by_parent: HashMap<Uuid, Vec<Subagent>>,
 
     // Pulse numbers
     prompts_1h: i64,
@@ -201,6 +206,7 @@ impl DashboardView {
             locks: vec![],
             selected: 0,
             agent_name_by_id: HashMap::new(),
+            subagents_by_parent: HashMap::new(),
             prompts_1h: 0,
             digests_1h: 0,
             cache_hits_24h: 0,
@@ -477,6 +483,19 @@ impl DashboardView {
             } else if self.selected >= self.agents.len() {
                 self.selected = self.agents.len().saturating_sub(1);
             }
+        }
+
+        let ids: Vec<Uuid> = self.agents.iter().map(|a| a.agent_id).collect();
+        self.subagents_by_parent.clear();
+        for sub in SubagentRepo::new(pool)
+            .list_recent(&ids, SUBAGENT_RECENT_SECS)
+            .await
+            .unwrap_or_default()
+        {
+            self.subagents_by_parent
+                .entry(sub.parent_agent_id)
+                .or_default()
+                .push(sub);
         }
 
         let lock_mgr = LockManager::new(pool, 300, crate::db::user_id());
@@ -1492,11 +1511,12 @@ impl DashboardView {
         let selected = self.selected;
         let per_agent = &self.per_agent_hourly;
         let per_tokens = &self.per_agent_tokens;
+        let subagents_by_parent = &self.subagents_by_parent;
         let rows: Vec<Row> = self
             .agents
             .iter()
             .enumerate()
-            .map(|(i, agent)| {
+            .flat_map(|(i, agent)| {
                 let style = if i == selected {
                     Style::default().bg(Color::DarkGray)
                 } else {
@@ -1631,7 +1651,7 @@ impl DashboardView {
                     )
                 };
 
-                Row::new(vec![
+                let row = Row::new(vec![
                     Cell::from(name_cell).style(Style::default().fg(name_color)),
                     Cell::from(state_label).style(Style::default().fg(state_fg)),
                     Cell::from(pressure_bar).style(Style::default().fg(ctx_fg)),
@@ -1640,7 +1660,14 @@ impl DashboardView {
                     Cell::from(humanize_since(agent.updated_at))
                         .style(Style::default().fg(name_color)),
                 ])
-                .style(style)
+                .style(style);
+                let children = subagents_by_parent
+                    .get(&agent.agent_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(subagent_row);
+                std::iter::once(row).chain(children).collect::<Vec<_>>()
             })
             .collect();
 
@@ -1743,6 +1770,43 @@ impl DashboardView {
 
 /// Trim a resource key (usually an abs path) to the last two path
 /// components plus an ellipsis prefix. Keeps the informative tail visible.
+/// Child row under the parent agent: `└ Explore: probe the readme`.
+fn subagent_row(sub: &Subagent) -> Row<'static> {
+    let now = Utc::now();
+    let live = crate::models::subagent::is_live(sub, now);
+    let (state, color) = match (sub.state.as_str(), live) {
+        ("running", true) => match sub.last_tool.as_deref() {
+            Some(t) => (format!("tool: {t}"), Color::Yellow),
+            None => ("working".to_string(), Color::Green),
+        },
+        ("running", false) => ("working (stale)".to_string(), Color::DarkGray),
+        _ => ("done".to_string(), Color::DarkGray),
+    };
+    let fg = if live { Color::Gray } else { Color::DarkGray };
+    let tokens = if sub.input_tokens + sub.output_tokens > 0 {
+        format!(
+            "{}↓ {}↑",
+            humanize_tokens(sub.input_tokens),
+            humanize_tokens(sub.output_tokens)
+        )
+    } else {
+        String::new()
+    };
+    Row::new(vec![
+        Cell::from(format!(
+            "  └ {}{}",
+            sub.label(),
+            if sub.background { " (bg)" } else { "" }
+        ))
+        .style(Style::default().fg(fg)),
+        Cell::from(state).style(Style::default().fg(color)),
+        Cell::from(""),
+        Cell::from(tokens).style(Style::default().fg(fg)),
+        Cell::from(""),
+        Cell::from(humanize_since(sub.updated_at)).style(Style::default().fg(fg)),
+    ])
+}
+
 fn short_resource(s: &str) -> String {
     let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() <= 2 {

@@ -14,7 +14,7 @@ ygg task close <ref>                           # Complete a task
 ygg status                                     # See all agents' state, locks, recent activity
 ygg lock acquire <resource-key>                # Lease a shared resource before editing
 ygg lock release <resource-key>                # Release when done
-ygg spawn --task "..."                         # Spawn a parallel agent in a new tmux window
+ygg spawn --task "..."                         # Detached agent in a tmux window (outlives this session)
 ygg logs --follow [--kind K] [--session SID]   # Live event stream (filterable)
 ygg rollup --days 7                            # Per-repo activity summary
 ygg reap --dry-run                             # Preview stale-row cleanup
@@ -23,7 +23,7 @@ ygg reap --dry-run                             # Preview stale-row cleanup
 ### Rules
 
 - Acquire a lock before editing a resource another agent might touch. Release when done.
-- Prefer `ygg spawn` over a native Task/Agent tool for parallel work that warrants its own context.
+- For parallel work inside a session, use the native subagent (Agent) tool, in the background and with worktree isolation when it edits files. Use `ygg spawn` only for detached work that must outlive the session (ADR 0020).
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking. Intra-turn checklists can stay in a native TodoList.
 - Do NOT use `bd` / beads. This project has migrated to Yggdrasil.
@@ -82,7 +82,7 @@ ygg task dupes [--all]                      # Probable duplicate pairs (string s
 
 ygg status                                  # Agents + outstanding locks
 ygg lock acquire <key> / release <key> / list
-ygg spawn --task "..."                      # Parallel agent in a new tmux window
+ygg spawn --task "..."                      # Detached agent in a tmux window (outlives the session)
 ygg interrupt take-over --agent <name>      # Take over another agent
 ygg logs --follow                           # Live event stream
 ```
@@ -90,7 +90,7 @@ ygg logs --follow                           # Live event stream
 ### Rules
 
 - Acquire a lock before editing a resource another agent might touch. Release when done.
-- Prefer `ygg spawn` over a native Task/Agent tool for parallel work.
+- For parallel work inside a session, use the native subagent (Agent) tool, in the background and with worktree isolation when it edits files. Use `ygg spawn` only for detached work that must outlive the session.
 - Check `ygg status` before assuming you're working alone.
 - Use `ygg task` for cross-session work tracking.
 - Before `ygg task create`, run `ygg task dupes` to surface near-dups.

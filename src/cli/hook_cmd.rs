@@ -7,9 +7,18 @@
 
 use crate::config::AppConfig;
 use crate::lock::LockManager;
-use crate::models::agent::AgentRepo;
+use crate::models::agent::{AgentRepo, AgentWorkflow};
+use crate::models::subagent::{AgentCall, StopReport, SubagentRepo};
 use clap::Subcommand;
+use std::path::{Path, PathBuf};
 use tracing::warn;
+
+/// Where SessionStart records which agent a Claude Code session belongs to.
+const SESSION_MAP_DIR: &str = "/tmp/ygg";
+
+/// Upper bound on DB work in the subagent hooks. They are bookkeeping only and
+/// must never hold up Claude Code.
+const SUBAGENT_HOOK_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Subcommand)]
 pub enum HookAction {
@@ -23,6 +32,10 @@ pub enum HookAction {
     PreCompact,
     /// Stop: digest session + capture outcome + stop-check
     Stop,
+    /// SubagentStart: record a native subagent under its parent agent
+    SubagentStart,
+    /// SubagentStop: mark a native subagent done + record its token totals
+    SubagentStop,
 }
 
 /// Read stdin, parse common fields, dispatch to the appropriate handler.
@@ -45,12 +58,18 @@ pub async fn handle(action: HookAction) -> anyhow::Result<()> {
         .unwrap_or("")
         .to_string();
 
-    let agent_name = std::env::var("YGG_AGENT_NAME").unwrap_or_else(|_| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "ygg".to_string())
-    });
+    // Hooks that fire inside a native subagent carry `agent_id`; those (and
+    // the Subagent* events) belong to the parent agent, whose cwd can differ
+    // from the subagent's (`isolation: "worktree"`).
+    let subagent_ctx = matches!(action, HookAction::SubagentStart | HookAction::SubagentStop)
+        || payload_str(&payload, "agent_id").is_some();
+    let agent_name = resolve_agent_name(
+        std::env::var("YGG_AGENT_NAME").ok(),
+        &session_id,
+        std::env::current_dir().ok(),
+        subagent_ctx,
+        read_session_mapping,
+    );
 
     // Record session_id process-globally so downstream DB calls tag correctly.
     // Avoids the unsafe, non-thread-safe std::env::set_var.
@@ -62,6 +81,111 @@ pub async fn handle(action: HookAction) -> anyhow::Result<()> {
         HookAction::PreToolUse => handle_pre_tool_use(&agent_name, &payload).await,
         HookAction::PreCompact => handle_pre_compact(&agent_name, &payload).await,
         HookAction::Stop => handle_stop(&agent_name, &payload).await,
+        HookAction::SubagentStart => {
+            handle_subagent_start(&agent_name, &session_id, &payload).await
+        }
+        HookAction::SubagentStop => handle_subagent_stop(&agent_name, &session_id, &payload).await,
+    }
+}
+
+fn payload_str<'a>(payload: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// Agent identity for a hook invocation. `YGG_AGENT_NAME` wins (spawned
+/// workers export it, and subagent hooks inherit it). Otherwise the cwd
+/// basename — except inside a subagent, where the cwd may be the subagent's
+/// own worktree: there the SessionStart mapping for the (parent's) session id
+/// is used, then the repo that owns a `.claude/worktrees/<name>` cwd.
+fn resolve_agent_name(
+    env_name: Option<String>,
+    session_id: &str,
+    cwd: Option<PathBuf>,
+    subagent_ctx: bool,
+    session_mapping: impl Fn(&str) -> Option<String>,
+) -> String {
+    if let Some(name) = env_name.filter(|n| !n.is_empty()) {
+        return name;
+    }
+    let mut cwd = cwd;
+    if subagent_ctx {
+        if !session_id.is_empty() {
+            if let Some(name) = session_mapping(session_id) {
+                return name;
+            }
+        }
+        cwd = cwd.map(|p| outside_claude_worktree(&p).to_path_buf());
+    }
+    cwd.and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "ygg".to_string())
+}
+
+fn session_mapping_path(session_id: &str) -> PathBuf {
+    Path::new(SESSION_MAP_DIR).join(format!("session-{session_id}.agent"))
+}
+
+fn read_session_mapping(session_id: &str) -> Option<String> {
+    // Session ids are UUIDs; refuse anything that could leave the directory.
+    if !session_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    std::fs::read_to_string(session_mapping_path(session_id))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// `<repo>/.claude/worktrees/<name>/...` → `<repo>`; any other path unchanged.
+fn outside_claude_worktree(path: &Path) -> &Path {
+    for dir in path.ancestors().skip(1) {
+        if dir.file_name().is_some_and(|n| n == "worktrees")
+            && let Some(dot_claude) = dir.parent()
+            && dot_claude.file_name().is_some_and(|n| n == ".claude")
+            && let Some(repo) = dot_claude.parent()
+        {
+            return repo;
+        }
+    }
+    path
+}
+
+/// The parent's agent row, minted on first sight (same rule as `set_tool`).
+async fn resolve_parent(pool: &sqlx::PgPool, agent_name: &str) -> anyhow::Result<AgentWorkflow> {
+    let repo = AgentRepo::new(pool, crate::db::user_id());
+    let persona = std::env::var("YGG_AGENT_PERSONA")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(agent) = repo
+        .get_by_name_persona(agent_name, persona.as_deref())
+        .await?
+    {
+        return Ok(agent);
+    }
+    Ok(repo
+        .register_with_persona(agent_name, persona.as_deref())
+        .await?)
+}
+
+async fn hook_pool(label: &str) -> Option<sqlx::PgPool> {
+    let config = match AppConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("hook {label}: config error: {e}");
+            return None;
+        }
+    };
+    match crate::db::connect(&config.database).await {
+        Ok(p) => Some(p),
+        Err(e) => {
+            warn!("hook {label}: db pool error: {e}");
+            None
+        }
     }
 }
 
@@ -83,10 +207,8 @@ async fn handle_session_start(
 
     // Write session mapping so other hooks/tools can resolve agent from sid.
     if !session_id.is_empty() {
-        let dir = std::path::Path::new("/tmp/ygg");
-        std::fs::create_dir_all(dir).ok();
-        let mapping_file = dir.join(format!("session-{session_id}.agent"));
-        std::fs::write(&mapping_file, agent_name).ok();
+        std::fs::create_dir_all(SESSION_MAP_DIR).ok();
+        std::fs::write(session_mapping_path(session_id), agent_name).ok();
     }
 
     // Call prime — output goes to stdout for Claude Code injection.
@@ -306,6 +428,11 @@ async fn pre_tool_coordination(
         let _ = crate::cli::agent_cmd::set_tool(&pool, agent_name, tool_name).await;
     }
 
+    // ADR 0020: Agent tool calls and tool calls made inside native subagents.
+    if let Err(e) = record_subagent_activity(&pool, agent_name, payload).await {
+        warn!("hook pre-tool-use: subagent bookkeeping failed: {e}");
+    }
+
     // ADR 0016 / yggdrasil-99: bump heartbeat on running task_run.
     let _ = crate::cli::run_cmd::heartbeat_cli(&pool, None, agent_name).await;
 
@@ -337,6 +464,179 @@ async fn pre_tool_coordination(
     }
 
     Ok(Some(pool))
+}
+
+/// The native Agent tool call in a PreToolUse payload (`Task` is its former
+/// name), or `None` for any other tool.
+fn agent_call(payload: &serde_json::Value) -> Option<AgentCall<'_>> {
+    let tool = payload_str(payload, "tool_name")?;
+    if tool != "Agent" && tool != "Task" {
+        return None;
+    }
+    let input = payload.get("tool_input")?;
+    let field = |k: &str| {
+        input
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    Some(AgentCall {
+        tool_use_id: payload_str(payload, "tool_use_id")?,
+        // Claude Code runs `general-purpose` when the call names no type.
+        agent_type: field("subagent_type").unwrap_or("general-purpose"),
+        description: field("description"),
+        background: input
+            .get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        isolation: field("isolation"),
+    })
+}
+
+async fn record_subagent_activity(
+    pool: &sqlx::PgPool,
+    agent_name: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let Some(session_id) = payload_str(payload, "session_id") else {
+        return Ok(());
+    };
+    let repo = SubagentRepo::new(pool);
+    if let (Some(cc_agent_id), Some(tool)) = (
+        payload_str(payload, "agent_id"),
+        payload_str(payload, "tool_name"),
+    ) {
+        repo.touch(session_id, cc_agent_id, tool).await?;
+    }
+    if let Some(call) = agent_call(payload) {
+        let parent = resolve_parent(pool, agent_name).await?;
+        repo.record_call(parent.agent_id, crate::db::user_id(), session_id, &call)
+            .await?;
+    }
+    Ok(())
+}
+
+// ── SubagentStart / SubagentStop ────────────────────────────────────────────
+
+/// SubagentStart (ADR 0020): record the subagent as a running child of the
+/// parent agent. Fail-open: every error is logged and swallowed, and nothing
+/// is written to stdout, so the hook can never block or steer Claude Code.
+async fn handle_subagent_start(
+    agent_name: &str,
+    session_id: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let Some(cc_agent_id) = payload_str(payload, "agent_id") else {
+        return Ok(());
+    };
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    let agent_type = payload_str(payload, "agent_type").unwrap_or("");
+    let cwd = payload_str(payload, "cwd");
+    let work = async {
+        let Some(pool) = hook_pool("subagent-start").await else {
+            return Ok(());
+        };
+        let parent = resolve_parent(&pool, agent_name).await?;
+        SubagentRepo::new(&pool)
+            .start(
+                parent.agent_id,
+                crate::db::user_id(),
+                session_id,
+                cc_agent_id,
+                agent_type,
+                cwd,
+            )
+            .await?;
+        anyhow::Ok(())
+    };
+    match tokio::time::timeout(SUBAGENT_HOOK_BUDGET, work).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!("hook subagent-start: {e}"),
+        Err(_) => warn!("hook subagent-start: timed out"),
+    }
+    Ok(())
+}
+
+/// SubagentStop (ADR 0020): mark the subagent done and record token totals
+/// from its own transcript (`agent_transcript_path`), the way the Stop hook
+/// does for sessions. Fail-open like `handle_subagent_start`; it never emits a
+/// decision, so it cannot keep a subagent running.
+async fn handle_subagent_stop(
+    agent_name: &str,
+    session_id: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let Some(cc_agent_id) = payload_str(payload, "agent_id") else {
+        return Ok(());
+    };
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    let agent_type = payload_str(payload, "agent_type").unwrap_or("");
+    let transcript = payload_str(payload, "agent_transcript_path").map(expand_home);
+    let last_message =
+        payload_str(payload, "last_assistant_message").map(|m| truncate_utf8(m, 2000));
+
+    let mut report = StopReport {
+        transcript_path: transcript.as_deref(),
+        last_message,
+        ..Default::default()
+    };
+    if let Some(path) = transcript.as_deref().map(Path::new).filter(|p| p.is_file()) {
+        let turns = crate::stats::collector::parse_session(path);
+        let usage = crate::stats::collector::aggregate_usage(&turns);
+        let clamp = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+        report.input_tokens = clamp(usage.input_tokens);
+        report.output_tokens = clamp(usage.output_tokens);
+        report.cache_read = clamp(usage.cache_read);
+        report.cache_write = clamp(usage.cache_write);
+        report.tool_calls = i32::try_from(turns.iter().map(|t| t.tool_names.len()).sum::<usize>())
+            .unwrap_or(i32::MAX);
+    }
+
+    let work = async {
+        let Some(pool) = hook_pool("subagent-stop").await else {
+            return Ok(());
+        };
+        let parent = resolve_parent(&pool, agent_name).await?;
+        SubagentRepo::new(&pool)
+            .stop(
+                parent.agent_id,
+                crate::db::user_id(),
+                session_id,
+                cc_agent_id,
+                agent_type,
+                &report,
+            )
+            .await?;
+        anyhow::Ok(())
+    };
+    match tokio::time::timeout(SUBAGENT_HOOK_BUDGET, work).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!("hook subagent-stop: {e}"),
+        Err(_) => warn!("hook subagent-stop: timed out"),
+    }
+    Ok(())
+}
+
+fn expand_home(path: &str) -> String {
+    match (path.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) if !home.is_empty() => format!("{home}/{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 // ── PreCompact ──────────────────────────────────────────────────────────────
@@ -383,6 +683,10 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
 
     if let Some((ref pool, ref config)) = db {
         let user_id = crate::db::user_id().to_string();
+        // ADR 0020: Claude Code fires Stop while background subagents are
+        // still working. Their tool calls run under this agent's identity and
+        // locks, so keep the session, locks and task run open until they end.
+        let mut live_subagents = 0;
 
         // 1. On stop, always end session + release locks; token stats are
         //    best-effort and depend on a readable transcript.
@@ -405,29 +709,40 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
                 }
             }
 
-            if let Some(sid) =
-                crate::models::session::resolve_current_session(pool, a.agent_id, None).await
-            {
-                let _ = crate::models::session::SessionRepo::new(pool)
-                    .end(sid)
+            live_subagents = SubagentRepo::new(pool)
+                .live_count(a.agent_id)
+                .await
+                .unwrap_or(0);
+            if live_subagents > 0 {
+                eprintln!(
+                    "ygg: {live_subagents} native subagent(s) still running; \
+                     keeping this agent's session, locks and task run open"
+                );
+            } else {
+                if let Some(sid) =
+                    crate::models::session::resolve_current_session(pool, a.agent_id, None).await
+                {
+                    let _ = crate::models::session::SessionRepo::new(pool)
+                        .end(sid)
+                        .await;
+                }
+                let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, &user_id);
+                let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
+
+                // Mark the agent Shutdown. Subsequent prompts re-enter Executing
+                // via inject (force_state is unconditional); the watcher's reap
+                // pass will close the tmux window once the process is truly gone.
+                let _ = AgentRepo::new(pool, &user_id)
+                    .force_state(a.agent_id, crate::models::agent::AgentState::Shutdown, None)
                     .await;
             }
-            let lock_mgr = LockManager::new(pool, config.lock_ttl_secs, &user_id);
-            let _ = lock_mgr.release_all_for_agent(a.agent_id).await;
-
-            // Mark the agent Shutdown. Subsequent prompts re-enter Executing
-            // via inject (force_state is unconditional); the watcher's reap
-            // pass will close the tmux window once the process is truly gone.
-            let _ = AgentRepo::new(pool, &user_id)
-                .force_state(a.agent_id, crate::models::agent::AgentState::Shutdown, None)
-                .await;
         }
 
         // 2. Capture outcome (unless YGG_RUN_CAPTURE=0).
         let skip_capture = std::env::var("YGG_RUN_CAPTURE")
             .map(|v| v == "0")
             .unwrap_or(false);
-        if !skip_capture {
+        if !skip_capture && live_subagents == 0 {
             let _ = crate::cli::run_cmd::capture_outcome_cli(pool, agent_name, None).await;
         }
 
@@ -490,6 +805,125 @@ async fn handle_stop(agent_name: &str, payload: &serde_json::Value) -> anyhow::R
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn no_mapping(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn agent_name_env_wins() {
+        let name = resolve_agent_name(
+            Some("worker-7".into()),
+            "sid",
+            Some(PathBuf::from("/r/.claude/worktrees/agent-1")),
+            true,
+            |_| Some("mapped".into()),
+        );
+        assert_eq!(name, "worker-7");
+    }
+
+    #[test]
+    fn agent_name_main_session_uses_cwd_basename() {
+        let name = resolve_agent_name(
+            None,
+            "sid",
+            Some(PathBuf::from("/code/yggdrasil")),
+            false,
+            |_| Some("mapped".into()),
+        );
+        assert_eq!(name, "yggdrasil");
+    }
+
+    #[test]
+    fn agent_name_subagent_prefers_session_mapping() {
+        let name = resolve_agent_name(
+            None,
+            "sid",
+            Some(PathBuf::from("/code/yggdrasil/.claude/worktrees/agent-1")),
+            true,
+            |sid| (sid == "sid").then(|| "yggdrasil:reviewer".to_string()),
+        );
+        assert_eq!(name, "yggdrasil:reviewer");
+    }
+
+    #[test]
+    fn agent_name_subagent_worktree_falls_back_to_repo() {
+        let name = resolve_agent_name(
+            None,
+            "sid",
+            Some(PathBuf::from(
+                "/code/yggdrasil/.claude/worktrees/agent-1/src",
+            )),
+            true,
+            no_mapping,
+        );
+        assert_eq!(name, "yggdrasil");
+    }
+
+    #[test]
+    fn outside_claude_worktree_leaves_other_paths() {
+        let p = Path::new("/code/yggdrasil/.claude");
+        assert_eq!(outside_claude_worktree(p), p);
+        let p = Path::new("/code/yggdrasil/.claude/worktrees");
+        assert_eq!(outside_claude_worktree(p), p);
+        let p = Path::new("/code/worktrees/x");
+        assert_eq!(outside_claude_worktree(p), p);
+    }
+
+    #[test]
+    fn session_mapping_rejects_path_traversal() {
+        assert_eq!(read_session_mapping("../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn agent_call_reads_agent_tool_input() {
+        let payload = serde_json::json!({
+            "tool_name": "Agent",
+            "tool_use_id": "toolu_1",
+            "tool_input": {
+                "description": "probe the readme",
+                "prompt": "...",
+                "subagent_type": "Explore",
+                "run_in_background": true,
+                "isolation": "worktree"
+            }
+        });
+        let call = agent_call(&payload).unwrap();
+        assert_eq!(call.tool_use_id, "toolu_1");
+        assert_eq!(call.agent_type, "Explore");
+        assert_eq!(call.description, Some("probe the readme"));
+        assert!(call.background);
+        assert_eq!(call.isolation, Some("worktree"));
+    }
+
+    #[test]
+    fn agent_call_defaults_and_legacy_task_name() {
+        let payload = serde_json::json!({
+            "tool_name": "Task",
+            "tool_use_id": "toolu_2",
+            "tool_input": {"description": "d", "prompt": "p"}
+        });
+        let call = agent_call(&payload).unwrap();
+        assert_eq!(call.agent_type, "general-purpose");
+        assert!(!call.background);
+        assert_eq!(call.isolation, None);
+    }
+
+    #[test]
+    fn agent_call_ignores_other_tools_and_missing_ids() {
+        let edit = serde_json::json!({"tool_name": "Edit", "tool_use_id": "t", "tool_input": {}});
+        assert!(agent_call(&edit).is_none());
+        let no_id = serde_json::json!({"tool_name": "Agent", "tool_input": {}});
+        assert!(agent_call(&no_id).is_none());
+    }
+
+    #[test]
+    fn truncate_utf8_keeps_char_boundaries() {
+        assert_eq!(truncate_utf8("abc", 10), "abc");
+        assert_eq!(truncate_utf8("ääää", 3), "ä");
+    }
+
     #[test]
     fn prompt_truncation_ascii() {
         // ASCII: byte length == char length, should truncate to exactly 2000 bytes.

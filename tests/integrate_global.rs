@@ -140,3 +140,21 @@ fn managed_block_documents_orchestration_patterns() {
         );
     }
 }
+
+// ADR 0020: in-session parallel work uses the native Agent tool; `ygg spawn`
+// is only for detached work. The old "prefer ygg spawn" rule must not return.
+#[test]
+fn managed_blocks_teach_native_agents_for_parallel_work() {
+    let dir = tempfile::tempdir().unwrap();
+    install(dir.path()).unwrap();
+    for file in ["CLAUDE.md", "AGENTS.md"] {
+        let body = std::fs::read_to_string(dir.path().join(file)).unwrap();
+        assert!(
+            body.contains("Agent) tool") || body.contains("native Agent tool"),
+            "{file}"
+        );
+        assert!(body.contains("only for detached work"), "{file}");
+        assert!(!body.contains("Prefer `ygg spawn`"), "{file}");
+        assert!(!body.contains("prefer `ygg spawn`"), "{file}");
+    }
+}

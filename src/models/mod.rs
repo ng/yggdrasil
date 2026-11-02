@@ -5,6 +5,7 @@ pub mod learning;
 pub mod memory;
 pub mod repo;
 pub mod session;
+pub mod subagent;
 pub mod task;
 pub mod task_run;
 pub mod worker;
