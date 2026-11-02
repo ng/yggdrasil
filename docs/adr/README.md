@@ -14,7 +14,7 @@ ADRs are append-only. Superseded decisions get a new ADR that references the old
 | 0004 | [Conversation as a typed DAG, not a flat transcript](0004-conversation-dag.md) | Accepted  |
 | 0005 | [Shell hooks over MCP server or Agent SDK plugin](0005-shell-hook-integration.md) | Accepted  |
 | 0006 | [Dogfood Yggdrasil; remove beads directives from this repo](0006-dogfood-drop-beads.md) | Accepted  |
-| 0007 | [tmux as the multi-agent display substrate](0007-tmux-as-substrate.md) | Accepted  |
+| 0007 | [tmux as the multi-agent display substrate](0007-tmux-as-substrate.md) | Accepted (narrowed by 0020) |
 | 0008 | [One global database across repos; agents auto-keyed by pwd](0008-shared-db-across-repos.md) | Accepted (partially superseded by 0009) |
 | 0009 | [Repos and sessions as first-class dimensions](0009-repos-and-sessions-first-class.md) | Accepted (partially superseded by 0013) |
 | 0010 | [Tasks: beads replacement inside Yggdrasil](0010-tasks-beads-replacement.md) | Accepted |
@@ -27,6 +27,7 @@ ADRs are append-only. Superseded decisions get a new ADR that references the old
 | 0017 | [Learnings: approval gate + agent-proposed capture](0017-learning-capture-and-approval.md) | Proposed |
 | 0018 | [Task acceptance as a Definition-of-Done checklist](0018-task-acceptance-checklists.md) | Proposed |
 | 0019 | [Managed Postgres and OKF knowledge storage](0019-managed-postgres-and-okf-knowledge.md) | Accepted; implemented through M7, release gates open |
+| 0020 | [Native subagents for in-session parallel work](0020-native-subagents-for-in-session-parallelism.md) | Accepted (narrows 0007) |
 
 ## Writing a new ADR
 

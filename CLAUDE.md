@@ -4,7 +4,7 @@ This project **is** Yggdrasil — a multi-agent coordination layer. We dogfood i
 
 ## Working in This Repo (Dogfooded Coordination)
 
-The SessionStart, UserPromptSubmit, Stop, PreCompact, and PreToolUse hooks are active. They prime agent context, deliver agent-to-agent messages, record token stats, enforce locks, and track state in Postgres. You will see prime output at the top of each session (`<!-- ygg:prime -->`). (ADR 0015: the similarity-retrieval / embedding layer was removed — there is no longer a `[ygg memory | ...]` injection. `ygg remember` was later re-added as a plain, non-embedding note store; since ADR 0019 notes and learnings live in the OKF file corpus under the user data directory, created by `ygg init`.)
+The SessionStart, UserPromptSubmit, Stop, PreCompact, PreToolUse, SubagentStart and SubagentStop hooks are active. They prime agent context, deliver agent-to-agent messages, record token stats, enforce locks, track native subagents (ADR 0020), and track state in Postgres. You will see prime output at the top of each session (`<!-- ygg:prime -->`). (ADR 0015: the similarity-retrieval / embedding layer was removed — there is no longer a `[ygg memory | ...]` injection. `ygg remember` was later re-added as a plain, non-embedding note store; since ADR 0019 notes and learnings live in the OKF file corpus under the user data directory, created by `ygg init`.)
 
 ### Quick Reference
 
@@ -35,7 +35,7 @@ ygg status                                  # See all agents' state, locks, rece
 ygg lock acquire <resource-key>             # Lease a shared resource before editing
 ygg lock release <resource-key>             # Release when done
 ygg lock list                               # See outstanding locks
-ygg spawn --task "..."                      # Spawn a parallel agent in a new tmux window
+ygg spawn --task "..."                      # Detached agent in a tmux window (outlives this session)
 ygg interrupt take-over --agent <name>      # Take over / steer another agent
 ygg logs --follow                           # Live event stream
 ```
@@ -43,7 +43,7 @@ ygg logs --follow                           # Live event stream
 ### Rules
 
 - **Before editing a resource another agent might touch** (shared file, branch, migration, config), acquire a lock: `ygg lock acquire <path-or-key>`. Release when done. This is Yggdrasil's core contract — bypassing it defeats the coordination layer we're building.
-- **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock coordination.
+- **For parallel work** inside this session, use Claude Code's native Agent tool: run it in the background, with `isolation: "worktree"` when it edits files. Yggdrasil records each subagent under your agent in `ygg status` and the dashboard. Use `ygg spawn` only for detached work that must outlive this session; the scheduler also dispatches through it (ADR 0020).
 - **Before assuming you're alone**, check `ygg status`. Other agents may hold locks or be mid-task on related work.
 - **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in native TaskCreate; cross-session work lives in `ygg task`.
 - **Durable rules** — write hard rules to `CLAUDE.md` (repo) or `~/.claude/CLAUDE.md` (global); for file-scoped engineering corrections use `ygg learn add` with a glob. For shorter cross-session notes use `ygg remember "..."` (repo-scoped, `--global` for everywhere) — a plain note store with no embeddings/similarity; recent notes surface in the prime block and via `ygg remember --list`.
@@ -129,7 +129,7 @@ collisions between concurrent agents.
 - **src/cli/**: one file per subcommand — `prime`, `spawn`, `lock`, `interrupt`, `status`, `logs`, `task_cmd`, `run_cmd`, `scheduler_cmd`, `hook_cmd`.
 - **src/lock.rs, src/scheduler.rs**: coordination primitives.
 - **migrations/**: Postgres schema (`uuid-ossp`). ADR 0015 removed `pgvector` and the embedding/`nodes` tables.
-- **Hooks** → native `ygg hook <event>` handlers, installed by `ygg init` at Claude Code lifecycle events.
+- **Hooks** → native `ygg hook <event>` handlers, installed by `ygg init` at Claude Code lifecycle events. `SubagentStart`/`SubagentStop` record native subagents in `subagents` (ADR 0020). A hook that fires inside a subagent carries `agent_id` and is attributed to the parent agent (`YGG_AGENT_NAME`, else the SessionStart session→agent map in `/tmp/ygg`, else the repo that owns a `.claude/worktrees/<name>` cwd), so a subagent's Edit/Write locks belong to its parent and siblings never block each other. The parent's Stop hook keeps its locks, session and task run open while it has live subagents.
 
 <!-- BEGIN YGG INTEGRATION v:4 hash:8de7570e -->
 <!-- markdownlint-disable MD024 -->
@@ -137,9 +137,9 @@ collisions between concurrent agents.
 
 This project uses **Yggdrasil** (`ygg`) for resource coordination and issue
 tracking across parallel Claude Code agents. The SessionStart, UserPromptSubmit,
-Stop, PreCompact, and PreToolUse hooks are active — they prime agent context,
-deliver agent-to-agent messages, record token stats, and track state in
-Postgres. You will see prime output at the top of each session
+Stop, PreCompact, PreToolUse, SubagentStart and SubagentStop hooks are active —
+they prime agent context, deliver agent-to-agent messages, record token stats,
+track native subagents, and track state in Postgres. You will see prime output at the top of each session
 (`<!-- ygg:prime -->`).
 
 ### Quick Reference
@@ -258,7 +258,7 @@ ygg status                                  # See all agents' state, locks, rece
 ygg lock acquire <resource-key>             # Lease a shared resource before editing
 ygg lock release <resource-key>             # Release when done
 ygg lock list                               # See outstanding locks
-ygg spawn --task "..."                      # Spawn a parallel agent in a new tmux window
+ygg spawn --task "..."                      # Detached agent in a tmux window (outlives this session)
 ygg interrupt take-over --agent <name>      # Take over / steer another agent
 ygg logs --follow                           # Live event stream
 ```
@@ -266,7 +266,7 @@ ygg logs --follow                           # Live event stream
 ### Rules
 
 - **Before editing a resource another agent might touch** (shared file, branch, migration, config), acquire a lock: `ygg lock acquire <path-or-key>`. Release when done. This is Yggdrasil's core contract — bypassing it defeats the coordination layer.
-- **For parallel work** that warrants its own context window, prefer `ygg spawn` over the native Task/Agent tool. Spawned agents are tracked in the DB, get their own prime context, and participate in lock coordination.
+- **For parallel work** inside this session, use Claude Code's native Agent tool: run it in the background, with `isolation: "worktree"` when it edits files. Yggdrasil records each subagent under your agent in `ygg status` and the dashboard. Use `ygg spawn` only for detached work that must outlive this session; the scheduler also dispatches through it (ADR 0020).
 - **Before assuming you're alone**, check `ygg status`. Other agents may hold locks or be mid-task on related work.
 - **Task tracking** — use `ygg task` for anything that outlives the current session: creating work, recording dependencies, claiming, closing. Intra-turn checklists can stay in a native TodoList; cross-session work lives in `ygg task`.
 - **Do NOT** use `bd` / beads. This project uses `ygg task` instead.

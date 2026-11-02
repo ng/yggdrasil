@@ -37,7 +37,7 @@ ygg status --format codex
 Example:
 
 ```text
-ygg agents 12/18 active | locks 3 | tasks 4 ready, 9 open, 2 in_progress, 1 blocked | workers 2/3 running
+ygg agents 12/18 active | subagents 2 running | locks 3 | tasks 4 ready, 9 open, 2 in_progress, 1 blocked | workers 2/3 running
 ```
 
 For one agent:

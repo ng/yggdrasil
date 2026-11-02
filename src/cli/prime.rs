@@ -347,7 +347,7 @@ fn print_rich(agent_name: &str, ctx: &PrimeContext) {
         "- **Before editing a shared resource** another agent might touch → `ygg lock acquire <key>`. Release when done."
     );
     println!(
-        "- **For parallel work** that warrants its own context window → `ygg spawn --task \"...\"` instead of the native Task/Agent tool."
+        "- **For parallel work** inside this session → the native Agent tool, in the background (`isolation: \"worktree\"` when it edits files). Yggdrasil tracks those subagents under your agent. Use `ygg spawn --task \"...\"` only for detached work that must outlive this session."
     );
     println!(
         "- **To steer or take over** another agent → `ygg interrupt take-over --agent <name>`."

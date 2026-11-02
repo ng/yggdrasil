@@ -1,11 +1,16 @@
 use crate::lock::LockManager;
 use crate::models::agent::AgentRepo;
 use crate::models::repo::{Repo, RepoRepo, detect_git_repo, slugify};
+use crate::models::subagent::{Subagent, SubagentRepo};
 use crate::models::task::TaskRepo;
 use crate::models::worker::WorkerRepo;
 
+/// Finished subagents stay listed this long after they stop.
+const RECENT_SUBAGENT_SECS: i64 = 60 * 60;
+
 struct StatusContext<'a> {
     agent_repo: AgentRepo<'a>,
+    subagent_repo: SubagentRepo<'a>,
     lock_mgr: LockManager<'a>,
     workers: Vec<crate::models::worker::Worker>,
 }
@@ -61,6 +66,14 @@ pub async fn execute(
                 );
             }
         }
+        let subagents = status
+            .subagent_repo
+            .list_recent(&[agent.agent_id], RECENT_SUBAGENT_SECS)
+            .await
+            .unwrap_or_default();
+        for sub in &subagents {
+            println!("  Subagent: {}", subagent_line(sub, chrono::Utc::now()));
+        }
     } else {
         let agents = if all_users {
             status.agent_repo.list_all_users().await?
@@ -87,6 +100,30 @@ pub async fn execute(
             );
         }
         println!("\n{} agent(s).", agents.len());
+
+        // Native subagents (ADR 0020), running or finished in the last hour.
+        let ids: Vec<uuid::Uuid> = agents.iter().map(|a| a.agent_id).collect();
+        let subagents = status
+            .subagent_repo
+            .list_recent(&ids, RECENT_SUBAGENT_SECS)
+            .await
+            .unwrap_or_default();
+        if !subagents.is_empty() {
+            let names: std::collections::HashMap<uuid::Uuid, &str> = agents
+                .iter()
+                .map(|a| (a.agent_id, a.agent_name.as_str()))
+                .collect();
+            println!("\n{:<20} SUBAGENT", "PARENT");
+            let now = chrono::Utc::now();
+            for sub in &subagents {
+                println!(
+                    "{:<20} {}",
+                    names.get(&sub.parent_agent_id).copied().unwrap_or("?"),
+                    subagent_line(sub, now)
+                );
+            }
+            println!("\n{} subagent(s).", subagents.len());
+        }
 
         // Live workers with intent
         if !status.workers.is_empty() {
@@ -163,9 +200,19 @@ async fn execute_codex(
         status.lock_mgr.list_all().await?
     };
     let task_summary = current_repo_task_summary(pool).await;
+    let ids: Vec<uuid::Uuid> = agents.iter().map(|a| a.agent_id).collect();
+    let now = chrono::Utc::now();
+    let live_subagents = status
+        .subagent_repo
+        .list_recent(&ids, 0)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| crate::models::subagent::is_live(s, now))
+        .count();
 
     println!(
-        "ygg agents {active}/{total} active | locks {locks} | tasks {tasks} | workers {running}/{workers} running",
+        "ygg agents {active}/{total} active | subagents {live_subagents} running | locks {locks} | tasks {tasks} | workers {running}/{workers} running",
         active = active_agents,
         total = agents.len(),
         locks = locks.len(),
@@ -177,9 +224,40 @@ async fn execute_codex(
     Ok(())
 }
 
+/// `running  Explore: probe the readme  · tool Bash · 4m` — one subagent.
+fn subagent_line(sub: &Subagent, now: chrono::DateTime<chrono::Utc>) -> String {
+    let state = if sub.state == "running" && !crate::models::subagent::is_live(sub, now) {
+        "stale"
+    } else {
+        sub.state.as_str()
+    };
+    let mut line = format!("{state:<8} {}", sub.label());
+    if sub.background {
+        line.push_str(" · bg");
+    }
+    if let Some(iso) = sub.isolation.as_deref() {
+        line.push_str(&format!(" · {iso}"));
+    }
+    if sub.state == "running" {
+        if let Some(tool) = sub.last_tool.as_deref() {
+            line.push_str(&format!(" · tool {tool}"));
+        }
+    } else if sub.input_tokens + sub.output_tokens > 0 {
+        line.push_str(&format!(
+            " · {}↓ {}↑ tok",
+            sub.input_tokens, sub.output_tokens
+        ));
+    }
+    let end = sub.ended_at.unwrap_or(now);
+    let mins = (end - sub.started_at).num_minutes().max(0);
+    line.push_str(&format!(" · {mins}m"));
+    line
+}
+
 async fn load_status_context(pool: &sqlx::PgPool) -> StatusContext<'_> {
     StatusContext {
         agent_repo: AgentRepo::new(pool, crate::db::user_id()),
+        subagent_repo: SubagentRepo::new(pool),
         lock_mgr: LockManager::new(pool, 300, crate::db::user_id()),
         workers: WorkerRepo::new(pool).list_live().await.unwrap_or_default(),
     }

@@ -39,7 +39,8 @@ ygg init
 # 2. Create a task
 ygg task create "my first task" --kind task --priority 2
 
-# 3. Spawn an agent to work on it
+# 3. Spawn a detached agent to work on it (for parallel work inside a Claude
+#    Code session, use its native Agent tool; ygg tracks those subagents too)
 ygg spawn --task "do something"
 
 # 4. Open the TUI dashboard to watch your fleet
@@ -121,7 +122,7 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `status`    | Quick text output of agent + system state; `--format codex` emits one line. |
 | `db`        | Database lifecycle, diagnostics, combined backup, validated restore, deployment switching and offline verification; [operator guide](src/db/README.md#combined-operator-backups). |
 | `migrate`   | Run database migrations.                                                |
-| `spawn`     | Spawn a new agent in a tmux window, registered in the DB.               |
+| `spawn`     | Spawn a detached agent in a tmux window, registered in the DB (scheduler runs and work that outlives the session; [ADR 0020](docs/adr/0020-native-subagents-for-in-session-parallelism.md)). |
 | `task`      | Task tracking: `create / list / ready / claim / close / dep / show / dupes`. |
 | `run`       | Task-run lifecycle: `claim / heartbeat / finalize / show / list / capture-outcome`. |
 | `scheduler` | Autonomous task-DAG scheduler: `run / tick / status / dry-run / backfill`. |
@@ -139,7 +140,7 @@ One deliberate design choice: Yggdrasil is **global per user**, not per repo. On
 | `reap`      | Purge stale locks / sessions. Safe to cron.                             |
 | `bar`       | Claude Code statusline generator (context pressure, cache rate, spend). |
 | `agent-tool`| Hook: record the tool an agent is about to call.                        |
-| `hook`      | Native Claude Code lifecycle hook handlers.                             |
+| `hook`      | Native Claude Code lifecycle hook handlers, including `SubagentStart`/`SubagentStop` tracking of native subagents. |
 
 Codex CLI notes, including a sample `[tui].status_line` and the compact
 `ygg status --format codex` output, live in

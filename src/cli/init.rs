@@ -537,13 +537,7 @@ async fn init(
         let ygg_bin = find_bin("ygg").unwrap_or_else(|| "ygg".to_string());
 
         let settings = serde_json::json!({
-            "hooks": {
-                "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook session-start")}]}],
-                "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook pre-tool-use")}]}],
-                "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook prompt-submit")}]}],
-                "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook pre-compact")}]}],
-                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook stop")}]}]
-            },
+            "hooks": hook_settings(&ygg_bin),
             "statusLine": {
                 "type": "command",
                 "command": format!("{}", status_dest.to_string_lossy()),
@@ -628,15 +622,55 @@ async fn init(
     println!("  {G}{B}ready{X}");
     println!();
     println!("  {D}next:{X}");
-    println!("    {O}ygg spawn{X} --task {D}\"your task\"{X}");
     println!("    {O}ygg dashboard{X}");
+    println!(
+        "    {O}ygg spawn{X} --task {D}\"your task\"{X}   {D}# detached agents only; in-session parallel work uses the native Agent tool{X}"
+    );
     println!();
 
     Ok(())
 }
 
+/// The `hooks` object `ygg init` writes into `~/.claude/settings.json`.
+/// SubagentStart/SubagentStop track native subagents (ADR 0020); an empty
+/// matcher covers every agent type.
+fn hook_settings(ygg_bin: &str) -> serde_json::Value {
+    let entry = |sub: &str| serde_json::json!([{"matcher": "", "hooks": [{"type": "command", "command": format!("{ygg_bin} hook {sub}")}]}]);
+    serde_json::json!({
+        "SessionStart": entry("session-start"),
+        "PreToolUse": entry("pre-tool-use"),
+        "UserPromptSubmit": entry("prompt-submit"),
+        "PreCompact": entry("pre-compact"),
+        "Stop": entry("stop"),
+        "SubagentStart": entry("subagent-start"),
+        "SubagentStop": entry("subagent-stop"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hook_settings_register_subagent_events() {
+        let hooks = super::hook_settings("/bin/ygg");
+        for (event, sub) in [
+            ("SessionStart", "session-start"),
+            ("PreToolUse", "pre-tool-use"),
+            ("UserPromptSubmit", "prompt-submit"),
+            ("PreCompact", "pre-compact"),
+            ("Stop", "stop"),
+            ("SubagentStart", "subagent-start"),
+            ("SubagentStop", "subagent-stop"),
+        ] {
+            let entry = &hooks[event][0];
+            assert_eq!(entry["matcher"], "", "{event} must match every agent type");
+            assert_eq!(
+                entry["hooks"][0]["command"],
+                format!("/bin/ygg hook {sub}"),
+                "{event} command"
+            );
+        }
+    }
+
     /// yggdrasil-107: hook drift regression. The PreToolUse hook MUST bump
     /// `task_runs.heartbeat_at` so the scheduler doesn't reap live agents as
     /// crashed (yggdrasil-99). Drop this line from scripts/hooks and the
