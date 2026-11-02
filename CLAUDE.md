@@ -121,7 +121,20 @@ Claude Code `--permission-mode` flag for spawned agents (default
 `bypassPermissions`). Accepted values: `bypassPermissions`, `dontAsk`,
 `acceptEdits`, `default`, `plan`. Each spawned agent also gets its own
 git worktree under `.ygg/worktrees/<name>` to avoid working-directory
-collisions between concurrent agents.
+collisions between concurrent agents. The task is never typed into the pane:
+it is written to `<worktree git dir>/ygg/task.md` and a generated
+`launch.sh` passes it to `claude` as one argument, so any character is safe.
+
+**Spawn startup check:** after launching, `ygg spawn` watches the pane for
+up to `YGG_SPAWN_STARTUP_TIMEOUT_SECS` (default 45). A session waiting at a
+Claude Code startup dialog (workspace trust, MCP server approval, …) is
+reported as an error instead of idling; the scheduler kills its window and
+marks the run `crashed` / `agent_error` (`reason_code` `startup_prompt`).
+`YGG_SPAWN_TRUST_WORKTREES=1` (env or the user `.env`) opts in to
+pre-accepting the trust dialog: ygg sets
+`projects["<worktree>"].hasTrustDialogAccepted` in `~/.claude.json`
+(`$CLAUDE_CONFIG_DIR/.claude.json` when set), only for worktrees it created
+under `.ygg/worktrees/` and only when the repository root is already trusted.
 
 ## Architecture Overview
 
