@@ -971,20 +971,14 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
             recovery = recovery_note(&input),
         );
 
-        // Use crate::cli::spawn::execute. A failure to spawn marks the run
-        // crashed so the failure is observable and won't burn a retry budget
-        // on a non-recoverable problem (tmux down, no claude binary, ...).
-        match crate::cli::spawn::execute(pool, &app_cfg, &prompt, Some(&agent_name)).await {
-            Ok(()) => {
-                // Bind the run to the agent we just registered (spawn::execute
-                // registers the agent before launching tmux).
-                let agent_id: Option<Uuid> =
-                    sqlx::query_scalar("SELECT agent_id FROM agents WHERE name = $1 LIMIT 1")
-                        .bind(&agent_name)
-                        .fetch_optional(pool)
-                        .await
-                        .ok()
-                        .flatten();
+        // A failure to spawn marks the run crashed so the failure is
+        // observable and won't burn a retry budget on a non-recoverable
+        // problem (tmux down, no claude binary, a session stuck at a Claude
+        // Code startup dialog, ...).
+        match crate::cli::spawn::spawn_detached(pool, &app_cfg, &prompt, Some(&agent_name)).await {
+            Ok(spawned) => {
+                // Bind the run to the agent spawn registered.
+                let agent_id = Some(spawned.agent_id);
                 let mut tx = pool.begin().await?;
                 sqlx::query(
                     "UPDATE task_runs SET agent_id = $2, updated_at = now() WHERE run_id = $1",
@@ -1020,11 +1014,17 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
             }
             Err(err) => {
                 tracing::warn!(error = %err, task_ref = %task_ref, "scheduler spawn failed");
+                let (reason, reason_code) = spawn_failure_reason(&err);
+                // A session idling at a dialog is a dead dispatch: nobody is
+                // there to answer it, so don't leave it holding a window.
+                if reason_code == "startup_prompt" {
+                    crate::tmux::TmuxManager::kill_agent_window(&agent_name);
+                }
                 sqlx::query(
                     "UPDATE task_runs
                         SET state = 'crashed',
-                            reason = 'tmux_gone',
-                            error = jsonb_build_object('reason_code', 'tmux_gone',
+                            reason = $3::text::run_reason,
+                            error = jsonb_build_object('reason_code', $4::text,
                                                        'message', $2::text),
                             ended_at = now(),
                             updated_at = now()
@@ -1032,6 +1032,8 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
                 )
                 .bind(run_id)
                 .bind(err.to_string())
+                .bind(reason)
+                .bind(reason_code)
                 .execute(pool)
                 .await?;
                 EventRepo::new(pool)
@@ -1052,6 +1054,19 @@ pub async fn dispatch_ready(pool: &PgPool, cfg: &SchedulerConfig) -> Result<i64,
         }
     }
     Ok(dispatched)
+}
+
+/// `(run_reason, error.reason_code)` for a failed dispatch. A session stuck at
+/// a Claude Code startup dialog launched fine, so it is not `tmux_gone`.
+fn spawn_failure_reason(err: &anyhow::Error) -> (&'static str, &'static str) {
+    if err
+        .downcast_ref::<crate::cli::spawn::StuckAtStartup>()
+        .is_some()
+    {
+        ("agent_error", "startup_prompt")
+    } else {
+        ("tmux_gone", "tmux_gone")
+    }
 }
 
 /// (yggdrasil-95) One-shot migration: synthesize task_runs rows for tasks
@@ -1260,6 +1275,22 @@ mod tests {
         // Empty slug falls back to the task-ref scheme.
         let f = scheduler_agent_name("ygg", 42, 1, Some(""));
         assert!(f.starts_with("ygg-ygg-42-a1-"));
+    }
+
+    #[test]
+    fn stuck_startup_is_a_failed_dispatch_not_tmux_gone() {
+        let stuck: anyhow::Error = crate::cli::spawn::StuckAtStartup {
+            agent: "a1".into(),
+            dialog: crate::cli::spawn::StartupDialog::WorkspaceTrust,
+            worktree: "/r/.ygg/worktrees/a1".into(),
+        }
+        .into();
+        assert_eq!(
+            spawn_failure_reason(&stuck),
+            ("agent_error", "startup_prompt")
+        );
+        let other = anyhow::anyhow!("tmux is not available");
+        assert_eq!(spawn_failure_reason(&other), ("tmux_gone", "tmux_gone"));
     }
 
     #[test]

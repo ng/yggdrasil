@@ -132,6 +132,48 @@ impl TmuxManager {
         Ok(())
     }
 
+    /// Type `line` into a pane literally (`send-keys -l`, so tmux never reads
+    /// it as key names), then press Enter. The line must be a single line.
+    pub async fn send_line(target: &str, line: &str) -> Result<(), crate::YggError> {
+        if line.contains(['\n', '\r']) {
+            return Err(crate::YggError::Tmux(
+                "refusing to type a multi-line command into a pane".into(),
+            ));
+        }
+        for args in [
+            vec!["send-keys", "-t", target, "-l", line],
+            vec!["send-keys", "-t", target, "Enter"],
+        ] {
+            let status = Command::new("tmux")
+                .args(&args)
+                .status()
+                .await
+                .map_err(|e| crate::YggError::Tmux(format!("send-keys failed: {e}")))?;
+            if !status.success() {
+                return Err(crate::YggError::Tmux(format!(
+                    "send-keys to {target} failed"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The visible contents of a pane, as plain text.
+    pub async fn capture_pane(target: &str) -> Result<String, crate::YggError> {
+        let out = Command::new("tmux")
+            .args(["capture-pane", "-p", "-t", target])
+            .output()
+            .await
+            .map_err(|e| crate::YggError::Tmux(format!("capture-pane failed: {e}")))?;
+        if !out.status.success() {
+            return Err(crate::YggError::Tmux(format!(
+                "capture-pane {target} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// Select a window by name.
     pub async fn select_window(window_name: &str) -> Result<(), crate::YggError> {
         Command::new("tmux")
@@ -161,6 +203,12 @@ impl TmuxManager {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+
+    /// Kill a window by name in the ygg session. Silently succeeds if the
+    /// window is already gone.
+    pub fn kill_agent_window(window: &str) {
+        Self::kill_window_sync(SESSION_NAME, window);
     }
 
     /// List all windows in the ygg session.

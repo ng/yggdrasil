@@ -341,6 +341,7 @@ Dashboard's new "Scheduler" tile polls the latest `scheduler_tick` event every f
 | Postgres restart | `PgListener` reconnects; tick resumes; partial transactions rolled back by Postgres itself |
 | Agent tmux window killed externally | `run.heartbeat_at` stops advancing; step (2) crashes the run on TTL expiry |
 | Agent hung mid-turn (no tool calls) | Same as above; heartbeat TTL catches it |
+| Spawned session stuck at a Claude Code startup dialog (workspace trust, MCP approval) | `ygg spawn` watches the new pane for up to `YGG_SPAWN_STARTUP_TIMEOUT_SECS` (45s); a dialog fails the dispatch: the window is killed and the run is marked `crashed` / `agent_error` with `error.reason_code = 'startup_prompt'` |
 | Hook failed to write outcome | Run stuck in `running` past heartbeat → step (2) crashes it; retry (step 4) handles re-dispatch |
 | Lock acquired but spawn failed | `bind_run_to_agent` is atomic with state transition; if spawn fails, state stays `ready`, locks released in same txn |
 | Two schedulers accidentally started | Second one fails to acquire advisory lock and exits; no double-writes possible |
