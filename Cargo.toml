@@ -1,6 +1,6 @@
 [package]
 name = "ygg"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Yggdrasil — High-density agent orchestrator"
 license = "MIT"
