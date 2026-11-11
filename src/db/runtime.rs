@@ -512,6 +512,10 @@ impl ManagedCluster {
         super::runtime_endpoint::path(&self.root, self.manifest.socket_dir.as_deref())
     }
 
+    pub(super) fn refresh_endpoint(&self) -> Result<()> {
+        super::runtime_endpoint::refresh(self.manifest.socket_dir.as_deref())
+    }
+
     pub fn id(&self) -> Uuid {
         self.manifest.cluster_id
     }

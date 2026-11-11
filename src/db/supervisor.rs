@@ -293,10 +293,17 @@ pub async fn serve(cluster: ManagedCluster) -> Result<()> {
     owner.start_or_adopt(Duration::from_secs(30)).await?;
     let mut monitor = tokio::time::interval(Duration::from_secs(1));
     monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut refresh = tokio::time::interval(Duration::from_secs(3600));
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
+            _ = refresh.tick() => {
+                if let Err(error) = cluster.refresh_endpoint() {
+                    tracing::warn!(%error, "could not refresh runtime endpoint identity");
+                }
+            }
             _ = monitor.tick() => {
                 if let Err(error) = owner.start_or_adopt(Duration::from_secs(5)).await {
                     tracing::warn!(%error, "managed server not ready; preserving cluster state");

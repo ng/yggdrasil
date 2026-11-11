@@ -646,6 +646,13 @@ Both PostgreSQL and supervisor sockets use the same selected directory. Readines
 checks the PID-file endpoint, live socket configuration/permissions, database
 system identity, major version, data directory, postmaster process and disabled TCP.
 
+Periodic `/tmp` cleaners (macOS `tmp_cleaner` deletes files untouched for three
+days) would otherwise delete the identity marker under a long-running server. The
+supervisor refreshes the marker's timestamps hourly, as PostgreSQL does for its own
+socket lock files. If the marker is lost while the server is live, recreate it as
+the private (`0600`) file `cluster.json` containing the compact JSON array
+`["<canonical cluster root>","<cluster UUID>"]`.
+
 Temporary-directory cleanup does not remove database state. `status` and metadata
 inspection never recreate a missing endpoint. An owner may recreate it under the
 persistent cluster lease only after proving PostgreSQL is stopped. If a live server
