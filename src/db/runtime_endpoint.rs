@@ -152,6 +152,22 @@ pub(super) fn check(root: &Path, id: Uuid, selected: Option<&Path>, create: bool
     Ok(())
 }
 
+/// Periodic /tmp cleaners (macOS tmp_cleaner, systemd-tmpfiles) delete files
+/// untouched for days, stranding a live server without its identity. Refresh
+/// the marker's timestamps, as PostgreSQL does for its own socket lock files.
+pub(super) fn refresh(selected: Option<&Path>) -> Result<()> {
+    let Some(selected) = selected else {
+        return Ok(());
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(selected.join("cluster.json"))?;
+    let now = std::time::SystemTime::now();
+    file.set_times(fs::FileTimes::new().set_accessed(now).set_modified(now))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +216,33 @@ mod tests {
         fs::DirBuilder::new().mode(0o700).create(&selected).unwrap();
         fs::write(selected.join("unexpected"), "preserve").unwrap();
         assert!(check(&root, id, Some(&selected), true).is_err());
+        fs::remove_dir_all(&selected).unwrap();
+    }
+
+    #[test]
+    fn refresh_keeps_identity_marker_ahead_of_tmp_cleaners() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("x".repeat(150));
+        let id = Uuid::new_v4();
+        let selected = choose(&root, id).unwrap().unwrap();
+        refresh(None).unwrap();
+        assert!(refresh(Some(&selected)).is_err());
+        check(&root, id, Some(&selected), true).unwrap();
+        let marker = selected.join("cluster.json");
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
+        File::open(&marker)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_accessed(stale).set_modified(stale))
+            .unwrap();
+        refresh(Some(&selected)).unwrap();
+        let age = fs::metadata(&marker)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(age < std::time::Duration::from_secs(60));
+        check(&root, id, Some(&selected), false).unwrap();
         fs::remove_dir_all(&selected).unwrap();
     }
 }
