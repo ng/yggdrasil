@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/ng/yggdrasil/compare/v0.1.1...v0.1.2) - 2026-11-12
+
+### Other
+
+- Ignore .claude/settings.local.json so it can't be committed on machines without the global ignore ([#129](https://github.com/ng/yggdrasil/pull/129))
+- Refresh endpoint identity marker so macOS tmp_cleaner cannot strand a live cluster
+
 ## [0.1.1](https://github.com/ng/yggdrasil/compare/v0.1.0...v0.1.1) - 2026-11-02
 
 ### Added
