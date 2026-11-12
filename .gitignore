@@ -7,3 +7,4 @@
 *.db
 .env
 .reviews/
+.claude/settings.local.json
